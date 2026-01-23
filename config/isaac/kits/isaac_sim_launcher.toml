@@ -1,0 +1,248 @@
+# Isaac Sim Kit Launcher Configuration
+# This TOML file configures how Isaac Sim Kit is launched for the MCP server
+
+[app]
+# Application metadata
+name = "Isaac Sim MCP Server"
+version = "0.1.0"
+description = "MCP server integration for Isaac Sim"
+
+# Kit configuration
+[kit]
+# Renderer settings
+renderer = "rtx"
+headless = false
+width = 1920
+height = 1080
+vsync = true
+max_fps = 60
+
+# Window settings
+[kit.window]
+title = "Isaac Sim MCP Server"
+width = 1920
+height = 1080
+x = 100
+y = 100
+resizable = true
+maximized = false
+
+# Viewport settings
+[kit.viewport]
+default_camera_position = [5.0, 5.0, 5.0]
+default_camera_target = [0.0, 0.0, 0.0]
+grid_enabled = true
+axis_enabled = true
+background_color = [0.2, 0.2, 0.2]
+
+# Extensions to load
+[extensions]
+# Core Isaac Sim extensions
+required = [
+    "omni.isaac.core",
+    "omni.isaac.ui",
+    "omni.isaac.kit",
+    "omni.usd",
+    "omni.hydra.rtx",
+    "omni.kit.viewport.window",
+    "omni.kit.renderer.core",
+]
+
+# Optional extensions
+optional = [
+    "omni.isaac.sensor",
+    "omni.isaac.manipulators",
+    "omni.isaac.wheeled_robots",
+    "omni.isaac.quadruped",
+    "omni.isaac.surface_gripper",
+    "omni.isaac.range_sensor",
+    "omni.isaac.contact_sensor",
+    "omni.isaac.occupancy_map",
+    "omni.isaac.motion_generation",
+    "omni.isaac.franka",
+    "omni.isaac.universal_robots",
+]
+
+# Development extensions
+development = [
+    "omni.kit.console",
+    "omni.kit.profiler.window",
+    "omni.kit.stage_templates",
+    "omni.kit.property.bundle",
+]
+
+# MCP specific extension
+mcp = [
+  "khemoo.simul.mcp",  # Our custom MCP extension
+]
+
+# Physics settings
+[physics]
+enabled = true
+dt = 0.01667  # 60 FPS
+substeps = 1
+solver_type = "TGS"  # TGS, PGS
+bounce_threshold = 0.2
+friction_offset_threshold = 0.04
+friction_correlation_distance = 0.025
+sleep_threshold = 0.005
+stabilization_threshold = 0.0001
+
+# Simulation settings
+[simulation]
+auto_play = false
+play_speed = 1.0
+time_scale = 1.0
+max_step_size = 0.01667
+enable_fabric = true
+enable_flatcache = true
+
+# Rendering settings
+[rendering]
+# RTX settings
+rtx_enabled = true
+rtx_samples_per_pixel = 1
+rtx_max_bounces = 4
+rtx_denoising = true
+rtx_translucency_enabled = true
+rtx_reflections_enabled = true
+rtx_gi_enabled = true
+
+# Rasterization fallback
+raster_aa = "TAA"  # FXAA, TAA, MSAA
+raster_msaa_samples = 4
+
+# Post-processing
+post_processing_enabled = true
+tone_mapping = "ACES"
+exposure = 0.0
+gamma = 2.2
+
+# Lighting settings
+[lighting]
+default_light_intensity = 1000.0
+ambient_light_intensity = 0.1
+enable_dome_light = true
+dome_light_intensity = 1.0
+dome_light_texture = ""
+
+# Material settings
+[materials]
+enable_mdl = true
+mdl_search_paths = [
+    "${ISAAC_SIM_PATH}/materials",
+    "${PROJECT_ROOT}/materials",
+]
+
+# Asset settings
+[assets]
+# Default asset paths
+search_paths = [
+    "${ISAAC_SIM_PATH}/assets",
+    "${PROJECT_ROOT}/assets",
+  "/tmp/simul_mcp_assets",
+]
+
+# Cache settings
+cache_enabled = true
+cache_path = "/tmp/simul_mcp_cache"
+cache_size_mb = 1024
+
+# USD settings
+[usd]
+# Stage settings
+default_prim_path = "/World"
+default_up_axis = "Y"
+default_units = "meters"
+default_time_codes_per_second = 24.0
+
+# Loading settings
+load_plugins = true
+enable_instancing = true
+enable_point_instancer = true
+
+# Performance settings
+enable_multithreading = true
+thread_count = 0  # 0 = auto-detect
+
+# Networking settings
+[networking]
+# Omniverse connection
+omniverse_enabled = false
+omniverse_server = ""
+omniverse_user = ""
+
+# Live streaming
+livestream_enabled = false
+livestream_port = 8211
+livestream_quality = "medium"  # low, medium, high
+
+# WebRTC
+webrtc_enabled = false
+webrtc_port = 8212
+
+# Logging settings
+[logging]
+# Kit logging
+kit_log_level = "warning"  # verbose, info, warning, error
+kit_log_file = "logs/isaac_kit.log"
+
+# Component logging
+omni_log_level = "warning"
+carb_log_level = "warning"
+rtx_log_level = "warning"
+
+# Performance settings
+[performance]
+# Memory management
+memory_limit_mb = 8192
+enable_memory_pooling = true
+gc_frequency = 100
+
+# Threading
+worker_thread_count = 4
+enable_async_loading = true
+
+# GPU settings
+gpu_memory_fraction = 0.8
+enable_gpu_profiling = false
+
+# Development settings
+[development]
+# Debug options
+enable_debug_draw = false
+enable_wireframe = false
+enable_profiling = false
+enable_validation = false
+
+# Hot reload
+enable_hot_reload = false
+watch_paths = [
+    "${PROJECT_ROOT}/src",
+    "${PROJECT_ROOT}/exts",
+]
+
+# Testing
+enable_test_mode = false
+test_data_path = "${PROJECT_ROOT}/tests/data"
+
+# Security settings
+[security]
+# Sandbox
+enable_sandbox = true
+allowed_file_extensions = [
+    ".usd", ".usda", ".usdc", ".usdz",
+    ".png", ".jpg", ".jpeg", ".exr", ".hdr",
+    ".obj", ".fbx", ".gltf", ".glb",
+]
+
+# Script execution
+allow_script_execution = false
+script_timeout_seconds = 30
+
+# File access
+restrict_file_access = true
+allowed_directories = [
+    "${PROJECT_ROOT}",
+  "/tmp/simul_mcp",
+]
