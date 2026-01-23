@@ -1,0 +1,1 @@
+"""Worvai extension namespace."""

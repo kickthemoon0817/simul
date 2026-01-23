@@ -1,0 +1,103 @@
+[core]
+reloadable = true
+order = 0
+
+
+[package]
+# Extension package information
+name = "khemoo.simul.mcp"
+version = "0.1.7"
+title = "Simul MCP Server"
+description = "MCP (Model Context Protocol) server extension for Simul-MCP with USD operations and Isaac Sim control"
+authors = ["khemoo"]
+repository = "https://github.com/khemoo/simul-mcp"
+category = "Simulation"
+keywords = ["mcp", "usd", "simulation", "ai", "llm"]
+
+icon = "data/icon.svg"
+preview_image = "data/preview.svg"
+
+changelog = "docs/CHANGELOG.md"
+readme = "docs/README.md"
+
+
+[dependencies]
+# Core Omniverse dependencies
+"omni.kit.uiapp" = {}
+"omni.ui" = {}
+"omni.kit.window.extensions" = {}
+"omni.isaac.core" = {}
+"omni.isaac.ui" = {}
+
+# USD dependencies
+"omni.usd" = {}
+"omni.kit.stage_templates" = {}
+
+# Python dependencies
+"omni.kit.pip_archive" = {}
+
+
+[python.pipapi]
+# Python packages to install via pip
+use_online_index = true
+repositories = [
+    "https://pypi.org/simple"
+]
+
+# Required packages
+requirements = [
+    "fastmcp>=0.2.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "numpy>=1.20.0",
+]
+
+
+[python.module]
+"khemoo.simul.mcp" = "khemoo/simul/mcp"
+
+[[python.module]]
+name = "simul_mcp"
+path = "../../src/simul_mcp"
+
+
+[settings]
+# Extension settings
+exts."khemoo.simul.mcp".server.enabled = false
+exts."khemoo.simul.mcp".server.auto_start = false
+exts."khemoo.simul.mcp".server.transport = "stdio"
+exts."khemoo.simul.mcp".server.log_level = "INFO"
+exts."khemoo.simul.mcp".ui.show_advanced = false
+exts."khemoo.simul.mcp".ui.window_width = 400
+exts."khemoo.simul.mcp".ui.window_height = 300
+
+
+[documentation]
+# Documentation settings
+pages = [
+    "docs/README.md",
+    "docs/CHANGELOG.md"
+]
+
+
+[test]
+# Test configuration
+dependencies = [
+    "omni.kit.test",
+]
+
+args = [
+    "--/app/window/dpiScaleOverride=1.0",
+    "--/app/window/scaleToMonitor=false",
+    "--no-window"
+]
+
+stdoutFailPatterns = [
+    "*[Error]*",
+    "*[error]*",
+    "*ERROR*"
+]
+
+timeout = 300
