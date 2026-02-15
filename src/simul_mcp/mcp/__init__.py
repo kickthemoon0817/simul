@@ -21,6 +21,9 @@ from .schemas import (
     ViewportCaptureResponse,
     SceneSummaryRequest,
     SceneSummaryResponse,
+    BlenderInfoResponse,
+    BlenderSceneObjectsRequest,
+    BlenderSceneObjectsResponse,
 )
 
 __all__ = [
@@ -28,15 +31,17 @@ __all__ = [
     "IsaacMCPServer",
     "start_mcp_server",
     "create_server_instance",
-    
     # Schemas
     "USDFileInfo",
     "StageInfo",
-    "PrimInfo", 
+    "PrimInfo",
     "MeshInfo",
     "BoundingBox",
     "ViewportCaptureRequest",
     "ViewportCaptureResponse",
     "SceneSummaryRequest",
     "SceneSummaryResponse",
+    "BlenderInfoResponse",
+    "BlenderSceneObjectsRequest",
+    "BlenderSceneObjectsResponse",
 ]

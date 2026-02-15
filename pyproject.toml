@@ -55,6 +55,10 @@ isaac = [
     # "omni-isaac-core",  # Provided by Isaac Sim
     # "pxr",  # USD Python bindings - provided by Isaac Sim
 ]
+blender = [
+    # Blender Python module (optional, platform/runtime dependent)
+    "bpy>=4.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/khemoo/simul-mcp"
@@ -115,6 +119,8 @@ module = [
     "omni.*",
     "carb.*",
     "omniverse.*",
+    "bpy",
+    "bpy.*",
 ]
 ignore_missing_imports = true
 

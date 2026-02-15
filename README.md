@@ -249,6 +249,11 @@ The server provides the following MCP tools:
 - `get_viewport_info`: Get viewport information and capabilities
 - `get_camera_info`: Get camera information and capabilities
 
+### Blender Operations (when available)
+
+- `get_blender_info`: Get active Blender runtime details through `bpy`
+- `list_blender_scene_objects`: List objects in the active Blender scene or collection
+
 ## Examples
 
 ### Basic USD Analysis

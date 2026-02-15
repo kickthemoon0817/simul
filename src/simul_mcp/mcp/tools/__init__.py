@@ -18,6 +18,8 @@ from .isaac_tools import (
     CameraTools,
 )
 
+from .blender_tools import BlenderTools
+
 from .registry import (
     ToolRegistry,
     register_all_tools,
@@ -27,15 +29,15 @@ from .registry import (
 __all__ = [
     # USD tools
     "USDFileTools",
-    "USDSceneTools", 
+    "USDSceneTools",
     "USDMeshTools",
     "USDBBoxTools",
-    
     # Isaac Sim tools
     "ViewportTools",
     "SimulationTools",
     "CameraTools",
-    
+    # Blender tools
+    "BlenderTools",
     # Registry
     "ToolRegistry",
     "register_all_tools",

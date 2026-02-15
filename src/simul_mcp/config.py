@@ -11,11 +11,11 @@ from typing import Any, Dict, List, Optional, Union
 from functools import lru_cache
 
 import yaml
-from pydantic import BaseSettings, Field, validator
-from pydantic.env_settings import SettingsSourceCallable
+from pydantic import BaseModel, Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class ServerConfig(BaseSettings):
+class ServerConfig(BaseModel):
     """MCP Server configuration."""
 
     name: str = Field(default="SimulMCP", description="Server name")
@@ -31,7 +31,7 @@ class ServerConfig(BaseSettings):
     )
 
 
-class IsaacSimConfig(BaseSettings):
+class IsaacSimConfig(BaseModel):
     """Isaac Sim configuration."""
 
     path: Optional[str] = Field(
@@ -46,8 +46,9 @@ class IsaacSimConfig(BaseSettings):
     width: int = Field(default=1920, description="Viewport width", ge=640)
     height: int = Field(default=1080, description="Viewport height", ge=480)
 
-    @validator("path")
-    def validate_isaac_path(cls, v):
+    @field_validator("path")
+    @classmethod
+    def validate_isaac_path(cls, v: Optional[str]) -> Optional[str]:
         """Validate Isaac Sim path if provided."""
         if v is not None:
             path = Path(v)
@@ -58,7 +59,39 @@ class IsaacSimConfig(BaseSettings):
         return v
 
 
-class USDConfig(BaseSettings):
+class BlenderConfig(BaseModel):
+    """Blender runtime configuration."""
+
+    enabled: bool = Field(default=True, description="Enable Blender runtime tools")
+    binary_path: Optional[str] = Field(
+        default=None,
+        description="Path to Blender binary when explicitly configured",
+    )
+    default_collection: Optional[str] = Field(
+        default=None,
+        description="Default Blender collection filter for scene listing",
+    )
+    max_scene_objects: int = Field(
+        default=200,
+        description="Default maximum scene objects returned from Blender tools",
+        ge=1,
+        le=5000,
+    )
+
+    @field_validator("binary_path")
+    @classmethod
+    def validate_binary_path(cls, v: Optional[str]) -> Optional[str]:
+        """Validate Blender binary path when provided."""
+        if v is not None:
+            path = Path(v)
+            if not path.exists():
+                raise ValueError(f"Blender binary path does not exist: {v}")
+            if not path.is_file():
+                raise ValueError(f"Blender binary path is not a file: {v}")
+        return v
+
+
+class USDConfig(BaseModel):
     """USD configuration."""
 
     cache_enabled: bool = Field(default=True, description="Enable USD caching")
@@ -88,7 +121,7 @@ class USDConfig(BaseSettings):
     )
 
 
-class MeshConfig(BaseSettings):
+class MeshConfig(BaseModel):
     """Mesh processing configuration."""
 
     decimation_enabled: bool = Field(default=True, description="Enable mesh decimation")
@@ -113,7 +146,7 @@ class MeshConfig(BaseSettings):
     )
 
 
-class ViewportConfig(BaseSettings):
+class ViewportConfig(BaseModel):
     """Viewport configuration."""
 
     default_width: int = Field(
@@ -133,7 +166,7 @@ class ViewportConfig(BaseSettings):
     far_plane: float = Field(default=1000.0, description="Far clipping plane", gt=0.0)
 
 
-class LoggingConfig(BaseSettings):
+class LoggingConfig(BaseModel):
     """Logging configuration."""
 
     level: str = Field(default="INFO", description="Log level")
@@ -147,8 +180,9 @@ class LoggingConfig(BaseSettings):
         default=True, description="Enable colored console output"
     )
 
-    @validator("level")
-    def validate_log_level(cls, v):
+    @field_validator("level")
+    @classmethod
+    def validate_log_level(cls, v: str) -> str:
         """Validate log level."""
         valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
         if v.upper() not in valid_levels:
@@ -156,7 +190,7 @@ class LoggingConfig(BaseSettings):
         return v.upper()
 
 
-class SecurityConfig(BaseSettings):
+class SecurityConfig(BaseModel):
     """Security configuration."""
 
     sandbox_enabled: bool = Field(default=True, description="Enable sandbox mode")
@@ -175,7 +209,7 @@ class SecurityConfig(BaseSettings):
     )
 
 
-class PerformanceConfig(BaseSettings):
+class PerformanceConfig(BaseModel):
     """Performance configuration."""
 
     memory_limit_gb: int = Field(default=8, description="Memory limit in GB", ge=1)
@@ -200,7 +234,7 @@ class PerformanceConfig(BaseSettings):
     )
 
 
-class FeatureFlags(BaseSettings):
+class FeatureFlags(BaseModel):
     """Feature flags configuration."""
 
     enable_mesh_analysis: bool = Field(default=True, description="Enable mesh analysis")
@@ -225,7 +259,7 @@ class FeatureFlags(BaseSettings):
     enable_streaming: bool = Field(default=False, description="Enable streaming")
 
 
-class DevelopmentConfig(BaseSettings):
+class DevelopmentConfig(BaseModel):
     """Development configuration."""
 
     debug_mode: bool = Field(default=False, description="Enable debug mode")
@@ -245,6 +279,7 @@ class Settings(BaseSettings):
     # Configuration sections
     server: ServerConfig = Field(default_factory=ServerConfig)
     isaac_sim: IsaacSimConfig = Field(default_factory=IsaacSimConfig)
+    blender: BlenderConfig = Field(default_factory=BlenderConfig)
     usd: USDConfig = Field(default_factory=USDConfig)
     mesh: MeshConfig = Field(default_factory=MeshConfig)
     viewport: ViewportConfig = Field(default_factory=ViewportConfig)
@@ -254,49 +289,38 @@ class Settings(BaseSettings):
     features: FeatureFlags = Field(default_factory=FeatureFlags)
     development: DevelopmentConfig = Field(default_factory=DevelopmentConfig)
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        env_nested_delimiter = "__"
-        case_sensitive = False
-
-    @classmethod
-    def customise_sources(
-        cls,
-        init_settings: SettingsSourceCallable,
-        env_settings: SettingsSourceCallable,
-        file_secret_settings: SettingsSourceCallable,
-    ) -> tuple[SettingsSourceCallable, ...]:
-        """Customize settings sources to include YAML file loading."""
-        return (
-            init_settings,
-            yaml_config_settings_source,
-            env_settings,
-            file_secret_settings,
-        )
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_nested_delimiter="__",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
 
-def yaml_config_settings_source(settings: BaseSettings) -> Dict[str, Any]:
-    """Load settings from YAML configuration file."""
-    config_file = os.getenv("CONFIG_FILE", "config/default.yaml")
-
-    if not os.path.exists(config_file):
+def _load_yaml_settings(config_file: Union[str, Path]) -> Dict[str, Any]:
+    """Load YAML settings from file path and return dict payload."""
+    config_path = Path(config_file)
+    if not config_path.exists():
         return {}
 
     try:
-        with open(config_file, "r", encoding="utf-8") as f:
+        with open(config_path, "r", encoding="utf-8") as f:
             config_data = yaml.safe_load(f)
-        return config_data or {}
+        if isinstance(config_data, dict):
+            return config_data
+        return {}
     except Exception as e:
-        # Log error but don't fail - fall back to other sources
-        print(f"Warning: Failed to load config file {config_file}: {e}")
+        print(f"Warning: Failed to load config file {config_path}: {e}")
         return {}
 
 
 @lru_cache()
 def get_settings() -> Settings:
     """Get cached settings instance."""
-    return Settings()
+    config_file = os.getenv("CONFIG_FILE", "config/default.yaml")
+    config_data = _load_yaml_settings(config_file)
+    return Settings(**config_data)
 
 
 def load_config_from_file(config_path: Union[str, Path]) -> Settings:
@@ -306,19 +330,8 @@ def load_config_from_file(config_path: Union[str, Path]) -> Settings:
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
-    original_config = os.getenv("CONFIG_FILE")
-    os.environ["CONFIG_FILE"] = str(config_path)
-
-    try:
-        get_settings.cache_clear()
-        settings = Settings()
-        return settings
-    finally:
-        if original_config is not None:
-            os.environ["CONFIG_FILE"] = original_config
-        else:
-            os.environ.pop("CONFIG_FILE", None)
-        get_settings.cache_clear()
+    config_data = _load_yaml_settings(config_path)
+    return Settings(**config_data)
 
 
 def load_settings(config_path: Union[str, Path]) -> Settings:

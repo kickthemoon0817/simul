@@ -17,7 +17,11 @@ from simul_mcp.config import get_settings, load_settings
 from simul_mcp.logging import setup_logging, get_logger
 from simul_mcp.mcp.server import start_mcp_server
 from simul_mcp.mcp.tools.registry import get_tool_registry
-from simul_mcp.adapters import is_isaac_available, is_headless_available
+from simul_mcp.adapters import (
+    is_blender_available,
+    is_isaac_available,
+    is_headless_available,
+)
 
 # Initialize CLI
 app = typer.Typer(
@@ -70,6 +74,7 @@ def server(
 
         # Check runtime availability
         isaac_available = is_isaac_available()
+        blender_available = is_blender_available()
         usd_available = is_headless_available() or isaac_available
 
         if not usd_available:
@@ -84,6 +89,7 @@ def server(
                 f"[bold blue]Isaac Sim MCP Server[/bold blue]\n"
                 f"Transport: {transport}\n"
                 f"Isaac Sim: {'✓' if isaac_available else '✗'}\n"
+                f"Blender: {'✓' if blender_available else '✗'}\n"
                 f"USD Support: {'✓' if usd_available else '✗'}\n"
                 f"Config: {config or 'default'}\n"
                 f"Log Level: {settings.logging.level}",
@@ -124,6 +130,7 @@ def info(
 
         # Check runtime availability
         isaac_available = is_isaac_available()
+        blender_available = is_blender_available()
         usd_available = is_headless_available() or isaac_available
 
         # Get tool registry
@@ -142,6 +149,13 @@ def info(
             "Full simulation and viewport capabilities"
             if isaac_available
             else "Headless USD operations only",
+        )
+        system_table.add_row(
+            "Blender Runtime",
+            "✓ Available" if blender_available else "✗ Not Available",
+            "Blender scene tools through bpy"
+            if blender_available
+            else "Install bpy to enable Blender tools",
         )
         system_table.add_row(
             "USD Support",
@@ -184,6 +198,8 @@ def info(
             requirements = []
             if tool_info["requires_isaac"]:
                 requirements.append("Isaac Sim")
+            if tool_info.get("requires_blender"):
+                requirements.append("Blender")
             if tool_info["requires_usd"]:
                 requirements.append("USD")
 
@@ -393,6 +409,7 @@ def version():
             f"[bold blue]Isaac Sim MCP Server[/bold blue]\n"
             f"Version: {version_str}\n"
             f"Isaac Sim: {'✓' if is_isaac_available() else '✗'}\n"
+            f"Blender: {'✓' if is_blender_available() else '✗'}\n"
             f"USD Support: {'✓' if is_headless_available() or is_isaac_available() else '✗'}",
             title="Version Information",
         )

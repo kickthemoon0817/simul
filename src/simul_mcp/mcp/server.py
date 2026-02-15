@@ -40,8 +40,10 @@ except ImportError:
 from ..logging import get_logger, LoggerMixin
 from ..config import Settings, get_settings
 from ..adapters import (
+    BlenderRuntimeAdapter,
     HeadlessUSDAdapter,
     IsaacRuntimeAdapter,
+    is_blender_available,
     is_isaac_available,
     is_headless_available,
 )
@@ -86,12 +88,25 @@ class IsaacMCPServer(LoggerMixin):
         self.isaac_adapter = (
             IsaacRuntimeAdapter(self.settings) if is_isaac_available() else None
         )
+        self.blender_adapter = (
+            BlenderRuntimeAdapter(self.settings) if is_blender_available() else None
+        )
 
         # Initialize FastMCP server
+        assert FastMCP is not None
+
+        mcp_kwargs: Dict[str, Any] = {
+            "name": "simul-mcp",
+            "version": "0.1.7",
+        }
+        if "description" in inspect.signature(FastMCP).parameters:
+            mcp_kwargs["description"] = (
+                "MCP server for simulation and DCC tools with USD operations "
+                "and simulation control"
+            )
+
         self.mcp = FastMCP(
-            name="simul-mcp",
-            version="0.1.7",
-            description="MCP server for simulation and DCC tools with USD operations and simulation control",
+            **mcp_kwargs,
         )
 
         # Register tools
@@ -221,7 +236,19 @@ class IsaacMCPServer(LoggerMixin):
         return annotations
 
     def _tool_output_schema(self, *models: Type[BaseModel]) -> Dict[str, Any]:
-        return {"oneOf": [model.schema() for model in models]}
+        if len(models) == 1:
+            model = models[0]
+            if hasattr(model, "model_json_schema"):
+                return model.model_json_schema()
+            return model.schema()
+
+        # FastMCP 2.x validates output schema as a single object and rejects
+        # union schemas such as oneOf. Use a permissive object schema for
+        # multi-response tools to stay compatible across FastMCP versions.
+        return {
+            "type": "object",
+            "additionalProperties": True,
+        }
 
     def _task_optional(self) -> Optional[Any]:
         if TaskConfig:
@@ -238,7 +265,14 @@ class IsaacMCPServer(LoggerMixin):
         if self.isaac_adapter and self.isaac_adapter.is_available():
             self._register_isaac_tools()
 
-        self.logger.info(f"Registered {len(self.mcp.tools)} MCP tools")
+        # Blender specific tools (if available)
+        if self.blender_adapter and self.blender_adapter.is_available():
+            self._register_blender_tools()
+
+        tool_count = len(getattr(self.mcp, "tools", []))
+        if tool_count == 0 and hasattr(self.mcp, "_tool_manager"):
+            tool_count = len(getattr(self.mcp._tool_manager, "_tools", {}))
+        self.logger.info(f"Registered {tool_count} MCP tools")
 
     def _register_usd_tools(self) -> None:
         """Register USD-related tools."""
@@ -1648,6 +1682,130 @@ class IsaacMCPServer(LoggerMixin):
                     result, (FocusPrimResponse, ErrorResponse), "focus_on_prim"
                 )
 
+    def _register_blender_tools(self) -> None:
+        """Register Blender runtime specific tools."""
+
+        @self.mcp.tool(
+            name="get_blender_info",
+            description="Get information about the active Blender runtime.",
+            annotations=self._tool_annotations(
+                read_only=True,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(BlenderInfoResponse, ErrorResponse),
+            task=self._task_optional(),
+        )
+        async def get_blender_info() -> Dict[str, Any]:
+            """
+            Get information about the active Blender runtime.
+
+            Returns:
+                Blender runtime information or an error response.
+            """
+            rate_error = self._check_rate_limit("get_blender_info")
+            if rate_error:
+                return rate_error
+
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+
+                with self.blender_adapter.create_session() as session:
+                    runtime_info = session.get_runtime_info()
+                    runtime_info["success"] = True
+                    result = BlenderInfoResponse(**runtime_info).dict()
+                    return self._validate_output(
+                        result,
+                        (BlenderInfoResponse, ErrorResponse),
+                        "get_blender_info",
+                    )
+
+            except Exception as e:
+                self.logger.error(f"Error getting Blender runtime info: {e}")
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (BlenderInfoResponse, ErrorResponse),
+                    "get_blender_info",
+                )
+
+        @self.mcp.tool(
+            name="list_blender_scene_objects",
+            description="List objects from the active Blender scene.",
+            annotations=self._tool_annotations(
+                read_only=True,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderSceneObjectsResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def list_blender_scene_objects(
+            collection_name: Optional[str] = None,
+            include_hidden: bool = False,
+            max_items: int = self.settings.blender.max_scene_objects,
+        ) -> Dict[str, Any]:
+            """
+            List objects from the active Blender scene.
+
+            Args:
+                collection_name: Optional collection name filter.
+                include_hidden: Include hidden objects when true.
+                max_items: Maximum number of objects to return.
+
+            Returns:
+                Blender object listing response or error response.
+            """
+            rate_error = self._check_rate_limit("list_blender_scene_objects")
+            if rate_error:
+                return rate_error
+
+            input_data = self._validate_input(
+                BlenderSceneObjectsRequest,
+                collection_name=collection_name,
+                include_hidden=include_hidden,
+                max_items=max_items,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+
+                with self.blender_adapter.create_session() as session:
+                    objects_payload = session.list_scene_objects(
+                        collection_name=input_data.collection_name,
+                        include_hidden=input_data.include_hidden,
+                        max_items=input_data.max_items,
+                    )
+                    objects_payload["success"] = True
+                    result = BlenderSceneObjectsResponse(**objects_payload).dict()
+                    return self._validate_output(
+                        result,
+                        (BlenderSceneObjectsResponse, ErrorResponse),
+                        "list_blender_scene_objects",
+                    )
+
+            except Exception as e:
+                self.logger.error(f"Error listing Blender scene objects: {e}")
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (BlenderSceneObjectsResponse, ErrorResponse),
+                    "list_blender_scene_objects",
+                )
+
     async def run(self, transport: str = "stdio") -> None:
         """
         Run the MCP server.
@@ -1686,6 +1844,9 @@ class IsaacMCPServer(LoggerMixin):
 
         if self.isaac_adapter and self.isaac_adapter.is_available():
             capabilities.extend(self.isaac_adapter.get_capabilities())
+
+        if self.blender_adapter and self.blender_adapter.is_available():
+            capabilities.extend(self.blender_adapter.get_capabilities())
 
         return list(set(capabilities))  # Remove duplicates
 
