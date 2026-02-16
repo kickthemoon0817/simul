@@ -60,6 +60,11 @@ from ..schemas import (
     BlenderSetupRigidBodyResponse,
     BlenderViewportInfoResponse,
     ErrorResponse,
+    SimReadyApplyMetadataResponse,
+    SimReadyExportResponse,
+    SimReadyGetMetadataResponse,
+    SimReadySetupHierarchyResponse,
+    SimReadyValidateResponse,
 )
 
 logger = get_logger(__name__)
@@ -1612,4 +1617,199 @@ class BlenderTools(LoggerMixin):
 
         except Exception as e:
             self.logger.error(f"Error creating mesh from data: {e}")
+            return ErrorResponse(error=str(e), error_type="Exception").dict()
+
+    # -- SimReady Asset Format wrappers ----------------------------------------
+
+    async def apply_simready_metadata(
+        self,
+        object_name: str,
+        metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Apply SimReady metadata to a Blender object.
+
+        Args:
+            object_name: Target Blender object name.
+            metadata: Dict with semantic, physics, material sub-dicts.
+
+        Returns:
+            Apply result dictionary or error response.
+        """
+        try:
+            if not self.blender_adapter or not self.blender_adapter.is_available():
+                return ErrorResponse(
+                    error="Blender runtime not available",
+                    error_type="RuntimeError",
+                ).dict()
+
+            with self.blender_adapter.create_session() as session:
+                payload = session.apply_simready_metadata(
+                    object_name=object_name,
+                    metadata=metadata,
+                )
+                return SimReadyApplyMetadataResponse(
+                    success=True, **payload
+                ).dict()
+
+        except Exception as e:
+            self.logger.error(f"Error applying SimReady metadata: {e}")
+            return ErrorResponse(error=str(e), error_type="Exception").dict()
+
+    async def get_simready_metadata(
+        self,
+        object_name: str,
+    ) -> Dict[str, Any]:
+        """
+        Read SimReady metadata from a Blender object.
+
+        Args:
+            object_name: Blender object to inspect.
+
+        Returns:
+            Metadata dictionary or error response.
+        """
+        try:
+            if not self.blender_adapter or not self.blender_adapter.is_available():
+                return ErrorResponse(
+                    error="Blender runtime not available",
+                    error_type="RuntimeError",
+                ).dict()
+
+            with self.blender_adapter.create_session() as session:
+                payload = session.get_simready_metadata(
+                    object_name=object_name,
+                )
+                return SimReadyGetMetadataResponse(
+                    success=True, **payload
+                ).dict()
+
+        except Exception as e:
+            self.logger.error(f"Error getting SimReady metadata: {e}")
+            return ErrorResponse(error=str(e), error_type="Exception").dict()
+
+    async def validate_simready_compliance(
+        self,
+        object_names: Optional[List[str]] = None,
+        check_naming: bool = True,
+        check_scale: bool = True,
+        check_transforms: bool = True,
+        check_materials: bool = True,
+        check_hierarchy: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Validate objects against NVIDIA SimReady conventions.
+
+        Args:
+            object_names: Objects to check (None = all mesh objects).
+            check_naming: Check lowercase_underscore naming.
+            check_scale: Check real-world meter scale.
+            check_transforms: Check for clean transforms.
+            check_materials: Check material segmentation.
+            check_hierarchy: Check hierarchy structure.
+
+        Returns:
+            Validation result dictionary or error response.
+        """
+        try:
+            if not self.blender_adapter or not self.blender_adapter.is_available():
+                return ErrorResponse(
+                    error="Blender runtime not available",
+                    error_type="RuntimeError",
+                ).dict()
+
+            with self.blender_adapter.create_session() as session:
+                payload = session.validate_simready_compliance(
+                    object_names=object_names,
+                    check_naming=check_naming,
+                    check_scale=check_scale,
+                    check_transforms=check_transforms,
+                    check_materials=check_materials,
+                    check_hierarchy=check_hierarchy,
+                )
+                return SimReadyValidateResponse(
+                    success=True, **payload
+                ).dict()
+
+        except Exception as e:
+            self.logger.error(f"Error validating SimReady compliance: {e}")
+            return ErrorResponse(error=str(e), error_type="Exception").dict()
+
+    async def export_simready_usd(
+        self,
+        file_path: str,
+        object_names: Optional[List[str]] = None,
+        embed_metadata: bool = True,
+        validate_before_export: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Export a SimReady-compliant USD file.
+
+        Args:
+            file_path: Output .usd / .usda / .usdc path.
+            object_names: Objects to export (None = all).
+            embed_metadata: Include simready_ custom properties.
+            validate_before_export: Run validation first.
+
+        Returns:
+            Export result dictionary or error response.
+        """
+        try:
+            if not self.blender_adapter or not self.blender_adapter.is_available():
+                return ErrorResponse(
+                    error="Blender runtime not available",
+                    error_type="RuntimeError",
+                ).dict()
+
+            with self.blender_adapter.create_session() as session:
+                payload = session.export_simready_usd(
+                    file_path=file_path,
+                    object_names=object_names,
+                    embed_metadata=embed_metadata,
+                    validate_before_export=validate_before_export,
+                )
+                return SimReadyExportResponse(
+                    success=True, **payload
+                ).dict()
+
+        except Exception as e:
+            self.logger.error(f"Error exporting SimReady USD: {e}")
+            return ErrorResponse(error=str(e), error_type="Exception").dict()
+
+    async def setup_simready_hierarchy(
+        self,
+        root_name: str,
+        child_names: List[str],
+        semantic: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a SimReady-compliant hierarchy with a root empty.
+
+        Args:
+            root_name: Name for the root empty (XForm equivalent).
+            child_names: Existing objects to parent under root.
+            semantic: Optional semantic labels dict for the root.
+
+        Returns:
+            Hierarchy setup result dictionary or error response.
+        """
+        try:
+            if not self.blender_adapter or not self.blender_adapter.is_available():
+                return ErrorResponse(
+                    error="Blender runtime not available",
+                    error_type="RuntimeError",
+                ).dict()
+
+            with self.blender_adapter.create_session() as session:
+                payload = session.setup_simready_hierarchy(
+                    root_name=root_name,
+                    child_names=child_names,
+                    semantic=semantic,
+                )
+                return SimReadySetupHierarchyResponse(
+                    success=True, **payload
+                ).dict()
+
+        except Exception as e:
+            self.logger.error(f"Error setting up SimReady hierarchy: {e}")
             return ErrorResponse(error=str(e), error_type="Exception").dict()

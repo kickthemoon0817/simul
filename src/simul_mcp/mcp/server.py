@@ -3391,6 +3391,337 @@ class IsaacMCPServer(LoggerMixin):
                     "create_blender_mesh_from_data",
                 )
 
+        # -- SimReady Asset Format tools ---------------------------------------
+
+        @self.mcp.tool(
+            name="apply_simready_metadata",
+            description=(
+                "Apply NVIDIA SimReady metadata (semantic labels, physics "
+                "properties, material info) to a Blender object as custom "
+                "properties. Stored with simready_ prefix for USD export."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                SimReadyApplyMetadataResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def apply_simready_metadata(
+            object_name: str,
+            metadata: Dict[str, Any],
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("apply_simready_metadata")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                SimReadyApplyMetadataRequest,
+                object_name=object_name,
+                metadata=metadata,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                with self.blender_adapter.create_session() as session:
+                    payload = session.apply_simready_metadata(
+                        object_name=input_data.object_name,
+                        metadata=input_data.metadata.dict(
+                            exclude_none=True
+                        ),
+                    )
+                    result = SimReadyApplyMetadataResponse(
+                        success=True, **payload
+                    ).dict()
+                    return self._validate_output(
+                        result,
+                        (SimReadyApplyMetadataResponse, ErrorResponse),
+                        "apply_simready_metadata",
+                    )
+            except Exception as e:
+                self.logger.error(
+                    "Error applying SimReady metadata: %s", e
+                )
+                result = ErrorResponse(
+                    error=str(e), error_type="Exception"
+                ).dict()
+                return self._validate_output(
+                    result,
+                    (SimReadyApplyMetadataResponse, ErrorResponse),
+                    "apply_simready_metadata",
+                )
+
+        @self.mcp.tool(
+            name="get_simready_metadata",
+            description=(
+                "Read NVIDIA SimReady metadata from a Blender object. "
+                "Returns semantic labels, physics properties, and material "
+                "info stored as simready_ custom properties."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                SimReadyGetMetadataResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def get_simready_metadata(
+            object_name: str,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("get_simready_metadata")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                SimReadyGetMetadataRequest,
+                object_name=object_name,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                with self.blender_adapter.create_session() as session:
+                    payload = session.get_simready_metadata(
+                        object_name=input_data.object_name,
+                    )
+                    result = SimReadyGetMetadataResponse(
+                        success=True, **payload
+                    ).dict()
+                    return self._validate_output(
+                        result,
+                        (SimReadyGetMetadataResponse, ErrorResponse),
+                        "get_simready_metadata",
+                    )
+            except Exception as e:
+                self.logger.error(
+                    "Error getting SimReady metadata: %s", e
+                )
+                result = ErrorResponse(
+                    error=str(e), error_type="Exception"
+                ).dict()
+                return self._validate_output(
+                    result,
+                    (SimReadyGetMetadataResponse, ErrorResponse),
+                    "get_simready_metadata",
+                )
+
+        @self.mcp.tool(
+            name="validate_simready_compliance",
+            description=(
+                "Validate Blender objects against NVIDIA SimReady "
+                "conventions: naming (lowercase_underscore), scale (meters), "
+                "clean transforms, material segmentation, hierarchy."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                SimReadyValidateResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def validate_simready_compliance(
+            object_names: Optional[List[str]] = None,
+            check_naming: bool = True,
+            check_scale: bool = True,
+            check_transforms: bool = True,
+            check_materials: bool = True,
+            check_hierarchy: bool = True,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit(
+                "validate_simready_compliance"
+            )
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                SimReadyValidateRequest,
+                object_names=object_names,
+                check_naming=check_naming,
+                check_scale=check_scale,
+                check_transforms=check_transforms,
+                check_materials=check_materials,
+                check_hierarchy=check_hierarchy,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                with self.blender_adapter.create_session() as session:
+                    payload = session.validate_simready_compliance(
+                        object_names=input_data.object_names,
+                        check_naming=input_data.check_naming,
+                        check_scale=input_data.check_scale,
+                        check_transforms=input_data.check_transforms,
+                        check_materials=input_data.check_materials,
+                        check_hierarchy=input_data.check_hierarchy,
+                    )
+                    result = SimReadyValidateResponse(
+                        success=True, **payload
+                    ).dict()
+                    return self._validate_output(
+                        result,
+                        (SimReadyValidateResponse, ErrorResponse),
+                        "validate_simready_compliance",
+                    )
+            except Exception as e:
+                self.logger.error(
+                    "Error validating SimReady compliance: %s", e
+                )
+                result = ErrorResponse(
+                    error=str(e), error_type="Exception"
+                ).dict()
+                return self._validate_output(
+                    result,
+                    (SimReadyValidateResponse, ErrorResponse),
+                    "validate_simready_compliance",
+                )
+
+        @self.mcp.tool(
+            name="export_simready_usd",
+            description=(
+                "Export a SimReady-compliant USD file. Validates objects "
+                "before export, selects the requested objects, and carries "
+                "simready_ custom properties into USD attributes."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=False,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                SimReadyExportResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def export_simready_usd(
+            file_path: str,
+            object_names: Optional[List[str]] = None,
+            embed_metadata: bool = True,
+            validate_before_export: bool = True,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("export_simready_usd")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                SimReadyExportRequest,
+                file_path=file_path,
+                object_names=object_names,
+                embed_metadata=embed_metadata,
+                validate_before_export=validate_before_export,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                with self.blender_adapter.create_session() as session:
+                    payload = session.export_simready_usd(
+                        file_path=input_data.file_path,
+                        object_names=input_data.object_names,
+                        embed_metadata=input_data.embed_metadata,
+                        validate_before_export=input_data.validate_before_export,
+                    )
+                    result = SimReadyExportResponse(
+                        success=True, **payload
+                    ).dict()
+                    return self._validate_output(
+                        result,
+                        (SimReadyExportResponse, ErrorResponse),
+                        "export_simready_usd",
+                    )
+            except Exception as e:
+                self.logger.error(
+                    "Error exporting SimReady USD: %s", e
+                )
+                result = ErrorResponse(
+                    error=str(e), error_type="Exception"
+                ).dict()
+                return self._validate_output(
+                    result,
+                    (SimReadyExportResponse, ErrorResponse),
+                    "export_simready_usd",
+                )
+
+        @self.mcp.tool(
+            name="setup_simready_hierarchy",
+            description=(
+                "Create a SimReady-compliant object hierarchy with a root "
+                "empty (XForm equivalent) and parent the given children "
+                "under it. Optionally applies semantic labels to the root."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=False,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                SimReadySetupHierarchyResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def setup_simready_hierarchy(
+            root_name: str,
+            child_names: List[str],
+            semantic: Optional[Dict[str, Any]] = None,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit(
+                "setup_simready_hierarchy"
+            )
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                SimReadySetupHierarchyRequest,
+                root_name=root_name,
+                child_names=child_names,
+                semantic=semantic,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                with self.blender_adapter.create_session() as session:
+                    payload = session.setup_simready_hierarchy(
+                        root_name=input_data.root_name,
+                        child_names=input_data.child_names,
+                        semantic=(
+                            input_data.semantic.dict(exclude_none=True)
+                            if input_data.semantic
+                            else None
+                        ),
+                    )
+                    result = SimReadySetupHierarchyResponse(
+                        success=True, **payload
+                    ).dict()
+                    return self._validate_output(
+                        result,
+                        (
+                            SimReadySetupHierarchyResponse,
+                            ErrorResponse,
+                        ),
+                        "setup_simready_hierarchy",
+                    )
+            except Exception as e:
+                self.logger.error(
+                    "Error setting up SimReady hierarchy: %s", e
+                )
+                result = ErrorResponse(
+                    error=str(e), error_type="Exception"
+                ).dict()
+                return self._validate_output(
+                    result,
+                    (
+                        SimReadySetupHierarchyResponse,
+                        ErrorResponse,
+                    ),
+                    "setup_simready_hierarchy",
+                )
+
     async def run(self, transport: str = "stdio") -> None:
         """
         Run the MCP server.

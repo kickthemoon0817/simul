@@ -2877,3 +2877,337 @@ class TestCreateMeshFromData:
                 faces=[[0, 1, 2]],
                 collection_name="NoSuch",
             )
+
+
+class FakeObjectWithProps:
+    """FakeObject with dict-like custom property support for SimReady tests."""
+
+    def __init__(
+        self,
+        name: str,
+        object_type: str = "MESH",
+        location: tuple = (0.0, 0.0, 0.0),
+        rotation_euler: tuple = (0.0, 0.0, 0.0),
+        scale: tuple = (1.0, 1.0, 1.0),
+        dimensions: tuple = (1.0, 1.0, 1.0),
+        parent: Optional[Any] = None,
+        children: Optional[list] = None,
+        data: Optional[Any] = None,
+    ) -> None:
+        self.name = name
+        self.type = object_type
+        self.location = FakeVector(location)
+        self.rotation_euler = FakeVector(rotation_euler)
+        self.scale = FakeVector(scale)
+        self.dimensions = FakeVector(dimensions)
+        self.parent = parent
+        self.children = children or []
+        self.data = data
+        self._custom_props: Dict[str, Any] = {}
+        self.hide_viewport = False
+        self.empty_display_type = ""
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._custom_props[key] = value
+
+    def __getitem__(self, key: str) -> Any:
+        return self._custom_props[key]
+
+    def keys(self) -> list:
+        return list(self._custom_props.keys())
+
+    def select_set(self, val: bool) -> None:
+        self._selected = val
+
+    def visible_get(self) -> bool:
+        return not self.hide_viewport
+
+
+class TestSimReadyMethods:
+    """Tests for SimReady Asset Format adapter methods."""
+
+    @staticmethod
+    def _make_fake_bpy(
+        objects: Optional[List[Any]] = None,
+    ) -> SimpleNamespace:
+        """Create a fake bpy module with the given objects."""
+        objs = objects or []
+
+        class ObjCollection:
+            def __init__(self, items: list) -> None:
+                self._items = items
+                self._dict = {o.name: o for o in items}
+
+            def __iter__(self):  # type: ignore[override]
+                return iter(self._items)
+
+            def __len__(self) -> int:
+                return len(self._items)
+
+            def get(self, name: str) -> Optional[Any]:
+                return self._dict.get(name)
+
+            def new(self, name: str, data: Any) -> Any:
+                obj = FakeObjectWithProps(
+                    name=name,
+                    object_type="EMPTY" if data is None else "MESH",
+                )
+                obj.data = data
+                self._items.append(obj)
+                self._dict[name] = obj
+                return obj
+
+            def link(self, obj: Any) -> None:
+                if obj.name not in self._dict:
+                    self._items.append(obj)
+                    self._dict[obj.name] = obj
+
+        data_objects = ObjCollection(list(objs))
+        scene_col = SimpleNamespace(objects=data_objects)
+        scene = SimpleNamespace(collection=scene_col)
+        return SimpleNamespace(
+            app=SimpleNamespace(
+                version=(5, 0, 1),
+                version_string="5.0.1",
+                binary_path="/bin/blender",
+                background=True,
+            ),
+            data=SimpleNamespace(
+                filepath="",
+                objects=data_objects,
+            ),
+            context=SimpleNamespace(scene=scene),
+            ops=SimpleNamespace(
+                wm=SimpleNamespace(
+                    usd_export=lambda **kw: None,
+                ),
+            ),
+        )
+
+    def test_apply_simready_metadata_semantic(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Apply semantic metadata and verify custom properties."""
+        obj = FakeObjectWithProps(name="fire_truck")
+        fake_bpy = self._make_fake_bpy([obj])
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.apply_simready_metadata(
+            object_name="fire_truck",
+            metadata={
+                "semantic": {
+                    "semantic_class": "truck",
+                    "semantic_hierarchy": "machine/vehicle/truck",
+                    "semantic_qcode": "Q43193",
+                },
+            },
+        )
+
+        assert result["object_name"] == "fire_truck"
+        assert "simready_semantic_class" in result["applied_properties"]
+        assert obj["simready_semantic_class"] == "truck"
+        assert obj["simready_semantic_hierarchy"] == "machine/vehicle/truck"
+        assert obj["simready_semantic_qcode"] == "Q43193"
+
+    def test_apply_simready_metadata_physics(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Apply physics metadata and verify custom properties."""
+        obj = FakeObjectWithProps(name="box_crate")
+        fake_bpy = self._make_fake_bpy([obj])
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.apply_simready_metadata(
+            object_name="box_crate",
+            metadata={
+                "physics": {
+                    "mass_kg": 12.5,
+                    "collider_type": "convexHull",
+                    "is_rigid_body": True,
+                },
+            },
+        )
+
+        assert "simready_mass_kg" in result["applied_properties"]
+        assert "simready_collider_type" in result["applied_properties"]
+        assert "simready_is_rigid_body" in result["applied_properties"]
+        assert obj["simready_mass_kg"] == 12.5
+        assert obj["simready_is_rigid_body"] == 1
+
+    def test_get_simready_metadata_roundtrip(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Apply then read back metadata for roundtrip verification."""
+        obj = FakeObjectWithProps(name="coffee_cup")
+        fake_bpy = self._make_fake_bpy([obj])
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        session.apply_simready_metadata(
+            object_name="coffee_cup",
+            metadata={
+                "semantic": {
+                    "semantic_class": "cup",
+                    "semantic_qcode": "Q81727",
+                },
+                "physics": {
+                    "mass_kg": 0.35,
+                },
+                "material": {
+                    "substrate_type": "ceramic",
+                    "shader_type": "OmniPBR",
+                },
+            },
+        )
+
+        result = session.get_simready_metadata(object_name="coffee_cup")
+        assert result["has_simready_data"] is True
+        meta = result["metadata"]
+        assert meta["semantic"]["semantic_class"] == "cup"
+        assert meta["physics"]["mass_kg"] == 0.35
+        assert meta["material"]["substrate_type"] == "ceramic"
+
+    def test_get_simready_metadata_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Object with no simready_ properties returns has_simready_data=False."""
+        obj = FakeObjectWithProps(name="plain_cube")
+        fake_bpy = self._make_fake_bpy([obj])
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.get_simready_metadata(object_name="plain_cube")
+        assert result["has_simready_data"] is False
+        assert result["metadata"] is None
+
+    def test_validate_naming_issue(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Uppercase names should produce a naming error."""
+        obj = FakeObjectWithProps(
+            name="MyBadName",
+            data=SimpleNamespace(materials=["mat1"]),
+        )
+        obj.parent = FakeObjectWithProps(name="root", object_type="EMPTY")
+        fake_bpy = self._make_fake_bpy([obj])
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.validate_simready_compliance(
+            object_names=["MyBadName"],
+            check_scale=False,
+            check_transforms=False,
+            check_materials=False,
+            check_hierarchy=False,
+        )
+
+        assert result["compliant"] is False
+        assert result["issue_count"] >= 1
+        naming_issues = [
+            i for i in result["issues"] if i["check"] == "naming"
+        ]
+        assert len(naming_issues) == 1
+        assert "MyBadName" in naming_issues[0]["message"]
+
+    def test_validate_compliant_object(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A well-named, correctly-scaled object with material passes."""
+        parent = FakeObjectWithProps(name="root", object_type="EMPTY")
+        obj = FakeObjectWithProps(
+            name="coffee_cup",
+            dimensions=(0.08, 0.08, 0.12),
+            data=SimpleNamespace(materials=["ceramic_white"]),
+            parent=parent,
+        )
+        fake_bpy = self._make_fake_bpy([obj])
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.validate_simready_compliance(
+            object_names=["coffee_cup"],
+        )
+
+        assert result["compliant"] is True
+        error_issues = [
+            i for i in result["issues"] if i["severity"] == "error"
+        ]
+        assert len(error_issues) == 0
+
+    def test_validate_no_material_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Object with no material assigned produces material error."""
+        parent = FakeObjectWithProps(name="root", object_type="EMPTY")
+        obj = FakeObjectWithProps(
+            name="bare_cube",
+            data=SimpleNamespace(materials=[]),
+            parent=parent,
+        )
+        fake_bpy = self._make_fake_bpy([obj])
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.validate_simready_compliance(
+            object_names=["bare_cube"],
+            check_naming=False,
+            check_scale=False,
+            check_transforms=False,
+            check_hierarchy=False,
+        )
+
+        assert result["compliant"] is False
+        mat_issues = [
+            i for i in result["issues"] if i["check"] == "materials"
+        ]
+        assert len(mat_issues) == 1
+
+    def test_setup_simready_hierarchy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Hierarchy setup creates root empty and parents children."""
+        child = FakeObjectWithProps(name="body_mesh")
+        fake_bpy = self._make_fake_bpy([child])
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.setup_simready_hierarchy(
+            root_name="fire_truck",
+            child_names=["body_mesh"],
+            semantic={
+                "semantic_class": "truck",
+                "semantic_qcode": "Q43193",
+            },
+        )
+
+        assert result["root_name"] == "fire_truck"
+        assert "body_mesh" in result["children"]
+        assert result["hierarchy_path"] == "/fire_truck"
+        # Child should be parented
+        assert child.parent is not None
+        assert child.parent.name == "fire_truck"
+
+    def test_setup_simready_hierarchy_bad_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Hierarchy setup rejects non-SimReady root names."""
+        fake_bpy = self._make_fake_bpy([])
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        with pytest.raises(ValueError, match="violates SimReady naming"):
+            session.setup_simready_hierarchy(
+                root_name="BadName",
+                child_names=[],
+            )

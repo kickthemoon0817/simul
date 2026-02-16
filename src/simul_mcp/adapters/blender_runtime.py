@@ -1917,6 +1917,420 @@ class BlenderRuntimeSession(LoggerMixin):
 
     # -- End scripting & mesh-from-data methods ------------------------------
 
+    # -- SimReady Asset Format methods -----------------------------------------
+
+    # Custom property prefix for all SimReady metadata stored on Blender objects
+    _SIMREADY_PREFIX: str = "simready_"
+
+    # Valid SimReady naming pattern: lowercase letters, digits, underscores only
+    _SIMREADY_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+    def apply_simready_metadata(
+        self,
+        object_name: str,
+        metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Apply SimReady metadata as custom properties on a Blender object.
+
+        Properties are stored with a ``simready_`` prefix so they survive
+        USD export as custom attributes.
+
+        Args:
+            object_name: Target Blender object.
+            metadata: Dict with optional keys ``semantic``, ``physics``,
+                ``material``, each containing relevant sub-fields.
+
+        Returns:
+            Dict with object_name and list of applied_properties.
+        """
+        obj = self._get_object_or_raise(object_name)
+        applied: List[str] = []
+
+        semantic = metadata.get("semantic")
+        if semantic:
+            for key in ("semantic_class", "semantic_hierarchy",
+                        "semantic_qcode"):
+                val = semantic.get(key)
+                if val is not None:
+                    prop_key = f"{self._SIMREADY_PREFIX}{key}"
+                    obj[prop_key] = val
+                    applied.append(prop_key)
+            extra = semantic.get("additional_labels")
+            if extra and isinstance(extra, dict):
+                for label_key, label_val in extra.items():
+                    prop_key = (
+                        f"{self._SIMREADY_PREFIX}label_{label_key}"
+                    )
+                    obj[prop_key] = label_val
+                    applied.append(prop_key)
+
+        physics = metadata.get("physics")
+        if physics:
+            for key in ("mass_kg", "collider_type", "static_friction",
+                        "dynamic_friction", "restitution", "density"):
+                val = physics.get(key)
+                if val is not None:
+                    prop_key = f"{self._SIMREADY_PREFIX}{key}"
+                    obj[prop_key] = val
+                    applied.append(prop_key)
+            if physics.get("is_rigid_body"):
+                prop_key = f"{self._SIMREADY_PREFIX}is_rigid_body"
+                obj[prop_key] = 1
+                applied.append(prop_key)
+
+        mat = metadata.get("material")
+        if mat:
+            for key in ("substrate_type", "material_naming",
+                        "shader_type", "texel_density"):
+                val = mat.get(key)
+                if val is not None:
+                    prop_key = f"{self._SIMREADY_PREFIX}{key}"
+                    obj[prop_key] = val
+                    applied.append(prop_key)
+
+        return {"object_name": object_name, "applied_properties": applied}
+
+    def get_simready_metadata(
+        self,
+        object_name: str,
+    ) -> Dict[str, Any]:
+        """
+        Read SimReady metadata stored as custom properties on a Blender object.
+
+        Args:
+            object_name: Blender object to inspect.
+
+        Returns:
+            Dict with object_name, metadata (or None), and has_simready_data.
+        """
+        obj = self._get_object_or_raise(object_name)
+
+        semantic: Dict[str, Any] = {}
+        physics: Dict[str, Any] = {}
+        material: Dict[str, Any] = {}
+        prefix = self._SIMREADY_PREFIX
+        additional_labels: Dict[str, str] = {}
+
+        for key in obj.keys():
+            if not key.startswith(prefix):
+                continue
+            stripped = key[len(prefix):]
+            val = obj[key]
+            # Convert IDPropertyArray / other exotic types to Python
+            if hasattr(val, "to_list"):
+                val = val.to_list()
+
+            if stripped.startswith("label_"):
+                additional_labels[stripped[6:]] = str(val)
+            elif stripped in ("semantic_class", "semantic_hierarchy",
+                              "semantic_qcode"):
+                semantic[stripped] = val
+            elif stripped in ("mass_kg", "collider_type",
+                              "static_friction", "dynamic_friction",
+                              "restitution", "density", "is_rigid_body"):
+                physics[stripped] = val
+            elif stripped in ("substrate_type", "material_naming",
+                              "shader_type", "texel_density"):
+                material[stripped] = val
+
+        if additional_labels:
+            semantic["additional_labels"] = additional_labels
+
+        has_data = bool(semantic or physics or material)
+        result_metadata: Optional[Dict[str, Any]] = None
+        if has_data:
+            result_metadata = {}
+            if semantic:
+                result_metadata["semantic"] = semantic
+            if physics:
+                if "is_rigid_body" in physics:
+                    physics["is_rigid_body"] = bool(physics["is_rigid_body"])
+                result_metadata["physics"] = physics
+            if material:
+                result_metadata["material"] = material
+
+        return {
+            "object_name": object_name,
+            "metadata": result_metadata,
+            "has_simready_data": has_data,
+        }
+
+    def validate_simready_compliance(
+        self,
+        object_names: Optional[List[str]] = None,
+        check_naming: bool = True,
+        check_scale: bool = True,
+        check_transforms: bool = True,
+        check_materials: bool = True,
+        check_hierarchy: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Validate objects against NVIDIA SimReady conventions.
+
+        Checks naming (lowercase_underscore), scale (meter-range dimensions),
+        clean transforms (no stacked rotation/scale), material segmentation,
+        and hierarchy structure.
+
+        Args:
+            object_names: Objects to check.  ``None`` checks all mesh objects.
+            check_naming: Validate naming convention.
+            check_scale: Validate real-world meter scale.
+            check_transforms: Validate clean transforms.
+            check_materials: Validate material segmentation.
+            check_hierarchy: Validate hierarchy structure.
+
+        Returns:
+            Dict with compliant flag, object_count, issue_count, issues list.
+        """
+        blender_module: Any = bpy
+        issues: List[Dict[str, Any]] = []
+
+        if object_names is None:
+            targets = [
+                o for o in blender_module.data.objects
+                if o.type == "MESH"
+            ]
+        else:
+            targets = [self._get_object_or_raise(n) for n in object_names]
+
+        for obj in targets:
+            name: str = obj.name
+
+            if check_naming and not self._SIMREADY_NAME_RE.match(name):
+                issues.append({
+                    "object_name": name,
+                    "check": "naming",
+                    "severity": "error",
+                    "message": (
+                        f"Name '{name}' violates SimReady convention "
+                        "(lowercase letters, digits, underscores only)"
+                    ),
+                    "suggestion": (
+                        "Rename to: "
+                        + re.sub(r"[^a-z0-9_]", "_", name.lower()).strip("_")
+                    ),
+                })
+
+            if check_scale and hasattr(obj, "dimensions"):
+                dims = list(obj.dimensions)
+                max_dim = max(abs(d) for d in dims) if dims else 0.0
+                if max_dim > 1000.0:
+                    issues.append({
+                        "object_name": name,
+                        "check": "scale",
+                        "severity": "warning",
+                        "message": (
+                            f"Largest dimension {max_dim:.2f}m exceeds "
+                            "1000m — verify scene is in meters"
+                        ),
+                        "suggestion": "Ensure scene unit scale is 1.0 (meters)",
+                    })
+                if max_dim < 1e-4 and max_dim > 0:
+                    issues.append({
+                        "object_name": name,
+                        "check": "scale",
+                        "severity": "warning",
+                        "message": (
+                            f"Largest dimension {max_dim:.6f}m is very small "
+                            "— may not be in meter scale"
+                        ),
+                        "suggestion": "Verify units; SimReady uses meters",
+                    })
+
+            if check_transforms:
+                rot = tuple(obj.rotation_euler)
+                scl = tuple(obj.scale)
+                has_rotation = any(abs(r) > 1e-6 for r in rot)
+                has_non_unit_scale = any(abs(s - 1.0) > 1e-6 for s in scl)
+                if has_rotation:
+                    issues.append({
+                        "object_name": name,
+                        "check": "transforms",
+                        "severity": "warning",
+                        "message": (
+                            f"Non-zero rotation {rot} — SimReady requires "
+                            "applied (zero) transforms"
+                        ),
+                        "suggestion": "Apply rotation: Ctrl+A → Rotation",
+                    })
+                if has_non_unit_scale:
+                    issues.append({
+                        "object_name": name,
+                        "check": "transforms",
+                        "severity": "warning",
+                        "message": (
+                            f"Non-unit scale {scl} — SimReady requires "
+                            "applied (1,1,1) scale"
+                        ),
+                        "suggestion": "Apply scale: Ctrl+A → Scale",
+                    })
+
+            if check_materials and hasattr(obj, "data") and obj.data:
+                mat_count = len(getattr(obj.data, "materials", []))
+                if mat_count == 0:
+                    issues.append({
+                        "object_name": name,
+                        "check": "materials",
+                        "severity": "error",
+                        "message": "No material assigned",
+                        "suggestion": (
+                            "Assign at least one material per mesh prim"
+                        ),
+                    })
+
+            if check_hierarchy and obj.parent is None:
+                has_children = len(obj.children) > 0
+                if not has_children and obj.type == "MESH":
+                    issues.append({
+                        "object_name": name,
+                        "check": "hierarchy",
+                        "severity": "warning",
+                        "message": (
+                            "Mesh has no parent empty — SimReady assets "
+                            "should be under a root XForm"
+                        ),
+                        "suggestion": (
+                            "Use setup_simready_hierarchy to create a root"
+                        ),
+                    })
+
+        error_count = sum(
+            1 for i in issues if i["severity"] == "error"
+        )
+        return {
+            "compliant": error_count == 0,
+            "object_count": len(targets),
+            "issue_count": len(issues),
+            "issues": issues,
+        }
+
+    def export_simready_usd(
+        self,
+        file_path: str,
+        object_names: Optional[List[str]] = None,
+        embed_metadata: bool = True,
+        validate_before_export: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Export a SimReady-compliant USD file.
+
+        Validates objects before export (optionally), selects the requested
+        objects, and delegates to the version-aware USD exporter.  SimReady
+        custom properties on the Blender objects are carried into the USD
+        as custom attributes automatically by Blender's USD exporter.
+
+        Args:
+            file_path: Output .usd / .usda / .usdc path.
+            object_names: Objects to export (None = all).
+            embed_metadata: Include simready_ custom properties.
+            validate_before_export: Run validation first.
+
+        Returns:
+            Dict with file_path, object_count, validation_passed, issues.
+        """
+        blender_module: Any = bpy
+        issues: Optional[List[Dict[str, Any]]] = None
+        validation_passed = True
+
+        if object_names:
+            targets = [self._get_object_or_raise(n) for n in object_names]
+        else:
+            targets = list(blender_module.data.objects)
+
+        if validate_before_export:
+            names = [o.name for o in targets]
+            result = self.validate_simready_compliance(
+                object_names=names
+            )
+            issues = result.get("issues")
+            validation_passed = result.get("compliant", True)
+
+        # Select only the requested objects
+        for obj in blender_module.data.objects:
+            obj.select_set(False)
+        for obj in targets:
+            obj.select_set(True)
+
+        self.export_file(
+            file_path=file_path,
+            file_format="USD",
+            selected_only=bool(object_names),
+        )
+
+        return {
+            "file_path": file_path,
+            "object_count": len(targets),
+            "validation_passed": validation_passed,
+            "issues": issues,
+        }
+
+    def setup_simready_hierarchy(
+        self,
+        root_name: str,
+        child_names: List[str],
+        semantic: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a SimReady-compliant hierarchy with a root empty (XForm)
+        and parent the given children under it.
+
+        The root empty is placed at the origin with identity transforms,
+        matching SimReady modeling best-practices.  Optionally applies
+        semantic labels to the root.
+
+        Args:
+            root_name: Name for the root empty object.
+            child_names: Existing objects to parent under the root.
+            semantic: Optional semantic labels dict to apply to the root.
+
+        Returns:
+            Dict with root_name, children, hierarchy_path.
+        """
+        blender_module: Any = bpy
+
+        # Validate root name follows SimReady conventions
+        if not self._SIMREADY_NAME_RE.match(root_name):
+            raise ValueError(
+                f"Root name '{root_name}' violates SimReady naming "
+                "(lowercase letters, digits, underscores only)"
+            )
+
+        # Create root empty at origin
+        empty = blender_module.data.objects.new(root_name, None)
+        blender_module.context.scene.collection.objects.link(empty)
+        empty.empty_display_type = "PLAIN_AXES"
+        empty.location = (0.0, 0.0, 0.0)
+        empty.rotation_euler = (0.0, 0.0, 0.0)
+        empty.scale = (1.0, 1.0, 1.0)
+
+        # Parent children
+        parented: List[str] = []
+        for child_name in child_names:
+            child = self._get_object_or_raise(child_name)
+            child.parent = empty
+            parented.append(child.name)
+
+        # Apply semantic labels if provided
+        if semantic:
+            self.apply_simready_metadata(
+                empty.name,
+                {"semantic": semantic},
+            )
+
+        hierarchy_parts = [f"/{empty.name}"]
+        for c in parented:
+            hierarchy_parts.append(f"/{empty.name}/{c}")
+        hierarchy_path = hierarchy_parts[0]
+
+        return {
+            "root_name": empty.name,
+            "children": parented,
+            "hierarchy_path": hierarchy_path,
+        }
+
+    # -- End SimReady methods --------------------------------------------------
+
     def cleanup(self) -> None:
         """Clean up resources for the Blender session."""
         self.logger.debug("Blender runtime session cleaned up")
@@ -2263,6 +2677,11 @@ class BlenderRuntimeAdapter(LoggerMixin):
             "blender_free_bake",
             "execute_blender_script",
             "create_blender_mesh_from_data",
+            "apply_simready_metadata",
+            "get_simready_metadata",
+            "validate_simready_compliance",
+            "export_simready_usd",
+            "setup_simready_hierarchy",
         ]
 
 

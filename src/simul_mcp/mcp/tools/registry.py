@@ -35,6 +35,7 @@ class ToolCategory(str, Enum):
     RIGID_BODY = "rigid_body"
     CAMERA = "camera"
     BLENDER = "blender"
+    SIMREADY = "simready"
 
 
 @dataclass
@@ -230,6 +231,9 @@ class ToolRegistry(LoggerMixin):
                 if self._isaac_available:
                     return CameraTools(self.settings)
             elif category == ToolCategory.BLENDER:
+                if self._blender_available:
+                    return BlenderTools(self.settings)
+            elif category == ToolCategory.SIMREADY:
                 if self._blender_available:
                     return BlenderTools(self.settings)
         except Exception as e:
