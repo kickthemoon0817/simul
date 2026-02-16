@@ -52,3 +52,7 @@ extscache/
 *.blend1
 *.blend2
 
+# Agent working files
+.sisyphus/
+plan-*.md
+

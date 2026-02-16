@@ -1,9 +1,9 @@
 """Tests for Blender tool registration inside FastMCP server."""
 
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-import sys
 
 import pytest
 

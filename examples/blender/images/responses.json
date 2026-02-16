@@ -1,0 +1,129 @@
+{
+  "step0_clear": {
+    "success": true,
+    "object_count": 1
+  },
+  "step1_body": {
+    "success": true,
+    "return_value": "192 verts, 176 faces",
+    "duration_seconds": 0.0006
+  },
+  "step2a_fin_left": {
+    "success": true,
+    "object_name": "FinLeft",
+    "vertex_count": 19,
+    "face_count": 18
+  },
+  "step2b_fin_right": {
+    "success": true,
+    "return_value": "Created FinRight",
+    "duration_seconds": 0.0027
+  },
+  "step3_tail": {
+    "success": true,
+    "return_value": "22 verts, 16 faces",
+    "duration_seconds": 0.0001
+  },
+  "step4_dorsal": {
+    "success": true,
+    "object_name": "DorsalRidge",
+    "vertex_count": 10,
+    "face_count": 6
+  },
+  "step5_parent": {
+    "success": true,
+    "children": [
+      "FinLeft",
+      "FinRight",
+      "TailFluke",
+      "DorsalRidge"
+    ],
+    "parent": "WhaleBody"
+  },
+  "step6_smooth": {
+    "success": true,
+    "return_value": "Subdivision + smooth on 5 objects"
+  },
+  "step7_material": {
+    "success": true,
+    "return_value": "WhaleSkin assigned to 5 objects"
+  },
+  "step7b_belly": {
+    "success": true,
+    "return_value": "Belly blend on 192 vertices"
+  },
+  "step8_armature": {
+    "success": true,
+    "return_value": "Armature with 6 bones"
+  },
+  "step9_animation": {
+    "success": true,
+    "return_value": "144 keyframes across 6 bones"
+  },
+  "step10_lighting": {
+    "success": true,
+    "return_value": "Sun + FillLight created"
+  },
+  "step11_camera": {
+    "success": true,
+    "camera_name": "Camera",
+    "location": [
+      5.0,
+      -7.0,
+      3.0
+    ],
+    "rotation_euler": [
+      1.149999976158142,
+      0.0,
+      0.550000011920929
+    ]
+  },
+  "step12_summary": {
+    "success": true,
+    "total_objects": 9,
+    "type_counts": {
+      "CAMERA": 1,
+      "MESH": 5,
+      "LIGHT": 2,
+      "ARMATURE": 1
+    },
+    "active_camera": "Camera",
+    "frame_start": 1,
+    "frame_end": 120
+  },
+  "render_hero": {
+    "file": "whale_hero.png",
+    "size_bytes": 1846496,
+    "engine": "CYCLES",
+    "render_seconds": 5.89
+  },
+  "render_side": {
+    "file": "whale_side.png",
+    "size_bytes": 1852586,
+    "engine": "CYCLES",
+    "render_seconds": 5.77
+  },
+  "render_front": {
+    "file": "whale_front.png",
+    "size_bytes": 1885719,
+    "engine": "CYCLES",
+    "render_seconds": 3.98
+  },
+  "render_top": {
+    "file": "whale_top.png",
+    "size_bytes": 1928510,
+    "engine": "CYCLES",
+    "render_seconds": 5.31
+  },
+  "render_swim": {
+    "file": "whale_swim_f30.png",
+    "size_bytes": 1847177,
+    "engine": "CYCLES",
+    "render_seconds": 4.71
+  },
+  "step14_save": {
+    "success": true,
+    "file_path": "/Users/khemoo/pt/simul-mcp/examples/blender/humpback_whale.blend",
+    "file_size_bytes": 102842
+  }
+}

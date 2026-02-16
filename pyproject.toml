@@ -57,7 +57,7 @@ isaac = [
 ]
 blender = [
     # Blender Python module (optional, platform/runtime dependent)
-    "bpy>=4.0.0",
+    "bpy>=3.6",
 ]
 
 [project.urls]
