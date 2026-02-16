@@ -13,6 +13,7 @@ from ...adapters import (
     is_blender_available,
     is_headless_available,
     is_isaac_available,
+    is_unreal_available,
 )
 from ...config import Settings, get_settings
 from ...logging import LoggerMixin, get_logger
@@ -36,6 +37,14 @@ class ToolCategory(str, Enum):
     CAMERA = "camera"
     BLENDER = "blender"
     SIMREADY = "simready"
+    UNREAL_SCENE = "unreal_scene"
+    UNREAL_VIEWPORT = "unreal_viewport"
+    UNREAL_MANIPULATION = "unreal_manipulation"
+    UNREAL_MATERIAL = "unreal_material"
+    UNREAL_PHYSICS = "unreal_physics"
+    UNREAL_USD = "unreal_usd"
+    UNREAL_AGENT = "unreal_agent"
+    UNREAL_GEOMETRY = "unreal_geometry"
 
 
 @dataclass
@@ -48,6 +57,7 @@ class ToolInfo:
     method: Callable
     requires_isaac: bool = False
     requires_blender: bool = False
+    requires_unreal: bool = False
     requires_usd: bool = True
     enabled: bool = True
 
@@ -74,12 +84,14 @@ class ToolRegistry(LoggerMixin):
         # Check runtime capabilities
         self._isaac_available = is_isaac_available()
         self._blender_available = is_blender_available()
+        self._unreal_available = is_unreal_available()
         self._usd_available = is_headless_available() or self._isaac_available
 
         self.logger.info(
-            "Tool registry initialized - Isaac: %s, Blender: %s, USD: %s",
+            "Tool registry initialized - Isaac: %s, Blender: %s, Unreal: %s, USD: %s",
             self._isaac_available,
             self._blender_available,
+            self._unreal_available,
             self._usd_available,
         )
 
@@ -91,6 +103,7 @@ class ToolRegistry(LoggerMixin):
         description: str,
         requires_isaac: bool = False,
         requires_blender: bool = False,
+        requires_unreal: bool = False,
         requires_usd: bool = True,
     ) -> None:
         """
@@ -102,6 +115,8 @@ class ToolRegistry(LoggerMixin):
             method: Tool method
             description: Tool description
             requires_isaac: Whether tool requires Isaac Sim
+            requires_blender: Whether tool requires Blender runtime
+            requires_unreal: Whether tool requires Unreal Engine runtime
             requires_usd: Whether tool requires USD support
         """
         # Check if tool can be enabled based on requirements
@@ -114,6 +129,10 @@ class ToolRegistry(LoggerMixin):
             enabled = False
             self.logger.debug(f"Tool {name} disabled - Blender runtime not available")
 
+        if requires_unreal and not self._unreal_available:
+            enabled = False
+            self.logger.debug(f"Tool {name} disabled - Unreal runtime not available")
+
         if requires_usd and not self._usd_available:
             enabled = False
             self.logger.debug(f"Tool {name} disabled - USD support not available")
@@ -125,6 +144,7 @@ class ToolRegistry(LoggerMixin):
             method=method,
             requires_isaac=requires_isaac,
             requires_blender=requires_blender,
+            requires_unreal=requires_unreal,
             requires_usd=requires_usd,
             enabled=enabled,
         )
@@ -236,6 +256,11 @@ class ToolRegistry(LoggerMixin):
             elif category == ToolCategory.SIMREADY:
                 if self._blender_available:
                     return BlenderTools(self.settings)
+            elif category.value.startswith("unreal_"):
+                if self._unreal_available:
+                    from .unreal_tools import UnrealTools
+
+                    return UnrealTools(self.settings)
         except Exception as e:
             self.logger.error(f"Error creating tool instance for {category}: {e}")
 
@@ -253,6 +278,7 @@ class ToolRegistry(LoggerMixin):
         capabilities = {
             "isaac_available": self._isaac_available,
             "blender_available": self._blender_available,
+            "unreal_available": self._unreal_available,
             "usd_available": self._usd_available,
             "total_tools": len(self._tools),
             "enabled_tools": len(enabled_tools),
@@ -276,6 +302,7 @@ class ToolRegistry(LoggerMixin):
                 "enabled": tool.enabled,
                 "requires_isaac": tool.requires_isaac,
                 "requires_blender": tool.requires_blender,
+                "requires_unreal": tool.requires_unreal,
                 "requires_usd": tool.requires_usd,
                 "description": tool.description,
             }
