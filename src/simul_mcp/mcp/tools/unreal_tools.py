@@ -121,7 +121,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealListActorsResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error listing Unreal actors: {e}")
+            self.logger.error("Error listing Unreal actors: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def get_unreal_actor_info(
@@ -149,7 +149,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealGetActorInfoResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error getting Unreal actor info: {e}")
+            self.logger.error("Error getting Unreal actor info: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def search_unreal_assets(
@@ -189,7 +189,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSearchAssetsResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error searching Unreal assets: {e}")
+            self.logger.error("Error searching Unreal assets: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def describe_unreal_object(
@@ -217,7 +217,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealDescribeObjectResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error describing Unreal object: {e}")
+            self.logger.error("Error describing Unreal object: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def get_unreal_actor_thumbnail(
@@ -252,7 +252,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealGetThumbnailResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error getting Unreal thumbnail: {e}")
+            self.logger.error("Error getting Unreal thumbnail: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def summarize_unreal_scene(self) -> Dict[str, Any]:
@@ -275,7 +275,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSceneSummaryResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error summarizing Unreal scene: {e}")
+            self.logger.error("Error summarizing Unreal scene: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     # ------------------------------------------------------------------
@@ -316,7 +316,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealCaptureViewportResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error capturing Unreal viewport: {e}")
+            self.logger.error("Error capturing Unreal viewport: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def get_unreal_viewport_info(self) -> Dict[str, Any]:
@@ -339,7 +339,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealViewportInfoResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error getting Unreal viewport info: {e}")
+            self.logger.error("Error getting Unreal viewport info: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def set_unreal_camera_view(
@@ -384,7 +384,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSetCameraViewResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error setting Unreal camera view: {e}")
+            self.logger.error("Error setting Unreal camera view: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def focus_unreal_on_actor(
@@ -417,7 +417,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealFocusActorResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error focusing on Unreal actor: {e}")
+            self.logger.error("Error focusing on Unreal actor: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     # ------------------------------------------------------------------
@@ -469,7 +469,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSpawnActorResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error spawning Unreal actor: {e}")
+            self.logger.error("Error spawning Unreal actor: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def delete_unreal_actor(self, actor_path: str) -> Dict[str, Any]:
@@ -495,7 +495,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealDeleteActorResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error deleting Unreal actor: {e}")
+            self.logger.error("Error deleting Unreal actor: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def set_unreal_actor_transform(
@@ -547,7 +547,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSetActorTransformResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error setting Unreal actor transform: {e}")
+            self.logger.error("Error setting Unreal actor transform: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def set_unreal_actor_property(
@@ -587,7 +587,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSetActorPropertyResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error setting Unreal actor property: {e}")
+            self.logger.error("Error setting Unreal actor property: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def call_unreal_actor_function(
@@ -624,7 +624,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealCallActorFunctionResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error calling Unreal actor function: {e}")
+            self.logger.error("Error calling Unreal actor function: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def set_unreal_actor_parent(
@@ -658,7 +658,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSetActorParentResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error setting Unreal actor parent: {e}")
+            self.logger.error("Error setting Unreal actor parent: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def add_unreal_component(
@@ -695,7 +695,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealAddComponentResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error adding Unreal component: {e}")
+            self.logger.error("Error adding Unreal component: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def set_unreal_actor_visibility(
@@ -732,7 +732,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSetActorVisibilityResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error setting Unreal actor visibility: {e}")
+            self.logger.error("Error setting Unreal actor visibility: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     # ------------------------------------------------------------------
@@ -767,7 +767,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealGetMaterialInfoResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error getting Unreal material info: {e}")
+            self.logger.error("Error getting Unreal material info: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def set_unreal_material_params(
@@ -819,7 +819,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSetMaterialParamsResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error setting Unreal material params: {e}")
+            self.logger.error("Error setting Unreal material params: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def create_unreal_material_instance(
@@ -856,7 +856,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealCreateMaterialInstanceResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error creating Unreal material instance: {e}")
+            self.logger.error("Error creating Unreal material instance: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def assign_unreal_material(
@@ -893,7 +893,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealAssignMaterialResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error assigning Unreal material: {e}")
+            self.logger.error("Error assigning Unreal material: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def set_unreal_light_params(
@@ -948,7 +948,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSetLightParamsResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error setting Unreal light params: {e}")
+            self.logger.error("Error setting Unreal light params: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def set_unreal_render_settings(
@@ -982,7 +982,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSetRenderSettingsResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error setting Unreal render settings: {e}")
+            self.logger.error("Error setting Unreal render settings: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     # ------------------------------------------------------------------
@@ -1015,7 +1015,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealControlSimulationResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error controlling Unreal simulation: {e}")
+            self.logger.error("Error controlling Unreal simulation: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def get_unreal_simulation_status(self) -> Dict[str, Any]:
@@ -1038,7 +1038,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealGetSimulationStatusResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error getting Unreal simulation status: {e}")
+            self.logger.error("Error getting Unreal simulation status: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def enable_unreal_physics(
@@ -1075,7 +1075,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealEnablePhysicsResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error enabling Unreal physics: {e}")
+            self.logger.error("Error enabling Unreal physics: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def set_unreal_collision(
@@ -1112,7 +1112,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSetCollisionResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error setting Unreal collision: {e}")
+            self.logger.error("Error setting Unreal collision: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def apply_unreal_force(
@@ -1164,7 +1164,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealApplyForceResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error applying Unreal force: {e}")
+            self.logger.error("Error applying Unreal force: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def set_unreal_physics_params(
@@ -1207,7 +1207,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSetPhysicsParamsResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error setting Unreal physics params: {e}")
+            self.logger.error("Error setting Unreal physics params: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     # ------------------------------------------------------------------
@@ -1254,7 +1254,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealImportUsdResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error importing USD to Unreal: {e}")
+            self.logger.error("Error importing USD to Unreal: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def export_unreal_usd(
@@ -1297,7 +1297,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealExportUsdResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error exporting Unreal USD: {e}")
+            self.logger.error("Error exporting Unreal USD: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def convert_to_simready(
@@ -1340,7 +1340,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealConvertToSimreadyResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error converting to SimReady: {e}")
+            self.logger.error("Error converting to SimReady: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def validate_simready_asset(
@@ -1374,7 +1374,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealValidateSimreadyResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error validating SimReady asset: {e}")
+            self.logger.error("Error validating SimReady asset: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def get_unreal_interchange_info(self) -> Dict[str, Any]:
@@ -1397,7 +1397,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealGetInterchangeInfoResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error getting interchange info: {e}")
+            self.logger.error("Error getting interchange info: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     # ------------------------------------------------------------------
@@ -1432,7 +1432,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealBatchOperationsResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error in batch Unreal operations: {e}")
+            self.logger.error("Error in batch Unreal operations: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def query_unreal_scene_graph(
@@ -1472,7 +1472,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealQuerySceneGraphResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error querying Unreal scene graph: {e}")
+            self.logger.error("Error querying Unreal scene graph: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def analyze_unreal_scene_for_robotics(
@@ -1506,7 +1506,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealAnalyzeSceneForRoboticsResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error analyzing scene for robotics: {e}")
+            self.logger.error("Error analyzing scene for robotics: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def generate_unreal_procedural_scene(
@@ -1546,7 +1546,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealGenerateProceduralSceneResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error generating procedural scene: {e}")
+            self.logger.error("Error generating procedural scene: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def get_unreal_actor_by_semantic_label(
@@ -1583,7 +1583,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealGetActorBySemanticLabelResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error finding actors by semantic label: {e}")
+            self.logger.error("Error finding actors by semantic label: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     # ------------------------------------------------------------------
@@ -1630,7 +1630,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealGenerateMeshPrimitiveResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error generating mesh primitive: {e}")
+            self.logger.error("Error generating mesh primitive: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def apply_unreal_mesh_boolean(
@@ -1667,7 +1667,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealApplyMeshBooleanResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error applying mesh boolean: {e}")
+            self.logger.error("Error applying mesh boolean: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def compute_unreal_convex_hull(
@@ -1698,7 +1698,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealComputeConvexHullResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error computing convex hull: {e}")
+            self.logger.error("Error computing convex hull: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def decompose_unreal_convex_hull(
@@ -1741,7 +1741,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealDecomposeConvexHullResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error decomposing convex hull: {e}")
+            self.logger.error("Error decomposing convex hull: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def edit_unreal_mesh_topology(
@@ -1793,7 +1793,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealEditMeshTopologyResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error editing mesh topology: {e}")
+            self.logger.error("Error editing mesh topology: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def subdivide_unreal_mesh(
@@ -1830,7 +1830,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSubdivideMeshResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error subdividing mesh: {e}")
+            self.logger.error("Error subdividing mesh: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def simplify_unreal_mesh(
@@ -1870,7 +1870,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealSimplifyMeshResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error simplifying mesh: {e}")
+            self.logger.error("Error simplifying mesh: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def cut_unreal_mesh_plane(
@@ -1913,7 +1913,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealCutMeshPlaneResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error cutting mesh with plane: {e}")
+            self.logger.error("Error cutting mesh with plane: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def validate_unreal_mesh(
@@ -1947,7 +1947,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealValidateMeshResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error validating mesh: {e}")
+            self.logger.error("Error validating mesh: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def convert_unreal_mesh_format(
@@ -1984,7 +1984,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealConvertMeshFormatResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error converting mesh format: {e}")
+            self.logger.error("Error converting mesh format: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def remesh_unreal_mesh(
@@ -2027,7 +2027,7 @@ class UnrealTools(LoggerMixin):
                 return UnrealRemeshMeshResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error remeshing mesh: {e}")
+            self.logger.error("Error remeshing mesh: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()
 
     async def compute_unreal_mesh_uv(
@@ -2067,5 +2067,5 @@ class UnrealTools(LoggerMixin):
                 return UnrealComputeMeshUvResponse(**payload).dict()
 
         except Exception as e:
-            self.logger.error(f"Error computing mesh UVs: {e}")
+            self.logger.error("Error computing mesh UVs: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").dict()

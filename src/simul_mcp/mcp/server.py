@@ -1860,7 +1860,7 @@ class IsaacMCPServer(LoggerMixin):
                     )
 
             except Exception as e:
-                self.logger.error(f"Error in Unreal health check: {e}")
+                self.logger.error("Error in Unreal health check: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -1910,7 +1910,7 @@ class IsaacMCPServer(LoggerMixin):
                     )
 
             except Exception as e:
-                self.logger.error(f"Error getting Unreal engine info: {e}")
+                self.logger.error("Error getting Unreal engine info: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -1960,7 +1960,7 @@ class IsaacMCPServer(LoggerMixin):
                     )
 
             except Exception as e:
-                self.logger.error(f"Error getting Unreal loaded map: {e}")
+                self.logger.error("Error getting Unreal loaded map: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2027,7 +2027,7 @@ class IsaacMCPServer(LoggerMixin):
                     )
 
             except Exception as e:
-                self.logger.error(f"Error listing Unreal actors: {e}")
+                self.logger.error("Error listing Unreal actors: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2080,7 +2080,7 @@ class IsaacMCPServer(LoggerMixin):
                     )
 
             except Exception as e:
-                self.logger.error(f"Error getting Unreal actor info: {e}")
+                self.logger.error("Error getting Unreal actor info: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2157,7 +2157,7 @@ class IsaacMCPServer(LoggerMixin):
                     )
 
             except Exception as e:
-                self.logger.error(f"Error searching Unreal assets: {e}")
+                self.logger.error("Error searching Unreal assets: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2210,7 +2210,7 @@ class IsaacMCPServer(LoggerMixin):
                     )
 
             except Exception as e:
-                self.logger.error(f"Error describing Unreal object: {e}")
+                self.logger.error("Error describing Unreal object: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2271,7 +2271,7 @@ class IsaacMCPServer(LoggerMixin):
                     )
 
             except Exception as e:
-                self.logger.error(f"Error getting Unreal thumbnail: {e}")
+                self.logger.error("Error getting Unreal thumbnail: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2321,7 +2321,7 @@ class IsaacMCPServer(LoggerMixin):
                     )
 
             except Exception as e:
-                self.logger.error(f"Error summarizing Unreal scene: {e}")
+                self.logger.error("Error summarizing Unreal scene: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2386,7 +2386,7 @@ class IsaacMCPServer(LoggerMixin):
                     )
 
             except Exception as e:
-                self.logger.error(f"Error capturing Unreal viewport: {e}")
+                self.logger.error("Error capturing Unreal viewport: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2436,7 +2436,7 @@ class IsaacMCPServer(LoggerMixin):
                     )
 
             except Exception as e:
-                self.logger.error(f"Error getting Unreal viewport info: {e}")
+                self.logger.error("Error getting Unreal viewport info: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2507,7 +2507,7 @@ class IsaacMCPServer(LoggerMixin):
                     )
 
             except Exception as e:
-                self.logger.error(f"Error setting Unreal camera view: {e}")
+                self.logger.error("Error setting Unreal camera view: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2566,7 +2566,7 @@ class IsaacMCPServer(LoggerMixin):
                     )
 
             except Exception as e:
-                self.logger.error(f"Error focusing on Unreal actor: {e}")
+                self.logger.error("Error focusing on Unreal actor: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2624,7 +2624,7 @@ class IsaacMCPServer(LoggerMixin):
                         "spawn_unreal_actor",
                     )
             except Exception as e:
-                self.logger.error(f"Error spawning Unreal actor: {e}")
+                self.logger.error("Error spawning Unreal actor: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2669,7 +2669,7 @@ class IsaacMCPServer(LoggerMixin):
                         "delete_unreal_actor",
                     )
             except Exception as e:
-                self.logger.error(f"Error deleting Unreal actor: {e}")
+                self.logger.error("Error deleting Unreal actor: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2727,7 +2727,7 @@ class IsaacMCPServer(LoggerMixin):
                         "set_unreal_actor_transform",
                     )
             except Exception as e:
-                self.logger.error(f"Error setting Unreal actor transform: {e}")
+                self.logger.error("Error setting Unreal actor transform: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2779,7 +2779,7 @@ class IsaacMCPServer(LoggerMixin):
                         "set_unreal_actor_property",
                     )
             except Exception as e:
-                self.logger.error(f"Error setting Unreal actor property: {e}")
+                self.logger.error("Error setting Unreal actor property: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2829,7 +2829,7 @@ class IsaacMCPServer(LoggerMixin):
                         "call_unreal_actor_function",
                     )
             except Exception as e:
-                self.logger.error(f"Error calling Unreal actor function: {e}")
+                self.logger.error("Error calling Unreal actor function: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2877,7 +2877,7 @@ class IsaacMCPServer(LoggerMixin):
                         "set_unreal_actor_parent",
                     )
             except Exception as e:
-                self.logger.error(f"Error setting Unreal actor parent: {e}")
+                self.logger.error("Error setting Unreal actor parent: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2927,7 +2927,7 @@ class IsaacMCPServer(LoggerMixin):
                         "add_unreal_component",
                     )
             except Exception as e:
-                self.logger.error(f"Error adding Unreal component: {e}")
+                self.logger.error("Error adding Unreal component: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -2977,7 +2977,7 @@ class IsaacMCPServer(LoggerMixin):
                         "set_unreal_actor_visibility",
                     )
             except Exception as e:
-                self.logger.error(f"Error setting Unreal actor visibility: {e}")
+                self.logger.error("Error setting Unreal actor visibility: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3027,7 +3027,7 @@ class IsaacMCPServer(LoggerMixin):
                         "get_unreal_material_info",
                     )
             except Exception as e:
-                self.logger.error(f"Error getting Unreal material info: {e}")
+                self.logger.error("Error getting Unreal material info: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3092,7 +3092,7 @@ class IsaacMCPServer(LoggerMixin):
                         "set_unreal_material_params",
                     )
             except Exception as e:
-                self.logger.error(f"Error setting Unreal material params: {e}")
+                self.logger.error("Error setting Unreal material params: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3142,7 +3142,7 @@ class IsaacMCPServer(LoggerMixin):
                         "create_unreal_material_instance",
                     )
             except Exception as e:
-                self.logger.error(f"Error creating Unreal material instance: {e}")
+                self.logger.error("Error creating Unreal material instance: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3192,7 +3192,7 @@ class IsaacMCPServer(LoggerMixin):
                         "assign_unreal_material",
                     )
             except Exception as e:
-                self.logger.error(f"Error assigning Unreal material: {e}")
+                self.logger.error("Error assigning Unreal material: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3215,14 +3215,14 @@ class IsaacMCPServer(LoggerMixin):
         )
         async def set_unreal_light_params(
             actor_path: str,
-            intensity: float = None,
-            color_r: float = None,
-            color_g: float = None,
-            color_b: float = None,
-            temperature: float = None,
-            use_temperature: bool = None,
-            attenuation_radius: float = None,
-            cast_shadows: bool = None,
+            intensity: Optional[float] = None,
+            color_r: Optional[float] = None,
+            color_g: Optional[float] = None,
+            color_b: Optional[float] = None,
+            temperature: Optional[float] = None,
+            use_temperature: Optional[bool] = None,
+            attenuation_radius: Optional[float] = None,
+            cast_shadows: Optional[bool] = None,
         ) -> Dict[str, Any]:
             """Set light parameters."""
             rate_error = self._check_rate_limit("set_unreal_light_params")
@@ -3254,7 +3254,7 @@ class IsaacMCPServer(LoggerMixin):
                         "set_unreal_light_params",
                     )
             except Exception as e:
-                self.logger.error(f"Error setting Unreal light params: {e}")
+                self.logger.error("Error setting Unreal light params: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3302,7 +3302,7 @@ class IsaacMCPServer(LoggerMixin):
                         "set_unreal_render_settings",
                     )
             except Exception as e:
-                self.logger.error(f"Error setting Unreal render settings: {e}")
+                self.logger.error("Error setting Unreal render settings: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3348,7 +3348,7 @@ class IsaacMCPServer(LoggerMixin):
                         "control_unreal_simulation",
                     )
             except Exception as e:
-                self.logger.error(f"Error controlling Unreal simulation: {e}")
+                self.logger.error("Error controlling Unreal simulation: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3390,7 +3390,7 @@ class IsaacMCPServer(LoggerMixin):
                         "get_unreal_simulation_status",
                     )
             except Exception as e:
-                self.logger.error(f"Error getting Unreal simulation status: {e}")
+                self.logger.error("Error getting Unreal simulation status: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3440,7 +3440,7 @@ class IsaacMCPServer(LoggerMixin):
                         "enable_unreal_physics",
                     )
             except Exception as e:
-                self.logger.error(f"Error enabling Unreal physics: {e}")
+                self.logger.error("Error enabling Unreal physics: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3490,7 +3490,7 @@ class IsaacMCPServer(LoggerMixin):
                         "set_unreal_collision",
                     )
             except Exception as e:
-                self.logger.error(f"Error setting Unreal collision: {e}")
+                self.logger.error("Error setting Unreal collision: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3517,9 +3517,9 @@ class IsaacMCPServer(LoggerMixin):
             force_y: float = 0.0,
             force_z: float = 0.0,
             is_impulse: bool = False,
-            location_x: float = None,
-            location_y: float = None,
-            location_z: float = None,
+            location_x: Optional[float] = None,
+            location_y: Optional[float] = None,
+            location_z: Optional[float] = None,
         ) -> Dict[str, Any]:
             """Apply force or impulse."""
             rate_error = self._check_rate_limit("apply_unreal_force")
@@ -3550,7 +3550,7 @@ class IsaacMCPServer(LoggerMixin):
                         "apply_unreal_force",
                     )
             except Exception as e:
-                self.logger.error(f"Error applying Unreal force: {e}")
+                self.logger.error("Error applying Unreal force: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3573,10 +3573,10 @@ class IsaacMCPServer(LoggerMixin):
         )
         async def set_unreal_physics_params(
             actor_path: str,
-            mass: float = None,
-            linear_damping: float = None,
-            angular_damping: float = None,
-            enable_gravity: bool = None,
+            mass: Optional[float] = None,
+            linear_damping: Optional[float] = None,
+            angular_damping: Optional[float] = None,
+            enable_gravity: Optional[bool] = None,
         ) -> Dict[str, Any]:
             """Set physics parameters."""
             rate_error = self._check_rate_limit("set_unreal_physics_params")
@@ -3604,7 +3604,7 @@ class IsaacMCPServer(LoggerMixin):
                         "set_unreal_physics_params",
                     )
             except Exception as e:
-                self.logger.error(f"Error setting Unreal physics params: {e}")
+                self.logger.error("Error setting Unreal physics params: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3631,7 +3631,7 @@ class IsaacMCPServer(LoggerMixin):
         )
         async def import_unreal_usd(
             usd_path: str,
-            target_path: str = None,
+            target_path: Optional[str] = None,
             import_animations: bool = True,
             import_materials: bool = True,
             scale_factor: float = 1.0,
@@ -3662,7 +3662,7 @@ class IsaacMCPServer(LoggerMixin):
                         "import_unreal_usd",
                     )
             except Exception as e:
-                self.logger.error(f"Error importing USD to Unreal: {e}")
+                self.logger.error("Error importing USD to Unreal: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3717,7 +3717,7 @@ class IsaacMCPServer(LoggerMixin):
                         "export_unreal_usd",
                     )
             except Exception as e:
-                self.logger.error(f"Error exporting Unreal USD: {e}")
+                self.logger.error("Error exporting Unreal USD: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3779,7 +3779,7 @@ class IsaacMCPServer(LoggerMixin):
                         "convert_to_simready",
                     )
             except Exception as e:
-                self.logger.error(f"Error converting to SimReady: {e}")
+                self.logger.error("Error converting to SimReady: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3832,7 +3832,7 @@ class IsaacMCPServer(LoggerMixin):
                         "validate_simready_asset",
                     )
             except Exception as e:
-                self.logger.error(f"Error validating SimReady asset: {e}")
+                self.logger.error("Error validating SimReady asset: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3874,7 +3874,7 @@ class IsaacMCPServer(LoggerMixin):
                         "get_unreal_interchange_info",
                     )
             except Exception as e:
-                self.logger.error(f"Error getting interchange info: {e}")
+                self.logger.error("Error getting interchange info: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3925,7 +3925,7 @@ class IsaacMCPServer(LoggerMixin):
                         "batch_unreal_operations",
                     )
             except Exception as e:
-                self.logger.error(f"Error in batch Unreal operations: {e}")
+                self.logger.error("Error in batch Unreal operations: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -3947,10 +3947,10 @@ class IsaacMCPServer(LoggerMixin):
             task=self._task_optional(),
         )
         async def query_unreal_scene_graph(
-            root_path: str = None,
+            root_path: Optional[str] = None,
             max_depth: int = 10,
             include_components: bool = False,
-            class_filter: str = None,
+            class_filter: Optional[str] = None,
         ) -> Dict[str, Any]:
             """Query scene graph hierarchy."""
             rate_error = self._check_rate_limit("query_unreal_scene_graph")
@@ -3977,7 +3977,7 @@ class IsaacMCPServer(LoggerMixin):
                         "query_unreal_scene_graph",
                     )
             except Exception as e:
-                self.logger.error(f"Error querying scene graph: {e}")
+                self.logger.error("Error querying scene graph: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4000,7 +4000,7 @@ class IsaacMCPServer(LoggerMixin):
         )
         async def analyze_unreal_scene_for_robotics(
             analysis_types: str = "",
-            actor_filter: str = None,
+            actor_filter: Optional[str] = None,
         ) -> Dict[str, Any]:
             """Analyze scene for robotics."""
             rate_error = self._check_rate_limit("analyze_unreal_scene_for_robotics")
@@ -4030,7 +4030,7 @@ class IsaacMCPServer(LoggerMixin):
                         "analyze_unreal_scene_for_robotics",
                     )
             except Exception as e:
-                self.logger.error(f"Error analyzing scene for robotics: {e}")
+                self.logger.error("Error analyzing scene for robotics: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4095,7 +4095,7 @@ class IsaacMCPServer(LoggerMixin):
                         "generate_unreal_procedural_scene",
                     )
             except Exception as e:
-                self.logger.error(f"Error generating procedural scene: {e}")
+                self.logger.error("Error generating procedural scene: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4145,7 +4145,7 @@ class IsaacMCPServer(LoggerMixin):
                         "get_unreal_actor_by_semantic_label",
                     )
             except Exception as e:
-                self.logger.error(f"Error finding actors by label: {e}")
+                self.logger.error("Error finding actors by label: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4175,7 +4175,7 @@ class IsaacMCPServer(LoggerMixin):
             dimensions: str = "{}",
             segments: int = 32,
             location: str = "",
-            actor_label: str = None,
+            actor_label: Optional[str] = None,
         ) -> Dict[str, Any]:
             """Create mesh primitive."""
             rate_error = self._check_rate_limit("generate_unreal_mesh_primitive")
@@ -4211,7 +4211,7 @@ class IsaacMCPServer(LoggerMixin):
                         "generate_unreal_mesh_primitive",
                     )
             except Exception as e:
-                self.logger.error(f"Error generating mesh primitive: {e}")
+                self.logger.error("Error generating mesh primitive: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4261,7 +4261,7 @@ class IsaacMCPServer(LoggerMixin):
                         "apply_unreal_mesh_boolean",
                     )
             except Exception as e:
-                self.logger.error(f"Error applying mesh boolean: {e}")
+                self.logger.error("Error applying mesh boolean: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4307,7 +4307,7 @@ class IsaacMCPServer(LoggerMixin):
                         "compute_unreal_convex_hull",
                     )
             except Exception as e:
-                self.logger.error(f"Error computing convex hull: {e}")
+                self.logger.error("Error computing convex hull: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4361,7 +4361,7 @@ class IsaacMCPServer(LoggerMixin):
                         "decompose_unreal_convex_hull",
                     )
             except Exception as e:
-                self.logger.error(f"Error decomposing convex hull: {e}")
+                self.logger.error("Error decomposing convex hull: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4385,12 +4385,12 @@ class IsaacMCPServer(LoggerMixin):
         async def edit_unreal_mesh_topology(
             mesh_path: str,
             operation: str,
-            face_selection: str = None,
-            edge_selection: str = None,
-            distance: float = None,
-            offset: float = None,
+            face_selection: Optional[str] = None,
+            edge_selection: Optional[str] = None,
+            distance: Optional[float] = None,
+            offset: Optional[float] = None,
             scale: str = "",
-            count: int = None,
+            count: Optional[int] = None,
         ) -> Dict[str, Any]:
             """Edit mesh topology."""
             rate_error = self._check_rate_limit("edit_unreal_mesh_topology")
@@ -4426,7 +4426,7 @@ class IsaacMCPServer(LoggerMixin):
                         "edit_unreal_mesh_topology",
                     )
             except Exception as e:
-                self.logger.error(f"Error editing mesh topology: {e}")
+                self.logger.error("Error editing mesh topology: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4476,7 +4476,7 @@ class IsaacMCPServer(LoggerMixin):
                         "subdivide_unreal_mesh",
                     )
             except Exception as e:
-                self.logger.error(f"Error subdividing mesh: {e}")
+                self.logger.error("Error subdividing mesh: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4499,9 +4499,9 @@ class IsaacMCPServer(LoggerMixin):
         )
         async def simplify_unreal_mesh(
             mesh_path: str,
-            target_triangle_count: int = None,
-            target_percentage: float = None,
-            max_error: float = None,
+            target_triangle_count: Optional[int] = None,
+            target_percentage: Optional[float] = None,
+            max_error: Optional[float] = None,
         ) -> Dict[str, Any]:
             """Simplify mesh."""
             rate_error = self._check_rate_limit("simplify_unreal_mesh")
@@ -4528,7 +4528,7 @@ class IsaacMCPServer(LoggerMixin):
                         "simplify_unreal_mesh",
                     )
             except Exception as e:
-                self.logger.error(f"Error simplifying mesh: {e}")
+                self.logger.error("Error simplifying mesh: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4584,7 +4584,7 @@ class IsaacMCPServer(LoggerMixin):
                         "cut_unreal_mesh_plane",
                     )
             except Exception as e:
-                self.logger.error(f"Error cutting mesh with plane: {e}")
+                self.logger.error("Error cutting mesh with plane: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4637,7 +4637,7 @@ class IsaacMCPServer(LoggerMixin):
                         "validate_unreal_mesh",
                     )
             except Exception as e:
-                self.logger.error(f"Error validating mesh: {e}")
+                self.logger.error("Error validating mesh: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4694,7 +4694,7 @@ class IsaacMCPServer(LoggerMixin):
                         "convert_unreal_mesh_format",
                     )
             except Exception as e:
-                self.logger.error(f"Error converting mesh format: {e}")
+                self.logger.error("Error converting mesh format: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4718,8 +4718,8 @@ class IsaacMCPServer(LoggerMixin):
         async def remesh_unreal_mesh(
             mesh_path: str,
             mode: str = "uniform",
-            target_edge_length: float = None,
-            target_triangle_count: int = None,
+            target_edge_length: Optional[float] = None,
+            target_triangle_count: Optional[int] = None,
             smoothing_iterations: int = 3,
         ) -> Dict[str, Any]:
             """Remesh mesh."""
@@ -4748,7 +4748,7 @@ class IsaacMCPServer(LoggerMixin):
                         "remesh_unreal_mesh",
                     )
             except Exception as e:
-                self.logger.error(f"Error remeshing: {e}")
+                self.logger.error("Error remeshing: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4800,7 +4800,7 @@ class IsaacMCPServer(LoggerMixin):
                         "compute_unreal_mesh_uv",
                     )
             except Exception as e:
-                self.logger.error(f"Error computing mesh UVs: {e}")
+                self.logger.error("Error computing mesh UVs: %s", e)
                 result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
@@ -4834,7 +4834,7 @@ class IsaacMCPServer(LoggerMixin):
                 raise ValueError(f"Unsupported transport: {transport}")
 
         except Exception as e:
-            self.logger.error(f"Error running MCP server: {e}")
+            self.logger.error("Error running MCP server: %s", e)
             raise
 
     def get_capabilities(self) -> List[str]:

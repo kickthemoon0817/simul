@@ -3316,7 +3316,10 @@ class UnrealRuntimeSession(LoggerMixin):
                             val.get("Yaw", default[1]),
                             val.get("Roll", default[2]),
                         )
-            except Exception:
+            except Exception as e:
+                self.logger.warning(
+                    "Failed to fetch %s property: %s", key, e
+                )
                 result[key] = default
 
         return result
@@ -3395,8 +3398,58 @@ class UnrealRuntimeAdapter(LoggerMixin):
 
         return [
             "unreal_health_check",
-            "unreal_engine_info",
-            "unreal_loaded_map",
+            "get_unreal_engine_info",
+            "get_unreal_loaded_map",
+            "list_unreal_actors",
+            "get_unreal_actor_info",
+            "search_unreal_assets",
+            "describe_unreal_object",
+            "get_unreal_actor_thumbnail",
+            "summarize_unreal_scene",
+            "capture_unreal_viewport",
+            "get_unreal_viewport_info",
+            "set_unreal_camera_view",
+            "focus_unreal_on_actor",
+            "spawn_unreal_actor",
+            "delete_unreal_actor",
+            "set_unreal_actor_transform",
+            "set_unreal_actor_property",
+            "call_unreal_actor_function",
+            "set_unreal_actor_parent",
+            "add_unreal_component",
+            "set_unreal_actor_visibility",
+            "get_unreal_material_info",
+            "set_unreal_material_params",
+            "create_unreal_material_instance",
+            "assign_unreal_material",
+            "set_unreal_light_params",
+            "set_unreal_render_settings",
+            "control_unreal_simulation",
+            "get_unreal_simulation_status",
+            "enable_unreal_physics",
+            "set_unreal_collision",
+            "apply_unreal_force",
+            "set_unreal_physics_params",
+            "import_unreal_usd",
+            "export_unreal_usd",
+            "get_unreal_interchange_info",
+            "batch_unreal_operations",
+            "query_unreal_scene_graph",
+            "analyze_unreal_scene_for_robotics",
+            "generate_unreal_procedural_scene",
+            "get_unreal_actor_by_semantic_label",
+            "generate_unreal_mesh_primitive",
+            "apply_unreal_mesh_boolean",
+            "compute_unreal_convex_hull",
+            "decompose_unreal_convex_hull",
+            "edit_unreal_mesh_topology",
+            "subdivide_unreal_mesh",
+            "simplify_unreal_mesh",
+            "cut_unreal_mesh_plane",
+            "validate_unreal_mesh",
+            "convert_unreal_mesh_format",
+            "remesh_unreal_mesh",
+            "compute_unreal_mesh_uv",
         ]
 
 

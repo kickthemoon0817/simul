@@ -107,8 +107,23 @@ class TestUnrealRuntimeSession:
 
     def test_health_check_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Health check returns connected=True with engine info."""
-        responses = {"/remote/info": FakeResponse(REMOTE_INFO_PAYLOAD)}
-        session = self._make_session(monkeypatch, responses)
+        session = self._make_session(monkeypatch)
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            fn = (json or {}).get("functionName", "")
+            if fn == "GetEngineVersion":
+                return FakeResponse({"ReturnValue": "5.4.0"})
+            if fn == "ExecutePythonCommandEx":
+                return FakeResponse({
+                    "ReturnValue": True,
+                    "CommandResult": "'TestProject'",
+                })
+            return FakeResponse({}, 404)
+
+        session._session = SmartFakeClientSession(
+            get_responses={"/remote/info": FakeResponse(REMOTE_INFO_PAYLOAD)},
+            put_fn=put_fn,
+        )
 
         result = asyncio.run(session.health_check())
 
@@ -129,8 +144,26 @@ class TestUnrealRuntimeSession:
 
     def test_get_engine_info(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Engine info returns all expected fields."""
-        responses = {"/remote/info": FakeResponse(REMOTE_INFO_PAYLOAD)}
-        session = self._make_session(monkeypatch, responses)
+        session = self._make_session(monkeypatch)
+        # get_engine_info calls: GetEngineVersion + 3× ExecutePythonCommandEx
+        python_results = iter([
+            "'TestProject'",
+            "'/Game/Maps/TestMap'",
+            "'Win64'",
+        ])
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            fn = (json or {}).get("functionName", "")
+            if fn == "GetEngineVersion":
+                return FakeResponse({"ReturnValue": "5.4.0"})
+            if fn == "ExecutePythonCommandEx":
+                return FakeResponse({
+                    "ReturnValue": True,
+                    "CommandResult": next(python_results),
+                })
+            return FakeResponse({}, 404)
+
+        session._session = SmartFakeClientSession(put_fn=put_fn)
 
         result = asyncio.run(session.get_engine_info())
 
@@ -143,8 +176,18 @@ class TestUnrealRuntimeSession:
 
     def test_get_loaded_map(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Loaded map returns the map path."""
-        responses = {"/remote/info": FakeResponse(REMOTE_INFO_PAYLOAD)}
-        session = self._make_session(monkeypatch, responses)
+        session = self._make_session(monkeypatch)
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            fn = (json or {}).get("functionName", "")
+            if fn == "ExecutePythonCommandEx":
+                return FakeResponse({
+                    "ReturnValue": True,
+                    "CommandResult": "'/Game/Maps/TestMap'",
+                })
+            return FakeResponse({}, 404)
+
+        session._session = SmartFakeClientSession(put_fn=put_fn)
 
         result = asyncio.run(session.get_loaded_map())
 
@@ -165,16 +208,31 @@ class TestUnrealRuntimeSession:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Health check tolerates missing optional fields from the API."""
+        session = self._make_session(monkeypatch)
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            fn = (json or {}).get("functionName", "")
+            if fn == "GetEngineVersion":
+                return FakeResponse({"ReturnValue": "5.3.0"})
+            if fn == "ExecutePythonCommandEx":
+                return FakeResponse({
+                    "ReturnValue": True,
+                    "CommandResult": "''",
+                })
+            return FakeResponse({}, 404)
+
         sparse_payload: Dict[str, Any] = {"EngineVersion": "5.3.0"}
-        responses = {"/remote/info": FakeResponse(sparse_payload)}
-        session = self._make_session(monkeypatch, responses)
+        session._session = SmartFakeClientSession(
+            get_responses={"/remote/info": FakeResponse(sparse_payload)},
+            put_fn=put_fn,
+        )
 
         result = asyncio.run(session.health_check())
 
         assert result["connected"] is True
         assert result["engine_version"] == "5.3.0"
         assert result["project_name"] == ""
-        assert result["is_editor"] is False
+        assert result["is_editor"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +503,15 @@ class TestUnrealRuntimeSessionPhase1:
 
         def put_router(path: str, json: Any = None) -> FakeResponse:
             if path == "/remote/object/call":
-                return FakeResponse({"ReturnValue": actor_paths})
+                fn = (json or {}).get("functionName", "")
+                if fn == "ExecutePythonCommandEx":
+                    return FakeResponse({
+                        "ReturnValue": True,
+                        "CommandResult": "'/Game/Maps/TestMap'",
+                    })
+                if fn == "GetAllLevelActors":
+                    return FakeResponse({"ReturnValue": actor_paths})
+                return FakeResponse({})
             if path == "/remote/object/describe":
                 obj_path = json.get("objectPath", "") if json else ""
                 if "PointLight" in obj_path:
@@ -490,8 +556,11 @@ class TestUnrealRuntimeSessionPhase2:
             fn = (json or {}).get("functionName", "")
             if fn == "ExecuteConsoleCommand":
                 return FakeResponse({})
-            if fn == "GetEditorWorld":
-                return FakeResponse({"ScreenshotBase64": "iVBOR=="})
+            if fn == "ExecutePythonCommandEx":
+                return FakeResponse({
+                    "ReturnValue": True,
+                    "LogOutput": [{"Type": "Info", "Output": "iVBOR=="}],
+                })
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
@@ -515,8 +584,11 @@ class TestUnrealRuntimeSessionPhase2:
             fn = (json or {}).get("functionName", "")
             if fn == "ExecuteConsoleCommand":
                 return FakeResponse({})
-            if fn == "GetEditorWorld":
-                return FakeResponse({})  # No ScreenshotBase64 key
+            if fn == "ExecutePythonCommandEx":
+                return FakeResponse({
+                    "ReturnValue": True,
+                    "LogOutput": [{"Type": "Info", "Output": ""}],
+                })
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
@@ -602,23 +674,46 @@ class TestUnrealRuntimeSessionPhase2:
     # -- focus_on_actor --
 
     def test_focus_on_actor_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """focus_on_actor selects actor, focuses, and reads back camera position."""
+        """focus_on_actor selects actor, positions camera, and reads back camera."""
         session = self._make_session(monkeypatch)
         calls_made: list = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
+            # _get_actor_transform reads properties via /remote/object/property
+            if path == "/remote/object/property":
+                prop = (json or {}).get("propertyName", "")
+                if "RelativeLocation" in prop:
+                    return FakeResponse({
+                        "RootComponent.RelativeLocation": {
+                            "X": 100.0, "Y": 200.0, "Z": 50.0,
+                        },
+                    })
+                if "RelativeRotation" in prop:
+                    return FakeResponse({
+                        "RootComponent.RelativeRotation": {
+                            "Pitch": 0.0, "Yaw": 45.0, "Roll": 0.0,
+                        },
+                    })
+                if "RelativeScale3D" in prop:
+                    return FakeResponse({
+                        "RootComponent.RelativeScale3D": {
+                            "X": 1.0, "Y": 1.0, "Z": 1.0,
+                        },
+                    })
+                return FakeResponse({})
+            # /remote/object/call dispatched by functionName
             fn = (json or {}).get("functionName", "")
             calls_made.append(fn)
             if fn == "SetActorSelectionState":
                 return FakeResponse({})
-            if fn == "FocusOnSelectedActors":
+            if fn == "SetLevelViewportCameraInfo":
                 return FakeResponse({})
             if fn == "GetLevelViewportCameraInfo":
                 return FakeResponse({
                     "CameraLocation": {"X": 150.0, "Y": 250.0, "Z": 350.0},
                     "CameraRotation": {"Pitch": -20.0, "Yaw": 60.0, "Roll": 0.0},
                 })
-            return FakeResponse({}, 404)
+            return FakeResponse({})
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
@@ -630,7 +725,7 @@ class TestUnrealRuntimeSessionPhase2:
         assert result["camera_location"] == (150.0, 250.0, 350.0)
         assert result["camera_rotation"] == (-20.0, 60.0, 0.0)
         assert "SetActorSelectionState" in calls_made
-        assert "FocusOnSelectedActors" in calls_made
+        assert "SetLevelViewportCameraInfo" in calls_made
         assert "GetLevelViewportCameraInfo" in calls_made
 
 
@@ -681,8 +776,9 @@ class TestUnrealRuntimeAdapter:
         caps = adapter.get_capabilities()
 
         assert "unreal_health_check" in caps
-        assert "unreal_engine_info" in caps
-        assert "unreal_loaded_map" in caps
+        assert "get_unreal_engine_info" in caps
+        assert "get_unreal_loaded_map" in caps
+        assert len(caps) == 53
 
     def test_get_capabilities_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
@@ -799,15 +895,15 @@ class TestUnrealRuntimeSessionPhase3:
     # -- set_actor_transform --
 
     def test_set_actor_transform_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_actor_transform writes location, rotation, scale properties."""
+        """set_actor_transform calls K2_SetActorLocation/Rotation and SetActorScale3D."""
         session = self._make_session(monkeypatch)
-        written_properties: list = []
+        called_functions: list = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
-            if path == "/remote/object/property":
-                prop = (json or {}).get("propertyName", "")
-                written_properties.append(prop)
-                return FakeResponse({})
+            fn = (json or {}).get("functionName", "")
+            called_functions.append(fn)
+            if fn in ("K2_SetActorLocation", "K2_SetActorRotation", "SetActorScale3D"):
+                return FakeResponse({"ReturnValue": True})
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
@@ -820,9 +916,9 @@ class TestUnrealRuntimeSessionPhase3:
         ))
 
         assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
-        assert "RelativeLocation" in written_properties
-        assert "RelativeRotation" in written_properties
-        assert "RelativeScale3D" in written_properties
+        assert "K2_SetActorLocation" in called_functions
+        assert "K2_SetActorRotation" in called_functions
+        assert "SetActorScale3D" in called_functions
 
     # -- set_actor_property --
 
@@ -1573,14 +1669,23 @@ class TestUnrealRuntimeSessionPhase8:
         monkeypatch.setattr(unreal_runtime, "AIOHTTP_AVAILABLE", True)
         return unreal_runtime.UnrealRuntimeSession(settings=Settings())
 
+    @staticmethod
+    def _python_response(data: dict) -> FakeResponse:
+        """Wrap data dict in ExecutePythonCommandEx LogOutput envelope."""
+        return FakeResponse({
+            "ReturnValue": True,
+            "LogOutput": [{"Type": "Info", "Output": json.dumps(data)}],
+        })
+
     def test_generate_mesh_primitive_box(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """generate_mesh_primitive returns actor path and counts."""
         session = self._make_session(monkeypatch)
         session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "ActorPath": "/Game/Maps/T.T:PersistentLevel.DynMesh_box",
-                "TriangleCount": 12,
-                "VertexCount": 8,
+            "/remote/object/call": self._python_response({
+                "actor_path": "/Game/Maps/T.T:PersistentLevel.DynMesh_box",
+                "primitive_type": "box",
+                "triangle_count": 12,
+                "vertex_count": 8,
             }),
         })
 
@@ -1598,9 +1703,11 @@ class TestUnrealRuntimeSessionPhase8:
         """apply_mesh_boolean returns result counts for subtract."""
         session = self._make_session(monkeypatch)
         session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "TriangleCount": 200,
-                "VertexCount": 120,
+            "/remote/object/call": self._python_response({
+                "target_mesh_path": "/Game/Maps/T.T:PersistentLevel.Body",
+                "operation": "subtract",
+                "result_triangle_count": 200,
+                "result_vertex_count": 120,
             }),
         })
 
@@ -1617,11 +1724,12 @@ class TestUnrealRuntimeSessionPhase8:
         """compute_convex_hull returns hull info."""
         session = self._make_session(monkeypatch)
         session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "HullActorPath": "/Game/Maps/T.T:PersistentLevel.Hull_0",
-                "HullVertexCount": 24,
-                "HullTriangleCount": 44,
-                "VolumeRatio": 0.85,
+            "/remote/object/call": self._python_response({
+                "mesh_path": "/Game/Maps/T.T:PersistentLevel.Body",
+                "hull_actor_path": "/Game/Maps/T.T:PersistentLevel.Hull_0",
+                "hull_vertex_count": 24,
+                "hull_triangle_count": 44,
+                "source_triangle_count": 100,
             }),
         })
 
@@ -1630,17 +1738,18 @@ class TestUnrealRuntimeSessionPhase8:
         ))
 
         assert result["hull_vertex_count"] == 24
-        assert result["volume_ratio"] == 0.85
+        assert result["hull_triangle_count"] == 44
 
     def test_decompose_convex_hull_vhacd(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """decompose_convex_hull returns hull list with V-HACD."""
         session = self._make_session(monkeypatch)
         session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "Hulls": [
-                    {"Path": "/Hull_0", "VertexCount": 12, "TriangleCount": 20},
-                    {"Path": "/Hull_1", "VertexCount": 8, "TriangleCount": 12},
-                ],
+            "/remote/object/call": self._python_response({
+                "mesh_path": "/Game/Maps/T.T:PersistentLevel.Body",
+                "hull_count": 2,
+                "decomp_actor_path": "/Game/Maps/T.T:PersistentLevel.Decomp_0",
+                "total_triangles": 32,
+                "total_vertices": 20,
             }),
         })
 
@@ -1656,9 +1765,13 @@ class TestUnrealRuntimeSessionPhase8:
         """subdivide_mesh returns subdivided counts."""
         session = self._make_session(monkeypatch)
         session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "TriangleCount": 768,
-                "VertexCount": 386,
+            "/remote/object/call": self._python_response({
+                "mesh_path": "/Game/Maps/T.T:PersistentLevel.Body",
+                "level": 2,
+                "scheme": "catmull_clark",
+                "result_triangle_count": 768,
+                "result_vertex_count": 386,
+                "previous_triangle_count": 192,
             }),
         })
 
@@ -1676,9 +1789,12 @@ class TestUnrealRuntimeSessionPhase8:
         """simplify_mesh returns reduction ratio."""
         session = self._make_session(monkeypatch)
         session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "OriginalTriangleCount": 1000,
-                "TriangleCount": 500,
+            "/remote/object/call": self._python_response({
+                "mesh_path": "/Game/Maps/T.T:PersistentLevel.Body",
+                "original_triangles": 1000,
+                "result_triangles": 500,
+                "result_vertex_count": 260,
+                "reduction_ratio": 0.5,
             }),
         })
 
@@ -1695,9 +1811,11 @@ class TestUnrealRuntimeSessionPhase8:
         """cut_mesh_plane returns cut result."""
         session = self._make_session(monkeypatch)
         session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "Pieces": ["/Body_top", "/Body_bottom"],
-                "CutFacesAdded": 4,
+            "/remote/object/call": self._python_response({
+                "mesh_path": "/Game/Maps/T.T:PersistentLevel.Body",
+                "result_triangle_count": 200,
+                "result_vertex_count": 120,
+                "previous_triangle_count": 100,
             }),
         })
 
@@ -1707,17 +1825,19 @@ class TestUnrealRuntimeSessionPhase8:
             plane_normal=[0.0, 0.0, 1.0],
         ))
 
-        assert len(result["pieces"]) == 2
-        assert result["cut_faces_added"] == 4
+        assert result["result_triangle_count"] == 200
+        assert result["previous_triangle_count"] == 100
 
     def test_edit_mesh_topology_extrude(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """edit_mesh_topology returns affected faces for extrude."""
         session = self._make_session(monkeypatch)
         session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "FacesAffected": 6,
-                "EdgesAffected": 12,
-                "TriangleCount": 48,
+            "/remote/object/call": self._python_response({
+                "mesh_path": "/Game/Maps/T.T:PersistentLevel.Body",
+                "operation": "extrude_faces",
+                "result_triangle_count": 48,
+                "result_vertex_count": 30,
+                "previous_triangle_count": 24,
             }),
         })
 
@@ -1728,24 +1848,22 @@ class TestUnrealRuntimeSessionPhase8:
         ))
 
         assert result["operation"] == "extrude_faces"
-        assert result["faces_affected"] == 6
         assert result["result_triangle_count"] == 48
 
     def test_validate_mesh_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """validate_mesh returns per-check results."""
         session = self._make_session(monkeypatch)
         session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "IsValid": True,
-                "CheckResults": {
-                    "watertight": True,
-                    "manifold": True,
-                    "normals": True,
-                    "self_intersection": True,
-                },
-                "Issues": [],
-                "TriangleCount": 100,
-                "VertexCount": 52,
+            "/remote/object/call": self._python_response({
+                "mesh_path": "/Game/Maps/T.T:PersistentLevel.Body",
+                "is_valid": True,
+                "triangle_count": 100,
+                "vertex_count": 52,
+                "open_border_edges": 0,
+                "open_border_loops": 0,
+                "connected_components": 1,
+                "has_normals": True,
+                "issues": [],
             }),
         })
 
@@ -1754,19 +1872,19 @@ class TestUnrealRuntimeSessionPhase8:
         ))
 
         assert result["is_valid"] is True
-        assert result["checks"]["watertight"] is True
+        assert result["open_border_edges"] == 0
         assert result["triangle_count"] == 100
 
     def test_convert_mesh_format_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """convert_mesh_format returns converted path."""
         session = self._make_session(monkeypatch)
         session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "SourcePath": "/Game/Meshes/SM_Body",
-                "ResultPath": "/Game/Meshes/DynMesh_Body",
-                "SourceFormat": "static_mesh",
-                "TargetFormat": "dynamic_mesh",
-                "TriangleCount": 200,
+            "/remote/object/call": self._python_response({
+                "source_path": "/Game/Meshes/SM_Body",
+                "result_path": "/Game/Meshes/DynMesh_Body",
+                "target_format": "dynamic_mesh",
+                "triangle_count": 200,
+                "vertex_count": 120,
             }),
         })
 
@@ -1782,10 +1900,12 @@ class TestUnrealRuntimeSessionPhase8:
         """remesh_mesh returns new triangle counts."""
         session = self._make_session(monkeypatch)
         session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "OriginalTriangleCount": 1000,
-                "TriangleCount": 800,
-                "AverageEdgeLength": 5.0,
+            "/remote/object/call": self._python_response({
+                "mesh_path": "/Game/Maps/T.T:PersistentLevel.Body",
+                "mode": "uniform",
+                "original_triangles": 1000,
+                "result_triangles": 800,
+                "result_vertex_count": 420,
             }),
         })
 
@@ -1798,16 +1918,17 @@ class TestUnrealRuntimeSessionPhase8:
         assert result["mode"] == "uniform"
         assert result["original_triangles"] == 1000
         assert result["result_triangles"] == 800
-        assert result["average_edge_length"] == 5.0
 
     def test_compute_mesh_uv_auto(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """compute_mesh_uv returns UV metrics."""
         session = self._make_session(monkeypatch)
         session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "IslandCount": 12,
-                "CoverageRatio": 0.92,
-                "OverlapDetected": False,
+            "/remote/object/call": self._python_response({
+                "mesh_path": "/Game/Maps/T.T:PersistentLevel.Body",
+                "method": "auto_uv",
+                "uv_channel": 0,
+                "triangle_count": 100,
+                "vertex_count": 52,
             }),
         })
 
@@ -1817,6 +1938,4 @@ class TestUnrealRuntimeSessionPhase8:
         ))
 
         assert result["method"] == "auto_uv"
-        assert result["island_count"] == 12
-        assert result["coverage_ratio"] == 0.92
-        assert result["overlap_detected"] is False
+        assert result["triangle_count"] == 100
