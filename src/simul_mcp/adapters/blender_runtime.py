@@ -499,8 +499,10 @@ class BlenderRuntimeSession(LoggerMixin):
         if not use_render_fallback:
             try:
                 return self._capture_gpu_offscreen(width, height, jpeg_quality, engine)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "GPU offscreen capture failed, falling back to render: %s", exc
+                )
 
         return self._capture_render_fallback(width, height, jpeg_quality, engine)
 
@@ -1066,7 +1068,12 @@ class BlenderRuntimeSession(LoggerMixin):
             raise ValueError(f"Not a .blend file: {file_path}")
 
         blender_module: Any = bpy
-        blender_module.ops.wm.open_mainfile(filepath=file_path)
+        try:
+            blender_module.ops.wm.open_mainfile(filepath=file_path)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to open .blend file '{file_path}': {exc}"
+            ) from exc
 
         obj_count = len(blender_module.data.objects)
         return {"file_path": file_path, "object_count": obj_count}
@@ -1087,7 +1094,12 @@ class BlenderRuntimeSession(LoggerMixin):
         blender_module: Any = bpy
 
         if file_path is not None:
-            blender_module.ops.wm.save_as_mainfile(filepath=file_path)
+            try:
+                blender_module.ops.wm.save_as_mainfile(filepath=file_path)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to save .blend file to '{file_path}': {exc}"
+                ) from exc
             return {"file_path": file_path}
 
         current = blender_module.data.filepath
@@ -1096,7 +1108,10 @@ class BlenderRuntimeSession(LoggerMixin):
                 "No file path provided and the file has never been saved. "
                 "Pass a file_path argument."
             )
-        blender_module.ops.wm.save_mainfile()
+        try:
+            blender_module.ops.wm.save_mainfile()
+        except Exception as exc:
+            raise RuntimeError(f"Failed to save .blend file: {exc}") from exc
         return {"file_path": current}
 
     def import_file(self, file_path: str, file_format: str) -> Dict[str, Any]:
@@ -1286,16 +1301,24 @@ class BlenderRuntimeSession(LoggerMixin):
 
         if action == "stop":
             if screen.is_animation_playing:
-                blender_module.ops.screen.animation_cancel(restore_frame=False)
+                try:
+                    blender_module.ops.screen.animation_cancel(restore_frame=False)
+                except Exception as exc:
+                    raise RuntimeError(f"Failed to cancel animation: {exc}") from exc
             return {
                 "action": "stop",
                 "is_playing": False,
             }
 
-        if action == "reverse":
-            blender_module.ops.screen.animation_play(reverse=True)
-        else:
-            blender_module.ops.screen.animation_play()
+        try:
+            if action == "reverse":
+                blender_module.ops.screen.animation_play(reverse=True)
+            else:
+                blender_module.ops.screen.animation_play()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to play animation (action={action}): {exc}"
+            ) from exc
 
         return {
             "action": action,
@@ -1457,11 +1480,19 @@ class BlenderRuntimeSession(LoggerMixin):
 
         scene = blender_module.context.scene
         if scene.rigidbody_world is None:
-            blender_module.ops.rigidbody.world_add()
+            try:
+                blender_module.ops.rigidbody.world_add()
+            except Exception as exc:
+                raise RuntimeError(f"Failed to create rigid body world: {exc}") from exc
 
         blender_module.context.view_layer.objects.active = obj
         obj.select_set(True)
-        blender_module.ops.rigidbody.object_add(type=body_type.upper())
+        try:
+            blender_module.ops.rigidbody.object_add(type=body_type.upper())
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to add rigid body to '{object_name}': {exc}"
+            ) from exc
 
         rb = obj.rigid_body
         rb.mass = mass
@@ -1500,7 +1531,14 @@ class BlenderRuntimeSession(LoggerMixin):
         blender_module: Any = bpy
         loc = tuple(location or [0.0, 0.0, 0.0])
 
-        blender_module.ops.object.effector_add(type=field_type.upper(), location=loc)
+        try:
+            blender_module.ops.object.effector_add(
+                type=field_type.upper(), location=loc
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to add force field '{field_type}': {exc}"
+            ) from exc
         field_obj = blender_module.context.active_object
         if name:
             field_obj.name = name
@@ -1565,16 +1603,29 @@ class BlenderRuntimeSession(LoggerMixin):
 
         scene = blender_module.context.scene
         if scene.rigidbody_world is None:
-            blender_module.ops.rigidbody.world_add()
+            try:
+                blender_module.ops.rigidbody.world_add()
+            except Exception as exc:
+                raise RuntimeError(f"Failed to create rigid body world: {exc}") from exc
 
         loc = tuple(location or [0.0, 0.0, 0.0])
-        blender_module.ops.object.empty_add(location=loc)
+        try:
+            blender_module.ops.object.empty_add(location=loc)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to add constraint empty at {loc}: {exc}"
+            ) from exc
         empty = blender_module.context.active_object
         empty.name = f"RBC_{object1_name}_{object2_name}"
 
         empty.select_set(True)
         blender_module.context.view_layer.objects.active = empty
-        blender_module.ops.rigidbody.constraint_add(type=constraint_type.upper())
+        try:
+            blender_module.ops.rigidbody.constraint_add(type=constraint_type.upper())
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to add rigid body constraint '{constraint_type}': {exc}"
+            ) from exc
 
         rbc = empty.rigid_body_constraint
         rbc.object1 = obj1
@@ -1724,7 +1775,12 @@ class BlenderRuntimeSession(LoggerMixin):
         pc.frame_end = frame_end
 
         override = {"scene": scene, "point_cache": pc}
-        blender_module.ops.ptcache.bake(override, bake=True)
+        try:
+            blender_module.ops.ptcache.bake(override, bake=True)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to bake simulation (frames {frame_start}-{frame_end}): {exc}"
+            ) from exc
 
         return {
             "frame_start": frame_start,
@@ -1746,7 +1802,10 @@ class BlenderRuntimeSession(LoggerMixin):
 
         pc = scene.rigidbody_world.point_cache
         override = {"scene": scene, "point_cache": pc}
-        blender_module.ops.ptcache.free_bake(override)
+        try:
+            blender_module.ops.ptcache.free_bake(override)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to free baked simulation data: {exc}") from exc
 
         return {}
 
@@ -1869,19 +1928,15 @@ class BlenderRuntimeSession(LoggerMixin):
             for idx in edge:
                 if idx < 0 or idx >= num_verts:
                     raise ValueError(
-                        f"Edge {ei} index {idx} out of range "
-                        f"[0, {num_verts})"
+                        f"Edge {ei} index {idx} out of range " f"[0, {num_verts})"
                     )
         for fi, face in enumerate(safe_faces):
             if len(face) < 3:
-                raise ValueError(
-                    f"Face {fi} must have >= 3 indices, got {len(face)}"
-                )
+                raise ValueError(f"Face {fi} must have >= 3 indices, got {len(face)}")
             for idx in face:
                 if idx < 0 or idx >= num_verts:
                     raise ValueError(
-                        f"Face {fi} index {idx} out of range "
-                        f"[0, {num_verts})"
+                        f"Face {fi} index {idx} out of range " f"[0, {num_verts})"
                     )
 
         # Create mesh data-block and populate
@@ -1900,9 +1955,7 @@ class BlenderRuntimeSession(LoggerMixin):
         if collection_name is not None:
             col = blender_module.data.collections.get(collection_name)
             if col is None:
-                raise ValueError(
-                    f"Collection '{collection_name}' not found"
-                )
+                raise ValueError(f"Collection '{collection_name}' not found")
             col.objects.link(obj)
         else:
             blender_module.context.scene.collection.objects.link(obj)
@@ -1949,8 +2002,7 @@ class BlenderRuntimeSession(LoggerMixin):
 
         semantic = metadata.get("semantic")
         if semantic:
-            for key in ("semantic_class", "semantic_hierarchy",
-                        "semantic_qcode"):
+            for key in ("semantic_class", "semantic_hierarchy", "semantic_qcode"):
                 val = semantic.get(key)
                 if val is not None:
                     prop_key = f"{self._SIMREADY_PREFIX}{key}"
@@ -1959,16 +2011,20 @@ class BlenderRuntimeSession(LoggerMixin):
             extra = semantic.get("additional_labels")
             if extra and isinstance(extra, dict):
                 for label_key, label_val in extra.items():
-                    prop_key = (
-                        f"{self._SIMREADY_PREFIX}label_{label_key}"
-                    )
+                    prop_key = f"{self._SIMREADY_PREFIX}label_{label_key}"
                     obj[prop_key] = label_val
                     applied.append(prop_key)
 
         physics = metadata.get("physics")
         if physics:
-            for key in ("mass_kg", "collider_type", "static_friction",
-                        "dynamic_friction", "restitution", "density"):
+            for key in (
+                "mass_kg",
+                "collider_type",
+                "static_friction",
+                "dynamic_friction",
+                "restitution",
+                "density",
+            ):
                 val = physics.get(key)
                 if val is not None:
                     prop_key = f"{self._SIMREADY_PREFIX}{key}"
@@ -1981,8 +2037,12 @@ class BlenderRuntimeSession(LoggerMixin):
 
         mat = metadata.get("material")
         if mat:
-            for key in ("substrate_type", "material_naming",
-                        "shader_type", "texel_density"):
+            for key in (
+                "substrate_type",
+                "material_naming",
+                "shader_type",
+                "texel_density",
+            ):
                 val = mat.get(key)
                 if val is not None:
                     prop_key = f"{self._SIMREADY_PREFIX}{key}"
@@ -2015,7 +2075,7 @@ class BlenderRuntimeSession(LoggerMixin):
         for key in obj.keys():
             if not key.startswith(prefix):
                 continue
-            stripped = key[len(prefix):]
+            stripped = key[len(prefix) :]
             val = obj[key]
             # Convert IDPropertyArray / other exotic types to Python
             if hasattr(val, "to_list"):
@@ -2023,15 +2083,24 @@ class BlenderRuntimeSession(LoggerMixin):
 
             if stripped.startswith("label_"):
                 additional_labels[stripped[6:]] = str(val)
-            elif stripped in ("semantic_class", "semantic_hierarchy",
-                              "semantic_qcode"):
+            elif stripped in ("semantic_class", "semantic_hierarchy", "semantic_qcode"):
                 semantic[stripped] = val
-            elif stripped in ("mass_kg", "collider_type",
-                              "static_friction", "dynamic_friction",
-                              "restitution", "density", "is_rigid_body"):
+            elif stripped in (
+                "mass_kg",
+                "collider_type",
+                "static_friction",
+                "dynamic_friction",
+                "restitution",
+                "density",
+                "is_rigid_body",
+            ):
                 physics[stripped] = val
-            elif stripped in ("substrate_type", "material_naming",
-                              "shader_type", "texel_density"):
+            elif stripped in (
+                "substrate_type",
+                "material_naming",
+                "shader_type",
+                "texel_density",
+            ):
                 material[stripped] = val
 
         if additional_labels:
@@ -2087,10 +2156,7 @@ class BlenderRuntimeSession(LoggerMixin):
         issues: List[Dict[str, Any]] = []
 
         if object_names is None:
-            targets = [
-                o for o in blender_module.data.objects
-                if o.type == "MESH"
-            ]
+            targets = [o for o in blender_module.data.objects if o.type == "MESH"]
         else:
             targets = [self._get_object_or_raise(n) for n in object_names]
 
@@ -2098,45 +2164,51 @@ class BlenderRuntimeSession(LoggerMixin):
             name: str = obj.name
 
             if check_naming and not self._SIMREADY_NAME_RE.match(name):
-                issues.append({
-                    "object_name": name,
-                    "check": "naming",
-                    "severity": "error",
-                    "message": (
-                        f"Name '{name}' violates SimReady convention "
-                        "(lowercase letters, digits, underscores only)"
-                    ),
-                    "suggestion": (
-                        "Rename to: "
-                        + re.sub(r"[^a-z0-9_]", "_", name.lower()).strip("_")
-                    ),
-                })
+                issues.append(
+                    {
+                        "object_name": name,
+                        "check": "naming",
+                        "severity": "error",
+                        "message": (
+                            f"Name '{name}' violates SimReady convention "
+                            "(lowercase letters, digits, underscores only)"
+                        ),
+                        "suggestion": (
+                            "Rename to: "
+                            + re.sub(r"[^a-z0-9_]", "_", name.lower()).strip("_")
+                        ),
+                    }
+                )
 
             if check_scale and hasattr(obj, "dimensions"):
                 dims = list(obj.dimensions)
                 max_dim = max(abs(d) for d in dims) if dims else 0.0
                 if max_dim > 1000.0:
-                    issues.append({
-                        "object_name": name,
-                        "check": "scale",
-                        "severity": "warning",
-                        "message": (
-                            f"Largest dimension {max_dim:.2f}m exceeds "
-                            "1000m — verify scene is in meters"
-                        ),
-                        "suggestion": "Ensure scene unit scale is 1.0 (meters)",
-                    })
+                    issues.append(
+                        {
+                            "object_name": name,
+                            "check": "scale",
+                            "severity": "warning",
+                            "message": (
+                                f"Largest dimension {max_dim:.2f}m exceeds "
+                                "1000m — verify scene is in meters"
+                            ),
+                            "suggestion": "Ensure scene unit scale is 1.0 (meters)",
+                        }
+                    )
                 if max_dim < 1e-4 and max_dim > 0:
-                    issues.append({
-                        "object_name": name,
-                        "check": "scale",
-                        "severity": "warning",
-                        "message": (
-                            f"Largest dimension {max_dim:.6f}m is very small "
-                            "— may not be in meter scale"
-                        ),
-                        "suggestion": "Verify units; SimReady uses meters",
-                    })
+                    issues.append(
+                        {
+                            "object_name": name,
+                            "check": "scale",
+                            "severity": "warning",
+                            "message": (
+                                f"Largest dimension {max_dim:.6f}m is very small "
+                                "— may not be in meter scale"
+                            ),
+                            "suggestion": "Verify units; SimReady uses meters",
+                        }
+                    )
 
             if check_transforms:
                 rot = tuple(obj.rotation_euler)
@@ -2144,60 +2216,66 @@ class BlenderRuntimeSession(LoggerMixin):
                 has_rotation = any(abs(r) > 1e-6 for r in rot)
                 has_non_unit_scale = any(abs(s - 1.0) > 1e-6 for s in scl)
                 if has_rotation:
-                    issues.append({
-                        "object_name": name,
-                        "check": "transforms",
-                        "severity": "warning",
-                        "message": (
-                            f"Non-zero rotation {rot} — SimReady requires "
-                            "applied (zero) transforms"
-                        ),
-                        "suggestion": "Apply rotation: Ctrl+A → Rotation",
-                    })
+                    issues.append(
+                        {
+                            "object_name": name,
+                            "check": "transforms",
+                            "severity": "warning",
+                            "message": (
+                                f"Non-zero rotation {rot} — SimReady requires "
+                                "applied (zero) transforms"
+                            ),
+                            "suggestion": "Apply rotation: Ctrl+A → Rotation",
+                        }
+                    )
                 if has_non_unit_scale:
-                    issues.append({
-                        "object_name": name,
-                        "check": "transforms",
-                        "severity": "warning",
-                        "message": (
-                            f"Non-unit scale {scl} — SimReady requires "
-                            "applied (1,1,1) scale"
-                        ),
-                        "suggestion": "Apply scale: Ctrl+A → Scale",
-                    })
+                    issues.append(
+                        {
+                            "object_name": name,
+                            "check": "transforms",
+                            "severity": "warning",
+                            "message": (
+                                f"Non-unit scale {scl} — SimReady requires "
+                                "applied (1,1,1) scale"
+                            ),
+                            "suggestion": "Apply scale: Ctrl+A → Scale",
+                        }
+                    )
 
             if check_materials and hasattr(obj, "data") and obj.data:
                 mat_count = len(getattr(obj.data, "materials", []))
                 if mat_count == 0:
-                    issues.append({
-                        "object_name": name,
-                        "check": "materials",
-                        "severity": "error",
-                        "message": "No material assigned",
-                        "suggestion": (
-                            "Assign at least one material per mesh prim"
-                        ),
-                    })
+                    issues.append(
+                        {
+                            "object_name": name,
+                            "check": "materials",
+                            "severity": "error",
+                            "message": "No material assigned",
+                            "suggestion": (
+                                "Assign at least one material per mesh prim"
+                            ),
+                        }
+                    )
 
             if check_hierarchy and obj.parent is None:
                 has_children = len(obj.children) > 0
                 if not has_children and obj.type == "MESH":
-                    issues.append({
-                        "object_name": name,
-                        "check": "hierarchy",
-                        "severity": "warning",
-                        "message": (
-                            "Mesh has no parent empty — SimReady assets "
-                            "should be under a root XForm"
-                        ),
-                        "suggestion": (
-                            "Use setup_simready_hierarchy to create a root"
-                        ),
-                    })
+                    issues.append(
+                        {
+                            "object_name": name,
+                            "check": "hierarchy",
+                            "severity": "warning",
+                            "message": (
+                                "Mesh has no parent empty — SimReady assets "
+                                "should be under a root XForm"
+                            ),
+                            "suggestion": (
+                                "Use setup_simready_hierarchy to create a root"
+                            ),
+                        }
+                    )
 
-        error_count = sum(
-            1 for i in issues if i["severity"] == "error"
-        )
+        error_count = sum(1 for i in issues if i["severity"] == "error")
         return {
             "compliant": error_count == 0,
             "object_count": len(targets),
@@ -2240,9 +2318,7 @@ class BlenderRuntimeSession(LoggerMixin):
 
         if validate_before_export:
             names = [o.name for o in targets]
-            result = self.validate_simready_compliance(
-                object_names=names
-            )
+            result = self.validate_simready_compliance(object_names=names)
             issues = result.get("issues")
             validation_passed = result.get("compliant", True)
 
@@ -2393,8 +2469,10 @@ class BlenderRuntimeSession(LoggerMixin):
         if hasattr(scene_object, "visible_get"):
             try:
                 return bool(scene_object.visible_get())
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "visible_get() failed, using hide_viewport fallback: %s", exc
+                )
         return not bool(getattr(scene_object, "hide_viewport", False))
 
     @staticmethod

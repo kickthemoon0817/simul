@@ -594,10 +594,16 @@ class BlenderDistanceResponse(BaseModel):
     object_name_b: str = Field(..., description="Second object name")
     distance: float = Field(..., description="Euclidean distance between objects")
     location_a: List[float] = Field(
-        ..., description="World location of first object [x, y, z]"
+        ...,
+        description="World location of first object [x, y, z]",
+        min_items=3,
+        max_items=3,
     )
     location_b: List[float] = Field(
-        ..., description="World location of second object [x, y, z]"
+        ...,
+        description="World location of second object [x, y, z]",
+        min_items=3,
+        max_items=3,
     )
 
 
@@ -622,7 +628,10 @@ class BlenderBoundsCheckResponse(BaseModel):
         ..., description="Whether object location is within the bounds"
     )
     object_location: List[float] = Field(
-        ..., description="Object world location [x, y, z]"
+        ...,
+        description="Object world location [x, y, z]",
+        min_items=3,
+        max_items=3,
     )
 
 
@@ -690,9 +699,17 @@ class BlenderSetCameraViewResponse(BaseModel):
 
     success: bool = Field(..., description="Whether operation succeeded")
     camera_name: str = Field(..., description="Name of the camera that was updated")
-    location: List[float] = Field(..., description="New camera location [x, y, z]")
+    location: List[float] = Field(
+        ...,
+        description="New camera location [x, y, z]",
+        min_items=3,
+        max_items=3,
+    )
     rotation_euler: List[float] = Field(
-        ..., description="New camera rotation [rx, ry, rz]"
+        ...,
+        description="New camera rotation [rx, ry, rz]",
+        min_items=3,
+        max_items=3,
     )
 
 
@@ -701,8 +718,18 @@ class BlenderCameraInfoResponse(BaseModel):
 
     success: bool = Field(..., description="Whether request succeeded")
     camera_name: str = Field(..., description="Active camera name")
-    location: List[float] = Field(..., description="Camera location [x, y, z]")
-    rotation_euler: List[float] = Field(..., description="Camera rotation [rx, ry, rz]")
+    location: List[float] = Field(
+        ...,
+        description="Camera location [x, y, z]",
+        min_items=3,
+        max_items=3,
+    )
+    rotation_euler: List[float] = Field(
+        ...,
+        description="Camera rotation [rx, ry, rz]",
+        min_items=3,
+        max_items=3,
+    )
     lens: float = Field(..., description="Focal length in mm")
     sensor_width: float = Field(..., description="Sensor width in mm")
     clip_start: float = Field(..., description="Near clip distance")
@@ -732,10 +759,16 @@ class BlenderFocusOnObjectResponse(BaseModel):
     camera_name: str = Field(..., description="Camera that was updated")
     object_name: str = Field(..., description="Object that was focused on")
     camera_location: List[float] = Field(
-        ..., description="New camera location [x, y, z]"
+        ...,
+        description="New camera location [x, y, z]",
+        min_items=3,
+        max_items=3,
     )
     look_at: List[float] = Field(
-        ..., description="Point the camera is aimed at [x, y, z]"
+        ...,
+        description="Point the camera is aimed at [x, y, z]",
+        min_items=3,
+        max_items=3,
     )
 
 
@@ -801,14 +834,20 @@ class BlenderCreateObjectRequest(BaseModel):
     location: List[float] = Field(
         default_factory=lambda: [0.0, 0.0, 0.0],
         description="Initial location [x, y, z]",
+        min_items=3,
+        max_items=3,
     )
     rotation_euler: List[float] = Field(
         default_factory=lambda: [0.0, 0.0, 0.0],
         description="Initial rotation [rx, ry, rz] radians",
+        min_items=3,
+        max_items=3,
     )
     scale: List[float] = Field(
         default_factory=lambda: [1.0, 1.0, 1.0],
         description="Initial scale [sx, sy, sz]",
+        min_items=3,
+        max_items=3,
     )
 
 
@@ -818,7 +857,12 @@ class BlenderCreateObjectResponse(BaseModel):
     success: bool = Field(..., description="Whether creation succeeded")
     name: str = Field(..., description="Resulting object name")
     object_type: str = Field(..., description="Created object type")
-    location: List[float] = Field(..., description="Object location [x, y, z]")
+    location: List[float] = Field(
+        ...,
+        description="Object location [x, y, z]",
+        min_items=3,
+        max_items=3,
+    )
 
 
 class BlenderDeleteObjectRequest(BaseModel):
@@ -838,11 +882,24 @@ class BlenderSetTransformRequest(BaseModel):
     """Request to set an object's transform."""
 
     object_name: str = Field(..., description="Object to transform")
-    location: Optional[List[float]] = Field(None, description="New location [x, y, z]")
-    rotation_euler: Optional[List[float]] = Field(
-        None, description="New rotation [rx, ry, rz] radians"
+    location: Optional[List[float]] = Field(
+        None,
+        description="New location [x, y, z]",
+        min_items=3,
+        max_items=3,
     )
-    scale: Optional[List[float]] = Field(None, description="New scale [sx, sy, sz]")
+    rotation_euler: Optional[List[float]] = Field(
+        None,
+        description="New rotation [rx, ry, rz] radians",
+        min_items=3,
+        max_items=3,
+    )
+    scale: Optional[List[float]] = Field(
+        None,
+        description="New scale [sx, sy, sz]",
+        min_items=3,
+        max_items=3,
+    )
 
 
 class BlenderSetTransformResponse(BaseModel):
@@ -850,9 +907,24 @@ class BlenderSetTransformResponse(BaseModel):
 
     success: bool = Field(..., description="Whether transform succeeded")
     object_name: str = Field(..., description="Object name")
-    location: List[float] = Field(..., description="Final location")
-    rotation_euler: List[float] = Field(..., description="Final rotation")
-    scale: List[float] = Field(..., description="Final scale")
+    location: List[float] = Field(
+        ...,
+        description="Final location [x, y, z]",
+        min_items=3,
+        max_items=3,
+    )
+    rotation_euler: List[float] = Field(
+        ...,
+        description="Final rotation [rx, ry, rz]",
+        min_items=3,
+        max_items=3,
+    )
+    scale: List[float] = Field(
+        ...,
+        description="Final scale [sx, sy, sz]",
+        min_items=3,
+        max_items=3,
+    )
 
 
 class BlenderSetParentRequest(BaseModel):
@@ -1165,7 +1237,10 @@ class BlenderKeyframeSummaryEntry(BaseModel):
     array_index: int = Field(..., description="Array index of the channel")
     keyframe_count: int = Field(..., description="Number of keyframes")
     frame_range: List[int] = Field(
-        ..., description="[first_frame, last_frame] of keyframes"
+        ...,
+        description="[first_frame, last_frame] of keyframes",
+        min_items=2,
+        max_items=2,
     )
 
 
@@ -1217,7 +1292,7 @@ class BlenderSetupRigidBodyRequest(BaseModel):
 class BlenderSetupRigidBodyResponse(BaseModel):
     """Response after setting up rigid body."""
 
-    success: bool = Field(True, description="Whether setup succeeded")
+    success: bool = Field(..., description="Whether setup succeeded")
     object_name: str = Field(..., description="Name of the object")
     body_type: str = Field(..., description="Rigid body type set")
     mass: float = Field(..., description="Mass set")
@@ -1238,6 +1313,8 @@ class BlenderAddForceFieldRequest(BaseModel):
     location: List[float] = Field(
         default_factory=lambda: [0.0, 0.0, 0.0],
         description="World-space XYZ location",
+        min_items=3,
+        max_items=3,
     )
     name: Optional[str] = Field(None, description="Optional name for the field")
 
@@ -1245,11 +1322,16 @@ class BlenderAddForceFieldRequest(BaseModel):
 class BlenderAddForceFieldResponse(BaseModel):
     """Response after adding a force field."""
 
-    success: bool = Field(True, description="Whether creation succeeded")
+    success: bool = Field(..., description="Whether creation succeeded")
     name: str = Field(..., description="Name of the created force field object")
     field_type: str = Field(..., description="Type of force field")
     strength: float = Field(..., description="Strength of the field")
-    location: List[float] = Field(..., description="Location of the field")
+    location: List[float] = Field(
+        ...,
+        description="Location of the field [x, y, z]",
+        min_items=3,
+        max_items=3,
+    )
 
 
 class BlenderGetForceFieldInfoRequest(BaseModel):
@@ -1261,13 +1343,18 @@ class BlenderGetForceFieldInfoRequest(BaseModel):
 class BlenderGetForceFieldInfoResponse(BaseModel):
     """Response with force field details."""
 
-    success: bool = Field(True, description="Whether query succeeded")
+    success: bool = Field(..., description="Whether query succeeded")
     object_name: str = Field(..., description="Name of the force field object")
     field_type: str = Field(..., description="Force field type")
     strength: float = Field(..., description="Field strength")
     shape: str = Field(..., description="Field shape (POINT, PLANE, etc.)")
     flow: float = Field(..., description="Field flow value")
-    location: List[float] = Field(..., description="World-space location")
+    location: List[float] = Field(
+        ...,
+        description="World-space location [x, y, z]",
+        min_items=3,
+        max_items=3,
+    )
 
 
 class BlenderAddConstraintRequest(BaseModel):
@@ -1283,7 +1370,10 @@ class BlenderAddConstraintRequest(BaseModel):
     object1_name: str = Field(..., description="First constrained object")
     object2_name: str = Field(..., description="Second constrained object")
     location: Optional[List[float]] = Field(
-        None, description="Optional location for the constraint empty"
+        None,
+        description="Optional location for the constraint empty",
+        min_items=3,
+        max_items=3,
     )
     disable_collisions: bool = Field(
         True, description="Disable collisions between constrained objects"
@@ -1293,7 +1383,7 @@ class BlenderAddConstraintRequest(BaseModel):
 class BlenderAddConstraintResponse(BaseModel):
     """Response after adding a rigid body constraint."""
 
-    success: bool = Field(True, description="Whether constraint was created")
+    success: bool = Field(..., description="Whether constraint was created")
     constraint_name: str = Field(..., description="Name of the constraint empty object")
     constraint_type: str = Field(..., description="Type of constraint")
     object1_name: str = Field(..., description="First constrained object")
@@ -1309,7 +1399,7 @@ class BlenderGetConstraintInfoRequest(BaseModel):
 class BlenderGetConstraintInfoResponse(BaseModel):
     """Response with rigid body constraint details."""
 
-    success: bool = Field(True, description="Whether query succeeded")
+    success: bool = Field(..., description="Whether query succeeded")
     object_name: str = Field(..., description="Name of the constraint object")
     constraint_type: str = Field(..., description="Constraint type")
     object1_name: Optional[str] = Field(
@@ -1331,11 +1421,19 @@ class BlenderGetPhysicsStateRequest(BaseModel):
 class BlenderGetPhysicsStateResponse(BaseModel):
     """Response with physics state readback."""
 
-    success: bool = Field(True, description="Whether query succeeded")
+    success: bool = Field(..., description="Whether query succeeded")
     object_name: str = Field(..., description="Name of the object")
-    location: List[float] = Field(..., description="World-space XYZ position")
+    location: List[float] = Field(
+        ...,
+        description="World-space XYZ position",
+        min_items=3,
+        max_items=3,
+    )
     rotation_euler: List[float] = Field(
-        ..., description="Rotation as Euler angles (radians)"
+        ...,
+        description="Rotation as Euler angles (radians)",
+        min_items=3,
+        max_items=3,
     )
     is_active: bool = Field(..., description="Whether object has active rigid body")
     has_rigid_body: bool = Field(
@@ -1352,10 +1450,23 @@ class BlenderTrajectoryPoint(BaseModel):
 
     frame: int = Field(..., description="Frame number")
     time: float = Field(..., description="Time in seconds")
-    location: List[float] = Field(..., description="XYZ position")
-    rotation_euler: List[float] = Field(..., description="Euler rotation (radians)")
+    location: List[float] = Field(
+        ...,
+        description="XYZ position",
+        min_items=3,
+        max_items=3,
+    )
+    rotation_euler: List[float] = Field(
+        ...,
+        description="Euler rotation (radians)",
+        min_items=3,
+        max_items=3,
+    )
     velocity: Optional[List[float]] = Field(
-        None, description="Estimated velocity (computed from position delta)"
+        None,
+        description="Estimated velocity (computed from position delta)",
+        min_items=3,
+        max_items=3,
     )
 
 
@@ -1371,7 +1482,7 @@ class BlenderGetTrajectoryRequest(BaseModel):
 class BlenderGetTrajectoryResponse(BaseModel):
     """Response with trajectory data."""
 
-    success: bool = Field(True, description="Whether query succeeded")
+    success: bool = Field(..., description="Whether query succeeded")
     object_name: str = Field(..., description="Name of the tracked object")
     point_count: int = Field(..., description="Number of trajectory points")
     points: List[BlenderTrajectoryPoint] = Field(
@@ -1389,7 +1500,7 @@ class BlenderBakeSimulationRequest(BaseModel):
 class BlenderBakeSimulationResponse(BaseModel):
     """Response after baking simulation."""
 
-    success: bool = Field(True, description="Whether bake succeeded")
+    success: bool = Field(..., description="Whether bake succeeded")
     frame_start: int = Field(..., description="First baked frame")
     frame_end: int = Field(..., description="Last baked frame")
 
@@ -1397,7 +1508,7 @@ class BlenderBakeSimulationResponse(BaseModel):
 class BlenderFreeBakeResponse(BaseModel):
     """Response after freeing baked simulation data."""
 
-    success: bool = Field(True, description="Whether free bake succeeded")
+    success: bool = Field(..., description="Whether free bake succeeded")
 
 
 # ---------------------------------------------------------------------------
@@ -1420,10 +1531,7 @@ class BlenderExecuteScriptRequest(BaseModel):
     )
     timeout: Optional[float] = Field(
         None,
-        description=(
-            "Maximum execution time in seconds. "
-            "None means no timeout."
-        ),
+        description=("Maximum execution time in seconds. " "None means no timeout."),
         ge=0.1,
     )
 
@@ -1432,9 +1540,7 @@ class BlenderExecuteScriptResponse(BaseModel):
     """Response after executing a Blender script."""
 
     success: bool = Field(..., description="Whether the script executed without error")
-    output: Optional[str] = Field(
-        None, description="Captured stdout from the script"
-    )
+    output: Optional[str] = Field(None, description="Captured stdout from the script")
     return_value: Optional[str] = Field(
         None,
         description=(
@@ -1442,9 +1548,7 @@ class BlenderExecuteScriptResponse(BaseModel):
             "assigned to __result__"
         ),
     )
-    error: Optional[str] = Field(
-        None, description="Error message if execution failed"
-    )
+    error: Optional[str] = Field(None, description="Error message if execution failed")
     duration_seconds: float = Field(
         ..., description="Wall-clock execution time in seconds"
     )
@@ -1480,8 +1584,7 @@ class BlenderCreateMeshFromDataRequest(BaseModel):
     collection_name: Optional[str] = Field(
         None,
         description=(
-            "Target collection name. Links to the active scene "
-            "collection when None."
+            "Target collection name. Links to the active scene " "collection when None."
         ),
     )
 
@@ -1532,9 +1635,7 @@ class SimReadyPhysicsProperties(BaseModel):
     Maps to USDPhysics schema: collider, mass, physical material, rigid body.
     """
 
-    mass_kg: Optional[float] = Field(
-        None, ge=0.0, description="Mass in kilograms"
-    )
+    mass_kg: Optional[float] = Field(None, ge=0.0, description="Mass in kilograms")
     collider_type: Optional[str] = Field(
         None,
         description="Collision shape: convexHull, mesh, box, sphere, capsule",
@@ -1624,12 +1725,8 @@ class SimReadyMetadata(BaseModel):
 class SimReadyApplyMetadataRequest(BaseModel):
     """Request to apply SimReady metadata to a Blender object."""
 
-    object_name: str = Field(
-        ..., description="Name of the Blender object"
-    )
-    metadata: SimReadyMetadata = Field(
-        ..., description="SimReady metadata to apply"
-    )
+    object_name: str = Field(..., description="Name of the Blender object")
+    metadata: SimReadyMetadata = Field(..., description="SimReady metadata to apply")
 
 
 class SimReadyApplyMetadataResponse(BaseModel):
@@ -1645,9 +1742,7 @@ class SimReadyApplyMetadataResponse(BaseModel):
 class SimReadyGetMetadataRequest(BaseModel):
     """Request to read SimReady metadata from a Blender object."""
 
-    object_name: str = Field(
-        ..., description="Name of the Blender object"
-    )
+    object_name: str = Field(..., description="Name of the Blender object")
 
 
 class SimReadyGetMetadataResponse(BaseModel):
@@ -1668,15 +1763,12 @@ class SimReadyValidationIssue(BaseModel):
 
     object_name: str = Field(..., description="Object with the issue")
     check: str = Field(
-        ..., description="Check category: naming, scale, transforms, materials, hierarchy"
+        ...,
+        description="Check category: naming, scale, transforms, materials, hierarchy",
     )
-    severity: str = Field(
-        ..., description="Issue severity: error or warning"
-    )
+    severity: str = Field(..., description="Issue severity: error or warning")
     message: str = Field(..., description="Human-readable description")
-    suggestion: Optional[str] = Field(
-        None, description="Suggested fix"
-    )
+    suggestion: Optional[str] = Field(None, description="Suggested fix")
 
 
 class SimReadyValidateRequest(BaseModel):
@@ -1696,9 +1788,7 @@ class SimReadyValidateResponse(BaseModel):
     """Response from SimReady compliance validation."""
 
     success: bool = Field(...)
-    compliant: bool = Field(
-        ..., description="True when zero errors found"
-    )
+    compliant: bool = Field(..., description="True when zero errors found")
     object_count: int = Field(..., description="Number of objects checked")
     issue_count: int = Field(..., description="Total issues found")
     issues: List[SimReadyValidationIssue] = Field(
@@ -1709,9 +1799,7 @@ class SimReadyValidateResponse(BaseModel):
 class SimReadyExportRequest(BaseModel):
     """Request to export a SimReady-compliant USD file."""
 
-    file_path: str = Field(
-        ..., description="Output .usd / .usda / .usdc file path"
-    )
+    file_path: str = Field(..., description="Output .usd / .usda / .usdc file path")
     object_names: Optional[List[str]] = Field(
         None, description="Objects to export (null = all scene objects)"
     )
@@ -1756,12 +1844,8 @@ class SimReadySetupHierarchyResponse(BaseModel):
 
     success: bool = Field(...)
     root_name: str = Field(..., description="Root empty name")
-    children: List[str] = Field(
-        ..., description="Successfully parented children"
-    )
-    hierarchy_path: str = Field(
-        ..., description="Logical hierarchy path from root"
-    )
+    children: List[str] = Field(..., description="Successfully parented children")
+    hierarchy_path: str = Field(..., description="Logical hierarchy path from root")
 
 
 class FocusPrimResponse(BaseModel):

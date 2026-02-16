@@ -3116,7 +3116,7 @@ class IsaacMCPServer(LoggerMixin):
                         error_type="RuntimeError",
                     ).dict()
                 with self.blender_adapter.create_session() as session:
-                    payload = session.open_file(input_data.file_path)
+                    payload = session.open_blend_file(input_data.file_path)
                     payload["success"] = True
                     result = BlenderOpenFileResponse(**payload).dict()
                     return self._validate_output(
@@ -3166,7 +3166,7 @@ class IsaacMCPServer(LoggerMixin):
                         error_type="RuntimeError",
                     ).dict()
                 with self.blender_adapter.create_session() as session:
-                    payload = session.save_file(input_data.file_path)
+                    payload = session.save_blend_file(input_data.file_path)
                     payload["success"] = True
                     result = BlenderSaveFileResponse(**payload).dict()
                     return self._validate_output(
@@ -3238,6 +3238,1066 @@ class IsaacMCPServer(LoggerMixin):
                     "import_blender_file",
                 )
 
+        # -- File I/O tools (export + info) ----------------------------------
+
+        @self.mcp.tool(
+            name="export_blender_file",
+            description="Export scene objects to a file.",
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=False,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderExportFileResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def export_blender_file(
+            file_path: str,
+            file_format: str,
+            selected_only: bool = False,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("export_blender_file")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderExportFileRequest,
+                file_path=file_path,
+                file_format=file_format,
+                selected_only=selected_only,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.export_file(
+                        file_path=input_data.file_path,
+                        file_format=input_data.file_format,
+                        selected_only=input_data.selected_only,
+                    )
+                    payload["success"] = True
+                    result = BlenderExportFileResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (BlenderExportFileResponse, ErrorResponse),
+                        "export_blender_file",
+                    )
+            except Exception as e:
+                self.logger.error("Error exporting Blender file: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (BlenderExportFileResponse, ErrorResponse),
+                    "export_blender_file",
+                )
+
+        @self.mcp.tool(
+            name="get_blender_file_info",
+            description="Get information about the current .blend file.",
+            annotations=self._tool_annotations(
+                read_only=True,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderFileInfoResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def get_blender_file_info() -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("get_blender_file_info")
+            if rate_error:
+                return rate_error
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.get_file_info()
+                    payload["success"] = True
+                    result = BlenderFileInfoResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (BlenderFileInfoResponse, ErrorResponse),
+                        "get_blender_file_info",
+                    )
+            except Exception as e:
+                self.logger.error("Error getting file info: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (BlenderFileInfoResponse, ErrorResponse),
+                    "get_blender_file_info",
+                )
+
+        # -- Animation & Timeline tools ---------------------------------------
+
+        @self.mcp.tool(
+            name="set_blender_frame",
+            description="Set the current animation frame.",
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderSetFrameResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def set_blender_frame(frame: int) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("set_blender_frame")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderSetFrameRequest,
+                frame=frame,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.set_frame(input_data.frame)
+                    payload["success"] = True
+                    result = BlenderSetFrameResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (BlenderSetFrameResponse, ErrorResponse),
+                        "set_blender_frame",
+                    )
+            except Exception as e:
+                self.logger.error("Error setting frame: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (BlenderSetFrameResponse, ErrorResponse),
+                    "set_blender_frame",
+                )
+
+        @self.mcp.tool(
+            name="get_blender_frame",
+            description="Get the current frame and animation range.",
+            annotations=self._tool_annotations(
+                read_only=True,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderGetFrameResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def get_blender_frame() -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("get_blender_frame")
+            if rate_error:
+                return rate_error
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.get_frame()
+                    payload["success"] = True
+                    result = BlenderGetFrameResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (BlenderGetFrameResponse, ErrorResponse),
+                        "get_blender_frame",
+                    )
+            except Exception as e:
+                self.logger.error("Error getting frame: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (BlenderGetFrameResponse, ErrorResponse),
+                    "get_blender_frame",
+                )
+
+        @self.mcp.tool(
+            name="set_blender_frame_range",
+            description="Set the animation frame range.",
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderSetFrameRangeResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def set_blender_frame_range(
+            frame_start: int,
+            frame_end: int,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("set_blender_frame_range")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderSetFrameRangeRequest,
+                frame_start=frame_start,
+                frame_end=frame_end,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.set_frame_range(
+                        input_data.frame_start,
+                        input_data.frame_end,
+                    )
+                    payload["success"] = True
+                    result = BlenderSetFrameRangeResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (BlenderSetFrameRangeResponse, ErrorResponse),
+                        "set_blender_frame_range",
+                    )
+            except Exception as e:
+                self.logger.error("Error setting frame range: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (BlenderSetFrameRangeResponse, ErrorResponse),
+                    "set_blender_frame_range",
+                )
+
+        @self.mcp.tool(
+            name="play_blender_animation",
+            description="Control animation playback (play, stop, reverse).",
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=False,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderPlayAnimationResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def play_blender_animation(
+            action: str = "play",
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("play_blender_animation")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderPlayAnimationRequest,
+                action=action,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.play_animation(input_data.action)
+                    payload["success"] = True
+                    result = BlenderPlayAnimationResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (BlenderPlayAnimationResponse, ErrorResponse),
+                        "play_blender_animation",
+                    )
+            except Exception as e:
+                self.logger.error("Error controlling animation: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (BlenderPlayAnimationResponse, ErrorResponse),
+                    "play_blender_animation",
+                )
+
+        @self.mcp.tool(
+            name="insert_blender_keyframe",
+            description="Insert a keyframe on an object property.",
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=False,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderInsertKeyframeResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def insert_blender_keyframe(
+            object_name: str,
+            data_path: str,
+            frame: int,
+            index: int = -1,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("insert_blender_keyframe")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderInsertKeyframeRequest,
+                object_name=object_name,
+                data_path=data_path,
+                frame=frame,
+                index=index,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.insert_keyframe(
+                        input_data.object_name,
+                        input_data.data_path,
+                        input_data.frame,
+                        input_data.index,
+                    )
+                    payload["success"] = True
+                    result = BlenderInsertKeyframeResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (
+                            BlenderInsertKeyframeResponse,
+                            ErrorResponse,
+                        ),
+                        "insert_blender_keyframe",
+                    )
+            except Exception as e:
+                self.logger.error("Error inserting keyframe: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (
+                        BlenderInsertKeyframeResponse,
+                        ErrorResponse,
+                    ),
+                    "insert_blender_keyframe",
+                )
+
+        @self.mcp.tool(
+            name="delete_blender_keyframe",
+            description="Delete a keyframe from an object property.",
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=False,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderDeleteKeyframeResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def delete_blender_keyframe(
+            object_name: str,
+            data_path: str,
+            frame: int,
+            index: int = -1,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("delete_blender_keyframe")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderDeleteKeyframeRequest,
+                object_name=object_name,
+                data_path=data_path,
+                frame=frame,
+                index=index,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.delete_keyframe(
+                        input_data.object_name,
+                        input_data.data_path,
+                        input_data.frame,
+                        input_data.index,
+                    )
+                    payload["success"] = True
+                    result = BlenderDeleteKeyframeResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (
+                            BlenderDeleteKeyframeResponse,
+                            ErrorResponse,
+                        ),
+                        "delete_blender_keyframe",
+                    )
+            except Exception as e:
+                self.logger.error("Error deleting keyframe: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (
+                        BlenderDeleteKeyframeResponse,
+                        ErrorResponse,
+                    ),
+                    "delete_blender_keyframe",
+                )
+
+        @self.mcp.tool(
+            name="get_blender_keyframes",
+            description="Get keyframe summary for an object.",
+            annotations=self._tool_annotations(
+                read_only=True,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderGetKeyframesResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def get_blender_keyframes(
+            object_name: str,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("get_blender_keyframes")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderGetKeyframesRequest,
+                object_name=object_name,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.get_keyframes(
+                        input_data.object_name,
+                    )
+                    payload["success"] = True
+                    result = BlenderGetKeyframesResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (
+                            BlenderGetKeyframesResponse,
+                            ErrorResponse,
+                        ),
+                        "get_blender_keyframes",
+                    )
+            except Exception as e:
+                self.logger.error("Error getting keyframes: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (
+                        BlenderGetKeyframesResponse,
+                        ErrorResponse,
+                    ),
+                    "get_blender_keyframes",
+                )
+
+        # -- Physics & Simulation tools ---------------------------------------
+
+        @self.mcp.tool(
+            name="setup_blender_rigid_body",
+            description="Set up rigid body physics on a Blender object.",
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderSetupRigidBodyResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def setup_blender_rigid_body(
+            object_name: str,
+            body_type: str = "ACTIVE",
+            mass: float = 1.0,
+            friction: float = 0.5,
+            restitution: float = 0.0,
+            collision_shape: str = "CONVEX_HULL",
+            linear_damping: float = 0.04,
+            angular_damping: float = 0.1,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("setup_blender_rigid_body")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderSetupRigidBodyRequest,
+                object_name=object_name,
+                body_type=body_type,
+                mass=mass,
+                friction=friction,
+                restitution=restitution,
+                collision_shape=collision_shape,
+                linear_damping=linear_damping,
+                angular_damping=angular_damping,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.setup_rigid_body(
+                        input_data.object_name,
+                        input_data.body_type,
+                        input_data.mass,
+                        input_data.friction,
+                        input_data.restitution,
+                        input_data.collision_shape,
+                        input_data.linear_damping,
+                        input_data.angular_damping,
+                    )
+                    payload["success"] = True
+                    result = BlenderSetupRigidBodyResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (
+                            BlenderSetupRigidBodyResponse,
+                            ErrorResponse,
+                        ),
+                        "setup_blender_rigid_body",
+                    )
+            except Exception as e:
+                self.logger.error("Error setting up rigid body: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (
+                        BlenderSetupRigidBodyResponse,
+                        ErrorResponse,
+                    ),
+                    "setup_blender_rigid_body",
+                )
+
+        @self.mcp.tool(
+            name="add_blender_force_field",
+            description="Add a force field to the scene.",
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=False,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderAddForceFieldResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def add_blender_force_field(
+            field_type: str,
+            strength: float = 1.0,
+            location: Optional[List[float]] = None,
+            name: Optional[str] = None,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("add_blender_force_field")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderAddForceFieldRequest,
+                field_type=field_type,
+                strength=strength,
+                location=location,
+                name=name,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.add_force_field(
+                        input_data.field_type,
+                        input_data.strength,
+                        input_data.location,
+                        input_data.name,
+                    )
+                    payload["success"] = True
+                    result = BlenderAddForceFieldResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (
+                            BlenderAddForceFieldResponse,
+                            ErrorResponse,
+                        ),
+                        "add_blender_force_field",
+                    )
+            except Exception as e:
+                self.logger.error("Error adding force field: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (
+                        BlenderAddForceFieldResponse,
+                        ErrorResponse,
+                    ),
+                    "add_blender_force_field",
+                )
+
+        @self.mcp.tool(
+            name="get_blender_force_field_info",
+            description="Get force field parameters for an object.",
+            annotations=self._tool_annotations(
+                read_only=True,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderGetForceFieldInfoResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def get_blender_force_field_info(
+            object_name: str,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("get_blender_force_field_info")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderGetForceFieldInfoRequest,
+                object_name=object_name,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.get_force_field_info(
+                        input_data.object_name,
+                    )
+                    payload["success"] = True
+                    result = BlenderGetForceFieldInfoResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (
+                            BlenderGetForceFieldInfoResponse,
+                            ErrorResponse,
+                        ),
+                        "get_blender_force_field_info",
+                    )
+            except Exception as e:
+                self.logger.error("Error getting force field info: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (
+                        BlenderGetForceFieldInfoResponse,
+                        ErrorResponse,
+                    ),
+                    "get_blender_force_field_info",
+                )
+
+        @self.mcp.tool(
+            name="add_blender_rigid_body_constraint",
+            description="Add a rigid body constraint between two objects.",
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=False,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderAddConstraintResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def add_blender_rigid_body_constraint(
+            constraint_type: str,
+            object1_name: str,
+            object2_name: str,
+            location: Optional[List[float]] = None,
+            disable_collisions: bool = True,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("add_blender_rigid_body_constraint")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderAddConstraintRequest,
+                constraint_type=constraint_type,
+                object1_name=object1_name,
+                object2_name=object2_name,
+                location=location,
+                disable_collisions=disable_collisions,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.add_rigid_body_constraint(
+                        input_data.constraint_type,
+                        input_data.object1_name,
+                        input_data.object2_name,
+                        input_data.location,
+                        input_data.disable_collisions,
+                    )
+                    payload["success"] = True
+                    result = BlenderAddConstraintResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (
+                            BlenderAddConstraintResponse,
+                            ErrorResponse,
+                        ),
+                        "add_blender_rigid_body_constraint",
+                    )
+            except Exception as e:
+                self.logger.error("Error adding rigid body constraint: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (
+                        BlenderAddConstraintResponse,
+                        ErrorResponse,
+                    ),
+                    "add_blender_rigid_body_constraint",
+                )
+
+        @self.mcp.tool(
+            name="get_blender_constraint_info",
+            description="Get rigid body constraint info for an object.",
+            annotations=self._tool_annotations(
+                read_only=True,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderGetConstraintInfoResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def get_blender_constraint_info(
+            object_name: str,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("get_blender_constraint_info")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderGetConstraintInfoRequest,
+                object_name=object_name,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.get_constraint_info(
+                        input_data.object_name,
+                    )
+                    payload["success"] = True
+                    result = BlenderGetConstraintInfoResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (
+                            BlenderGetConstraintInfoResponse,
+                            ErrorResponse,
+                        ),
+                        "get_blender_constraint_info",
+                    )
+            except Exception as e:
+                self.logger.error("Error getting constraint info: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (
+                        BlenderGetConstraintInfoResponse,
+                        ErrorResponse,
+                    ),
+                    "get_blender_constraint_info",
+                )
+
+        @self.mcp.tool(
+            name="get_blender_physics_state",
+            description="Get current physics state of an object.",
+            annotations=self._tool_annotations(
+                read_only=True,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderGetPhysicsStateResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def get_blender_physics_state(
+            object_name: str,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("get_blender_physics_state")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderGetPhysicsStateRequest,
+                object_name=object_name,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.get_physics_state(
+                        input_data.object_name,
+                    )
+                    payload["success"] = True
+                    result = BlenderGetPhysicsStateResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (
+                            BlenderGetPhysicsStateResponse,
+                            ErrorResponse,
+                        ),
+                        "get_blender_physics_state",
+                    )
+            except Exception as e:
+                self.logger.error("Error getting physics state: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (
+                        BlenderGetPhysicsStateResponse,
+                        ErrorResponse,
+                    ),
+                    "get_blender_physics_state",
+                )
+
+        @self.mcp.tool(
+            name="get_blender_object_trajectory",
+            description="Sample object position over a frame range.",
+            annotations=self._tool_annotations(
+                read_only=True,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderGetTrajectoryResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def get_blender_object_trajectory(
+            object_name: str,
+            start_frame: int,
+            end_frame: int,
+            step: int = 1,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("get_blender_object_trajectory")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderGetTrajectoryRequest,
+                object_name=object_name,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                step=step,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.get_object_trajectory(
+                        input_data.object_name,
+                        input_data.start_frame,
+                        input_data.end_frame,
+                        input_data.step,
+                    )
+                    payload["success"] = True
+                    result = BlenderGetTrajectoryResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (
+                            BlenderGetTrajectoryResponse,
+                            ErrorResponse,
+                        ),
+                        "get_blender_object_trajectory",
+                    )
+            except Exception as e:
+                self.logger.error("Error getting trajectory: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (
+                        BlenderGetTrajectoryResponse,
+                        ErrorResponse,
+                    ),
+                    "get_blender_object_trajectory",
+                )
+
+        @self.mcp.tool(
+            name="bake_blender_simulation",
+            description="Bake physics simulation for a frame range.",
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=False,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderBakeSimulationResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def bake_blender_simulation(
+            frame_start: int,
+            frame_end: int,
+        ) -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("bake_blender_simulation")
+            if rate_error:
+                return rate_error
+            input_data = self._validate_input(
+                BlenderBakeSimulationRequest,
+                frame_start=frame_start,
+                frame_end=frame_end,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    payload = session.bake_simulation(
+                        input_data.frame_start,
+                        input_data.frame_end,
+                    )
+                    payload["success"] = True
+                    result = BlenderBakeSimulationResponse(**payload).dict()
+                    return self._validate_output(
+                        result,
+                        (
+                            BlenderBakeSimulationResponse,
+                            ErrorResponse,
+                        ),
+                        "bake_blender_simulation",
+                    )
+            except Exception as e:
+                self.logger.error("Error baking simulation: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (
+                        BlenderBakeSimulationResponse,
+                        ErrorResponse,
+                    ),
+                    "bake_blender_simulation",
+                )
+
+        @self.mcp.tool(
+            name="free_blender_bake",
+            description="Free (delete) baked physics simulation data.",
+            annotations=self._tool_annotations(
+                read_only=False,
+                idempotent=True,
+                open_world=True,
+            ),
+            output_schema=self._tool_output_schema(
+                BlenderFreeBakeResponse,
+                ErrorResponse,
+            ),
+            task=self._task_optional(),
+        )
+        async def free_blender_bake() -> Dict[str, Any]:
+            rate_error = self._check_rate_limit("free_blender_bake")
+            if rate_error:
+                return rate_error
+            try:
+                if not self.blender_adapter or not self.blender_adapter.is_available():
+                    return ErrorResponse(
+                        error="Blender runtime not available",
+                        error_type="RuntimeError",
+                    ).dict()
+                with self.blender_adapter.create_session() as session:
+                    session.free_bake()
+                    result = BlenderFreeBakeResponse(
+                        success=True,
+                    ).dict()
+                    return self._validate_output(
+                        result,
+                        (
+                            BlenderFreeBakeResponse,
+                            ErrorResponse,
+                        ),
+                        "free_blender_bake",
+                    )
+            except Exception as e:
+                self.logger.error("Error freeing bake: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
+                return self._validate_output(
+                    result,
+                    (
+                        BlenderFreeBakeResponse,
+                        ErrorResponse,
+                    ),
+                    "free_blender_bake",
+                )
+
         # -- Scripting & mesh-from-data tools --------------------------------
 
         @self.mcp.tool(
@@ -3291,12 +4351,8 @@ class IsaacMCPServer(LoggerMixin):
                         "execute_blender_script",
                     )
             except Exception as e:
-                self.logger.error(
-                    "Error executing Blender script: %s", e
-                )
-                result = ErrorResponse(
-                    error=str(e), error_type="Exception"
-                ).dict()
+                self.logger.error("Error executing Blender script: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
                     (BlenderExecuteScriptResponse, ErrorResponse),
@@ -3328,9 +4384,7 @@ class IsaacMCPServer(LoggerMixin):
             location: Optional[List[float]] = None,
             collection_name: Optional[str] = None,
         ) -> Dict[str, Any]:
-            rate_error = self._check_rate_limit(
-                "create_blender_mesh_from_data"
-            )
+            rate_error = self._check_rate_limit("create_blender_mesh_from_data")
             if rate_error:
                 return rate_error
             input_data = self._validate_input(
@@ -3357,16 +4411,12 @@ class IsaacMCPServer(LoggerMixin):
                         edges=[list(e) for e in input_data.edges],
                         faces=[list(f) for f in input_data.faces],
                         location=(
-                            list(input_data.location)
-                            if input_data.location
-                            else None
+                            list(input_data.location) if input_data.location else None
                         ),
                         collection_name=input_data.collection_name,
                     )
                     payload["success"] = True
-                    result = BlenderCreateMeshFromDataResponse(
-                        **payload
-                    ).dict()
+                    result = BlenderCreateMeshFromDataResponse(**payload).dict()
                     return self._validate_output(
                         result,
                         (
@@ -3376,12 +4426,8 @@ class IsaacMCPServer(LoggerMixin):
                         "create_blender_mesh_from_data",
                     )
             except Exception as e:
-                self.logger.error(
-                    "Error creating mesh from data: %s", e
-                )
-                result = ErrorResponse(
-                    error=str(e), error_type="Exception"
-                ).dict()
+                self.logger.error("Error creating mesh from data: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
                     (
@@ -3429,9 +4475,7 @@ class IsaacMCPServer(LoggerMixin):
                 with self.blender_adapter.create_session() as session:
                     payload = session.apply_simready_metadata(
                         object_name=input_data.object_name,
-                        metadata=input_data.metadata.dict(
-                            exclude_none=True
-                        ),
+                        metadata=input_data.metadata.dict(exclude_none=True),
                     )
                     result = SimReadyApplyMetadataResponse(
                         success=True, **payload
@@ -3442,12 +4486,8 @@ class IsaacMCPServer(LoggerMixin):
                         "apply_simready_metadata",
                     )
             except Exception as e:
-                self.logger.error(
-                    "Error applying SimReady metadata: %s", e
-                )
-                result = ErrorResponse(
-                    error=str(e), error_type="Exception"
-                ).dict()
+                self.logger.error("Error applying SimReady metadata: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
                     (SimReadyApplyMetadataResponse, ErrorResponse),
@@ -3489,21 +4529,15 @@ class IsaacMCPServer(LoggerMixin):
                     payload = session.get_simready_metadata(
                         object_name=input_data.object_name,
                     )
-                    result = SimReadyGetMetadataResponse(
-                        success=True, **payload
-                    ).dict()
+                    result = SimReadyGetMetadataResponse(success=True, **payload).dict()
                     return self._validate_output(
                         result,
                         (SimReadyGetMetadataResponse, ErrorResponse),
                         "get_simready_metadata",
                     )
             except Exception as e:
-                self.logger.error(
-                    "Error getting SimReady metadata: %s", e
-                )
-                result = ErrorResponse(
-                    error=str(e), error_type="Exception"
-                ).dict()
+                self.logger.error("Error getting SimReady metadata: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
                     (SimReadyGetMetadataResponse, ErrorResponse),
@@ -3536,9 +4570,7 @@ class IsaacMCPServer(LoggerMixin):
             check_materials: bool = True,
             check_hierarchy: bool = True,
         ) -> Dict[str, Any]:
-            rate_error = self._check_rate_limit(
-                "validate_simready_compliance"
-            )
+            rate_error = self._check_rate_limit("validate_simready_compliance")
             if rate_error:
                 return rate_error
             input_data = self._validate_input(
@@ -3562,21 +4594,15 @@ class IsaacMCPServer(LoggerMixin):
                         check_materials=input_data.check_materials,
                         check_hierarchy=input_data.check_hierarchy,
                     )
-                    result = SimReadyValidateResponse(
-                        success=True, **payload
-                    ).dict()
+                    result = SimReadyValidateResponse(success=True, **payload).dict()
                     return self._validate_output(
                         result,
                         (SimReadyValidateResponse, ErrorResponse),
                         "validate_simready_compliance",
                     )
             except Exception as e:
-                self.logger.error(
-                    "Error validating SimReady compliance: %s", e
-                )
-                result = ErrorResponse(
-                    error=str(e), error_type="Exception"
-                ).dict()
+                self.logger.error("Error validating SimReady compliance: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
                     (SimReadyValidateResponse, ErrorResponse),
@@ -3627,21 +4653,15 @@ class IsaacMCPServer(LoggerMixin):
                         embed_metadata=input_data.embed_metadata,
                         validate_before_export=input_data.validate_before_export,
                     )
-                    result = SimReadyExportResponse(
-                        success=True, **payload
-                    ).dict()
+                    result = SimReadyExportResponse(success=True, **payload).dict()
                     return self._validate_output(
                         result,
                         (SimReadyExportResponse, ErrorResponse),
                         "export_simready_usd",
                     )
             except Exception as e:
-                self.logger.error(
-                    "Error exporting SimReady USD: %s", e
-                )
-                result = ErrorResponse(
-                    error=str(e), error_type="Exception"
-                ).dict()
+                self.logger.error("Error exporting SimReady USD: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
                     (SimReadyExportResponse, ErrorResponse),
@@ -3671,9 +4691,7 @@ class IsaacMCPServer(LoggerMixin):
             child_names: List[str],
             semantic: Optional[Dict[str, Any]] = None,
         ) -> Dict[str, Any]:
-            rate_error = self._check_rate_limit(
-                "setup_simready_hierarchy"
-            )
+            rate_error = self._check_rate_limit("setup_simready_hierarchy")
             if rate_error:
                 return rate_error
             input_data = self._validate_input(
@@ -3707,12 +4725,8 @@ class IsaacMCPServer(LoggerMixin):
                         "setup_simready_hierarchy",
                     )
             except Exception as e:
-                self.logger.error(
-                    "Error setting up SimReady hierarchy: %s", e
-                )
-                result = ErrorResponse(
-                    error=str(e), error_type="Exception"
-                ).dict()
+                self.logger.error("Error setting up SimReady hierarchy: %s", e)
+                result = ErrorResponse(error=str(e), error_type="Exception").dict()
                 return self._validate_output(
                     result,
                     (

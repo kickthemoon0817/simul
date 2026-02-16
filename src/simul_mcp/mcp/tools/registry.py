@@ -773,6 +773,140 @@ def register_all_tools(registry: ToolRegistry) -> None:
             requires_usd=False,
         )
 
+        # -- Phase 6: Physics & Simulation tools --
+        registry.register_tool(
+            "setup_blender_rigid_body",
+            ToolCategory.BLENDER,
+            blender_tools.setup_blender_rigid_body,
+            "Set up rigid body physics on an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "add_blender_force_field",
+            ToolCategory.BLENDER,
+            blender_tools.add_blender_force_field,
+            "Add a force field to the scene",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_force_field_info",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_force_field_info,
+            "Get force field parameters for an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "add_blender_rigid_body_constraint",
+            ToolCategory.BLENDER,
+            blender_tools.add_blender_rigid_body_constraint,
+            "Add a rigid body constraint between two objects",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_constraint_info",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_constraint_info,
+            "Get rigid body constraint info for an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_physics_state",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_physics_state,
+            "Get current physics state of an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_object_trajectory",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_object_trajectory,
+            "Sample object position over a frame range",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "bake_blender_simulation",
+            ToolCategory.BLENDER,
+            blender_tools.bake_blender_simulation,
+            "Bake physics simulation for a frame range",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "free_blender_bake",
+            ToolCategory.BLENDER,
+            blender_tools.free_blender_bake,
+            "Free baked physics simulation data",
+            requires_blender=True,
+            requires_usd=False,
+        )
+
+        # -- Scripting & mesh-from-data tools --
+        registry.register_tool(
+            "execute_blender_script",
+            ToolCategory.BLENDER,
+            blender_tools.execute_blender_script,
+            "Execute arbitrary Python code inside Blender",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "create_blender_mesh_from_data",
+            ToolCategory.BLENDER,
+            blender_tools.create_blender_mesh_from_data,
+            "Create a mesh from raw vertex/edge/face data",
+            requires_blender=True,
+            requires_usd=False,
+        )
+
+        # -- SimReady tools --
+        registry.register_tool(
+            "apply_simready_metadata",
+            ToolCategory.SIMREADY,
+            blender_tools.apply_simready_metadata,
+            "Apply SimReady metadata to an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_simready_metadata",
+            ToolCategory.SIMREADY,
+            blender_tools.get_simready_metadata,
+            "Get SimReady metadata from an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "validate_simready_compliance",
+            ToolCategory.SIMREADY,
+            blender_tools.validate_simready_compliance,
+            "Validate objects against SimReady spec",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "export_simready_usd",
+            ToolCategory.SIMREADY,
+            blender_tools.export_simready_usd,
+            "Export objects as SimReady USD",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "setup_simready_hierarchy",
+            ToolCategory.SIMREADY,
+            blender_tools.setup_simready_hierarchy,
+            "Set up SimReady-compliant object hierarchy",
+            requires_blender=True,
+            requires_usd=False,
+        )
+
     total = len(registry.get_all_tools())
     enabled = len(registry.get_enabled_tools())
     logger.info(f"Registered {total} tools, {enabled} enabled")
