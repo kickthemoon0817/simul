@@ -6,6 +6,7 @@ the MCP server and utility commands.
 """
 
 import asyncio
+import socket
 from pathlib import Path
 from typing import Optional
 import typer
@@ -19,9 +20,27 @@ from simul_mcp.mcp.server import start_mcp_server
 from simul_mcp.mcp.tools.registry import get_tool_registry
 from simul_mcp.adapters import (
     is_blender_available,
-    is_isaac_available,
     is_headless_available,
 )
+
+
+def _is_isaac_reachable(host: str = "127.0.0.1", port: int = 8226, timeout: float = 1.0) -> bool:
+    """
+    Check if Isaac Sim is reachable on the TCP socket.
+
+    Args:
+        host: Isaac Sim host address.
+        port: TCP port for the VS Code extension socket.
+        timeout: Connection timeout in seconds.
+
+    Returns:
+        True if a TCP connection succeeds.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (ConnectionRefusedError, OSError, TimeoutError):
+        return False
 
 # Initialize CLI
 app = typer.Typer(
@@ -73,24 +92,18 @@ def server(
         logger = get_logger(__name__)
 
         # Check runtime availability
-        isaac_available = is_isaac_available()
+        isaac_reachable = _is_isaac_reachable()
         blender_available = is_blender_available()
-        usd_available = is_headless_available() or isaac_available
-
-        if not usd_available:
-            console.print(
-                "[red]Error: No USD support available. Please install USD Python bindings.[/red]"
-            )
-            raise typer.Exit(1)
+        usd_available = is_headless_available()
 
         # Display startup info
         console.print(
             Panel.fit(
-                f"[bold blue]Isaac Sim MCP Server[/bold blue]\n"
+                f"[bold blue]Simul MCP Server[/bold blue]\n"
                 f"Transport: {transport}\n"
-                f"Isaac Sim: {'✓' if isaac_available else '✗'}\n"
+                f"Isaac Sim (TCP :8226): {'✓ reachable' if isaac_reachable else '✗ not reachable (tools will retry at call time)'}\n"
                 f"Blender: {'✓' if blender_available else '✗'}\n"
-                f"USD Support: {'✓' if usd_available else '✗'}\n"
+                f"USD Headless: {'✓' if usd_available else '✗'}\n"
                 f"Config: {config or 'default'}\n"
                 f"Log Level: {settings.logging.level}",
                 title="Starting Server",
@@ -129,9 +142,9 @@ def info(
             settings = get_settings()
 
         # Check runtime availability
-        isaac_available = is_isaac_available()
+        isaac_reachable = _is_isaac_reachable()
         blender_available = is_blender_available()
-        usd_available = is_headless_available() or isaac_available
+        usd_available = is_headless_available()
 
         # Get tool registry
         registry = get_tool_registry(settings)
@@ -144,11 +157,11 @@ def info(
         system_table.add_column("Details")
 
         system_table.add_row(
-            "Isaac Sim Runtime",
-            "✓ Available" if isaac_available else "✗ Not Available",
-            "Full simulation and viewport capabilities"
-            if isaac_available
-            else "Headless USD operations only",
+            "Isaac Sim (TCP :8226)",
+            "✓ Reachable" if isaac_reachable else "✗ Not Reachable",
+            "Simulation & viewport via TCP socket"
+            if isaac_reachable
+            else "Isaac Sim tools will retry at call time",
         )
         system_table.add_row(
             "Blender Runtime",
@@ -158,9 +171,9 @@ def info(
             else "Install bpy to enable Blender tools",
         )
         system_table.add_row(
-            "USD Support",
+            "USD Headless",
             "✓ Available" if usd_available else "✗ Not Available",
-            "pxr library for USD operations" if usd_available else "No USD support",
+            "pxr library for USD file operations" if usd_available else "No USD support",
         )
 
         console.print(system_table)
@@ -196,11 +209,11 @@ def info(
             status_style = "green" if tool_info["enabled"] else "red"
 
             requirements = []
-            if tool_info["requires_isaac"]:
-                requirements.append("Isaac Sim")
             if tool_info.get("requires_blender"):
                 requirements.append("Blender")
-            if tool_info["requires_usd"]:
+            if tool_info.get("requires_unreal"):
+                requirements.append("Unreal")
+            if tool_info.get("requires_usd"):
                 requirements.append("USD")
 
             tools_table.add_row(
@@ -300,7 +313,7 @@ def test_usd(
         console.print(f"[cyan]Testing USD file: {file_path}[/cyan]")
 
         # Check USD availability
-        usd_available = is_headless_available() or is_isaac_available()
+        usd_available = is_headless_available()
         if not usd_available:
             console.print("[red]Error: No USD support available[/red]")
             raise typer.Exit(1)
@@ -404,13 +417,14 @@ def version():
     except ImportError:
         version_str = "unknown"
 
+    isaac_reachable = _is_isaac_reachable()
     console.print(
         Panel.fit(
-            f"[bold blue]Isaac Sim MCP Server[/bold blue]\n"
+            f"[bold blue]Simul MCP Server[/bold blue]\n"
             f"Version: {version_str}\n"
-            f"Isaac Sim: {'✓' if is_isaac_available() else '✗'}\n"
+            f"Isaac Sim (TCP :8226): {'✓ reachable' if isaac_reachable else '✗ not reachable'}\n"
             f"Blender: {'✓' if is_blender_available() else '✗'}\n"
-            f"USD Support: {'✓' if is_headless_available() or is_isaac_available() else '✗'}",
+            f"USD Headless: {'✓' if is_headless_available() else '✗'}",
             title="Version Information",
         )
     )

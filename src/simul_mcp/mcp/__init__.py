@@ -69,8 +69,6 @@ from .schemas import (
     SceneSummaryResponse,
     StageInfo,
     USDFileInfo,
-    ViewportCaptureRequest,
-    ViewportCaptureResponse,
 )
 from .server import (
     IsaacMCPServer,
@@ -89,8 +87,6 @@ __all__ = [
     "PrimInfo",
     "MeshInfo",
     "BoundingBox",
-    "ViewportCaptureRequest",
-    "ViewportCaptureResponse",
     "SceneSummaryRequest",
     "SceneSummaryResponse",
     # Blender Schemas

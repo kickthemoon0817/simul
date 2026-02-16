@@ -12,13 +12,11 @@ from typing import Any, Callable, Dict, List, Optional
 from ...adapters import (
     is_blender_available,
     is_headless_available,
-    is_isaac_available,
     is_unreal_available,
 )
 from ...config import Settings, get_settings
 from ...logging import LoggerMixin, get_logger
 from .blender_tools import BlenderTools
-from .isaac_tools import CameraTools, RigidBodyTools, SimulationTools, ViewportTools
 from .usd_tools import USDBBoxTools, USDFileTools, USDMeshTools, USDSceneTools
 
 logger = get_logger(__name__)
@@ -31,10 +29,6 @@ class ToolCategory(str, Enum):
     USD_SCENE = "usd_scene"
     USD_MESH = "usd_mesh"
     USD_BBOX = "usd_bbox"
-    VIEWPORT = "viewport"
-    SIMULATION = "simulation"
-    RIGID_BODY = "rigid_body"
-    CAMERA = "camera"
     BLENDER = "blender"
     SIMREADY = "simready"
     UNREAL_SCENE = "unreal_scene"
@@ -55,7 +49,6 @@ class ToolInfo:
     category: ToolCategory
     description: str
     method: Callable
-    requires_isaac: bool = False
     requires_blender: bool = False
     requires_unreal: bool = False
     requires_usd: bool = True
@@ -82,14 +75,12 @@ class ToolRegistry(LoggerMixin):
         self._tool_instances: Dict[ToolCategory, Any] = {}
 
         # Check runtime capabilities
-        self._isaac_available = is_isaac_available()
         self._blender_available = is_blender_available()
         self._unreal_available = is_unreal_available()
-        self._usd_available = is_headless_available() or self._isaac_available
+        self._usd_available = is_headless_available()
 
         self.logger.info(
-            "Tool registry initialized - Isaac: %s, Blender: %s, Unreal: %s, USD: %s",
-            self._isaac_available,
+            "Tool registry initialized - Blender: %s, Unreal: %s, USD: %s",
             self._blender_available,
             self._unreal_available,
             self._usd_available,
@@ -101,7 +92,6 @@ class ToolRegistry(LoggerMixin):
         category: ToolCategory,
         method: Callable,
         description: str,
-        requires_isaac: bool = False,
         requires_blender: bool = False,
         requires_unreal: bool = False,
         requires_usd: bool = True,
@@ -114,17 +104,12 @@ class ToolRegistry(LoggerMixin):
             category: Tool category
             method: Tool method
             description: Tool description
-            requires_isaac: Whether tool requires Isaac Sim
             requires_blender: Whether tool requires Blender runtime
             requires_unreal: Whether tool requires Unreal Engine runtime
             requires_usd: Whether tool requires USD support
         """
         # Check if tool can be enabled based on requirements
         enabled = True
-        if requires_isaac and not self._isaac_available:
-            enabled = False
-            self.logger.debug(f"Tool {name} disabled - Isaac Sim not available")
-
         if requires_blender and not self._blender_available:
             enabled = False
             self.logger.debug(f"Tool {name} disabled - Blender runtime not available")
@@ -142,7 +127,6 @@ class ToolRegistry(LoggerMixin):
             category=category,
             description=description,
             method=method,
-            requires_isaac=requires_isaac,
             requires_blender=requires_blender,
             requires_unreal=requires_unreal,
             requires_usd=requires_usd,
@@ -300,7 +284,6 @@ class ToolRegistry(LoggerMixin):
             capabilities["tools"][tool.name] = {
                 "category": tool.category.value,
                 "enabled": tool.enabled,
-                "requires_isaac": tool.requires_isaac,
                 "requires_blender": tool.requires_blender,
                 "requires_unreal": tool.requires_unreal,
                 "requires_usd": tool.requires_usd,
@@ -419,89 +402,6 @@ def register_all_tools(registry: ToolRegistry) -> None:
         "Get bounding box for a prim or entire stage",
         requires_usd=True,
     )
-
-    # Isaac Sim specific tools (only if Isaac is available)
-    if is_isaac_available():
-        # Viewport Tools
-        viewport_tools = ViewportTools()
-        registry.register_tool(
-            "capture_viewport",
-            ToolCategory.VIEWPORT,
-            viewport_tools.capture_viewport,
-            "Capture the Isaac Sim viewport",
-            requires_isaac=True,
-        )
-        registry.register_tool(
-            "get_viewport_info",
-            ToolCategory.VIEWPORT,
-            viewport_tools.get_viewport_info,
-            "Get information about the current viewport",
-            requires_isaac=True,
-        )
-
-        # Simulation Tools
-        simulation_tools = SimulationTools()
-        registry.register_tool(
-            "control_simulation",
-            ToolCategory.SIMULATION,
-            simulation_tools.control_simulation,
-            "Control Isaac Sim simulation (play, pause, stop, reset, step)",
-            requires_isaac=True,
-        )
-        registry.register_tool(
-            "get_simulation_status",
-            ToolCategory.SIMULATION,
-            simulation_tools.get_simulation_status,
-            "Get current simulation status",
-            requires_isaac=True,
-        )
-
-        rigid_body_tools = RigidBodyTools()
-        registry.register_tool(
-            "enable_rigid_body",
-            ToolCategory.RIGID_BODY,
-            rigid_body_tools.enable_rigid_body,
-            "Enable rigid body physics on a prim",
-            requires_isaac=True,
-        )
-        registry.register_tool(
-            "set_rigid_body_velocity",
-            ToolCategory.RIGID_BODY,
-            rigid_body_tools.set_rigid_body_velocity,
-            "Set rigid body linear or angular velocity",
-            requires_isaac=True,
-        )
-        registry.register_tool(
-            "get_rigid_body_state",
-            ToolCategory.RIGID_BODY,
-            rigid_body_tools.get_rigid_body_state,
-            "Get rigid body physics state for a prim",
-            requires_isaac=True,
-        )
-
-        # Camera Tools
-        camera_tools = CameraTools()
-        registry.register_tool(
-            "set_camera_view",
-            ToolCategory.CAMERA,
-            camera_tools.set_camera_view,
-            "Set camera view in the viewport",
-            requires_isaac=True,
-        )
-        registry.register_tool(
-            "get_camera_info",
-            ToolCategory.CAMERA,
-            camera_tools.get_camera_info,
-            "Get information about the current camera",
-            requires_isaac=True,
-        )
-        registry.register_tool(
-            "focus_on_prim",
-            ToolCategory.CAMERA,
-            camera_tools.focus_on_prim,
-            "Focus camera on a specific prim",
-            requires_isaac=True,
-        )
 
     if is_blender_available():
         blender_tools = BlenderTools()
