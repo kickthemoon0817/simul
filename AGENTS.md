@@ -1,4 +1,4 @@
-# AGENTS.md — Isaac Sim MCP Server
+# AGENTS.md — Simul MCP Server
 
 This file guides agentic coding assistants working in this repository.
 
@@ -67,10 +67,10 @@ All Python scripts in this repository must adhere to the following standards:
 
 
 ## Repository Scope
-- Root: `/simul-mcp`
+- Root: `/home/khemoo/pt/simul`
 - Primary package: `src/simul_mcp`
-- CLI: `src/simul_mcp/cli/main.py`
-- Extension: `exts/khemoo.simul.mcp`
+- CLI entrypoint: `src/simul_mcp/cli/main.py`
+- Isaac Sim extension: `exts/khemoo.simul.mcp`
 
 ## Cursor/Copilot Rules
 - No Cursor rules found (`.cursor/rules/` or `.cursorrules`).
@@ -84,15 +84,16 @@ All Python scripts in this repository must adhere to the following standards:
 - Avoid unrelated refactors while fixing a bug.
 
 ## Build / Lint / Test Commands (Makefile)
-Run from `/simul-mcp`.
-- `make help`             # List targets
+Run from `/home/khemoo/pt/simul`.
+- `make help`             # List available targets
 - `make install`          # Install package
 - `make install-dev`      # Install dev deps + pre-commit
-- `make setup-isaac`      # Validate ISAAC_SIM_PATH
+- `make setup-isaac`      # Validate `ISAAC_SIM_PATH`
+- `make dev-setup`        # install-dev + setup-isaac
 
 ## Formatting
-- `make format`            # black + isort
-- `./scripts/isaac/dev_isort_black.sh`
+- `make format`                             # black + isort
+- `./scripts/isaac/dev_isort_black.sh`      # formatter wrapper
 - `./scripts/isaac/dev_isort_black.sh --check`
 - `./scripts/isaac/dev_isort_black.sh --diff`
 - `./scripts/isaac/dev_isort_black.sh --isort-only`
@@ -102,6 +103,7 @@ Run from `/simul-mcp`.
 - `make lint`              # flake8 + mypy
 - `flake8 src/ tests/`
 - `mypy src/`
+- `make check`             # format + lint + test
 
 ## Tests
 - `make test`              # pytest tests/ -v
@@ -114,10 +116,11 @@ Run from `/simul-mcp`.
 - `pytest tests/isaac/test_reader.py::TestUSDReader::test_open_stage_success -v`
 - `pytest tests/ -k "mesh" -v`
 
-## Run Server (Dev)
-- `make run-server`
-- `make run-headless`
-- `make run-isaac`          # uses ISAAC_SIM_PATH/python.sh
+## Build / Run
+- `make build`             # python -m build
+- `make run-server`        # MCP server (dev)
+- `make run-headless`      # MCP server (headless)
+- `make run-isaac`         # MCP server via Isaac Sim python.sh
 - `python -m simul_mcp.cli.main server --host localhost --port 8765`
 
 ## Debugging
@@ -135,6 +138,11 @@ Run from `/isaac-sim`.
 - `./tests/tests-nativepython-testing-isaacsim.core.api.hello_world.sh`
 
 ---
+
+## Configuration Notes
+- Environment template: `.env.example`
+- Default config: `config/isaac/default.yaml`
+- The project version is `0.0.1` in `pyproject.toml`.
 
 ## Python Conventions
 - Use type hints for public APIs.
@@ -182,24 +190,6 @@ Use this exact order within classes:
 - Identify relevant extensions or features and cite them in the plan.
 - Validate compatibility with simulator version and dependency setup.
 - Ask clarifying questions if the request could conflict with simulator constraints.
-- For a local sanity check, you can run Isaac Sim using:
-```
-/bin/bash -lc 'LD_LIBRARY_PATH=extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin:$LD_LIBRARY_PATH ./python.sh - <<'"'"'PY'"'"'
-import sys, os
-sys.path.append('extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311')
-from pxr import Usd
-print('pxr import ok')
-stage = Usd.Stage.Open('extsUser/khemoo.system.power/sources/openbot.usd')
-print(stage)
-for prim in stage.GetPseudoRoot().GetChildren():
-    print('root child', prim.GetPath())
-print('Prim count limit:')
-for i, prim in enumerate(stage.Traverse()):
-    print(prim.GetPath())
-    if i >= 60:
-        break
-PY'
-```
 
 ## Testing Expectations
 - Add or update tests for new behavior when feasible.
@@ -209,15 +199,8 @@ PY'
 - Update `README.md` or `docs/` when behavior or usage changes.
 - Keep examples minimal, runnable, and aligned with actual APIs.
 
----
-
-## Quick Reference (pyproject.toml)
-- Python: >= 3.8
-- Black: line length 88
-- pytest markers: slow, integration, isaac
-- Coverage: `--cov=simul_mcp`
-
 ## Notes for Agents
 - Some tests require Isaac Sim runtime.
 - Headless tools must work without Omniverse.
 - Avoid changing unrelated caches or Isaac root files.
+- CLI parity note: features like `simul isaac-sim current_stage ...` could be implemented here as well.
