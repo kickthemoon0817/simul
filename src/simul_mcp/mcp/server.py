@@ -7,6 +7,7 @@ connection management, and Isaac Sim integration based on FastMCP.
 
 import asyncio
 import inspect
+import json
 import os
 import sys
 from pathlib import Path
@@ -42,13 +43,12 @@ from ..config import Settings, get_settings
 from ..adapters import (
     BlenderRuntimeAdapter,
     HeadlessUSDAdapter,
-    IsaacRuntimeAdapter,
     UnrealRuntimeAdapter,
     is_blender_available,
-    is_isaac_available,
     is_headless_available,
     is_unreal_available,
 )
+from ..adapters.isaac_socket_client import IsaacSocketClient, ScriptResult
 from ..utils.timing import RateLimiter
 from .schemas import *
 
@@ -87,8 +87,9 @@ class IsaacMCPServer(LoggerMixin):
         self.headless_adapter = (
             HeadlessUSDAdapter(self.settings) if is_headless_available() else None
         )
-        self.isaac_adapter = (
-            IsaacRuntimeAdapter(self.settings) if is_isaac_available() else None
+        self.client = IsaacSocketClient(
+            host="127.0.0.1",
+            port=8226,
         )
         self.blender_adapter = (
             BlenderRuntimeAdapter(self.settings) if is_blender_available() else None
@@ -266,9 +267,8 @@ class IsaacMCPServer(LoggerMixin):
         # USD file operations
         self._register_usd_tools()
 
-        # Isaac Sim specific tools (if available)
-        if self.isaac_adapter and self.isaac_adapter.is_available():
-            self._register_isaac_tools()
+        # Isaac Sim tools — always registered; connection checked at runtime
+        self._register_isaac_tools()
 
         # Blender specific tools (if available)
         if self.blender_adapter and self.blender_adapter.is_available():
@@ -321,7 +321,7 @@ class IsaacMCPServer(LoggerMixin):
                 ).dict()
 
             try:
-                adapter = self.headless_adapter or self.isaac_adapter
+                adapter = self.headless_adapter
                 if not adapter:
                     return ErrorResponse(
                         error="No USD adapter available", error_type="AdapterError"
@@ -450,7 +450,7 @@ class IsaacMCPServer(LoggerMixin):
                 return input_data
 
             try:
-                adapter = self.headless_adapter or self.isaac_adapter
+                adapter = self.headless_adapter
                 if not adapter:
                     return ErrorResponse(
                         error="No USD adapter available", error_type="AdapterError"
@@ -559,7 +559,7 @@ class IsaacMCPServer(LoggerMixin):
                 return input_data
 
             try:
-                adapter = self.headless_adapter or self.isaac_adapter
+                adapter = self.headless_adapter
                 if not adapter:
                     return ErrorResponse(
                         error="No USD adapter available", error_type="AdapterError"
@@ -627,7 +627,7 @@ class IsaacMCPServer(LoggerMixin):
                 return input_data
 
             try:
-                adapter = self.headless_adapter or self.isaac_adapter
+                adapter = self.headless_adapter
                 if not adapter:
                     return ErrorResponse(
                         error="No USD adapter available", error_type="AdapterError"
@@ -695,7 +695,7 @@ class IsaacMCPServer(LoggerMixin):
                 return input_data
 
             try:
-                adapter = self.headless_adapter or self.isaac_adapter
+                adapter = self.headless_adapter
                 if not adapter:
                     return ErrorResponse(
                         error="No USD adapter available", error_type="AdapterError"
@@ -753,7 +753,7 @@ class IsaacMCPServer(LoggerMixin):
                 return input_data
 
             try:
-                adapter = self.headless_adapter or self.isaac_adapter
+                adapter = self.headless_adapter
                 if not adapter:
                     return ErrorResponse(
                         error="No USD adapter available", error_type="AdapterError"
@@ -824,7 +824,7 @@ class IsaacMCPServer(LoggerMixin):
                 return input_data
 
             try:
-                adapter = self.headless_adapter or self.isaac_adapter
+                adapter = self.headless_adapter
                 if not adapter:
                     return ErrorResponse(
                         error="No USD adapter available", error_type="AdapterError"
@@ -899,7 +899,7 @@ class IsaacMCPServer(LoggerMixin):
                 return input_data
 
             try:
-                adapter = self.headless_adapter or self.isaac_adapter
+                adapter = self.headless_adapter
                 if not adapter:
                     return ErrorResponse(
                         error="No USD adapter available", error_type="AdapterError"
@@ -984,7 +984,7 @@ class IsaacMCPServer(LoggerMixin):
                 return input_data
 
             try:
-                adapter = self.headless_adapter or self.isaac_adapter
+                adapter = self.headless_adapter
                 if not adapter:
                     return ErrorResponse(
                         error="No USD adapter available", error_type="AdapterError"
@@ -1046,650 +1046,89 @@ class IsaacMCPServer(LoggerMixin):
                 )
 
     def _register_isaac_tools(self) -> None:
-        """Register Isaac Sim specific tools."""
+        """Register Isaac Sim tools that execute via TCP socket on port 8226."""
 
         @self.mcp.tool(
-            name="capture_viewport",
-            description="Capture the Isaac Sim viewport.",
-            annotations=self._tool_annotations(
-                read_only=True, idempotent=False, open_world=True
+            name="execute_isaac_script",
+            description=(
+                "Execute arbitrary Python code inside a running Isaac Sim application. "
+                "The code runs in Kit's Python scope with full access to omni.*, pxr.*, "
+                "and isaacsim.* APIs. stdout is captured and returned. For structured "
+                "results, print JSON via json.dumps()."
             ),
-            output_schema=self._tool_output_schema(
-                ViewportCaptureResponse, ErrorResponse
-            ),
-            task=self._task_optional(),
-        )
-        async def capture_viewport(
-            width: Optional[int] = None,
-            height: Optional[int] = None,
-            format: str = "png",
-            save_to_file: bool = False,
-            file_path: Optional[str] = None,
-        ) -> Dict[str, Any]:
-            """
-            Capture the Isaac Sim viewport.
-
-            Args:
-                width: Image width
-                height: Image height
-                format: Image format (png, jpg, exr)
-                save_to_file: Save image to file
-                file_path: File path for saved image
-
-            Returns:
-                Viewport capture response or error
-            """
-            rate_error = self._check_rate_limit("capture_viewport")
-            if rate_error:
-                return rate_error
-
-            input_data = self._validate_input(
-                ViewportCaptureRequest,
-                width=width,
-                height=height,
-                format=format,
-                save_to_file=save_to_file,
-                file_path=file_path,
-            )
-            if isinstance(input_data, dict):
-                return input_data
-
-            if input_data.save_to_file and input_data.file_path:
-                if not self._is_path_allowed(input_data.file_path):
-                    return ErrorResponse(
-                        error="File path is not allowed by sandbox policy",
-                        error_type="SandboxError",
-                        details={"file_path": input_data.file_path},
-                    ).dict()
-
-            try:
-                if not self.isaac_adapter or not self.isaac_adapter.is_available():
-                    return ErrorResponse(
-                        error="Isaac Sim runtime not available",
-                        error_type="RuntimeError",
-                    ).dict()
-
-                with self.isaac_adapter.create_session() as session:
-                    capture = session.capture_viewport(
-                        width=input_data.width,
-                        height=input_data.height,
-                        format=input_data.format.value,
-                        save_to_file=input_data.save_to_file,
-                        file_path=input_data.file_path,
-                    )
-
-                    if capture:
-                        result = ViewportCaptureResponse(
-                            success=True,
-                            width=capture.width,
-                            height=capture.height,
-                            format=capture.format,
-                            file_path=capture.file_path,
-                        ).dict()
-                        return self._validate_output(
-                            result,
-                            (ViewportCaptureResponse, ErrorResponse),
-                            "capture_viewport",
-                        )
-                    else:
-                        result = ErrorResponse(
-                            error="Failed to capture viewport",
-                            error_type="CaptureError",
-                        ).dict()
-                        return self._validate_output(
-                            result,
-                            (ViewportCaptureResponse, ErrorResponse),
-                            "capture_viewport",
-                        )
-
-            except Exception as e:
-                self.logger.error(f"Error capturing viewport: {e}")
-                result = ErrorResponse(error=str(e), error_type="Exception").dict()
-                return self._validate_output(
-                    result, (ViewportCaptureResponse, ErrorResponse), "capture_viewport"
-                )
-
-        @self.mcp.tool(
-            name="get_viewport_info",
-            description="Get information about the current viewport.",
-            annotations=self._tool_annotations(
-                read_only=True, idempotent=True, open_world=True
-            ),
-            output_schema=self._tool_output_schema(ViewportInfoResponse, ErrorResponse),
-        )
-        async def get_viewport_info() -> Dict[str, Any]:
-            rate_error = self._check_rate_limit("get_viewport_info")
-            if rate_error:
-                return rate_error
-
-            try:
-                if not self.isaac_adapter or not self.isaac_adapter.is_available():
-                    return ErrorResponse(
-                        error="Isaac Sim runtime not available",
-                        error_type="RuntimeError",
-                    ).dict()
-
-                with self.isaac_adapter.create_session() as session:
-                    info = session.get_viewport_info()
-                    info["success"] = True
-                    result = ViewportInfoResponse(**info).dict()
-                    return self._validate_output(
-                        result,
-                        (ViewportInfoResponse, ErrorResponse),
-                        "get_viewport_info",
-                    )
-
-            except Exception as e:
-                self.logger.error(f"Error getting viewport info: {e}")
-                result = ErrorResponse(error=str(e), error_type="Exception").dict()
-                return self._validate_output(
-                    result, (ViewportInfoResponse, ErrorResponse), "get_viewport_info"
-                )
-
-        @self.mcp.tool(
-            name="control_simulation",
-            description="Control Isaac Sim simulation.",
             annotations=self._tool_annotations(
                 read_only=False, idempotent=False, open_world=True, destructive=True
             ),
-            output_schema=self._tool_output_schema(
-                SimulationControlResponse, ErrorResponse
-            ),
         )
-        async def control_simulation(action: str, steps: int = 1) -> Dict[str, Any]:
+        async def execute_isaac_script(code: str) -> Dict[str, Any]:
             """
-            Control Isaac Sim simulation.
+            Execute Python code inside the running Isaac Sim process.
+
+            The code is sent over TCP to the stock isaacsim.code_editor.vscode
+            extension (port 8226). stdout is captured and returned.
 
             Args:
-                action: Action (play, pause, stop, reset, step)
-                steps: Number of steps (for step action)
+                code: Python source code to execute in Isaac Sim.
 
             Returns:
-                Success status or error
+                Dict with success, output, and optional error info.
             """
-            rate_error = self._check_rate_limit("control_simulation")
+            rate_error = self._check_rate_limit("execute_isaac_script")
             if rate_error:
                 return rate_error
-
-            input_data = self._validate_input(
-                SimulationControlRequest,
-                action=action,
-                steps=steps,
-            )
-            if isinstance(input_data, dict):
-                return input_data
-
             try:
-                if not self.isaac_adapter or not self.isaac_adapter.is_available():
+                result: ScriptResult = await self.client.execute(code)
+                if not result.success:
                     return ErrorResponse(
-                        error="Isaac Sim runtime not available",
-                        error_type="RuntimeError",
+                        error=result.error_value or "Script execution failed",
+                        error_type=result.error_name or "RuntimeError",
+                        details={"traceback": result.traceback} if result.traceback else None,
                     ).dict()
 
-                with self.isaac_adapter.create_session() as session:
-                    # Initialize world if needed
-                    if not session.get_world():
-                        session.initialize_world()
+                # If output is valid JSON, return it directly
+                output = result.output.strip()
+                if output:
+                    try:
+                        return json.loads(output)
+                    except json.JSONDecodeError:
+                        pass
 
-                    success = False
-                    if input_data.action == "play":
-                        success = session.play_simulation()
-                    elif input_data.action == "pause":
-                        success = session.pause_simulation()
-                    elif input_data.action == "stop":
-                        success = session.stop_simulation()
-                    elif input_data.action == "reset":
-                        success = session.reset_simulation()
-                    elif input_data.action == "step":
-                        success = session.step_simulation(input_data.steps)
+                return {"success": True, "output": result.output}
 
-                    result = SimulationControlResponse(
-                        success=success,
-                        action=input_data.action,
-                        steps=input_data.steps if input_data.action == "step" else None,
-                        message=f"Simulation {input_data.action} {'successful' if success else 'failed'}",
-                    ).dict()
-                    return self._validate_output(
-                        result,
-                        (SimulationControlResponse, ErrorResponse),
-                        "control_simulation",
-                    )
-
-            except Exception as e:
-                self.logger.error(f"Error controlling simulation: {e}")
-                result = ErrorResponse(error=str(e), error_type="Exception").dict()
-                return self._validate_output(
-                    result,
-                    (SimulationControlResponse, ErrorResponse),
-                    "control_simulation",
-                )
+            except ConnectionRefusedError:
+                return ErrorResponse(
+                    error="Isaac Sim is not reachable on 127.0.0.1:8226. Is it running?",
+                    error_type="ConnectionError",
+                ).dict()
+            except TimeoutError:
+                return ErrorResponse(
+                    error="Script execution timed out.",
+                    error_type="TimeoutError",
+                ).dict()
+            except Exception as exc:
+                return ErrorResponse(error=str(exc), error_type="Exception").dict()
 
         @self.mcp.tool(
-            name="get_simulation_status",
-            description="Get current simulation status.",
+            name="ping_isaac",
+            description="Check if a running Isaac Sim instance is reachable.",
             annotations=self._tool_annotations(
                 read_only=True, idempotent=True, open_world=True
             ),
-            output_schema=self._tool_output_schema(
-                SimulationStatusResponse, ErrorResponse
-            ),
         )
-        async def get_simulation_status() -> Dict[str, Any]:
-            rate_error = self._check_rate_limit("get_simulation_status")
-            if rate_error:
-                return rate_error
-
-            try:
-                if not self.isaac_adapter or not self.isaac_adapter.is_available():
-                    return ErrorResponse(
-                        error="Isaac Sim runtime not available",
-                        error_type="RuntimeError",
-                    ).dict()
-
-                with self.isaac_adapter.create_session() as session:
-                    status = session.get_simulation_status()
-                    status["success"] = True
-                    result = SimulationStatusResponse(**status).dict()
-                    return self._validate_output(
-                        result,
-                        (SimulationStatusResponse, ErrorResponse),
-                        "get_simulation_status",
-                    )
-
-            except Exception as e:
-                self.logger.error(f"Error getting simulation status: {e}")
-                result = ErrorResponse(error=str(e), error_type="Exception").dict()
-                return self._validate_output(
-                    result,
-                    (SimulationStatusResponse, ErrorResponse),
-                    "get_simulation_status",
-                )
-
-        @self.mcp.tool(
-            name="enable_rigid_body",
-            description="Enable rigid body physics on a prim.",
-            annotations=self._tool_annotations(
-                read_only=False, idempotent=False, open_world=True, destructive=True
-            ),
-            output_schema=self._tool_output_schema(
-                RigidBodyActionResponse, ErrorResponse
-            ),
-        )
-        async def enable_rigid_body(
-            prim_path: str, mass: Optional[float] = None
-        ) -> Dict[str, Any]:
+        async def ping_isaac() -> Dict[str, Any]:
             """
-            Enable rigid body physics on a prim.
-
-            Args:
-                prim_path: Prim path
-                mass: Mass in kilograms
+            Ping Isaac Sim to verify connectivity.
 
             Returns:
-                Action status or error
+                Dict with reachable status and address.
             """
-            rate_error = self._check_rate_limit("enable_rigid_body")
-            if rate_error:
-                return rate_error
+            reachable = await self.client.ping()
+            return {
+                "reachable": reachable,
+                "address": self.client.address,
+            }
 
-            input_data = self._validate_input(
-                RigidBodyEnableRequest,
-                prim_path=prim_path,
-                mass=mass,
-            )
-            if isinstance(input_data, dict):
-                return input_data
 
-            try:
-                if not self.isaac_adapter or not self.isaac_adapter.is_available():
-                    return ErrorResponse(
-                        error="Isaac Sim runtime not available",
-                        error_type="RuntimeError",
-                    ).dict()
-
-                with self.isaac_adapter.create_session() as session:
-                    success = session.enable_rigid_body(
-                        input_data.prim_path, input_data.mass
-                    )
-                    result = RigidBodyActionResponse(
-                        success=success,
-                        prim_path=input_data.prim_path,
-                        message=f"Rigid body {'enabled' if success else 'not enabled'} for {input_data.prim_path}",
-                    ).dict()
-                    return self._validate_output(
-                        result,
-                        (RigidBodyActionResponse, ErrorResponse),
-                        "enable_rigid_body",
-                    )
-
-            except Exception as e:
-                self.logger.error(f"Error enabling rigid body: {e}")
-                result = ErrorResponse(error=str(e), error_type="Exception").dict()
-                return self._validate_output(
-                    result,
-                    (RigidBodyActionResponse, ErrorResponse),
-                    "enable_rigid_body",
-                )
-
-        @self.mcp.tool(
-            name="set_rigid_body_velocity",
-            description="Set rigid body linear or angular velocity.",
-            annotations=self._tool_annotations(
-                read_only=False, idempotent=False, open_world=True, destructive=True
-            ),
-            output_schema=self._tool_output_schema(
-                RigidBodyActionResponse, ErrorResponse
-            ),
-        )
-        async def set_rigid_body_velocity(
-            prim_path: str,
-            linear_velocity: Optional[List[float]] = None,
-            angular_velocity: Optional[List[float]] = None,
-        ) -> Dict[str, Any]:
-            """
-            Set rigid body linear or angular velocity.
-
-            Args:
-                prim_path: Prim path
-                linear_velocity: Linear velocity [x, y, z]
-                angular_velocity: Angular velocity [x, y, z]
-
-            Returns:
-                Action status or error
-            """
-            rate_error = self._check_rate_limit("set_rigid_body_velocity")
-            if rate_error:
-                return rate_error
-
-            input_data = self._validate_input(
-                RigidBodyVelocityRequest,
-                prim_path=prim_path,
-                linear_velocity=linear_velocity,
-                angular_velocity=angular_velocity,
-            )
-            if isinstance(input_data, dict):
-                return input_data
-
-            try:
-                if not self.isaac_adapter or not self.isaac_adapter.is_available():
-                    return ErrorResponse(
-                        error="Isaac Sim runtime not available",
-                        error_type="RuntimeError",
-                    ).dict()
-
-                with self.isaac_adapter.create_session() as session:
-                    success = session.set_rigid_body_velocity(
-                        input_data.prim_path,
-                        input_data.linear_velocity,
-                        input_data.angular_velocity,
-                    )
-                    result = RigidBodyActionResponse(
-                        success=success,
-                        prim_path=input_data.prim_path,
-                        message=f"Rigid body velocity {'updated' if success else 'not updated'} for {input_data.prim_path}",
-                    ).dict()
-                    return self._validate_output(
-                        result,
-                        (RigidBodyActionResponse, ErrorResponse),
-                        "set_rigid_body_velocity",
-                    )
-
-            except Exception as e:
-                self.logger.error(f"Error setting rigid body velocity: {e}")
-                result = ErrorResponse(error=str(e), error_type="Exception").dict()
-                return self._validate_output(
-                    result,
-                    (RigidBodyActionResponse, ErrorResponse),
-                    "set_rigid_body_velocity",
-                )
-
-        @self.mcp.tool(
-            name="get_rigid_body_state",
-            description="Get rigid body physics state for a prim.",
-            annotations=self._tool_annotations(
-                read_only=True, idempotent=True, open_world=True
-            ),
-            output_schema=self._tool_output_schema(
-                RigidBodyStateResponse, ErrorResponse
-            ),
-        )
-        async def get_rigid_body_state(prim_path: str) -> Dict[str, Any]:
-            """
-            Get rigid body physics state for a prim.
-
-            Args:
-                prim_path: Prim path
-
-            Returns:
-                Rigid body state or error
-            """
-            rate_error = self._check_rate_limit("get_rigid_body_state")
-            if rate_error:
-                return rate_error
-
-            try:
-                if not self.isaac_adapter or not self.isaac_adapter.is_available():
-                    return ErrorResponse(
-                        error="Isaac Sim runtime not available",
-                        error_type="RuntimeError",
-                    ).dict()
-
-                with self.isaac_adapter.create_session() as session:
-                    state = session.get_rigid_body_state(prim_path)
-                    if not state:
-                        result = ErrorResponse(
-                            error=f"Rigid body not found: {prim_path}",
-                            error_type="NotFoundError",
-                        ).dict()
-                        return self._validate_output(
-                            result,
-                            (RigidBodyStateResponse, ErrorResponse),
-                            "get_rigid_body_state",
-                        )
-
-                    result = RigidBodyStateResponse(
-                        success=True,
-                        prim_path=state["prim_path"],
-                        enabled=state["enabled"],
-                        mass=state.get("mass"),
-                        linear_velocity=state.get("linear_velocity"),
-                        angular_velocity=state.get("angular_velocity"),
-                    ).dict()
-                    return self._validate_output(
-                        result,
-                        (RigidBodyStateResponse, ErrorResponse),
-                        "get_rigid_body_state",
-                    )
-
-            except Exception as e:
-                self.logger.error(f"Error getting rigid body state: {e}")
-                result = ErrorResponse(error=str(e), error_type="Exception").dict()
-                return self._validate_output(
-                    result,
-                    (RigidBodyStateResponse, ErrorResponse),
-                    "get_rigid_body_state",
-                )
-
-        @self.mcp.tool(
-            name="set_camera_view",
-            description="Set camera view in the viewport.",
-            annotations=self._tool_annotations(
-                read_only=False, idempotent=False, open_world=True
-            ),
-            output_schema=self._tool_output_schema(CameraViewResponse, ErrorResponse),
-        )
-        async def set_camera_view(
-            eye: List[float],
-            target: List[float],
-            up: List[float] = [0, 1, 0],
-        ) -> Dict[str, Any]:
-            rate_error = self._check_rate_limit("set_camera_view")
-            if rate_error:
-                return rate_error
-
-            input_data = self._validate_input(
-                CameraViewRequest, eye=eye, target=target, up=up
-            )
-            if isinstance(input_data, dict):
-                return input_data
-
-            try:
-                if not self.isaac_adapter or not self.isaac_adapter.is_available():
-                    return ErrorResponse(
-                        error="Isaac Sim runtime not available",
-                        error_type="RuntimeError",
-                    ).dict()
-
-                with self.isaac_adapter.create_session() as session:
-                    success = session.set_camera_view(
-                        eye=(input_data.eye[0], input_data.eye[1], input_data.eye[2]),
-                        target=(
-                            input_data.target[0],
-                            input_data.target[1],
-                            input_data.target[2],
-                        ),
-                        up=(input_data.up[0], input_data.up[1], input_data.up[2]),
-                    )
-
-                    result = CameraViewResponse(
-                        success=success,
-                        eye=input_data.eye,
-                        target=input_data.target,
-                        up=input_data.up,
-                        message=f"Camera view {'set successfully' if success else 'failed to set'}",
-                    ).dict()
-                    return self._validate_output(
-                        result, (CameraViewResponse, ErrorResponse), "set_camera_view"
-                    )
-
-            except Exception as e:
-                self.logger.error(f"Error setting camera view: {e}")
-                result = ErrorResponse(error=str(e), error_type="Exception").dict()
-                return self._validate_output(
-                    result, (CameraViewResponse, ErrorResponse), "set_camera_view"
-                )
-
-        @self.mcp.tool(
-            name="get_camera_info",
-            description="Get information about the current camera.",
-            annotations=self._tool_annotations(
-                read_only=True, idempotent=True, open_world=True
-            ),
-            output_schema=self._tool_output_schema(CameraInfoResponse, ErrorResponse),
-        )
-        async def get_camera_info() -> Dict[str, Any]:
-            rate_error = self._check_rate_limit("get_camera_info")
-            if rate_error:
-                return rate_error
-
-            try:
-                if not self.isaac_adapter or not self.isaac_adapter.is_available():
-                    return ErrorResponse(
-                        error="Isaac Sim runtime not available",
-                        error_type="RuntimeError",
-                    ).dict()
-
-                with self.isaac_adapter.create_session() as session:
-                    info = session.get_camera_info()
-                    info["success"] = True
-                    info["can_control"] = info.get("camera_available", False)
-                    result = CameraInfoResponse(**info).dict()
-                    return self._validate_output(
-                        result, (CameraInfoResponse, ErrorResponse), "get_camera_info"
-                    )
-
-            except Exception as e:
-                self.logger.error(f"Error getting camera info: {e}")
-                result = ErrorResponse(error=str(e), error_type="Exception").dict()
-                return self._validate_output(
-                    result, (CameraInfoResponse, ErrorResponse), "get_camera_info"
-                )
-
-        @self.mcp.tool(
-            name="focus_on_prim",
-            description="Focus camera on a specific prim.",
-            annotations=self._tool_annotations(
-                read_only=False, idempotent=False, open_world=True
-            ),
-            output_schema=self._tool_output_schema(FocusPrimResponse, ErrorResponse),
-        )
-        async def focus_on_prim(stage_id: str, prim_path: str) -> Dict[str, Any]:
-            rate_error = self._check_rate_limit("focus_on_prim")
-            if rate_error:
-                return rate_error
-
-            input_data = self._validate_input(
-                FocusPrimRequest, stage_id=stage_id, prim_path=prim_path
-            )
-            if isinstance(input_data, dict):
-                return input_data
-
-            try:
-                if not self.isaac_adapter or not self.isaac_adapter.is_available():
-                    return ErrorResponse(
-                        error="Isaac Sim runtime not available",
-                        error_type="RuntimeError",
-                    ).dict()
-
-                with self.isaac_adapter.create_session() as session:
-                    bbox_dict = session.get_prim_bbox(
-                        input_data.stage_id, input_data.prim_path, world_space=True
-                    )
-                    if not bbox_dict:
-                        result = ErrorResponse(
-                            error=f"Could not get bounding box for prim: {input_data.prim_path}",
-                            error_type="ComputationError",
-                        ).dict()
-                        return self._validate_output(
-                            result, (FocusPrimResponse, ErrorResponse), "focus_on_prim"
-                        )
-
-                    min_point = bbox_dict["min"]
-                    max_point = bbox_dict["max"]
-                    center = [
-                        (min_point[0] + max_point[0]) / 2,
-                        (min_point[1] + max_point[1]) / 2,
-                        (min_point[2] + max_point[2]) / 2,
-                    ]
-                    size = [
-                        max_point[0] - min_point[0],
-                        max_point[1] - min_point[1],
-                        max_point[2] - min_point[2],
-                    ]
-                    max_size = max(size)
-                    distance = max_size * 2.0
-                    eye = [
-                        center[0] + distance,
-                        center[1] + distance,
-                        center[2] + distance,
-                    ]
-
-                    success = session.set_camera_view(
-                        eye=(eye[0], eye[1], eye[2]),
-                        target=(center[0], center[1], center[2]),
-                        up=(0, 1, 0),
-                    )
-
-                    result = FocusPrimResponse(
-                        success=success,
-                        stage_id=input_data.stage_id,
-                        prim_path=input_data.prim_path,
-                        focus_point=center,
-                        camera_position=eye,
-                        message=f"Camera {'focused on' if success else 'failed to focus on'} {input_data.prim_path}",
-                    ).dict()
-                    return self._validate_output(
-                        result, (FocusPrimResponse, ErrorResponse), "focus_on_prim"
-                    )
-
-            except Exception as e:
-                self.logger.error(
-                    f"Error focusing on prim {input_data.stage_id}:{input_data.prim_path}: {e}"
-                )
-                result = ErrorResponse(error=str(e), error_type="Exception").dict()
-                return self._validate_output(
-                    result, (FocusPrimResponse, ErrorResponse), "focus_on_prim"
-                )
 
     def _register_blender_tools(self) -> None:
         """Register Blender runtime specific tools."""
@@ -4839,13 +4278,13 @@ class IsaacMCPServer(LoggerMixin):
 
     def get_capabilities(self) -> List[str]:
         """Get list of server capabilities."""
-        capabilities = []
+        capabilities: list[str] = [
+            "isaac_sim_script_execution",
+            "isaac_sim_connectivity_check",
+        ]
 
         if self.headless_adapter and self.headless_adapter.is_available():
             capabilities.extend(self.headless_adapter.get_capabilities())
-
-        if self.isaac_adapter and self.isaac_adapter.is_available():
-            capabilities.extend(self.isaac_adapter.get_capabilities())
 
         if self.blender_adapter and self.blender_adapter.is_available():
             capabilities.extend(self.blender_adapter.get_capabilities())
@@ -4856,7 +4295,6 @@ class IsaacMCPServer(LoggerMixin):
         return list(set(capabilities))  # Remove duplicates
 
 
-# Convenience functions
 def create_server_instance(settings: Optional[Settings] = None) -> IsaacMCPServer:
     """
     Create an Isaac MCP Server instance.

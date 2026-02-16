@@ -1,5 +1,5 @@
 """
-Tool registry for Isaac Sim MCP Server.
+Tool registry for Simul MCP Server.
 
 This module provides a registry system for organizing and managing
 MCP tools with automatic discovery and registration.
@@ -13,12 +13,10 @@ from ...logging import get_logger, LoggerMixin
 from ...config import Settings, get_settings
 from ...adapters import (
     is_blender_available,
-    is_isaac_available,
     is_headless_available,
     is_unreal_available,
 )
 from .usd_tools import USDFileTools, USDSceneTools, USDMeshTools, USDBBoxTools
-from .isaac_tools import ViewportTools, SimulationTools, CameraTools, RigidBodyTools
 from .blender_tools import BlenderTools
 
 logger = get_logger(__name__)
@@ -31,10 +29,6 @@ class ToolCategory(str, Enum):
     USD_SCENE = "usd_scene"
     USD_MESH = "usd_mesh"
     USD_BBOX = "usd_bbox"
-    VIEWPORT = "viewport"
-    SIMULATION = "simulation"
-    RIGID_BODY = "rigid_body"
-    CAMERA = "camera"
     BLENDER = "blender"
     UNREAL_SCENE = "unreal_scene"
     UNREAL_VIEWPORT = "unreal_viewport"
@@ -54,7 +48,6 @@ class ToolInfo:
     category: ToolCategory
     description: str
     method: Callable
-    requires_isaac: bool = False
     requires_blender: bool = False
     requires_unreal: bool = False
     requires_usd: bool = True
@@ -81,14 +74,12 @@ class ToolRegistry(LoggerMixin):
         self._tool_instances: Dict[ToolCategory, Any] = {}
 
         # Check runtime capabilities
-        self._isaac_available = is_isaac_available()
         self._blender_available = is_blender_available()
         self._unreal_available = is_unreal_available()
-        self._usd_available = is_headless_available() or self._isaac_available
+        self._usd_available = is_headless_available()
 
         self.logger.info(
-            "Tool registry initialized - Isaac: %s, Blender: %s, Unreal: %s, USD: %s",
-            self._isaac_available,
+            "Tool registry initialized - Blender: %s, Unreal: %s, USD: %s",
             self._blender_available,
             self._unreal_available,
             self._usd_available,
@@ -100,7 +91,6 @@ class ToolRegistry(LoggerMixin):
         category: ToolCategory,
         method: Callable,
         description: str,
-        requires_isaac: bool = False,
         requires_blender: bool = False,
         requires_unreal: bool = False,
         requires_usd: bool = True,
@@ -113,16 +103,12 @@ class ToolRegistry(LoggerMixin):
             category: Tool category
             method: Tool method
             description: Tool description
-            requires_isaac: Whether tool requires Isaac Sim
             requires_blender: Whether tool requires Blender runtime
             requires_unreal: Whether tool requires Unreal Engine runtime
             requires_usd: Whether tool requires USD support
         """
         # Check if tool can be enabled based on requirements
         enabled = True
-        if requires_isaac and not self._isaac_available:
-            enabled = False
-            self.logger.debug(f"Tool {name} disabled - Isaac Sim not available")
 
         if requires_blender and not self._blender_available:
             enabled = False
@@ -141,7 +127,6 @@ class ToolRegistry(LoggerMixin):
             category=category,
             description=description,
             method=method,
-            requires_isaac=requires_isaac,
             requires_blender=requires_blender,
             requires_unreal=requires_unreal,
             requires_usd=requires_usd,
@@ -237,18 +222,6 @@ class ToolRegistry(LoggerMixin):
                 return USDMeshTools(self.settings)
             elif category == ToolCategory.USD_BBOX:
                 return USDBBoxTools(self.settings)
-            elif category == ToolCategory.VIEWPORT:
-                if self._isaac_available:
-                    return ViewportTools(self.settings)
-            elif category == ToolCategory.SIMULATION:
-                if self._isaac_available:
-                    return SimulationTools(self.settings)
-            elif category == ToolCategory.RIGID_BODY:
-                if self._isaac_available:
-                    return RigidBodyTools(self.settings)
-            elif category == ToolCategory.CAMERA:
-                if self._isaac_available:
-                    return CameraTools(self.settings)
             elif category == ToolCategory.BLENDER:
                 if self._blender_available:
                     return BlenderTools(self.settings)
@@ -272,7 +245,6 @@ class ToolRegistry(LoggerMixin):
         enabled_tools = self.get_enabled_tools()
 
         capabilities = {
-            "isaac_available": self._isaac_available,
             "blender_available": self._blender_available,
             "unreal_available": self._unreal_available,
             "usd_available": self._usd_available,
@@ -296,7 +268,6 @@ class ToolRegistry(LoggerMixin):
             capabilities["tools"][tool.name] = {
                 "category": tool.category.value,
                 "enabled": tool.enabled,
-                "requires_isaac": tool.requires_isaac,
                 "requires_blender": tool.requires_blender,
                 "requires_unreal": tool.requires_unreal,
                 "requires_usd": tool.requires_usd,
@@ -416,89 +387,7 @@ def register_all_tools(registry: ToolRegistry) -> None:
         requires_usd=True,
     )
 
-    # Isaac Sim specific tools (only if Isaac is available)
-    if is_isaac_available():
-        # Viewport Tools
-        viewport_tools = ViewportTools()
-        registry.register_tool(
-            "capture_viewport",
-            ToolCategory.VIEWPORT,
-            viewport_tools.capture_viewport,
-            "Capture the Isaac Sim viewport",
-            requires_isaac=True,
-        )
-        registry.register_tool(
-            "get_viewport_info",
-            ToolCategory.VIEWPORT,
-            viewport_tools.get_viewport_info,
-            "Get information about the current viewport",
-            requires_isaac=True,
-        )
-
-        # Simulation Tools
-        simulation_tools = SimulationTools()
-        registry.register_tool(
-            "control_simulation",
-            ToolCategory.SIMULATION,
-            simulation_tools.control_simulation,
-            "Control Isaac Sim simulation (play, pause, stop, reset, step)",
-            requires_isaac=True,
-        )
-        registry.register_tool(
-            "get_simulation_status",
-            ToolCategory.SIMULATION,
-            simulation_tools.get_simulation_status,
-            "Get current simulation status",
-            requires_isaac=True,
-        )
-
-        rigid_body_tools = RigidBodyTools()
-        registry.register_tool(
-            "enable_rigid_body",
-            ToolCategory.RIGID_BODY,
-            rigid_body_tools.enable_rigid_body,
-            "Enable rigid body physics on a prim",
-            requires_isaac=True,
-        )
-        registry.register_tool(
-            "set_rigid_body_velocity",
-            ToolCategory.RIGID_BODY,
-            rigid_body_tools.set_rigid_body_velocity,
-            "Set rigid body linear or angular velocity",
-            requires_isaac=True,
-        )
-        registry.register_tool(
-            "get_rigid_body_state",
-            ToolCategory.RIGID_BODY,
-            rigid_body_tools.get_rigid_body_state,
-            "Get rigid body physics state for a prim",
-            requires_isaac=True,
-        )
-
-        # Camera Tools
-        camera_tools = CameraTools()
-        registry.register_tool(
-            "set_camera_view",
-            ToolCategory.CAMERA,
-            camera_tools.set_camera_view,
-            "Set camera view in the viewport",
-            requires_isaac=True,
-        )
-        registry.register_tool(
-            "get_camera_info",
-            ToolCategory.CAMERA,
-            camera_tools.get_camera_info,
-            "Get information about the current camera",
-            requires_isaac=True,
-        )
-        registry.register_tool(
-            "focus_on_prim",
-            ToolCategory.CAMERA,
-            camera_tools.focus_on_prim,
-            "Focus camera on a specific prim",
-            requires_isaac=True,
-        )
-
+    # Blender tools (only if Blender is available)
     if is_blender_available():
         blender_tools = BlenderTools()
         registry.register_tool(
@@ -518,6 +407,11 @@ def register_all_tools(registry: ToolRegistry) -> None:
             requires_usd=False,
         )
 
+    # Note: Isaac Sim tools (execute_isaac_script, ping_isaac) are registered
+    # directly in server.py via TCP socket execution. They are not part of the
+    # tool registry because they use IsaacSocketClient, not local adapters.
+
     logger.info(
-        f"Registered {len(registry.get_all_tools())} tools, {len(registry.get_enabled_tools())} enabled"
+        f"Registered {len(registry.get_all_tools())} tools, "
+        f"{len(registry.get_enabled_tools())} enabled"
     )

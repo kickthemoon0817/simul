@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ...logging import get_logger, LoggerMixin
 from ...config import Settings, get_settings
-from ...adapters import HeadlessUSDAdapter, IsaacRuntimeAdapter, is_headless_available, is_isaac_available
+from ...adapters import HeadlessUSDAdapter, is_headless_available
 from ..schemas import *
 
 logger = get_logger(__name__)
@@ -23,11 +23,10 @@ class USDFileTools(LoggerMixin):
         """Initialize USD file tools."""
         self.settings = settings or get_settings()
         self.headless_adapter = HeadlessUSDAdapter(self.settings) if is_headless_available() else None
-        self.isaac_adapter = IsaacRuntimeAdapter(self.settings) if is_isaac_available() else None
-    
+
     def get_adapter(self):
         """Get the best available adapter."""
-        return self.isaac_adapter if (self.isaac_adapter and self.isaac_adapter.is_available()) else self.headless_adapter
+        return self.headless_adapter
     
     async def load_usd_file(self, file_path: str) -> Dict[str, Any]:
         """
@@ -153,11 +152,10 @@ class USDSceneTools(LoggerMixin):
         """Initialize USD scene tools."""
         self.settings = settings or get_settings()
         self.headless_adapter = HeadlessUSDAdapter(self.settings) if is_headless_available() else None
-        self.isaac_adapter = IsaacRuntimeAdapter(self.settings) if is_isaac_available() else None
-    
+
     def get_adapter(self):
         """Get the best available adapter."""
-        return self.isaac_adapter if (self.isaac_adapter and self.isaac_adapter.is_available()) else self.headless_adapter
+        return self.headless_adapter
     
     async def get_prim_info(self, stage_id: str, prim_path: str) -> Dict[str, Any]:
         """
@@ -479,11 +477,10 @@ class USDMeshTools(LoggerMixin):
         """Initialize USD mesh tools."""
         self.settings = settings or get_settings()
         self.headless_adapter = HeadlessUSDAdapter(self.settings) if is_headless_available() else None
-        self.isaac_adapter = IsaacRuntimeAdapter(self.settings) if is_isaac_available() else None
-    
+
     def get_adapter(self):
         """Get the best available adapter."""
-        return self.isaac_adapter if (self.isaac_adapter and self.isaac_adapter.is_available()) else self.headless_adapter
+        return self.headless_adapter
     
     async def get_mesh_info(self, stage_id: str, prim_path: str) -> Dict[str, Any]:
         """
@@ -556,11 +553,10 @@ class USDBBoxTools(LoggerMixin):
         """Initialize USD bounding box tools."""
         self.settings = settings or get_settings()
         self.headless_adapter = HeadlessUSDAdapter(self.settings) if is_headless_available() else None
-        self.isaac_adapter = IsaacRuntimeAdapter(self.settings) if is_isaac_available() else None
-    
+
     def get_adapter(self):
         """Get the best available adapter."""
-        return self.isaac_adapter if (self.isaac_adapter and self.isaac_adapter.is_available()) else self.headless_adapter
+        return self.headless_adapter
     
     async def get_bounding_box(self, stage_id: str, prim_path: Optional[str] = None, world_space: bool = True) -> Dict[str, Any]:
         """

@@ -1,4 +1,10 @@
-"""Adapter layer for simulation runtime integrations."""
+"""
+Adapter layer for Simul MCP Server.
+
+This package provides adapter classes that bridge between the MCP server
+and different runtime environments (headless USD operations, Isaac Sim via TCP,
+Blender, Unreal Engine).
+"""
 
 from typing import Any
 
@@ -6,6 +12,10 @@ from typing import Any
 def _raise_import_error(adapter_name: str) -> Any:
     """Raise consistent ImportError for unavailable optional adapters."""
     raise ImportError(f"{adapter_name} is not available in this environment")
+
+
+# Isaac Sim TCP socket client (always available — no omni.* dependency)
+from .isaac_socket_client import IsaacSocketClient, ScriptResult
 
 
 try:
@@ -25,28 +35,6 @@ except Exception:
 
     def is_headless_available() -> bool:
         """Fallback headless availability check."""
-        return False
-
-
-try:
-    from .isaac_runtime import (
-        IsaacRuntimeAdapter,
-        IsaacRuntimeSession,
-        ViewportCapture,
-        create_isaac_session,
-        is_isaac_available,
-    )
-except Exception:
-    IsaacRuntimeAdapter = None
-    IsaacRuntimeSession = None
-    ViewportCapture = None
-
-    def create_isaac_session(*args: Any, **kwargs: Any) -> Any:
-        """Fallback Isaac session creator when Isaac runtime is unavailable."""
-        return _raise_import_error("IsaacRuntimeAdapter")
-
-    def is_isaac_available() -> bool:
-        """Fallback Isaac availability check."""
         return False
 
 
@@ -91,17 +79,14 @@ except Exception:
 
 
 __all__ = [
+    # Isaac Sim TCP adapter
+    "IsaacSocketClient",
+    "ScriptResult",
     # Headless USD adapter
     "HeadlessUSDAdapter",
     "HeadlessUSDSession",
     "create_headless_session",
     "is_headless_available",
-    # Isaac Sim runtime adapter
-    "IsaacRuntimeAdapter",
-    "IsaacRuntimeSession",
-    "ViewportCapture",
-    "create_isaac_session",
-    "is_isaac_available",
     # Blender runtime adapter
     "BlenderRuntimeAdapter",
     "BlenderRuntimeSession",

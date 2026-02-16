@@ -10,15 +10,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
 
 
-class ImageFormat(str, Enum):
-    """Supported image formats for viewport capture."""
-
-    PNG = "png"
-    JPG = "jpg"
-    JPEG = "jpeg"
-    EXR = "exr"
-
-
 class PrimType(str, Enum):
     """Common USD prim types."""
 
@@ -145,13 +136,6 @@ class MeshInfoRequest(BaseModel):
     prim_path: str = Field(..., description="Mesh prim path", min_length=1)
 
 
-class FocusPrimRequest(BaseModel):
-    """Request to focus on a prim."""
-
-    stage_id: str = Field(..., description="Stage identifier", min_length=1)
-    prim_path: str = Field(..., description="Prim path", min_length=1)
-
-
 class PrimCreateRequest(BaseModel):
     stage_id: str = Field(..., description="Stage identifier", min_length=1)
     prim_path: str = Field(..., description="Prim path", min_length=1)
@@ -174,33 +158,6 @@ class PrimDeleteRequest(BaseModel):
     prim_path: str = Field(..., description="Prim path", min_length=1)
 
 
-class RigidBodyEnableRequest(BaseModel):
-    """Request to enable rigid body physics on a prim."""
-
-    prim_path: str = Field(..., description="Prim path", min_length=1)
-    mass: Optional[float] = Field(None, description="Mass in kilograms", gt=0)
-
-
-class RigidBodyVelocityRequest(BaseModel):
-    """Request to set rigid body velocities."""
-
-    prim_path: str = Field(..., description="Prim path", min_length=1)
-    linear_velocity: Optional[List[float]] = Field(
-        None, description="Linear velocity [x, y, z]", min_items=3, max_items=3
-    )
-    angular_velocity: Optional[List[float]] = Field(
-        None, description="Angular velocity [x, y, z]", min_items=3, max_items=3
-    )
-
-    @model_validator(mode="after")
-    def validate_velocity(self):
-        if self.angular_velocity is None and self.linear_velocity is None:
-            raise ValueError(
-                "At least one of linear_velocity or angular_velocity must be provided"
-            )
-        return self
-
-
 class MeshInfo(BaseModel):
     """USD mesh information."""
 
@@ -220,192 +177,6 @@ class MeshInfo(BaseModel):
     bbox: BoundingBox = Field(..., description="Mesh bounding box")
     materials: List[str] = Field(..., description="Material paths")
     subsets: List[Dict[str, Any]] = Field(..., description="Geometry subsets")
-
-
-class ViewportCaptureRequest(BaseModel):
-    """Request for viewport capture."""
-
-    width: Optional[int] = Field(None, description="Image width", gt=0, le=4096)
-    height: Optional[int] = Field(None, description="Image height", gt=0, le=4096)
-    format: ImageFormat = Field(ImageFormat.PNG, description="Image format")
-    save_to_file: bool = Field(False, description="Save image to file")
-    file_path: Optional[str] = Field(None, description="File path for saved image")
-
-    @field_validator("width", "height")
-    @classmethod
-    def validate_dimensions(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None and v <= 0:
-            raise ValueError("Dimensions must be positive")
-        return v
-
-
-class ViewportCaptureResponse(BaseModel):
-    """Response from viewport capture."""
-
-    success: bool = Field(..., description="Whether capture was successful")
-    width: int = Field(..., description="Actual image width")
-    height: int = Field(..., description="Actual image height")
-    format: str = Field(..., description="Image format")
-    file_path: Optional[str] = Field(None, description="Path to saved file")
-    error: Optional[str] = Field(None, description="Error message if failed")
-
-
-class ViewportInfoResponse(BaseModel):
-    """Response with viewport information."""
-
-    success: bool = Field(..., description="Whether request was successful")
-    viewport_available: bool = Field(..., description="Whether a viewport is available")
-    width: Optional[int] = Field(None, description="Viewport width")
-    height: Optional[int] = Field(None, description="Viewport height")
-    camera_path: Optional[str] = Field(None, description="Active camera path")
-    supported_formats: List[str] = Field(..., description="Supported capture formats")
-    max_capture_size: int = Field(..., description="Maximum capture size")
-
-
-class SimulationControlResponse(BaseModel):
-    """Response from simulation control."""
-
-    success: bool = Field(..., description="Whether the action succeeded")
-    action: str = Field(..., description="Action performed")
-    steps: Optional[int] = Field(None, description="Step count if action was step")
-    message: str = Field(..., description="Status message")
-
-
-class SimulationStatusResponse(BaseModel):
-    """Response with simulation status."""
-
-    success: bool = Field(..., description="Whether request was successful")
-    world_initialized: bool = Field(..., description="Whether world is initialized")
-    is_playing: bool = Field(..., description="Whether simulation is playing")
-    current_time: float = Field(..., description="Current simulation time")
-    physics_dt: Optional[float] = Field(None, description="Physics timestep")
-    rendering_dt: Optional[float] = Field(None, description="Rendering timestep")
-
-
-class RigidBodyActionResponse(BaseModel):
-    """Response for rigid body actions."""
-
-    success: bool = Field(..., description="Whether the action succeeded")
-    prim_path: str = Field(..., description="Prim path")
-    message: str = Field(..., description="Status message")
-
-
-class RigidBodyStateResponse(BaseModel):
-    """Response with rigid body state."""
-
-    success: bool = Field(..., description="Whether request was successful")
-    prim_path: str = Field(..., description="Prim path")
-    enabled: bool = Field(..., description="Whether rigid body API is applied")
-    mass: Optional[float] = Field(None, description="Mass in kilograms")
-    linear_velocity: Optional[List[float]] = Field(
-        None, description="Linear velocity [x, y, z]", min_items=3, max_items=3
-    )
-    angular_velocity: Optional[List[float]] = Field(
-        None, description="Angular velocity [x, y, z]", min_items=3, max_items=3
-    )
-
-
-class CameraInfoResponse(BaseModel):
-    """Response with camera information."""
-
-    success: bool = Field(..., description="Whether request was successful")
-    camera_available: bool = Field(..., description="Whether a camera is available")
-    camera_path: Optional[str] = Field(None, description="Camera prim path")
-    focal_length: Optional[float] = Field(None, description="Camera focal length")
-    horizontal_aperture: Optional[float] = Field(
-        None, description="Camera horizontal aperture"
-    )
-    vertical_aperture: Optional[float] = Field(
-        None, description="Camera vertical aperture"
-    )
-    can_control: Optional[bool] = Field(
-        None, description="Whether camera can be controlled"
-    )
-
-
-class CameraViewResponse(BaseModel):
-    success: bool = Field(..., description="Whether request was successful")
-    eye: List[float] = Field(
-        ..., description="Camera position [x, y, z]", min_items=3, max_items=3
-    )
-    target: List[float] = Field(
-        ..., description="Camera target [x, y, z]", min_items=3, max_items=3
-    )
-    up: List[float] = Field(
-        ..., description="Up vector [x, y, z]", min_items=3, max_items=3
-    )
-    message: str = Field(..., description="Status message")
-
-
-class BlenderInfoResponse(BaseModel):
-    """Response with Blender runtime information."""
-
-    success: bool = Field(..., description="Whether request was successful")
-    version: List[int] = Field(..., description="Blender version tuple values")
-    version_string: str = Field(..., description="Human-readable Blender version")
-    binary_path: Optional[str] = Field(None, description="Blender binary path")
-    background: bool = Field(..., description="Whether Blender runs in background mode")
-    blend_file_path: Optional[str] = Field(None, description="Current .blend file path")
-
-
-class BlenderObjectInfo(BaseModel):
-    """Serializable Blender object entry."""
-
-    name: str = Field(..., description="Object name")
-    object_type: str = Field(..., description="Blender object type")
-    collection: Optional[str] = Field(None, description="Collection name filter")
-    visible: bool = Field(..., description="Whether object is visible")
-
-
-class BlenderSceneObjectsRequest(BaseModel):
-    """Request for Blender scene object listing."""
-
-    collection_name: Optional[str] = Field(
-        None,
-        description="Optional collection name to filter objects",
-    )
-    include_hidden: bool = Field(
-        False,
-        description="Include hidden objects when true",
-    )
-    max_items: int = Field(
-        200,
-        description="Maximum number of objects to return",
-        ge=1,
-        le=5000,
-    )
-
-
-class BlenderSceneObjectsResponse(BaseModel):
-    """Response for Blender scene object listing."""
-
-    success: bool = Field(..., description="Whether request was successful")
-    collection: Optional[str] = Field(None, description="Collection used for filtering")
-    include_hidden: bool = Field(
-        ..., description="Whether hidden objects were included"
-    )
-    max_items: int = Field(..., description="Maximum number of requested objects")
-    count: int = Field(..., description="Number of objects in response")
-    objects: List[BlenderObjectInfo] = Field(
-        ...,
-        description="Listed Blender objects",
-    )
-    truncated: bool = Field(..., description="Whether output reached max_items limit")
-
-
-class FocusPrimResponse(BaseModel):
-    """Response from focusing camera on a prim."""
-
-    success: bool = Field(..., description="Whether focus succeeded")
-    stage_id: str = Field(..., description="Stage identifier")
-    prim_path: str = Field(..., description="Prim path")
-    focus_point: List[float] = Field(
-        ..., description="Focus point [x, y, z]", min_items=3, max_items=3
-    )
-    camera_position: List[float] = Field(
-        ..., description="Camera position [x, y, z]", min_items=3, max_items=3
-    )
-    message: str = Field(..., description="Status message")
 
 
 class PrimActionResponse(BaseModel):
@@ -441,35 +212,6 @@ class SceneSummaryResponse(BaseModel):
     summary: Dict[str, Any] = Field(..., description="Scene summary data")
     digest: Optional[str] = Field(None, description="Human-readable digest")
     error: Optional[str] = Field(None, description="Error message if failed")
-
-
-class CameraViewRequest(BaseModel):
-    """Request to set camera view."""
-
-    eye: List[float] = Field(
-        ..., description="Camera position [x, y, z]", min_items=3, max_items=3
-    )
-    target: List[float] = Field(
-        ..., description="Camera target [x, y, z]", min_items=3, max_items=3
-    )
-    up: List[float] = Field(
-        [0, 1, 0], description="Up vector [x, y, z]", min_items=3, max_items=3
-    )
-
-
-class SimulationControlRequest(BaseModel):
-    """Request for simulation control."""
-
-    action: str = Field(..., description="Action (play, pause, stop, reset, step)")
-    steps: int = Field(1, description="Number of steps (for step action)", ge=1)
-
-    @field_validator("action")
-    @classmethod
-    def validate_action(cls, v: str) -> str:
-        valid_actions = ["play", "pause", "stop", "reset", "step"]
-        if v not in valid_actions:
-            raise ValueError(f"Action must be one of {valid_actions}")
-        return v
 
 
 class PrimSearchRequest(BaseModel):
@@ -1939,75 +1681,6 @@ ToolResult = Union[
     USDFileInfo,
     PrimInfo,
     MeshInfo,
-    ViewportCaptureResponse,
-    ViewportInfoResponse,
-    SimulationControlResponse,
-    SimulationStatusResponse,
-    RigidBodyActionResponse,
-    RigidBodyStateResponse,
-    CameraInfoResponse,
-    CameraViewResponse,
-    BlenderInfoResponse,
-    BlenderSceneObjectsResponse,
-    UnrealHealthCheckResponse,
-    UnrealEngineInfoResponse,
-    UnrealLoadedMapResponse,
-    UnrealListActorsResponse,
-    UnrealGetActorInfoResponse,
-    UnrealSearchAssetsResponse,
-    UnrealDescribeObjectResponse,
-    UnrealGetThumbnailResponse,
-    UnrealSceneSummaryResponse,
-    UnrealCaptureViewportResponse,
-    UnrealViewportInfoResponse,
-    UnrealSetCameraViewResponse,
-    UnrealFocusActorResponse,
-    UnrealSpawnActorResponse,
-    UnrealDeleteActorResponse,
-    UnrealSetActorTransformResponse,
-    UnrealSetActorPropertyResponse,
-    UnrealCallActorFunctionResponse,
-    UnrealSetActorParentResponse,
-    UnrealAddComponentResponse,
-    UnrealSetActorVisibilityResponse,
-    UnrealGetMaterialInfoResponse,
-    UnrealSetMaterialParamsResponse,
-    UnrealCreateMaterialInstanceResponse,
-    UnrealAssignMaterialResponse,
-    UnrealSetLightParamsResponse,
-    UnrealSetRenderSettingsResponse,
-    UnrealControlSimulationResponse,
-    UnrealGetSimulationStatusResponse,
-    UnrealEnablePhysicsResponse,
-    UnrealSetCollisionResponse,
-    UnrealApplyForceResponse,
-    UnrealSetPhysicsParamsResponse,
-    # Phase 6: USD/SimReady
-    UnrealImportUsdResponse,
-    UnrealExportUsdResponse,
-    UnrealConvertToSimreadyResponse,
-    UnrealValidateSimreadyResponse,
-    UnrealGetInterchangeInfoResponse,
-    # Phase 7: Agent Tools
-    UnrealBatchOperationsResponse,
-    UnrealQuerySceneGraphResponse,
-    UnrealAnalyzeSceneForRoboticsResponse,
-    UnrealGenerateProceduralSceneResponse,
-    UnrealGetActorBySemanticLabelResponse,
-    # Phase 8: Geometry & Modeling
-    UnrealGenerateMeshPrimitiveResponse,
-    UnrealApplyMeshBooleanResponse,
-    UnrealComputeConvexHullResponse,
-    UnrealDecomposeConvexHullResponse,
-    UnrealEditMeshTopologyResponse,
-    UnrealSubdivideMeshResponse,
-    UnrealSimplifyMeshResponse,
-    UnrealCutMeshPlaneResponse,
-    UnrealValidateMeshResponse,
-    UnrealConvertMeshFormatResponse,
-    UnrealRemeshMeshResponse,
-    UnrealComputeMeshUvResponse,
-    FocusPrimResponse,
     PrimActionResponse,
     SceneSummaryResponse,
     PrimSearchResponse,

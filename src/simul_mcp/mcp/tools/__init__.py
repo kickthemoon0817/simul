@@ -1,8 +1,8 @@
 """
-MCP tools for Isaac Sim MCP Server.
+MCP tools for Simul MCP Server.
 
-This package provides individual MCP tool implementations for USD operations,
-viewport capture, and simulation control.
+This package provides individual MCP tool implementations for USD file operations.
+Isaac Sim tools are registered directly in the server via TCP socket execution.
 """
 
 from .usd_tools import (
@@ -10,12 +10,6 @@ from .usd_tools import (
     USDSceneTools,
     USDMeshTools,
     USDBBoxTools,
-)
-
-from .isaac_tools import (
-    ViewportTools,
-    SimulationTools,
-    CameraTools,
 )
 
 from .blender_tools import BlenderTools
@@ -33,10 +27,6 @@ __all__ = [
     "USDSceneTools",
     "USDMeshTools",
     "USDBBoxTools",
-    # Isaac Sim tools
-    "ViewportTools",
-    "SimulationTools",
-    "CameraTools",
     # Blender tools
     "BlenderTools",
     # Unreal tools
