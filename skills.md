@@ -494,12 +494,12 @@ set_prim_attribute_value("/World/Box", "xformOp:scale", Gf.Vec3d(2.0, 2.0, 2.0))
 | Create prim | `isaacsim.core.utils.prims` | `create_prim(path, type, position=, ...)` |
 | Delete prim | `isaacsim.core.utils.prims` | `delete_prim(path)` |
 | Get/Set attrs | `isaacsim.core.utils.prims` | `get/set_prim_attribute_value()` |
-| World pose | `isaacsim.core.utils.xforms` | `get_world_pose(path)` |
+| World/Local pose | `isaacsim.core.utils.xforms` | `get_world_pose(path)`, `get_local_pose(path)` |
 | Camera view | `isaacsim.core.utils.viewports` | `set_camera_view(eye, target)` |
 | Rigid body | `pxr.UsdPhysics` | `RigidBodyAPI.Apply(prim)` |
 | Materials | `pxr.UsdShade` | `Material.Define()`, `Shader.Define()` |
 | Lights | `pxr.UsdLux` | `DistantLight/DomeLight/SphereLight.Define()` |
-| Bounding box | `isaacsim.core.utils.bounds` | `create_bbox_cache()`, `compute_aabb()` |
+| Bounding box | `isaacsim.core.utils.bounds` | `create_bbox_cache()`, `compute_aabb()`, `compute_obb()` |
 | Rotations | `isaacsim.core.utils.rotations` | `euler_angles_to_quat()`, etc. |
 | Raycast | `isaacsim.core.utils.collisions` | `ray_cast(pos, orient, offset)` |
 | Load asset | `isaacsim.core.utils.stage` | `add_reference_to_stage(usd, path)` |

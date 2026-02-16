@@ -20,6 +20,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+MAX_RESPONSE_BYTES: int = 10 * 1024 * 1024  # 10 MB cap on response size
+
 
 @dataclass(frozen=True)
 class ScriptResult:
@@ -48,6 +50,9 @@ class IsaacSocketClient:
     Targets the stock ``isaacsim.code_editor.vscode`` extension which listens
     on ``127.0.0.1:8226`` by default. Each call opens a new TCP connection,
     sends the code, reads the JSON response, and closes.
+
+    Thread-safe: an ``asyncio.Lock`` serialises concurrent ``execute()`` calls
+    so that TCP connections never interleave.
     """
 
     def __init__(
@@ -56,6 +61,7 @@ class IsaacSocketClient:
         port: int = 8226,
         timeout_seconds: float = 30.0,
         read_buffer_size: int = 1024 * 1024,
+        max_response_bytes: int = MAX_RESPONSE_BYTES,
     ) -> None:
         """
         Initialize the socket client.
@@ -65,11 +71,14 @@ class IsaacSocketClient:
             port: Isaac Sim socket server port.
             timeout_seconds: Timeout for the full send+receive cycle.
             read_buffer_size: Max bytes to read per recv call.
+            max_response_bytes: Upper bound on total response size.
         """
         self._host = host
         self._port = port
         self._timeout_seconds = timeout_seconds
         self._read_buffer_size = read_buffer_size
+        self._max_response_bytes = max_response_bytes
+        self._lock = asyncio.Lock()
 
     @property
     def address(self) -> str:
@@ -82,6 +91,7 @@ class IsaacSocketClient:
 
         Opens a TCP connection to the VS Code extension socket server,
         sends the code, waits for the JSON result, and returns it parsed.
+        Serialised via an internal lock so concurrent callers are safe.
 
         Args:
             code: Python source code to execute in Isaac Sim's Python scope.
@@ -92,12 +102,34 @@ class IsaacSocketClient:
         Raises:
             ConnectionRefusedError: If Isaac Sim is not running or the
                 extension is not enabled.
-            TimeoutError: If the execution exceeds timeout_seconds.
+            TimeoutError: If the connection or execution exceeds timeout_seconds.
+        """
+        async with self._lock:
+            return await self._execute_unlocked(code)
+
+    async def _execute_unlocked(self, code: str) -> ScriptResult:
+        """
+        Internal execute without lock — called by ``execute()`` under lock.
+
+        Args:
+            code: Python source code to execute.
+
+        Returns:
+            ScriptResult with execution output.
+
+        Raises:
+            ConnectionRefusedError: Cannot reach Isaac Sim.
+            TimeoutError: Connection or read timed out.
         """
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(self._host, self._port),
                 timeout=self._timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Connection to Isaac Sim at {self.address} timed out "
+                f"after {self._timeout_seconds}s."
             )
         except (ConnectionRefusedError, OSError) as exc:
             raise ConnectionRefusedError(
@@ -110,6 +142,7 @@ class IsaacSocketClient:
             await writer.drain()
 
             chunks: list[bytes] = []
+            total_bytes: int = 0
             while True:
                 chunk = await asyncio.wait_for(
                     reader.read(self._read_buffer_size),
@@ -117,6 +150,11 @@ class IsaacSocketClient:
                 )
                 if not chunk:
                     break
+                total_bytes += len(chunk)
+                if total_bytes > self._max_response_bytes:
+                    raise ValueError(
+                        f"Response from Isaac Sim exceeded {self._max_response_bytes} bytes limit."
+                    )
                 chunks.append(chunk)
 
             raw_response = b"".join(chunks).decode("utf-8")
@@ -128,7 +166,7 @@ class IsaacSocketClient:
                 await writer.wait_closed()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except (OSError, RuntimeError) as exc:
                 logger.warning("Failed to close socket cleanly: %s", exc)
 
     async def ping(self) -> bool:
@@ -181,4 +219,3 @@ class IsaacSocketClient:
             error_value=data.get("evalue", ""),
             traceback=traceback_str,
         )
-

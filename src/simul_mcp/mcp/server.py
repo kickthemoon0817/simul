@@ -1073,6 +1073,13 @@ class IsaacMCPServer(LoggerMixin):
             Returns:
                 Dict with success, output, and optional error info.
             """
+            MAX_CODE_SIZE: int = 100_000  # 100 KB
+            if len(code) > MAX_CODE_SIZE:
+                return ErrorResponse(
+                    error=f"Code payload too large ({len(code)} bytes, max {MAX_CODE_SIZE}).",
+                    error_type="PayloadTooLarge",
+                ).dict()
+
             rate_error = self._check_rate_limit("execute_isaac_script")
             if rate_error:
                 return rate_error
