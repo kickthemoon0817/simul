@@ -5,21 +5,21 @@ This module provides a registry system for organizing and managing
 MCP tools with automatic discovery and registration.
 """
 
-from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
-from ...logging import get_logger, LoggerMixin
-from ...config import Settings, get_settings
 from ...adapters import (
     is_blender_available,
-    is_isaac_available,
     is_headless_available,
+    is_isaac_available,
     is_unreal_available,
 )
-from .usd_tools import USDFileTools, USDSceneTools, USDMeshTools, USDBBoxTools
-from .isaac_tools import ViewportTools, SimulationTools, CameraTools, RigidBodyTools
+from ...config import Settings, get_settings
+from ...logging import LoggerMixin, get_logger
 from .blender_tools import BlenderTools
+from .isaac_tools import CameraTools, RigidBodyTools, SimulationTools, ViewportTools
+from .usd_tools import USDBBoxTools, USDFileTools, USDMeshTools, USDSceneTools
 
 logger = get_logger(__name__)
 
@@ -36,6 +36,7 @@ class ToolCategory(str, Enum):
     RIGID_BODY = "rigid_body"
     CAMERA = "camera"
     BLENDER = "blender"
+    SIMREADY = "simready"
     UNREAL_SCENE = "unreal_scene"
     UNREAL_VIEWPORT = "unreal_viewport"
     UNREAL_MANIPULATION = "unreal_manipulation"
@@ -250,6 +251,9 @@ class ToolRegistry(LoggerMixin):
                 if self._isaac_available:
                     return CameraTools(self.settings)
             elif category == ToolCategory.BLENDER:
+                if self._blender_available:
+                    return BlenderTools(self.settings)
+            elif category == ToolCategory.SIMREADY:
                 if self._blender_available:
                     return BlenderTools(self.settings)
             elif category.value.startswith("unreal_"):
@@ -517,7 +521,419 @@ def register_all_tools(registry: ToolRegistry) -> None:
             requires_blender=True,
             requires_usd=False,
         )
+        registry.register_tool(
+            "get_blender_object_info",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_object_info,
+            "Get detailed information about a single Blender object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_mesh_info",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_mesh_info,
+            "Get counts-only mesh geometry information",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_bounding_box",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_bounding_box,
+            "Get bounding box corners of a Blender object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "search_blender_objects",
+            ToolCategory.BLENDER,
+            blender_tools.search_blender_objects,
+            "Search for Blender objects by name pattern and type",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "summarize_blender_scene",
+            ToolCategory.BLENDER,
+            blender_tools.summarize_blender_scene,
+            "Get high-level summary of the current Blender scene",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_material_info",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_material_info,
+            "Get material information with bounded node traversal",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_distance_between",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_distance_between,
+            "Compute Euclidean distance between two Blender objects",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "check_blender_object_bounds",
+            ToolCategory.BLENDER,
+            blender_tools.check_blender_object_bounds,
+            "Check whether an object is within spatial bounds",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "capture_blender_viewport",
+            ToolCategory.BLENDER,
+            blender_tools.capture_blender_viewport,
+            "Capture the Blender viewport as a base64 JPEG image",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "set_blender_camera_view",
+            ToolCategory.BLENDER,
+            blender_tools.set_blender_camera_view,
+            "Set Blender camera location and rotation",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_camera_info",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_camera_info,
+            "Get Blender camera properties (lens, sensor, clip distances)",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "focus_blender_on_object",
+            ToolCategory.BLENDER,
+            blender_tools.focus_blender_on_object,
+            "Focus the Blender camera on a specific object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_viewport_info",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_viewport_info,
+            "Get Blender viewport and render settings summary",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "capture_blender_viewport_sequence",
+            ToolCategory.BLENDER,
+            blender_tools.capture_blender_viewport_sequence,
+            "Capture Blender viewport at multiple frames",
+            requires_blender=True,
+            requires_usd=False,
+        )
 
-    logger.info(
-        f"Registered {len(registry.get_all_tools())} tools, {len(registry.get_enabled_tools())} enabled"
-    )
+        # -- Phase 3: Scene manipulation tools ---
+        registry.register_tool(
+            "create_blender_object",
+            ToolCategory.BLENDER,
+            blender_tools.create_blender_object,
+            "Create a new object in the Blender scene",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "delete_blender_object",
+            ToolCategory.BLENDER,
+            blender_tools.delete_blender_object,
+            "Delete an object from the Blender scene",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "set_blender_object_transform",
+            ToolCategory.BLENDER,
+            blender_tools.set_blender_object_transform,
+            "Set an object's location, rotation, and/or scale",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "set_blender_object_parent",
+            ToolCategory.BLENDER,
+            blender_tools.set_blender_object_parent,
+            "Parent one object to another",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "clear_blender_object_parent",
+            ToolCategory.BLENDER,
+            blender_tools.clear_blender_object_parent,
+            "Unparent an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "assign_blender_material",
+            ToolCategory.BLENDER,
+            blender_tools.assign_blender_material,
+            "Create and assign a Principled BSDF material to an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "add_blender_modifier",
+            ToolCategory.BLENDER,
+            blender_tools.add_blender_modifier,
+            "Add a modifier to an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "set_blender_light_params",
+            ToolCategory.BLENDER,
+            blender_tools.set_blender_light_params,
+            "Set properties on a Blender light object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+
+        # -- Phase 4: File I/O tools ------------------------------------------
+        registry.register_tool(
+            "open_blender_file",
+            ToolCategory.BLENDER,
+            blender_tools.open_blender_file,
+            "Open a .blend file, replacing the current scene",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "save_blender_file",
+            ToolCategory.BLENDER,
+            blender_tools.save_blender_file,
+            "Save the current scene to a .blend file",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "import_blender_file",
+            ToolCategory.BLENDER,
+            blender_tools.import_blender_file,
+            "Import a file (OBJ/FBX/GLTF/USD/STL/PLY) into the scene",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "export_blender_file",
+            ToolCategory.BLENDER,
+            blender_tools.export_blender_file,
+            "Export scene objects to a file (OBJ/FBX/GLTF/USD/STL/PLY)",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_file_info",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_file_info,
+            "Get information about the current .blend file",
+            requires_blender=True,
+            requires_usd=False,
+        )
+
+        # -- Phase 5: Animation & Timeline tools --------------------------------
+        registry.register_tool(
+            "set_blender_frame",
+            ToolCategory.BLENDER,
+            blender_tools.set_blender_frame,
+            "Set the current animation frame",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_frame",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_frame,
+            "Get the current frame and animation range",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "set_blender_frame_range",
+            ToolCategory.BLENDER,
+            blender_tools.set_blender_frame_range,
+            "Set the animation frame range",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "play_blender_animation",
+            ToolCategory.BLENDER,
+            blender_tools.play_blender_animation,
+            "Control animation playback (play, stop, reverse)",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "insert_blender_keyframe",
+            ToolCategory.BLENDER,
+            blender_tools.insert_blender_keyframe,
+            "Insert a keyframe on an object property",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "delete_blender_keyframe",
+            ToolCategory.BLENDER,
+            blender_tools.delete_blender_keyframe,
+            "Delete a keyframe from an object property",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_keyframes",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_keyframes,
+            "Get keyframe summary for an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+
+        # -- Phase 6: Physics & Simulation tools --
+        registry.register_tool(
+            "setup_blender_rigid_body",
+            ToolCategory.BLENDER,
+            blender_tools.setup_blender_rigid_body,
+            "Set up rigid body physics on an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "add_blender_force_field",
+            ToolCategory.BLENDER,
+            blender_tools.add_blender_force_field,
+            "Add a force field to the scene",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_force_field_info",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_force_field_info,
+            "Get force field parameters for an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "add_blender_rigid_body_constraint",
+            ToolCategory.BLENDER,
+            blender_tools.add_blender_rigid_body_constraint,
+            "Add a rigid body constraint between two objects",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_constraint_info",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_constraint_info,
+            "Get rigid body constraint info for an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_physics_state",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_physics_state,
+            "Get current physics state of an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_blender_object_trajectory",
+            ToolCategory.BLENDER,
+            blender_tools.get_blender_object_trajectory,
+            "Sample object position over a frame range",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "bake_blender_simulation",
+            ToolCategory.BLENDER,
+            blender_tools.bake_blender_simulation,
+            "Bake physics simulation for a frame range",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "free_blender_bake",
+            ToolCategory.BLENDER,
+            blender_tools.free_blender_bake,
+            "Free baked physics simulation data",
+            requires_blender=True,
+            requires_usd=False,
+        )
+
+        # -- Scripting & mesh-from-data tools --
+        registry.register_tool(
+            "execute_blender_script",
+            ToolCategory.BLENDER,
+            blender_tools.execute_blender_script,
+            "Execute arbitrary Python code inside Blender",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "create_blender_mesh_from_data",
+            ToolCategory.BLENDER,
+            blender_tools.create_blender_mesh_from_data,
+            "Create a mesh from raw vertex/edge/face data",
+            requires_blender=True,
+            requires_usd=False,
+        )
+
+        # -- SimReady tools --
+        registry.register_tool(
+            "apply_simready_metadata",
+            ToolCategory.SIMREADY,
+            blender_tools.apply_simready_metadata,
+            "Apply SimReady metadata to an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "get_simready_metadata",
+            ToolCategory.SIMREADY,
+            blender_tools.get_simready_metadata,
+            "Get SimReady metadata from an object",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "validate_simready_compliance",
+            ToolCategory.SIMREADY,
+            blender_tools.validate_simready_compliance,
+            "Validate objects against SimReady spec",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "export_simready_usd",
+            ToolCategory.SIMREADY,
+            blender_tools.export_simready_usd,
+            "Export objects as SimReady USD",
+            requires_blender=True,
+            requires_usd=False,
+        )
+        registry.register_tool(
+            "setup_simready_hierarchy",
+            ToolCategory.SIMREADY,
+            blender_tools.setup_simready_hierarchy,
+            "Set up SimReady-compliant object hierarchy",
+            requires_blender=True,
+            requires_usd=False,
+        )
+
+    total = len(registry.get_all_tools())
+    enabled = len(registry.get_enabled_tools())
+    logger.info(f"Registered {total} tools, {enabled} enabled")
