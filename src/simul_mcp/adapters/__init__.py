@@ -70,6 +70,26 @@ except Exception:
         return False
 
 
+try:
+    from .unreal_runtime import (
+        UnrealRuntimeAdapter,
+        UnrealRuntimeSession,
+        create_unreal_session,
+        is_unreal_available,
+    )
+except Exception:
+    UnrealRuntimeAdapter = None
+    UnrealRuntimeSession = None
+
+    def create_unreal_session(*args: Any, **kwargs: Any) -> Any:
+        """Fallback Unreal session creator when Unreal runtime is unavailable."""
+        return _raise_import_error("UnrealRuntimeAdapter")
+
+    def is_unreal_available() -> bool:
+        """Fallback Unreal availability check."""
+        return False
+
+
 __all__ = [
     # Headless USD adapter
     "HeadlessUSDAdapter",
@@ -87,4 +107,9 @@ __all__ = [
     "BlenderRuntimeSession",
     "create_blender_session",
     "is_blender_available",
+    # Unreal Engine runtime adapter
+    "UnrealRuntimeAdapter",
+    "UnrealRuntimeSession",
+    "create_unreal_session",
+    "is_unreal_available",
 ]
