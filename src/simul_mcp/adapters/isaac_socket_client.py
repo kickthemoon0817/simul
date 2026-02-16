@@ -126,8 +126,10 @@ class IsaacSocketClient:
             writer.close()
             try:
                 await writer.wait_closed()
-            except Exception:
-                pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Failed to close socket cleanly: %s", exc)
 
     async def ping(self) -> bool:
         """

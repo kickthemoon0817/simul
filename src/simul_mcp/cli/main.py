@@ -209,11 +209,11 @@ def info(
             status_style = "green" if tool_info["enabled"] else "red"
 
             requirements = []
-            if tool_info["requires_isaac"]:
-                requirements.append("Isaac Sim")
             if tool_info.get("requires_blender"):
                 requirements.append("Blender")
-            if tool_info["requires_usd"]:
+            if tool_info.get("requires_unreal"):
+                requirements.append("Unreal")
+            if tool_info.get("requires_usd"):
                 requirements.append("USD")
 
             tools_table.add_row(
