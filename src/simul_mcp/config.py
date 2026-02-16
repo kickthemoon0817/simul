@@ -91,6 +91,34 @@ class BlenderConfig(BaseModel):
         return v
 
 
+class UnrealConfig(BaseModel):
+    """Unreal Engine Remote Control API configuration."""
+
+    enabled: bool = Field(default=True, description="Enable Unreal Engine runtime tools")
+    host: str = Field(default="localhost", description="Remote Control API host")
+    port: int = Field(
+        default=30010,
+        description="Remote Control API port",
+        ge=1024,
+        le=65535,
+    )
+    timeout: int = Field(
+        default=30,
+        description="HTTP request timeout in seconds",
+        ge=1,
+    )
+    embedded_mode: bool = Field(
+        default=False,
+        description="Running inside UE5 Python interpreter",
+    )
+    max_actors: int = Field(
+        default=200,
+        description="Default maximum actors returned from Unreal tools",
+        ge=1,
+        le=5000,
+    )
+
+
 class USDConfig(BaseModel):
     """USD configuration."""
 
@@ -280,6 +308,7 @@ class Settings(BaseSettings):
     server: ServerConfig = Field(default_factory=ServerConfig)
     isaac_sim: IsaacSimConfig = Field(default_factory=IsaacSimConfig)
     blender: BlenderConfig = Field(default_factory=BlenderConfig)
+    unreal: UnrealConfig = Field(default_factory=UnrealConfig)
     usd: USDConfig = Field(default_factory=USDConfig)
     mesh: MeshConfig = Field(default_factory=MeshConfig)
     viewport: ViewportConfig = Field(default_factory=ViewportConfig)
