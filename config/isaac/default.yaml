@@ -16,7 +16,12 @@ server:
 isaac_sim:
   # Path to Isaac Sim installation (can be overridden by environment variable)
   path: "${ISAAC_SIM_PATH}"
-  
+
+  # TCP socket connection to the isaacsim.code_editor.vscode extension
+  socket_host: "127.0.0.1"
+  socket_port: 8226
+  socket_timeout: 30.0
+
   # Kit configuration
   kit:
     headless: false
