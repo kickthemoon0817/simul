@@ -18,7 +18,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class ServerConfig(BaseModel):
     """MCP Server configuration."""
 
-    name: str = Field(default="SimulMCP", description="Server name")
+    name: str = Field(
+        default="Simul – 3D Simulation & DCC Tools",
+        description="Server display name for MCP clients",
+    )
     host: str = Field(default="localhost", description="Server host")
     port: int = Field(default=8765, description="Server port", ge=1024, le=65535)
     max_connections: int = Field(

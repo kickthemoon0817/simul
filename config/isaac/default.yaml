@@ -1,8 +1,8 @@
-# Isaac Sim MCP Server Default Configuration
+# Simul 3D MCP Server Default Configuration
 
 # Server Configuration
 server:
-  name: "IsaacSimMCP"
+  name: "Simul – 3D Simulation & DCC Tools"
   host: "localhost"
   port: 8765
   max_connections: 10

@@ -1,8 +1,8 @@
 """
-Isaac Sim MCP Server implementation.
+Simul 3D MCP Server implementation.
 
 This module provides the main MCP server class with tool registry,
-connection management, and Isaac Sim integration based on FastMCP.
+connection management, and 3D simulation/DCC integration based on FastMCP.
 """
 
 import inspect
@@ -55,7 +55,7 @@ try:
 
     _PACKAGE_VERSION: str = _pkg_version("simul-mcp")
 except Exception:
-    _PACKAGE_VERSION = "0.0.3"
+    _PACKAGE_VERSION = "0.0.4"
 
 _MCP_INSTRUCTIONS: str = (
     "Simul MCP provides tools for interacting with 3D simulation "
@@ -79,15 +79,15 @@ _FASTMCP_SUPPORTS_INSTRUCTIONS: bool = (
 
 class IsaacMCPServer(LoggerMixin):
     """
-    Isaac Sim MCP Server.
+    Simul 3D MCP Server.
 
-    Provides MCP server functionality for Isaac Sim with USD operations,
-    viewport capture, and simulation control.
+    Provides MCP server functionality for 3D simulation and DCC tools
+    with USD operations, viewport capture, and runtime integration.
     """
 
     def __init__(self, settings: Optional[Settings] = None):
         """
-        Initialize Isaac MCP Server.
+        Initialize Simul 3D MCP Server.
 
         Args:
             settings: Configuration settings
@@ -118,7 +118,7 @@ class IsaacMCPServer(LoggerMixin):
         assert FastMCP is not None
 
         mcp_kwargs: Dict[str, Any] = {
-            "name": "simul-mcp",
+            "name": "Simul – 3D Simulation & DCC Tools",
             "version": _PACKAGE_VERSION,
         }
         if _FASTMCP_SUPPORTS_INSTRUCTIONS:
@@ -131,7 +131,7 @@ class IsaacMCPServer(LoggerMixin):
         # Register tools
         self._register_tools()
 
-        self.logger.info("Simul MCP Server initialized")
+        self.logger.info("Simul 3D MCP Server initialized")
 
     def _get_rate_limiter(self, tool_name: str) -> Optional[RateLimiter]:
         if not self._rate_limit_enabled:
@@ -4255,7 +4255,7 @@ class IsaacMCPServer(LoggerMixin):
             transport: Transport type (stdio, sse)
         """
         try:
-            self.logger.info(f"Starting Isaac MCP Server with {transport} transport")
+            self.logger.info(f"Starting Simul 3D MCP Server with {transport} transport")
 
             if transport == "stdio":
                 await self.mcp.run_async(transport="stdio")
@@ -7267,7 +7267,7 @@ class IsaacMCPServer(LoggerMixin):
             transport: Transport type (stdio, sse)
         """
         try:
-            self.logger.info(f"Starting Isaac MCP Server with {transport} transport")
+            self.logger.info(f"Starting Simul 3D MCP Server with {transport} transport")
 
             if transport == "stdio":
                 await self.mcp.run_async(transport="stdio")
@@ -7288,7 +7288,7 @@ class IsaacMCPServer(LoggerMixin):
 # Convenience functions
 def create_server_instance(settings: Optional[Settings] = None) -> IsaacMCPServer:
     """
-    Create an Isaac MCP Server instance.
+    Create a Simul 3D MCP Server instance.
 
     Args:
         settings: Configuration settings
@@ -7303,7 +7303,7 @@ async def start_mcp_server(
     settings: Optional[Settings] = None, transport: str = "stdio"
 ) -> None:
     """
-    Start the Isaac MCP Server.
+    Start the Simul 3D MCP Server.
 
     Args:
         settings: Configuration settings

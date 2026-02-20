@@ -45,7 +45,7 @@ def _is_isaac_reachable(host: str = "127.0.0.1", port: int = 8226, timeout: floa
 # Initialize CLI
 app = typer.Typer(
     name="simul-mcp",
-    help="Simul MCP Server - USD operations and simulation control",
+    help="Simul – 3D Simulation & DCC Tools MCP Server",
     add_completion=False,
 )
 console = Console(stderr=True)
@@ -99,7 +99,7 @@ def server(
         # Display startup info
         console.print(
             Panel.fit(
-                f"[bold blue]Simul MCP Server[/bold blue]\n"
+                f"[bold blue]Simul – 3D Simulation & DCC Tools[/bold blue]\n"
                 f"Transport: {transport}\n"
                 f"Isaac Sim (TCP :8226): {'✓ reachable' if isaac_reachable else '✗ not reachable (tools will retry at call time)'}\n"
                 f"Blender: {'✓' if blender_available else '✗'}\n"
@@ -111,7 +111,7 @@ def server(
         )
 
         # Start server
-        logger.info(f"Starting Isaac MCP Server with {transport} transport")
+        logger.info(f"Starting Simul 3D MCP Server with {transport} transport")
         asyncio.run(start_mcp_server(settings, transport))
 
     except KeyboardInterrupt:
@@ -420,7 +420,7 @@ def version():
     isaac_reachable = _is_isaac_reachable()
     console.print(
         Panel.fit(
-            f"[bold blue]Simul MCP Server[/bold blue]\n"
+            f"[bold blue]Simul – 3D Simulation & DCC Tools[/bold blue]\n"
             f"Version: {version_str}\n"
             f"Isaac Sim (TCP :8226): {'✓ reachable' if isaac_reachable else '✗ not reachable'}\n"
             f"Blender: {'✓' if is_blender_available() else '✗'}\n"
