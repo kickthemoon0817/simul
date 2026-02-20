@@ -1,0 +1,227 @@
+# Isaac Sim MCP Server Default Configuration
+
+# Server Configuration
+server:
+  name: "IsaacSimMCP"
+  host: "localhost"
+  port: 8765
+  max_connections: 10
+  timeout: 30
+  enable_cors: true
+  cors_origins:
+    - "http://localhost:*"
+    - "https://localhost:*"
+
+# Isaac Sim Configuration
+isaac_sim:
+  # Path to Isaac Sim installation (can be overridden by environment variable)
+  path: "${ISAAC_SIM_PATH}"
+  
+  # Kit configuration
+  kit:
+    headless: false
+    enable_livestream: false
+    livestream_port: 8211
+    enable_webrtc: false
+    resolution:
+      width: 1920
+      height: 1080
+    
+  # Extension settings
+  extensions:
+    auto_load:
+      - "omni.isaac.core"
+      - "omni.isaac.ui"
+      - "omni.usd"
+    
+  # Simulation settings
+  simulation:
+    physics_dt: 0.01667  # 60 FPS
+    rendering_dt: 0.01667  # 60 FPS
+    substeps: 1
+
+# USD Configuration
+usd:
+  # Stage settings
+  stage:
+    load_rules: "LoadAll"  # LoadAll, LoadNone, OnlyLoadedPrims
+    population_mask: ""
+    interpolation_type: "Linear"  # Linear, Held
+    enable_instancing: true
+    
+  # Cache settings
+  cache:
+    enabled: true
+    size: 1000
+    stage_cache_limit: 10
+    
+  # File handling
+  files:
+    allowed_extensions:
+      - ".usd"
+      - ".usda"
+      - ".usdc"
+      - ".usdz"
+    max_file_size_mb: 500
+    
+  # Performance settings
+  performance:
+    enable_multithreading: true
+    max_concurrent_operations: 10
+    operation_timeout: 30
+
+# Mesh Processing Configuration
+mesh:
+  # Decimation settings
+  decimation:
+    enabled: true
+    max_faces: 50000
+    preserve_boundaries: true
+    preserve_topology: false
+    
+  # Analysis settings
+  analysis:
+    compute_normals: true
+    compute_tangents: false
+    validate_topology: true
+    
+  # Export settings
+  export:
+    include_materials: true
+    include_textures: true
+    texture_resolution: 1024
+
+# Viewport Configuration
+viewport:
+  # Default capture settings
+  capture:
+    width: 1920
+    height: 1080
+    max_size: 2048
+    format: "png"  # png, jpg, exr
+    quality: 95
+    
+  # Rendering settings
+  rendering:
+    samples_per_pixel: 1
+    max_bounces: 4
+    enable_denoising: true
+    
+  # Camera settings
+  camera:
+    fov: 45.0
+    near_plane: 0.1
+    far_plane: 1000.0
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "detailed"  # simple, detailed, json
+  
+  # File logging
+  file:
+    enabled: true
+    path: "logs/simul_mcp.log"
+    max_size: "10MB"
+    backup_count: 5
+    rotation: "size"  # size, time
+    
+  # Console logging
+  console:
+    enabled: true
+    colored: true
+    
+  # Component-specific logging levels
+  components:
+    usd: "INFO"
+    mesh: "INFO"
+    viewport: "INFO"
+    server: "INFO"
+    isaac: "INFO"
+
+# Security Configuration
+security:
+  # Sandbox settings
+  sandbox:
+    enabled: true
+    allowed_paths:
+      - "${PROJECT_ROOT}/examples"
+      - "${PROJECT_ROOT}/tests/data"
+      - "/tmp/simul_mcp"
+    
+  # Rate limiting
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 60
+    burst_size: 10
+
+# Performance Configuration
+performance:
+  # Memory management
+  memory:
+    limit_gb: 8
+    gc_threshold: 1000
+    enable_memory_profiling: false
+    
+  # Threading
+  threading:
+    max_workers: 4
+    enable_async_operations: true
+    
+  # Caching
+  caching:
+    enable_result_caching: true
+    cache_ttl_seconds: 300
+    max_cache_entries: 1000
+
+# Feature Flags
+features:
+  # Core features
+  enable_mesh_analysis: true
+  enable_material_extraction: true
+  enable_animation_support: false
+  enable_physics_queries: true
+  enable_lighting_analysis: true
+  
+  # Advanced features
+  enable_scene_graph_export: true
+  enable_batch_operations: true
+  enable_streaming: false
+  
+  # Experimental features
+  enable_ai_scene_understanding: false
+  enable_procedural_generation: false
+
+# Development Configuration
+development:
+  debug_mode: false
+  profiling_enabled: false
+  verbose_usd_logging: false
+  enable_hot_reload: false
+  
+  # Testing
+  testing:
+    enable_mock_isaac: false
+    use_test_data: false
+    skip_gpu_operations: false
+
+# Integration Configuration
+integrations:
+  # Omniverse
+  omniverse:
+    enabled: false
+    server: ""
+    username: ""
+    
+  # External APIs
+  apis:
+    enable_rest_api: false
+    enable_websocket: true
+    enable_grpc: false
+    
+  # Export formats
+  export:
+    enable_gltf: true
+    enable_obj: true
+    enable_fbx: false
+    enable_stl: true
