@@ -50,6 +50,32 @@ from .schemas import *
 
 logger = get_logger(__name__)
 
+try:
+    from importlib.metadata import version as _pkg_version
+
+    _PACKAGE_VERSION: str = _pkg_version("simul-mcp")
+except Exception:
+    _PACKAGE_VERSION = "0.0.2"
+
+_MCP_INSTRUCTIONS: str = (
+    "Simul MCP provides tools for interacting with 3D simulation "
+    "and DCC applications. "
+    "Use Isaac Sim tools (execute_isaac_script, ping_isaac) to "
+    "control a running NVIDIA Isaac Sim instance — execute "
+    "arbitrary Python with full access to omni.*, pxr.*, and "
+    "isaacsim.* APIs. "
+    "Use USD tools to load, inspect, and edit Universal Scene "
+    "Description files. "
+    "Use Blender tools when a Blender runtime is connected. "
+    "Use Unreal tools when an Unreal Engine instance is connected."
+)
+
+_FASTMCP_SUPPORTS_INSTRUCTIONS: bool = (
+    "instructions" in inspect.signature(FastMCP).parameters
+    if FASTMCP_AVAILABLE and FastMCP is not None
+    else False
+)
+
 
 class IsaacMCPServer(LoggerMixin):
     """
@@ -93,13 +119,10 @@ class IsaacMCPServer(LoggerMixin):
 
         mcp_kwargs: Dict[str, Any] = {
             "name": "simul-mcp",
-            "version": "0.1.7",
+            "version": _PACKAGE_VERSION,
         }
-        if "description" in inspect.signature(FastMCP).parameters:
-            mcp_kwargs["description"] = (
-                "MCP server for simulation and DCC tools with USD operations "
-                "and simulation control"
-            )
+        if _FASTMCP_SUPPORTS_INSTRUCTIONS:
+            mcp_kwargs["instructions"] = _MCP_INSTRUCTIONS
 
         self.mcp = FastMCP(
             **mcp_kwargs,
