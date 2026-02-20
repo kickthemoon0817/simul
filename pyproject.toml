@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "simul-mcp"
-version = "0.0.3"
-description = "MCP server for simulation and DCC tools with USD scene understanding and runtime integration"
+version = "0.0.4"
+description = "MCP server for 3D simulation and DCC tools — USD scene control, Isaac Sim, Blender, and Unreal Engine integration"
 authors = [
     {name = "khemoo"}
 ]
