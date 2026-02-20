@@ -55,7 +55,7 @@ try:
 
     _PACKAGE_VERSION: str = _pkg_version("simul-mcp")
 except Exception:
-    _PACKAGE_VERSION = "0.0.2"
+    _PACKAGE_VERSION = "0.0.3"
 
 _MCP_INSTRUCTIONS: str = (
     "Simul MCP provides tools for interacting with 3D simulation "
@@ -317,7 +317,11 @@ class IsaacMCPServer(LoggerMixin):
 
         @self.mcp.tool(
             name="load_usd_file",
-            description="Load a USD file and return stage information.",
+            description=(
+                "Load a USD file and return stage information. "
+                "Works with local files and live stages from Isaac Sim "
+                "or other USD-capable applications."
+            ),
             annotations=self._tool_annotations(
                 read_only=True, idempotent=True, open_world=True
             ),
@@ -398,7 +402,11 @@ class IsaacMCPServer(LoggerMixin):
 
         @self.mcp.tool(
             name="validate_usd_file",
-            description="Validate a USD file without loading it.",
+            description=(
+                "Validate a USD file without loading it. "
+                "Works with local files and live stages from Isaac Sim "
+                "or other USD-capable applications."
+            ),
             annotations=self._tool_annotations(
                 read_only=True, idempotent=True, open_world=True
             ),
@@ -451,7 +459,11 @@ class IsaacMCPServer(LoggerMixin):
 
         @self.mcp.tool(
             name="get_prim_info",
-            description="Get information about a USD prim.",
+            description=(
+                "Get information about a USD prim. "
+                "Works with local files and live stages from Isaac Sim "
+                "or other USD-capable applications."
+            ),
             annotations=self._tool_annotations(
                 read_only=True, idempotent=True, open_world=False
             ),
@@ -562,7 +574,11 @@ class IsaacMCPServer(LoggerMixin):
 
         @self.mcp.tool(
             name="create_prim",
-            description="Create a prim in a USD stage.",
+            description=(
+                "Create a prim in a USD stage. "
+                "Works with local files and live stages from Isaac Sim "
+                "or other USD-capable applications."
+            ),
             annotations=self._tool_annotations(
                 read_only=False, idempotent=False, open_world=False, destructive=True
             ),
@@ -633,7 +649,11 @@ class IsaacMCPServer(LoggerMixin):
 
         @self.mcp.tool(
             name="update_prim_attributes",
-            description="Update attributes on a USD prim.",
+            description=(
+                "Update attributes on a USD prim. "
+                "Works with local files and live stages from Isaac Sim "
+                "or other USD-capable applications."
+            ),
             annotations=self._tool_annotations(
                 read_only=False, idempotent=False, open_world=False, destructive=True
             ),
@@ -707,7 +727,11 @@ class IsaacMCPServer(LoggerMixin):
 
         @self.mcp.tool(
             name="delete_prim",
-            description="Delete a prim from a USD stage.",
+            description=(
+                "Delete a prim from a USD stage. "
+                "Works with local files and live stages from Isaac Sim "
+                "or other USD-capable applications."
+            ),
             annotations=self._tool_annotations(
                 read_only=False, idempotent=False, open_world=False, destructive=True
             ),
@@ -768,7 +792,11 @@ class IsaacMCPServer(LoggerMixin):
 
         @self.mcp.tool(
             name="get_mesh_info",
-            description="Get mesh information for a mesh prim.",
+            description=(
+                "Get mesh information for a mesh prim. "
+                "Works with local files and live stages from Isaac Sim "
+                "or other USD-capable applications."
+            ),
             annotations=self._tool_annotations(
                 read_only=True, idempotent=True, open_world=False
             ),
@@ -822,7 +850,11 @@ class IsaacMCPServer(LoggerMixin):
 
         @self.mcp.tool(
             name="search_prims",
-            description="Search for prims in a USD stage.",
+            description=(
+                "Search for prims in a USD stage. "
+                "Works with local files and live stages from Isaac Sim "
+                "or other USD-capable applications."
+            ),
             annotations=self._tool_annotations(
                 read_only=True, idempotent=True, open_world=False
             ),
@@ -898,7 +930,11 @@ class IsaacMCPServer(LoggerMixin):
 
         @self.mcp.tool(
             name="get_bounding_box",
-            description="Get bounding box for a prim or entire stage.",
+            description=(
+                "Get bounding box for a prim or entire stage. "
+                "Works with local files and live stages from Isaac Sim "
+                "or other USD-capable applications."
+            ),
             annotations=self._tool_annotations(
                 read_only=True, idempotent=True, open_world=False
             ),
@@ -982,7 +1018,11 @@ class IsaacMCPServer(LoggerMixin):
 
         @self.mcp.tool(
             name="summarize_scene",
-            description="Generate a summary of a USD scene.",
+            description=(
+                "Generate a summary of a USD scene. "
+                "Works with local files and live stages from Isaac Sim "
+                "or other USD-capable applications."
+            ),
             annotations=self._tool_annotations(
                 read_only=True, idempotent=True, open_world=False
             ),
