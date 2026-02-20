@@ -55,7 +55,7 @@ try:
 
     _PACKAGE_VERSION: str = _pkg_version("simul-mcp")
 except Exception:
-    _PACKAGE_VERSION = "0.0.4"
+    _PACKAGE_VERSION = "0.0.5"
 
 _MCP_INSTRUCTIONS: str = (
     "Simul MCP provides tools for interacting with 3D simulation "
@@ -109,7 +109,11 @@ class IsaacMCPServer(LoggerMixin):
         self.headless_adapter = (
             HeadlessUSDAdapter(self.settings) if is_headless_available() else None
         )
-        self.client = IsaacSocketClient()
+        self.client = IsaacSocketClient(
+            host=self.settings.isaac_sim.socket_host,
+            port=self.settings.isaac_sim.socket_port,
+            timeout_seconds=self.settings.isaac_sim.socket_timeout,
+        )
         self.blender_adapter = (
             BlenderRuntimeAdapter(self.settings) if is_blender_available() else None
         )
@@ -1134,7 +1138,8 @@ class IsaacMCPServer(LoggerMixin):
                 "Execute arbitrary Python code inside a running Isaac Sim application. "
                 "The code runs in Kit's Python scope with full access to omni.*, pxr.*, "
                 "and isaacsim.* APIs. stdout is captured and returned. For structured "
-                "results, print JSON via json.dumps()."
+                "results, print JSON via json.dumps(). "
+                "Call ping_isaac first to verify connectivity before sending scripts."
             ),
             annotations=self._tool_annotations(
                 read_only=False, idempotent=False, open_world=True, destructive=True
@@ -1184,12 +1189,22 @@ class IsaacMCPServer(LoggerMixin):
 
             except ConnectionRefusedError:
                 return ErrorResponse(
-                    error="Isaac Sim is not reachable on 127.0.0.1:8226. Is it running?",
+                    error=(
+                        f"Isaac Sim is not reachable at {self.client.address}. "
+                        "Ensure Isaac Sim is running with the "
+                        "isaacsim.code_editor.vscode extension enabled. "
+                        "Use ping_isaac to verify connectivity."
+                    ),
                     error_type="ConnectionError",
                 ).dict()
             except TimeoutError:
                 return ErrorResponse(
-                    error="Script execution timed out.",
+                    error=(
+                        f"Script execution timed out after "
+                        f"{self.client.timeout_seconds}s on {self.client.address}. "
+                        "The script may be too slow or Isaac Sim may be unresponsive. "
+                        "Use ping_isaac to check if Isaac Sim is still reachable."
+                    ),
                     error_type="TimeoutError",
                 ).dict()
             except Exception as exc:
@@ -1197,7 +1212,11 @@ class IsaacMCPServer(LoggerMixin):
 
         @self.mcp.tool(
             name="ping_isaac",
-            description="Check if a running Isaac Sim instance is reachable.",
+            description=(
+                "Pre-flight check: verify that a running Isaac Sim instance is "
+                "reachable on the configured TCP socket. Call this before "
+                "execute_isaac_script to confirm connectivity and get the target address."
+            ),
             annotations=self._tool_annotations(
                 read_only=True, idempotent=True, open_world=True
             ),
@@ -1207,7 +1226,7 @@ class IsaacMCPServer(LoggerMixin):
             Ping Isaac Sim to verify connectivity.
 
             Returns:
-                Dict with reachable status and address.
+                Dict with reachable status, address, and timeout.
             """
             rate_error = self._check_rate_limit("ping_isaac")
             if rate_error:
@@ -1216,6 +1235,7 @@ class IsaacMCPServer(LoggerMixin):
             return {
                 "reachable": reachable,
                 "address": self.client.address,
+                "timeout_seconds": self.client.timeout_seconds,
             }
 
     def _register_blender_tools(self) -> None:

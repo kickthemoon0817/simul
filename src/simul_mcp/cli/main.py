@@ -24,7 +24,7 @@ from simul_mcp.adapters import (
 )
 
 
-def _is_isaac_reachable(host: str = "127.0.0.1", port: int = 8226, timeout: float = 1.0) -> bool:
+def _is_isaac_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
     """
     Check if Isaac Sim is reachable on the TCP socket.
 
@@ -92,7 +92,9 @@ def server(
         logger = get_logger(__name__)
 
         # Check runtime availability
-        isaac_reachable = _is_isaac_reachable()
+        isaac_host = settings.isaac_sim.socket_host
+        isaac_port = settings.isaac_sim.socket_port
+        isaac_reachable = _is_isaac_reachable(isaac_host, isaac_port)
         blender_available = is_blender_available()
         usd_available = is_headless_available()
 
@@ -101,7 +103,7 @@ def server(
             Panel.fit(
                 f"[bold blue]Simul – 3D Simulation & DCC Tools[/bold blue]\n"
                 f"Transport: {transport}\n"
-                f"Isaac Sim (TCP :8226): {'✓ reachable' if isaac_reachable else '✗ not reachable (tools will retry at call time)'}\n"
+                f"Isaac Sim (TCP :{isaac_port}): {'✓ reachable' if isaac_reachable else '✗ not reachable (tools will retry at call time)'}\n"
                 f"Blender: {'✓' if blender_available else '✗'}\n"
                 f"USD Headless: {'✓' if usd_available else '✗'}\n"
                 f"Config: {config or 'default'}\n"
@@ -142,7 +144,9 @@ def info(
             settings = get_settings()
 
         # Check runtime availability
-        isaac_reachable = _is_isaac_reachable()
+        isaac_host = settings.isaac_sim.socket_host
+        isaac_port = settings.isaac_sim.socket_port
+        isaac_reachable = _is_isaac_reachable(isaac_host, isaac_port)
         blender_available = is_blender_available()
         usd_available = is_headless_available()
 
@@ -157,7 +161,7 @@ def info(
         system_table.add_column("Details")
 
         system_table.add_row(
-            "Isaac Sim (TCP :8226)",
+            f"Isaac Sim (TCP :{isaac_port})",
             "✓ Reachable" if isaac_reachable else "✗ Not Reachable",
             "Simulation & viewport via TCP socket"
             if isaac_reachable
@@ -417,12 +421,16 @@ def version():
     except ImportError:
         version_str = "unknown"
 
-    isaac_reachable = _is_isaac_reachable()
+    settings = get_settings()
+    isaac_port = settings.isaac_sim.socket_port
+    isaac_reachable = _is_isaac_reachable(
+        settings.isaac_sim.socket_host, isaac_port
+    )
     console.print(
         Panel.fit(
             f"[bold blue]Simul – 3D Simulation & DCC Tools[/bold blue]\n"
             f"Version: {version_str}\n"
-            f"Isaac Sim (TCP :8226): {'✓ reachable' if isaac_reachable else '✗ not reachable'}\n"
+            f"Isaac Sim (TCP :{isaac_port}): {'✓ reachable' if isaac_reachable else '✗ not reachable'}\n"
             f"Blender: {'✓' if is_blender_available() else '✗'}\n"
             f"USD Headless: {'✓' if is_headless_available() else '✗'}",
             title="Version Information",

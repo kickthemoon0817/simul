@@ -85,6 +85,11 @@ class IsaacSocketClient:
         """Return the target address as host:port string."""
         return f"{self._host}:{self._port}"
 
+    @property
+    def timeout_seconds(self) -> float:
+        """Return the configured timeout in seconds."""
+        return self._timeout_seconds
+
     async def execute(self, code: str) -> ScriptResult:
         """
         Execute Python code inside the running Isaac Sim process.

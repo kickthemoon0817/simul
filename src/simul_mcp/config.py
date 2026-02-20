@@ -49,6 +49,23 @@ class IsaacSimConfig(BaseModel):
     width: int = Field(default=1920, description="Viewport width", ge=640)
     height: int = Field(default=1080, description="Viewport height", ge=480)
 
+    # TCP socket connection to the isaacsim.code_editor.vscode extension
+    socket_host: str = Field(
+        default="127.0.0.1",
+        description="Host for the Isaac Sim VS Code extension TCP socket",
+    )
+    socket_port: int = Field(
+        default=8226,
+        description="Port for the Isaac Sim VS Code extension TCP socket",
+        ge=1024,
+        le=65535,
+    )
+    socket_timeout: float = Field(
+        default=30.0,
+        description="Timeout in seconds for Isaac Sim TCP socket operations",
+        gt=0.0,
+    )
+
     @field_validator("path")
     @classmethod
     def validate_isaac_path(cls, v: Optional[str]) -> Optional[str]:
