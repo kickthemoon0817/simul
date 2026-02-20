@@ -6,6 +6,7 @@ connection management, and Isaac Sim integration based on FastMCP.
 """
 
 import inspect
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -246,8 +247,22 @@ class IsaacMCPServer(LoggerMixin):
         }
 
     def _task_optional(self) -> Optional[Any]:
+        """
+        Return a TaskConfig for optional background task support.
+
+        FastMCP 3.x can import TaskConfig without the full 'tasks' extra
+        installed, but raises ImportError at tool-registration time when
+        the ``docket`` runtime (``fastmcp[tasks]``) is absent.  Check
+        for actual runtime availability before returning a config.
+        """
         if TaskConfig:
-            return TaskConfig(mode="optional")
+            try:
+                from fastmcp.server.dependencies import is_docket_available
+
+                if is_docket_available():
+                    return TaskConfig(mode="optional")
+            except Exception:
+                pass
         return None
 
     def _register_tools(self) -> None:
@@ -264,9 +279,14 @@ class IsaacMCPServer(LoggerMixin):
             self._register_blender_tools()
             self._register_unreal_tools()
 
-        tool_count = len(getattr(self.mcp, "tools", []))
-        if tool_count == 0 and hasattr(self.mcp, "_tool_manager"):
-            tool_count = len(getattr(self.mcp._tool_manager, "_tools", {}))
+        # FastMCP 3.x stores tools in local_provider._components with
+        # keys like "tool:<name>@".  Count entries whose key starts with
+        # "tool:" to get an accurate tool count.
+        tool_count = 0
+        lp = getattr(self.mcp, "local_provider", None)
+        if lp is not None:
+            components = getattr(lp, "_components", {})
+            tool_count = sum(1 for k in components if k.startswith("tool:"))
         self.logger.info(f"Registered {tool_count} MCP tools")
 
     def _register_usd_tools(self) -> None:
@@ -4175,17 +4195,13 @@ class IsaacMCPServer(LoggerMixin):
             self.logger.info(f"Starting Isaac MCP Server with {transport} transport")
 
             if transport == "stdio":
-                await self.mcp.run()
+                await self.mcp.run_async(transport="stdio")
             elif transport == "sse":
-                run_sse = getattr(self.mcp, "run_sse", None)
-                if callable(run_sse):
-                    result = run_sse(
-                        host=self.settings.server.host, port=self.settings.server.port
-                    )
-                    if inspect.isawaitable(result):
-                        await result
-                else:
-                    raise ValueError("SSE transport not supported by FastMCP")
+                await self.mcp.run_async(
+                    transport="sse",
+                    host=self.settings.server.host,
+                    port=self.settings.server.port,
+                )
             else:
                 raise ValueError(f"Unsupported transport: {transport}")
 
@@ -7191,17 +7207,13 @@ class IsaacMCPServer(LoggerMixin):
             self.logger.info(f"Starting Isaac MCP Server with {transport} transport")
 
             if transport == "stdio":
-                await self.mcp.run()
+                await self.mcp.run_async(transport="stdio")
             elif transport == "sse":
-                run_sse = getattr(self.mcp, "run_sse", None)
-                if callable(run_sse):
-                    result = run_sse(
-                        host=self.settings.server.host, port=self.settings.server.port
-                    )
-                    if inspect.isawaitable(result):
-                        await result
-                else:
-                    raise ValueError("SSE transport not supported by FastMCP")
+                await self.mcp.run_async(
+                    transport="sse",
+                    host=self.settings.server.host,
+                    port=self.settings.server.port,
+                )
             else:
                 raise ValueError(f"Unsupported transport: {transport}")
 

@@ -34,13 +34,13 @@ handlers:
     class: logging.StreamHandler
     level: INFO
     formatter: colored
-    stream: ext://sys.stdout
+    stream: ext://sys.stderr
     
   console_simple:
     class: logging.StreamHandler
     level: INFO
     formatter: simple
-    stream: ext://sys.stdout
+    stream: ext://sys.stderr
     
   file:
     class: logging.handlers.RotatingFileHandler

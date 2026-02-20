@@ -115,7 +115,7 @@ def _setup_fallback_logging(
         level=getattr(logging, level.upper()),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.StreamHandler(sys.stdout),
+            logging.StreamHandler(sys.stderr),
             logging.FileHandler(settings.logging.file_path, encoding="utf-8"),
         ],
     )

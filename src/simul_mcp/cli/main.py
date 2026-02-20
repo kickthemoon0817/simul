@@ -48,7 +48,7 @@ app = typer.Typer(
     help="Simul MCP Server - USD operations and simulation control",
     add_completion=False,
 )
-console = Console()
+console = Console(stderr=True)
 
 
 @app.command()
@@ -88,7 +88,7 @@ def server(
             settings.logging.level = "DEBUG"
 
         # Setup logging
-        setup_logging(settings.logging)
+        setup_logging(settings)
         logger = get_logger(__name__)
 
         # Check runtime availability
@@ -308,7 +308,7 @@ def test_usd(
             settings = get_settings()
 
         # Setup minimal logging
-        setup_logging(settings.logging)
+        setup_logging(settings)
 
         console.print(f"[cyan]Testing USD file: {file_path}[/cyan]")
 
