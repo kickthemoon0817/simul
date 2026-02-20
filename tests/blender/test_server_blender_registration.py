@@ -4,6 +4,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -17,11 +18,12 @@ from simul_mcp.mcp import server as server_module  # noqa: E402
 class FakeFastMCP:
     """Minimal FastMCP test double for tool registration."""
 
-    def __init__(self, name: str, version: str, description: str):
+    def __init__(self, name: str, version: str, **kwargs: Any):
         self.name = name
         self.version = version
-        self.description = description
-        self.tools = []
+        self.description = kwargs.get("description")
+        self.instructions = kwargs.get("instructions")
+        self.tools: list[SimpleNamespace] = []
 
     def tool(self, name: str, **kwargs):
         """Return decorator that records tool metadata."""
