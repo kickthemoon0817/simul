@@ -8,9 +8,8 @@ IsaacSocketClient, and returns typed, structured responses.
 """
 
 import json
-import logging
 import textwrap
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from ...adapters import IsaacSocketClient, ScriptResult
 from ...config import Settings, get_settings
@@ -61,6 +60,9 @@ class IsaacTools(LoggerMixin):
         try:
             result: ScriptResult = await self._client.execute(script)
         except ConnectionRefusedError:
+            logger.error(
+                "Isaac Sim unreachable at %s", self._client.address
+            )
             return ErrorResponse(
                 error=(
                     f"Isaac Sim is not reachable at {self._client.address}. "
@@ -70,6 +72,11 @@ class IsaacTools(LoggerMixin):
                 error_type="ConnectionError",
             ).dict()
         except TimeoutError:
+            logger.error(
+                "Script timed out after %ss on %s",
+                self._client.timeout_seconds,
+                self._client.address,
+            )
             return ErrorResponse(
                 error=(
                     f"Script execution timed out after "
@@ -79,6 +86,7 @@ class IsaacTools(LoggerMixin):
                 error_type="TimeoutError",
             ).dict()
         except Exception as exc:
+            logger.error("Script execution failed: %s", exc, exc_info=True)
             return ErrorResponse(
                 error=str(exc), error_type="Exception"
             ).dict()
@@ -178,11 +186,14 @@ class IsaacTools(LoggerMixin):
             root_path: Root prim path to start traversal from.
             prim_type: Filter by USD prim type name (e.g. "Mesh", "Xform").
             max_depth: Maximum traversal depth (-1 for unlimited).
-            max_items: Maximum number of prims to return.
+            max_items: Maximum number of prims to return (1–10000).
 
         Returns:
             Dict with list of prim entries (path, type, name, active).
         """
+        max_items = max(1, min(max_items, 10000))
+        _root_path = json.dumps(root_path)
+        _prim_type = json.dumps(prim_type or "")
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -192,12 +203,12 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                root = stage.GetPrimAtPath("{root_path}")
+                root = stage.GetPrimAtPath({_root_path})
                 if not root.IsValid():
-                    print(json.dumps({{"error": "Invalid root path: {root_path}"}}))
+                    print(json.dumps({{"error": "Invalid root path: " + {_root_path}}}))
                 else:
                     prims = []
-                    type_filter = "{prim_type or ''}"
+                    type_filter = {_prim_type}
                     max_d = {max_depth}
                     max_n = {max_items}
                     root_depth = len(str(root.GetPath()).rstrip("/").split("/"))
@@ -219,7 +230,7 @@ class IsaacTools(LoggerMixin):
                         if len(prims) >= max_n:
                             break
                     print(json.dumps({{
-                        "root_path": "{root_path}",
+                        "root_path": {_root_path},
                         "type_filter": type_filter or None,
                         "count": len(prims),
                         "truncated": len(prims) >= max_n,
@@ -238,6 +249,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with prim type, attributes, transform, children, etc.
         """
+        _prim_path = json.dumps(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -247,9 +259,9 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 else:
                     # Basic info
                     children = [str(c.GetPath()) for c in prim.GetChildren()]
@@ -330,7 +342,7 @@ class IsaacTools(LoggerMixin):
                         pass
 
                     print(json.dumps({{
-                        "path": "{prim_path}",
+                        "path": {_prim_path},
                         "name": prim.GetName(),
                         "type": prim.GetTypeName(),
                         "is_active": prim.IsActive(),
@@ -363,6 +375,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with translation, rotation (quaternion), and scale.
         """
+        _prim_path = json.dumps(prim_path)
         world_str = "True" if world_space else "False"
         script = textwrap.dedent(f"""\
             import json
@@ -373,11 +386,11 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 elif not prim.IsA(UsdGeom.Xformable):
-                    print(json.dumps({{"error": "Prim is not Xformable: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim is not Xformable: " + {_prim_path}}}))
                 else:
                     xformable = UsdGeom.Xformable(prim)
                     world = {world_str}
@@ -398,7 +411,7 @@ class IsaacTools(LoggerMixin):
                             break
 
                     print(json.dumps({{
-                        "prim_path": "{prim_path}",
+                        "prim_path": {_prim_path},
                         "space": "world" if world else "local",
                         "translation": list(t),
                         "rotation_quat": [r.GetReal()] + list(r.GetImaginary()),
@@ -426,6 +439,10 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with matching prim paths and types.
         """
+        max_results = max(1, min(max_results, 10000))
+        _root_path = json.dumps(root_path)
+        _search_type = json.dumps(search_type)
+        _query = json.dumps(query)
         script = textwrap.dedent(f"""\
             import json, re
             import omni.usd
@@ -435,13 +452,13 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                root = stage.GetPrimAtPath("{root_path}")
+                root = stage.GetPrimAtPath({_root_path})
                 if not root.IsValid():
-                    print(json.dumps({{"error": "Invalid root path: {root_path}"}}))
+                    print(json.dumps({{"error": "Invalid root path: " + {_root_path}}}))
                 else:
                     matches = []
-                    search_type = "{search_type}"
-                    query = "{query}"
+                    search_type = {_search_type}
+                    query = {_query}
                     max_r = {max_results}
                     for p in Usd.PrimRange(root):
                         if search_type == "type":
@@ -455,7 +472,7 @@ class IsaacTools(LoggerMixin):
                     print(json.dumps({{
                         "search_type": search_type,
                         "query": query,
-                        "root_path": "{root_path}",
+                        "root_path": {_root_path},
                         "count": len(matches),
                         "truncated": len(matches) >= max_r,
                         "matches": matches,
@@ -516,18 +533,18 @@ class IsaacTools(LoggerMixin):
     # ------------------------------------------------------------------
 
     async def get_isaac_camera_info(
-        self, camera_path: str = ""
+        self, camera_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Get active or specified camera parameters.
 
         Args:
-            camera_path: USD path to a camera prim. If empty, uses active viewport camera.
+            camera_path: USD path to a camera prim. None uses active viewport camera.
 
         Returns:
             Dict with camera position, target, focal length, clipping range, etc.
         """
-        cam_arg = camera_path or ""
+        _cam_path = json.dumps(camera_path or "")
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -537,7 +554,7 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                cam_path = "{cam_arg}"
+                cam_path = {_cam_path}
                 cam_prim = None
                 if cam_path:
                     cam_prim = stage.GetPrimAtPath(cam_path)
@@ -626,7 +643,7 @@ class IsaacTools(LoggerMixin):
         self,
         position: Optional[List[float]] = None,
         target: Optional[List[float]] = None,
-        camera_path: str = "",
+        camera_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Set camera position and/or look-at target.
@@ -634,13 +651,14 @@ class IsaacTools(LoggerMixin):
         Args:
             position: Camera position as [x, y, z].
             target: Look-at target position as [x, y, z].
-            camera_path: Path to camera prim. Empty uses active viewport camera.
+            camera_path: Path to camera prim. None uses active viewport camera.
 
         Returns:
             Dict confirming the updated camera state.
         """
         pos_str = str(position) if position else "None"
         tgt_str = str(target) if target else "None"
+        _cam_path = json.dumps(camera_path or "")
         script = textwrap.dedent(f"""\
             import json
             from pxr import Gf, Usd, UsdGeom
@@ -652,7 +670,7 @@ class IsaacTools(LoggerMixin):
                 import omni.kit.viewport.utility as vp_util
                 from omni.kit.viewport.utility.camera_state import ViewportCameraState
 
-                cam_path = "{camera_path}"
+                cam_path = {_cam_path}
                 vp_api = vp_util.get_active_viewport()
                 if vp_api is None:
                     print(json.dumps({{"error": "No active viewport"}}))
@@ -682,7 +700,7 @@ class IsaacTools(LoggerMixin):
                 if stage is None:
                     print(json.dumps({{"error": "No stage is currently open"}}))
                 else:
-                    cam_path = "{camera_path}"
+                    cam_path = {_cam_path}
                     if not cam_path:
                         for p in stage.Traverse():
                             if p.IsA(UsdGeom.Camera):
@@ -720,12 +738,14 @@ class IsaacTools(LoggerMixin):
         Capture the active viewport as a base64-encoded PNG image.
 
         Args:
-            width: Output image width in pixels.
-            height: Output image height in pixels.
+            width: Output image width in pixels (1–7680).
+            height: Output image height in pixels (1–7680).
 
         Returns:
             Dict with base64 image data and dimensions.
         """
+        width = max(1, min(width, 7680))
+        height = max(1, min(height, 7680))
         script = textwrap.dedent(f"""\
             import json
             import base64
@@ -789,7 +809,9 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the created prim path and type.
         """
-        attrs_str = json.dumps(attributes) if attributes else "{}"
+        _prim_path = json.dumps(prim_path)
+        _prim_type = json.dumps(prim_type)
+        _attrs_str = json.dumps(json.dumps(attributes)) if attributes else '"{}"'
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -799,15 +821,15 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                existing = stage.GetPrimAtPath("{prim_path}")
+                existing = stage.GetPrimAtPath({_prim_path})
                 if existing.IsValid():
-                    print(json.dumps({{"error": "Prim already exists: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim already exists: " + {_prim_path}}}))
                 else:
-                    prim = stage.DefinePrim("{prim_path}", "{prim_type}")
+                    prim = stage.DefinePrim({_prim_path}, {_prim_type})
                     if not prim.IsValid():
-                        print(json.dumps({{"error": "Failed to create prim: {prim_path}"}}))
+                        print(json.dumps({{"error": "Failed to create prim: " + {_prim_path}}}))
                     else:
-                        attrs = json.loads('{attrs_str}')
+                        attrs = json.loads({_attrs_str})
                         for name, val in attrs.items():
                             attr = prim.GetAttribute(name)
                             if attr.IsValid():
@@ -830,6 +852,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming deletion.
         """
+        _prim_path = json.dumps(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -839,16 +862,16 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 else:
                     edit = Sdf.BatchNamespaceEdit()
-                    edit.Add(Sdf.NamespaceEdit.Remove("{prim_path}"))
+                    edit.Add(Sdf.NamespaceEdit.Remove({_prim_path}))
                     if stage.GetRootLayer().Apply(edit):
-                        print(json.dumps({{"prim_path": "{prim_path}", "deleted": True}}))
+                        print(json.dumps({{"prim_path": {_prim_path}, "deleted": True}}))
                     else:
-                        print(json.dumps({{"error": "Failed to delete prim: {prim_path}"}}))
+                        print(json.dumps({{"error": "Failed to delete prim: " + {_prim_path}}}))
         """)
         return await self._execute_json_script(script)
 
@@ -871,6 +894,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with updated transform values.
         """
+        _prim_path = json.dumps(prim_path)
         t_str = str(translation) if translation else "None"
         r_str = str(rotation_euler) if rotation_euler else "None"
         s_str = str(scale) if scale else "None"
@@ -883,11 +907,11 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 elif not prim.IsA(UsdGeom.Xformable):
-                    print(json.dumps({{"error": "Prim is not Xformable: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim is not Xformable: " + {_prim_path}}}))
                 else:
                     xformable = UsdGeom.Xformable(prim)
                     t = {t_str}
@@ -924,7 +948,7 @@ class IsaacTools(LoggerMixin):
                     xform = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
                     pos = xform.ExtractTranslation()
                     print(json.dumps({{
-                        "prim_path": "{prim_path}",
+                        "prim_path": {_prim_path},
                         "translation": list(pos),
                         "rotation_euler_set": r,
                         "scale_set": s,
@@ -945,7 +969,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the visibility state.
         """
-        vis_token = "inherited" if visible else "invisible"
+        _prim_path = json.dumps(prim_path)
+        _vis_token = json.dumps("inherited" if visible else "invisible")
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -955,17 +980,17 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 elif not prim.IsA(UsdGeom.Imageable):
-                    print(json.dumps({{"error": "Prim is not Imageable: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim is not Imageable: " + {_prim_path}}}))
                 else:
                     img = UsdGeom.Imageable(prim)
-                    img.GetVisibilityAttr().Set("{vis_token}")
+                    img.GetVisibilityAttr().Set({_vis_token})
                     print(json.dumps({{
-                        "prim_path": "{prim_path}",
-                        "visibility": "{vis_token}",
+                        "prim_path": {_prim_path},
+                        "visibility": {_vis_token},
                         "effective_visibility": img.ComputeVisibility(),
                     }}))
         """)
@@ -988,7 +1013,9 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the attribute was set.
         """
-        val_str = json.dumps(value)
+        _prim_path = json.dumps(prim_path)
+        _attr_name = json.dumps(attribute_name)
+        _val_str = json.dumps(json.dumps(value))
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -997,21 +1024,21 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 else:
-                    attr = prim.GetAttribute("{attribute_name}")
+                    attr = prim.GetAttribute({_attr_name})
                     if not attr.IsValid():
-                        print(json.dumps({{"error": "Attribute not found: {attribute_name} on {prim_path}"}}))
+                        print(json.dumps({{"error": "Attribute not found: " + {_attr_name} + " on " + {_prim_path}}}))
                     else:
-                        val = json.loads('{val_str}')
+                        val = json.loads({_val_str})
                         try:
                             attr.Set(val)
                             read_back = attr.Get()
                             print(json.dumps({{
-                                "prim_path": "{prim_path}",
-                                "attribute": "{attribute_name}",
+                                "prim_path": {_prim_path},
+                                "attribute": {_attr_name},
                                 "value_set": val,
                                 "value_read": str(read_back),
                             }}))
@@ -1033,6 +1060,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the duplication.
         """
+        _prim_path = json.dumps(prim_path)
+        _new_path = json.dumps(new_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1042,25 +1071,25 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                src = stage.GetPrimAtPath("{prim_path}")
+                src = stage.GetPrimAtPath({_prim_path})
                 if not src.IsValid():
-                    print(json.dumps({{"error": "Source prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Source prim not found: " + {_prim_path}}}))
                 else:
-                    dst = stage.GetPrimAtPath("{new_path}")
+                    dst = stage.GetPrimAtPath({_new_path})
                     if dst.IsValid():
-                        print(json.dumps({{"error": "Destination already exists: {new_path}"}}))
+                        print(json.dumps({{"error": "Destination already exists: " + {_new_path}}}))
                     else:
                         Sdf.CopySpec(
                             stage.GetRootLayer(),
-                            Sdf.Path("{prim_path}"),
+                            Sdf.Path({_prim_path}),
                             stage.GetRootLayer(),
-                            Sdf.Path("{new_path}"),
+                            Sdf.Path({_new_path}),
                         )
-                        new_prim = stage.GetPrimAtPath("{new_path}")
+                        new_prim = stage.GetPrimAtPath({_new_path})
                         if new_prim.IsValid():
                             print(json.dumps({{
-                                "source_path": "{prim_path}",
-                                "new_path": "{new_path}",
+                                "source_path": {_prim_path},
+                                "new_path": {_new_path},
                                 "type": new_prim.GetTypeName(),
                                 "duplicated": True,
                             }}))
@@ -1082,6 +1111,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with the new full path of the reparented prim.
         """
+        _prim_path = json.dumps(prim_path)
+        _new_parent = json.dumps(new_parent_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1091,29 +1122,29 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 else:
-                    parent = stage.GetPrimAtPath("{new_parent_path}")
+                    parent = stage.GetPrimAtPath({_new_parent})
                     if not parent.IsValid():
-                        print(json.dumps({{"error": "Parent not found: {new_parent_path}"}}))
+                        print(json.dumps({{"error": "Parent not found: " + {_new_parent}}}))
                     else:
                         name = prim.GetName()
-                        new_full_path = "{new_parent_path}/" + name
+                        new_full_path = {_new_parent} + "/" + name
                         edit = Sdf.BatchNamespaceEdit()
                         edit.Add(
                             Sdf.NamespaceEdit.Reparent(
-                                Sdf.Path("{prim_path}"),
-                                Sdf.Path("{new_parent_path}"),
+                                Sdf.Path({_prim_path}),
+                                Sdf.Path({_new_parent}),
                                 -1,
                             )
                         )
                         if stage.GetRootLayer().Apply(edit):
                             print(json.dumps({{
-                                "old_path": "{prim_path}",
+                                "old_path": {_prim_path},
                                 "new_path": new_full_path,
-                                "parent": "{new_parent_path}",
+                                "parent": {_new_parent},
                                 "reparented": True,
                             }}))
                         else:
@@ -1172,6 +1203,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with mass, velocity, angular velocity, kinematic state, etc.
         """
+        _prim_path = json.dumps(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1181,11 +1213,11 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 elif not prim.HasAPI(UsdPhysics.RigidBodyAPI):
-                    print(json.dumps({{"error": "Prim does not have RigidBodyAPI: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim does not have RigidBodyAPI: " + {_prim_path}}}))
                 else:
                     rb = UsdPhysics.RigidBodyAPI(prim)
                     vel = rb.GetVelocityAttr().Get()
@@ -1206,7 +1238,7 @@ class IsaacTools(LoggerMixin):
                         inertia = list(inertia_attr) if inertia_attr else None
 
                     print(json.dumps({{
-                        "prim_path": "{prim_path}",
+                        "prim_path": {_prim_path},
                         "rigid_body_enabled": rb_enabled if rb_enabled is not None else True,
                         "is_kinematic": kinematic if kinematic is not None else False,
                         "velocity": list(vel) if vel else [0, 0, 0],
@@ -1231,6 +1263,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with lists of rigid bodies, colliders, and joints.
         """
+        _root_path = json.dumps(root_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1240,7 +1273,7 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                root = stage.GetPrimAtPath("{root_path}")
+                root = stage.GetPrimAtPath({_root_path})
                 rigid_bodies = []
                 colliders = []
                 joints = []
@@ -1253,7 +1286,7 @@ class IsaacTools(LoggerMixin):
                     if p.IsA(UsdPhysics.Joint):
                         joints.append({{"path": path, "type": p.GetTypeName()}})
                 print(json.dumps({{
-                    "root_path": "{root_path}",
+                    "root_path": {_root_path},
                     "rigid_body_count": len(rigid_bodies),
                     "collider_count": len(colliders),
                     "joint_count": len(joints),
@@ -1276,6 +1309,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with collision enabled state and approximation type.
         """
+        _prim_path = json.dumps(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1285,11 +1319,11 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 elif not prim.HasAPI(UsdPhysics.CollisionAPI):
-                    print(json.dumps({{"error": "Prim does not have CollisionAPI: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim does not have CollisionAPI: " + {_prim_path}}}))
                 else:
                     col = UsdPhysics.CollisionAPI(prim)
                     enabled = col.GetCollisionEnabledAttr().Get()
@@ -1299,7 +1333,7 @@ class IsaacTools(LoggerMixin):
                         mesh_col = UsdPhysics.MeshCollisionAPI(prim)
                         approx = mesh_col.GetApproximationAttr().Get()
                     print(json.dumps({{
-                        "prim_path": "{prim_path}",
+                        "prim_path": {_prim_path},
                         "collision_enabled": enabled if enabled is not None else True,
                         "has_mesh_collision": prim.HasAPI(UsdPhysics.MeshCollisionAPI),
                         "approximation": approx,
@@ -1319,6 +1353,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with joint type, bodies, limits, and drive settings.
         """
+        _prim_path = json.dumps(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1328,11 +1363,11 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 elif not prim.IsA(UsdPhysics.Joint):
-                    print(json.dumps({{"error": "Prim is not a Joint: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim is not a Joint: " + {_prim_path}}}))
                 else:
                     joint = UsdPhysics.Joint(prim)
                     body0 = joint.GetBody0Rel().GetTargets()
@@ -1358,7 +1393,7 @@ class IsaacTools(LoggerMixin):
                         limits["upper"] = pri.GetUpperLimitAttr().Get()
 
                     print(json.dumps({{
-                        "prim_path": "{prim_path}",
+                        "prim_path": {_prim_path},
                         "joint_type": prim.GetTypeName(),
                         "enabled": enabled if enabled is not None else True,
                         "body0": [str(b) for b in body0] if body0 else [],
@@ -1383,6 +1418,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with mass, density, center of mass, and inertia tensor.
         """
+        _prim_path = json.dumps(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1392,11 +1428,11 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 elif not prim.HasAPI(UsdPhysics.MassAPI):
-                    print(json.dumps({{"error": "Prim does not have MassAPI: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim does not have MassAPI: " + {_prim_path}}}))
                 else:
                     mass_api = UsdPhysics.MassAPI(prim)
                     mass = mass_api.GetMassAttr().Get()
@@ -1405,7 +1441,7 @@ class IsaacTools(LoggerMixin):
                     inertia = mass_api.GetDiagonalInertiaAttr().Get()
                     principal_axes = mass_api.GetPrincipalAxesAttr().Get()
                     print(json.dumps({{
-                        "prim_path": "{prim_path}",
+                        "prim_path": {_prim_path},
                         "mass": mass,
                         "density": density,
                         "center_of_mass": list(com) if com else None,
@@ -1434,6 +1470,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the API was applied.
         """
+        _prim_path = json.dumps(prim_path)
         kin_str = "True" if kinematic else "False"
         script = textwrap.dedent(f"""\
             import json
@@ -1444,19 +1481,19 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 else:
                     if prim.HasAPI(UsdPhysics.RigidBodyAPI):
-                        print(json.dumps({{"error": "RigidBodyAPI already applied: {prim_path}"}}))
+                        print(json.dumps({{"error": "RigidBodyAPI already applied: " + {_prim_path}}}))
                     else:
                         UsdPhysics.RigidBodyAPI.Apply(prim)
                         if {kin_str}:
                             rb = UsdPhysics.RigidBodyAPI(prim)
                             rb.GetKinematicEnabledAttr().Set(True)
                         print(json.dumps({{
-                            "prim_path": "{prim_path}",
+                            "prim_path": {_prim_path},
                             "rigid_body_applied": True,
                             "kinematic": {kin_str},
                         }}))
@@ -1480,6 +1517,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming collision was added.
         """
+        _prim_path = json.dumps(prim_path)
+        _approx = json.dumps(approximation)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1489,18 +1528,18 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 else:
                     UsdPhysics.CollisionAPI.Apply(prim)
-                    approx = "{approximation}"
+                    approx = {_approx}
                     if approx != "none":
                         UsdPhysics.MeshCollisionAPI.Apply(prim)
                         mesh_col = UsdPhysics.MeshCollisionAPI(prim)
                         mesh_col.GetApproximationAttr().Set(approx)
                     print(json.dumps({{
-                        "prim_path": "{prim_path}",
+                        "prim_path": {_prim_path},
                         "collision_applied": True,
                         "approximation": approx,
                     }}))
@@ -1526,6 +1565,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming updated mass properties.
         """
+        _prim_path = json.dumps(prim_path)
         m_str = str(mass) if mass is not None else "None"
         d_str = str(density) if density is not None else "None"
         com_str = str(center_of_mass) if center_of_mass else "None"
@@ -1538,9 +1578,9 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 else:
                     if not prim.HasAPI(UsdPhysics.MassAPI):
                         UsdPhysics.MassAPI.Apply(prim)
@@ -1555,7 +1595,7 @@ class IsaacTools(LoggerMixin):
                     if com is not None:
                         mass_api.GetCenterOfMassAttr().Set(Gf.Vec3f(*com))
                     print(json.dumps({{
-                        "prim_path": "{prim_path}",
+                        "prim_path": {_prim_path},
                         "mass": mass_api.GetMassAttr().Get(),
                         "density": mass_api.GetDensityAttr().Get(),
                         "center_of_mass": list(mass_api.GetCenterOfMassAttr().Get()) if mass_api.GetCenterOfMassAttr().Get() else None,
@@ -1582,6 +1622,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the physics material was set.
         """
+        _prim_path = json.dumps(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1591,17 +1632,17 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
                     # Create material prim
-                    prim = stage.DefinePrim("{prim_path}", "Material")
+                    prim = stage.DefinePrim({_prim_path}, "Material")
                 UsdPhysics.MaterialAPI.Apply(prim)
                 mat = UsdPhysics.MaterialAPI(prim)
                 mat.GetStaticFrictionAttr().Set({static_friction})
                 mat.GetDynamicFrictionAttr().Set({dynamic_friction})
                 mat.GetRestitutionAttr().Set({restitution})
                 print(json.dumps({{
-                    "prim_path": "{prim_path}",
+                    "prim_path": {_prim_path},
                     "static_friction": {static_friction},
                     "dynamic_friction": {dynamic_friction},
                     "restitution": {restitution},
@@ -1717,6 +1758,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with current time after stepping.
         """
+        num_steps = max(1, min(num_steps, 1000))
         script = textwrap.dedent(f"""\
             import json
             try:
@@ -1808,6 +1850,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with material shader, inputs, and bound prims.
         """
+        _mat_path = json.dumps(material_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1817,11 +1860,11 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{material_path}")
+                prim = stage.GetPrimAtPath({_mat_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {material_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_mat_path}}}))
                 elif not prim.IsA(UsdShade.Material):
-                    print(json.dumps({{"error": "Prim is not a Material: {material_path}"}}))
+                    print(json.dumps({{"error": "Prim is not a Material: " + {_mat_path}}}))
                 else:
                     mat = UsdShade.Material(prim)
                     # Try default render context, then MDL
@@ -1856,7 +1899,7 @@ class IsaacTools(LoggerMixin):
                                 except Exception:
                                     inputs[name] = str(val)
                     print(json.dumps({{
-                        "material_path": "{material_path}",
+                        "material_path": {_mat_path},
                         "shader_path": shader_path,
                         "shader_type": shader_type,
                         "render_context": render_context,
@@ -1926,6 +1969,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the material binding.
         """
+        _prim_path = json.dumps(prim_path)
+        _mat_path = json.dumps(material_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1935,18 +1980,18 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
-                mat_prim = stage.GetPrimAtPath("{material_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
+                mat_prim = stage.GetPrimAtPath({_mat_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
                 elif not mat_prim.IsValid() or not mat_prim.IsA(UsdShade.Material):
-                    print(json.dumps({{"error": "Material not found: {material_path}"}}))
+                    print(json.dumps({{"error": "Material not found: " + {_mat_path}}}))
                 else:
                     mat = UsdShade.Material(mat_prim)
                     UsdShade.MaterialBindingAPI(prim).Bind(mat)
                     print(json.dumps({{
-                        "prim_path": "{prim_path}",
-                        "material_path": "{material_path}",
+                        "prim_path": {_prim_path},
+                        "material_path": {_mat_path},
                         "bound": True,
                     }}))
         """)
@@ -1969,7 +2014,9 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the property was set.
         """
-        val_str = json.dumps(value)
+        _mat_path = json.dumps(material_path)
+        _prop_name = json.dumps(property_name)
+        _val_str = json.dumps(json.dumps(value))
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1979,9 +2026,9 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{material_path}")
+                prim = stage.GetPrimAtPath({_mat_path})
                 if not prim.IsValid() or not prim.IsA(UsdShade.Material):
-                    print(json.dumps({{"error": "Material not found: {material_path}"}}))
+                    print(json.dumps({{"error": "Material not found: " + {_mat_path}}}))
                 else:
                     mat = UsdShade.Material(prim)
                     # Try default render context, then MDL
@@ -1993,30 +2040,31 @@ class IsaacTools(LoggerMixin):
                     if not shader_obj:
                         print(json.dumps({{"error": "No surface shader found on material"}}))
                     else:
-                        val = json.loads('{val_str}')
-                        inp = shader_obj.GetInput("{property_name}")
+                        val = json.loads({_val_str})
+                        prop_name = {_prop_name}
+                        inp = shader_obj.GetInput(prop_name)
                         if not inp or not inp.GetAttr().IsValid():
                             # Create the input for MDL shaders
                             if isinstance(val, list) and len(val) == 3:
-                                inp = shader_obj.CreateInput("{property_name}", Sdf.ValueTypeNames.Color3f)
+                                inp = shader_obj.CreateInput(prop_name, Sdf.ValueTypeNames.Color3f)
                             elif isinstance(val, list) and len(val) == 4:
-                                inp = shader_obj.CreateInput("{property_name}", Sdf.ValueTypeNames.Float4)
+                                inp = shader_obj.CreateInput(prop_name, Sdf.ValueTypeNames.Float4)
                             elif isinstance(val, (int, float)):
-                                inp = shader_obj.CreateInput("{property_name}", Sdf.ValueTypeNames.Float)
+                                inp = shader_obj.CreateInput(prop_name, Sdf.ValueTypeNames.Float)
                             elif isinstance(val, bool):
-                                inp = shader_obj.CreateInput("{property_name}", Sdf.ValueTypeNames.Bool)
+                                inp = shader_obj.CreateInput(prop_name, Sdf.ValueTypeNames.Bool)
                             elif isinstance(val, str):
-                                inp = shader_obj.CreateInput("{property_name}", Sdf.ValueTypeNames.String)
+                                inp = shader_obj.CreateInput(prop_name, Sdf.ValueTypeNames.String)
                             else:
-                                inp = shader_obj.CreateInput("{property_name}", Sdf.ValueTypeNames.Float)
+                                inp = shader_obj.CreateInput(prop_name, Sdf.ValueTypeNames.Float)
                         if isinstance(val, list) and len(val) == 3:
                             val = Gf.Vec3f(*val)
                         elif isinstance(val, list) and len(val) == 4:
                             val = Gf.Vec4f(*val)
                         inp.Set(val)
                         print(json.dumps({{
-                            "material_path": "{material_path}",
-                            "property_name": "{property_name}",
+                            "material_path": {_mat_path},
+                            "property_name": prop_name,
                             "value_set": str(val),
                         }}))
         """)
@@ -2036,17 +2084,18 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the stage was opened.
         """
+        _file_path = json.dumps(file_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
 
             ctx = omni.usd.get_context()
-            result, error = await ctx.open_stage_async("{file_path}")
+            result, error = await ctx.open_stage_async({_file_path})
             if result:
                 stage = ctx.get_stage()
                 total = sum(1 for _ in stage.Traverse()) if stage else 0
                 print(json.dumps({{
-                    "file_path": "{file_path}",
+                    "file_path": {_file_path},
                     "opened": True,
                     "total_prims": total,
                 }}))
@@ -2068,14 +2117,15 @@ class IsaacTools(LoggerMixin):
             Dict confirming the stage was saved.
         """
         if file_path:
+            _file_path = json.dumps(file_path)
             script = textwrap.dedent(f"""\
                 import json
                 import omni.usd
 
                 ctx = omni.usd.get_context()
-                result, error, saved_paths = await ctx.save_as_stage_async("{file_path}")
+                result, error, saved_paths = await ctx.save_as_stage_async({_file_path})
                 if result:
-                    print(json.dumps({{"file_path": "{file_path}", "saved": True}}))
+                    print(json.dumps({{"file_path": {_file_path}, "saved": True}}))
                 else:
                     print(json.dumps({{"error": f"Failed to save stage: {{error}}"}}))
             """)
@@ -2136,6 +2186,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the asset was imported.
         """
+        _asset_path = json.dumps(asset_path)
+        _target_path = json.dumps(target_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2145,14 +2197,14 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.DefinePrim("{target_path}")
+                prim = stage.DefinePrim({_target_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Failed to create prim at: {target_path}"}}))
+                    print(json.dumps({{"error": "Failed to create prim at: " + {_target_path}}}))
                 else:
-                    prim.GetReferences().AddReference("{asset_path}")
+                    prim.GetReferences().AddReference({_asset_path})
                     print(json.dumps({{
-                        "asset_path": "{asset_path}",
-                        "target_path": "{target_path}",
+                        "asset_path": {_asset_path},
+                        "target_path": {_target_path},
                         "imported": True,
                     }}))
         """)
@@ -2173,6 +2225,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the reference was added.
         """
+        _prim_path = json.dumps(prim_path)
+        _ref_path = json.dumps(reference_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2182,18 +2236,18 @@ class IsaacTools(LoggerMixin):
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath("{prim_path}")
+                prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
-                    prim = stage.DefinePrim("{prim_path}")
+                    prim = stage.DefinePrim({_prim_path})
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Cannot create prim: {prim_path}"}}))
+                    print(json.dumps({{"error": "Cannot create prim: " + {_prim_path}}}))
                 else:
-                    prim.GetReferences().AddReference("{reference_path}")
+                    prim.GetReferences().AddReference({_ref_path})
                     refs = prim.GetMetadata("references")
                     ref_count = len(refs.GetAddedOrExplicitItems()) if refs else 0
                     print(json.dumps({{
-                        "prim_path": "{prim_path}",
-                        "reference_path": "{reference_path}",
+                        "prim_path": {_prim_path},
+                        "reference_path": {_ref_path},
                         "added": True,
                         "total_references": ref_count,
                     }}))

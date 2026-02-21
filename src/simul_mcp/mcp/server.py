@@ -9,7 +9,7 @@ import inspect
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Coroutine, Dict, List, Optional, Tuple, Type, Union
 
 from pydantic import BaseModel
 
@@ -162,7 +162,9 @@ class IsaacMCPServer(LoggerMixin):
         return None
 
     async def _exec_isaac(
-        self, tool_name: str, coro: Any
+        self,
+        tool_name: str,
+        coro: Coroutine[Any, Any, Dict[str, Any]],
     ) -> Dict[str, Any]:
         """
         Execute an Isaac Sim tool coroutine with rate limiting and
@@ -176,30 +178,14 @@ class IsaacMCPServer(LoggerMixin):
             Tool result dict or error response dict.
         """
         rate_error = self._check_rate_limit(tool_name)
-        if rate_error:
+        if rate_error is not None:
             return rate_error
         try:
             return await coro
-        except ConnectionRefusedError:
-            return ErrorResponse(
-                error=(
-                    f"Isaac Sim is not reachable at {self.client.address}. "
-                    "Ensure Isaac Sim is running with the "
-                    "isaacsim.code_editor.vscode extension enabled."
-                ),
-                error_type="ConnectionError",
-            ).dict()
-        except TimeoutError:
-            return ErrorResponse(
-                error=(
-                    f"Script execution timed out after "
-                    f"{self.client.timeout_seconds}s on {self.client.address}."
-                ),
-                error_type="TimeoutError",
-            ).dict()
         except Exception as exc:
+            logger.error("Isaac tool %s failed: %s", tool_name, exc)
             return ErrorResponse(
-                error=str(exc), error_type="Exception"
+                error=str(exc), error_type=type(exc).__name__
             ).dict()
 
     def _resolve_allowed_paths(self) -> List[Path]:
@@ -1417,7 +1403,7 @@ class IsaacMCPServer(LoggerMixin):
             ),
         )
         async def get_isaac_camera_info(
-            camera_path: str = "",
+            camera_path: Optional[str] = None,
         ) -> Dict[str, Any]:
             return await self._exec_isaac(
                 "get_isaac_camera_info",
@@ -1452,7 +1438,7 @@ class IsaacMCPServer(LoggerMixin):
         async def set_isaac_camera(
             position: Optional[List[float]] = None,
             target: Optional[List[float]] = None,
-            camera_path: str = "",
+            camera_path: Optional[str] = None,
         ) -> Dict[str, Any]:
             return await self._exec_isaac(
                 "set_isaac_camera",
@@ -2034,6 +2020,12 @@ class IsaacMCPServer(LoggerMixin):
             ),
         )
         async def open_isaac_stage(file_path: str) -> Dict[str, Any]:
+            if not self._is_path_allowed(file_path):
+                return ErrorResponse(
+                    error="File path is not allowed by sandbox policy",
+                    error_type="SandboxError",
+                    details={"file_path": file_path},
+                ).dict()
             return await self._exec_isaac(
                 "open_isaac_stage",
                 self._isaac_tools.open_isaac_stage(file_path=file_path),
@@ -2052,6 +2044,12 @@ class IsaacMCPServer(LoggerMixin):
         async def save_isaac_stage(
             file_path: Optional[str] = None,
         ) -> Dict[str, Any]:
+            if file_path is not None and not self._is_path_allowed(file_path):
+                return ErrorResponse(
+                    error="File path is not allowed by sandbox policy",
+                    error_type="SandboxError",
+                    details={"file_path": file_path},
+                ).dict()
             return await self._exec_isaac(
                 "save_isaac_stage",
                 self._isaac_tools.save_isaac_stage(file_path=file_path),
@@ -2085,6 +2083,12 @@ class IsaacMCPServer(LoggerMixin):
             asset_path: str,
             target_path: str = "/World/ImportedAsset",
         ) -> Dict[str, Any]:
+            if not self._is_path_allowed(asset_path):
+                return ErrorResponse(
+                    error="File path is not allowed by sandbox policy",
+                    error_type="SandboxError",
+                    details={"file_path": asset_path},
+                ).dict()
             return await self._exec_isaac(
                 "import_isaac_asset",
                 self._isaac_tools.import_isaac_asset(
@@ -2105,6 +2109,12 @@ class IsaacMCPServer(LoggerMixin):
         async def add_isaac_reference(
             prim_path: str, reference_path: str
         ) -> Dict[str, Any]:
+            if not self._is_path_allowed(reference_path):
+                return ErrorResponse(
+                    error="File path is not allowed by sandbox policy",
+                    error_type="SandboxError",
+                    details={"file_path": reference_path},
+                ).dict()
             return await self._exec_isaac(
                 "add_isaac_reference",
                 self._isaac_tools.add_isaac_reference(
