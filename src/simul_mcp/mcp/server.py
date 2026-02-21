@@ -1484,6 +1484,148 @@ class IsaacMCPServer(LoggerMixin):
                 ),
             )
 
+        # -- Prim Manipulation tools ------------------------------------------
+
+        @self.mcp.tool(
+            name="create_isaac_prim",
+            description=(
+                "Create a new USD prim at the given path with optional type "
+                "(Xform, Mesh, Sphere, Cube, Cylinder, Cone, Capsule, Plane)."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def create_isaac_prim(
+            prim_path: str,
+            prim_type: str = "Xform",
+            attributes: Optional[Dict[str, Any]] = None,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "create_isaac_prim",
+                self._isaac_tools.create_isaac_prim(
+                    prim_path=prim_path,
+                    prim_type=prim_type,
+                    attributes=attributes,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="delete_isaac_prim",
+            description="Delete a prim and all its children from the stage.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True,
+                destructive=True,
+            ),
+        )
+        async def delete_isaac_prim(prim_path: str) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "delete_isaac_prim",
+                self._isaac_tools.delete_isaac_prim(prim_path=prim_path),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_prim_transform",
+            description=(
+                "Set a prim's local transform: translate, rotate (euler XYZ "
+                "degrees), and/or scale."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_prim_transform(
+            prim_path: str,
+            translation: Optional[List[float]] = None,
+            rotation_euler: Optional[List[float]] = None,
+            scale: Optional[List[float]] = None,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_prim_transform",
+                self._isaac_tools.set_isaac_prim_transform(
+                    prim_path=prim_path,
+                    translation=translation,
+                    rotation_euler=rotation_euler,
+                    scale=scale,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_prim_visibility",
+            description="Show or hide a prim in the viewport.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_prim_visibility(
+            prim_path: str, visible: bool
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_prim_visibility",
+                self._isaac_tools.set_isaac_prim_visibility(
+                    prim_path=prim_path, visible=visible
+                ),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_prim_attribute",
+            description=(
+                "Set an arbitrary attribute value on a prim. "
+                "The attribute must already exist."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_prim_attribute(
+            prim_path: str,
+            attribute_name: str,
+            value: Any,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_prim_attribute",
+                self._isaac_tools.set_isaac_prim_attribute(
+                    prim_path=prim_path,
+                    attribute_name=attribute_name,
+                    value=value,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="duplicate_isaac_prim",
+            description="Duplicate a prim (deep copy) to a new path.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def duplicate_isaac_prim(
+            prim_path: str, new_path: str
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "duplicate_isaac_prim",
+                self._isaac_tools.duplicate_isaac_prim(
+                    prim_path=prim_path, new_path=new_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="reparent_isaac_prim",
+            description="Move a prim under a new parent in the hierarchy.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def reparent_isaac_prim(
+            prim_path: str, new_parent_path: str
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "reparent_isaac_prim",
+                self._isaac_tools.reparent_isaac_prim(
+                    prim_path=prim_path,
+                    new_parent_path=new_parent_path,
+                ),
+            )
+
     def _register_blender_tools(self) -> None:
         """Register Blender runtime specific tools."""
 

@@ -768,3 +768,356 @@ class IsaacTools(LoggerMixin):
         return await self._execute_json_script(script)
 
 
+    # ------------------------------------------------------------------
+    # Phase 3: Prim Manipulation
+    # ------------------------------------------------------------------
+
+    async def create_isaac_prim(
+        self,
+        prim_path: str,
+        prim_type: str = "Xform",
+        attributes: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a new prim in the current Isaac Sim stage.
+
+        Args:
+            prim_path: USD path for the new prim (e.g. "/World/MyObject").
+            prim_type: USD type name (e.g. "Xform", "Mesh", "Cube", "Sphere").
+            attributes: Optional dict of attribute name→value to set on creation.
+
+        Returns:
+            Dict confirming the created prim path and type.
+        """
+        attrs_str = json.dumps(attributes) if attributes else "{}"
+        script = textwrap.dedent(f"""\
+            import json
+            import omni.usd
+            from pxr import Usd, UsdGeom, Sdf
+
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                print(json.dumps({{"error": "No stage is currently open"}}))
+            else:
+                existing = stage.GetPrimAtPath("{prim_path}")
+                if existing.IsValid():
+                    print(json.dumps({{"error": "Prim already exists: {prim_path}"}}))
+                else:
+                    prim = stage.DefinePrim("{prim_path}", "{prim_type}")
+                    if not prim.IsValid():
+                        print(json.dumps({{"error": "Failed to create prim: {prim_path}"}}))
+                    else:
+                        attrs = json.loads('{attrs_str}')
+                        for name, val in attrs.items():
+                            attr = prim.GetAttribute(name)
+                            if attr.IsValid():
+                                attr.Set(val)
+                        print(json.dumps({{
+                            "prim_path": str(prim.GetPath()),
+                            "prim_type": prim.GetTypeName(),
+                            "created": True,
+                        }}))
+        """)
+        return await self._execute_json_script(script)
+
+    async def delete_isaac_prim(self, prim_path: str) -> Dict[str, Any]:
+        """
+        Delete a prim and its children from the current stage.
+
+        Args:
+            prim_path: USD path of the prim to delete.
+
+        Returns:
+            Dict confirming deletion.
+        """
+        script = textwrap.dedent(f"""\
+            import json
+            import omni.usd
+            from pxr import Sdf
+
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                print(json.dumps({{"error": "No stage is currently open"}}))
+            else:
+                prim = stage.GetPrimAtPath("{prim_path}")
+                if not prim.IsValid():
+                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                else:
+                    edit = Sdf.BatchNamespaceEdit()
+                    edit.Add(Sdf.NamespaceEdit.Remove("{prim_path}"))
+                    if stage.GetRootLayer().Apply(edit):
+                        print(json.dumps({{"prim_path": "{prim_path}", "deleted": True}}))
+                    else:
+                        print(json.dumps({{"error": "Failed to delete prim: {prim_path}"}}))
+        """)
+        return await self._execute_json_script(script)
+
+    async def set_isaac_prim_transform(
+        self,
+        prim_path: str,
+        translation: Optional[List[float]] = None,
+        rotation_euler: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Set the transform of a prim (translation, rotation, scale).
+
+        Args:
+            prim_path: USD path of the prim.
+            translation: Position as [x, y, z].
+            rotation_euler: Rotation in degrees as [x, y, z] (XYZ Euler).
+            scale: Scale as [x, y, z].
+
+        Returns:
+            Dict with updated transform values.
+        """
+        t_str = str(translation) if translation else "None"
+        r_str = str(rotation_euler) if rotation_euler else "None"
+        s_str = str(scale) if scale else "None"
+        script = textwrap.dedent(f"""\
+            import json
+            import omni.usd
+            from pxr import Usd, UsdGeom, Gf
+
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                print(json.dumps({{"error": "No stage is currently open"}}))
+            else:
+                prim = stage.GetPrimAtPath("{prim_path}")
+                if not prim.IsValid():
+                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                elif not prim.IsA(UsdGeom.Xformable):
+                    print(json.dumps({{"error": "Prim is not Xformable: {prim_path}"}}))
+                else:
+                    xformable = UsdGeom.Xformable(prim)
+                    t = {t_str}
+                    r = {r_str}
+                    s = {s_str}
+                    if t is not None:
+                        found = False
+                        for op in xformable.GetOrderedXformOps():
+                            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                                op.Set(Gf.Vec3d(*t))
+                                found = True
+                                break
+                        if not found:
+                            xformable.AddTranslateOp().Set(Gf.Vec3d(*t))
+                    if r is not None:
+                        found = False
+                        for op in xformable.GetOrderedXformOps():
+                            if op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
+                                op.Set(Gf.Vec3f(*r))
+                                found = True
+                                break
+                        if not found:
+                            xformable.AddRotateXYZOp().Set(Gf.Vec3f(*r))
+                    if s is not None:
+                        found = False
+                        for op in xformable.GetOrderedXformOps():
+                            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+                                op.Set(Gf.Vec3f(*s))
+                                found = True
+                                break
+                        if not found:
+                            xformable.AddScaleOp().Set(Gf.Vec3f(*s))
+                    # Read back
+                    xform = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+                    pos = xform.ExtractTranslation()
+                    print(json.dumps({{
+                        "prim_path": "{prim_path}",
+                        "translation": list(pos),
+                        "rotation_euler_set": r,
+                        "scale_set": s,
+                    }}))
+        """)
+        return await self._execute_json_script(script)
+
+    async def set_isaac_prim_visibility(
+        self, prim_path: str, visible: bool
+    ) -> Dict[str, Any]:
+        """
+        Set the visibility of a prim.
+
+        Args:
+            prim_path: USD path of the prim.
+            visible: True to make visible, False to hide.
+
+        Returns:
+            Dict confirming the visibility state.
+        """
+        vis_token = "inherited" if visible else "invisible"
+        script = textwrap.dedent(f"""\
+            import json
+            import omni.usd
+            from pxr import UsdGeom
+
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                print(json.dumps({{"error": "No stage is currently open"}}))
+            else:
+                prim = stage.GetPrimAtPath("{prim_path}")
+                if not prim.IsValid():
+                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                elif not prim.IsA(UsdGeom.Imageable):
+                    print(json.dumps({{"error": "Prim is not Imageable: {prim_path}"}}))
+                else:
+                    img = UsdGeom.Imageable(prim)
+                    img.GetVisibilityAttr().Set("{vis_token}")
+                    print(json.dumps({{
+                        "prim_path": "{prim_path}",
+                        "visibility": "{vis_token}",
+                        "effective_visibility": img.ComputeVisibility(),
+                    }}))
+        """)
+        return await self._execute_json_script(script)
+
+    async def set_isaac_prim_attribute(
+        self,
+        prim_path: str,
+        attribute_name: str,
+        value: Any,
+    ) -> Dict[str, Any]:
+        """
+        Set a single attribute value on a prim.
+
+        Args:
+            prim_path: USD path of the prim.
+            attribute_name: Name of the attribute to set.
+            value: Value to set. Must be JSON-serializable.
+
+        Returns:
+            Dict confirming the attribute was set.
+        """
+        val_str = json.dumps(value)
+        script = textwrap.dedent(f"""\
+            import json
+            import omni.usd
+
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                print(json.dumps({{"error": "No stage is currently open"}}))
+            else:
+                prim = stage.GetPrimAtPath("{prim_path}")
+                if not prim.IsValid():
+                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                else:
+                    attr = prim.GetAttribute("{attribute_name}")
+                    if not attr.IsValid():
+                        print(json.dumps({{"error": "Attribute not found: {attribute_name} on {prim_path}"}}))
+                    else:
+                        val = json.loads('{val_str}')
+                        try:
+                            attr.Set(val)
+                            read_back = attr.Get()
+                            print(json.dumps({{
+                                "prim_path": "{prim_path}",
+                                "attribute": "{attribute_name}",
+                                "value_set": val,
+                                "value_read": str(read_back),
+                            }}))
+                        except Exception as e:
+                            print(json.dumps({{"error": f"Failed to set attribute: {{e}}"}}))
+        """)
+        return await self._execute_json_script(script)
+
+    async def duplicate_isaac_prim(
+        self, prim_path: str, new_path: str
+    ) -> Dict[str, Any]:
+        """
+        Duplicate a prim to a new path.
+
+        Args:
+            prim_path: Source prim path.
+            new_path: Destination prim path.
+
+        Returns:
+            Dict confirming the duplication.
+        """
+        script = textwrap.dedent(f"""\
+            import json
+            import omni.usd
+            from pxr import Sdf
+
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                print(json.dumps({{"error": "No stage is currently open"}}))
+            else:
+                src = stage.GetPrimAtPath("{prim_path}")
+                if not src.IsValid():
+                    print(json.dumps({{"error": "Source prim not found: {prim_path}"}}))
+                else:
+                    dst = stage.GetPrimAtPath("{new_path}")
+                    if dst.IsValid():
+                        print(json.dumps({{"error": "Destination already exists: {new_path}"}}))
+                    else:
+                        Sdf.CopySpec(
+                            stage.GetRootLayer(),
+                            Sdf.Path("{prim_path}"),
+                            stage.GetRootLayer(),
+                            Sdf.Path("{new_path}"),
+                        )
+                        new_prim = stage.GetPrimAtPath("{new_path}")
+                        if new_prim.IsValid():
+                            print(json.dumps({{
+                                "source_path": "{prim_path}",
+                                "new_path": "{new_path}",
+                                "type": new_prim.GetTypeName(),
+                                "duplicated": True,
+                            }}))
+                        else:
+                            print(json.dumps({{"error": "Duplication failed"}}))
+        """)
+        return await self._execute_json_script(script)
+
+    async def reparent_isaac_prim(
+        self, prim_path: str, new_parent_path: str
+    ) -> Dict[str, Any]:
+        """
+        Move a prim under a new parent.
+
+        Args:
+            prim_path: USD path of the prim to move.
+            new_parent_path: USD path of the new parent prim.
+
+        Returns:
+            Dict with the new full path of the reparented prim.
+        """
+        script = textwrap.dedent(f"""\
+            import json
+            import omni.usd
+            from pxr import Sdf
+
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                print(json.dumps({{"error": "No stage is currently open"}}))
+            else:
+                prim = stage.GetPrimAtPath("{prim_path}")
+                if not prim.IsValid():
+                    print(json.dumps({{"error": "Prim not found: {prim_path}"}}))
+                else:
+                    parent = stage.GetPrimAtPath("{new_parent_path}")
+                    if not parent.IsValid():
+                        print(json.dumps({{"error": "Parent not found: {new_parent_path}"}}))
+                    else:
+                        name = prim.GetName()
+                        new_full_path = "{new_parent_path}/" + name
+                        edit = Sdf.BatchNamespaceEdit()
+                        edit.Add(
+                            Sdf.NamespaceEdit.Reparent(
+                                Sdf.Path("{prim_path}"),
+                                Sdf.Path("{new_parent_path}"),
+                                -1,
+                            )
+                        )
+                        if stage.GetRootLayer().Apply(edit):
+                            print(json.dumps({{
+                                "old_path": "{prim_path}",
+                                "new_path": new_full_path,
+                                "parent": "{new_parent_path}",
+                                "reparented": True,
+                            }}))
+                        else:
+                            print(json.dumps({{"error": "Reparent operation failed"}}))
+        """)
+        return await self._execute_json_script(script)
+
