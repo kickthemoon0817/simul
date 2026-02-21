@@ -1404,6 +1404,86 @@ class IsaacMCPServer(LoggerMixin):
                 self._isaac_tools.get_isaac_scene_summary(),
             )
 
+        # -- Viewport & Camera tools ------------------------------------------
+
+        @self.mcp.tool(
+            name="get_isaac_camera_info",
+            description=(
+                "Get camera properties (focal length, clipping range, resolution) "
+                "for the active or specified camera."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_camera_info(
+            camera_path: str = "",
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_camera_info",
+                self._isaac_tools.get_isaac_camera_info(
+                    camera_path=camera_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="list_isaac_cameras",
+            description="List all camera prims in the current Isaac Sim stage.",
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def list_isaac_cameras() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "list_isaac_cameras",
+                self._isaac_tools.list_isaac_cameras(),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_camera",
+            description=(
+                "Set the active viewport camera position, target (look-at), "
+                "or switch to a specific camera prim."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_camera(
+            position: Optional[List[float]] = None,
+            target: Optional[List[float]] = None,
+            camera_path: str = "",
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_camera",
+                self._isaac_tools.set_isaac_camera(
+                    position=position,
+                    target=target,
+                    camera_path=camera_path,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="capture_isaac_viewport",
+            description=(
+                "Capture the current viewport as a PNG image and return "
+                "the file path or base64-encoded data."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def capture_isaac_viewport(
+            width: int = 1280,
+            height: int = 720,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "capture_isaac_viewport",
+                self._isaac_tools.capture_isaac_viewport(
+                    width=width, height=height
+                ),
+            )
+
     def _register_blender_tools(self) -> None:
         """Register Blender runtime specific tools."""
 
