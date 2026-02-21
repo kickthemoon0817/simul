@@ -1942,6 +1942,87 @@ class IsaacMCPServer(LoggerMixin):
                 self._isaac_tools.get_isaac_simulation_time(),
             )
 
+        # -- Materials & Appearance tools -------------------------------------
+
+        @self.mcp.tool(
+            name="get_isaac_material_info",
+            description=(
+                "Get material properties: shader type, bound inputs, "
+                "and connected textures for a material prim."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_material_info(
+            material_path: str,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_material_info",
+                self._isaac_tools.get_isaac_material_info(
+                    material_path=material_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="list_isaac_materials",
+            description="List all material prims in the current stage.",
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def list_isaac_materials() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "list_isaac_materials",
+                self._isaac_tools.list_isaac_materials(),
+            )
+
+        @self.mcp.tool(
+            name="assign_isaac_material",
+            description=(
+                "Bind a material to a prim so the prim renders "
+                "with that material's appearance."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def assign_isaac_material(
+            prim_path: str, material_path: str
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "assign_isaac_material",
+                self._isaac_tools.assign_isaac_material(
+                    prim_path=prim_path,
+                    material_path=material_path,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_material_property",
+            description=(
+                "Set an input property on a material's surface shader "
+                "(e.g. diffuse_color_constant, metallic_constant, "
+                "roughness_constant)."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_material_property(
+            material_path: str,
+            property_name: str,
+            value: Any,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_material_property",
+                self._isaac_tools.set_isaac_material_property(
+                    material_path=material_path,
+                    property_name=property_name,
+                    value=value,
+                ),
+            )
+
     def _register_blender_tools(self) -> None:
         """Register Blender runtime specific tools."""
 
