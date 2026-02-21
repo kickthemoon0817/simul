@@ -1626,6 +1626,217 @@ class IsaacMCPServer(LoggerMixin):
                 ),
             )
 
+        # -- Physics Inspection tools -----------------------------------------
+
+        @self.mcp.tool(
+            name="get_isaac_physics_scene",
+            description=(
+                "Get physics scene configuration: gravity, solver settings, "
+                "and physics scene prim paths."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_physics_scene() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_physics_scene",
+                self._isaac_tools.get_isaac_physics_scene(),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_rigid_body_info",
+            description=(
+                "Get rigid body physics properties: mass, velocity, "
+                "angular velocity, and kinematic state."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_rigid_body_info(
+            prim_path: str,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_rigid_body_info",
+                self._isaac_tools.get_isaac_rigid_body_info(
+                    prim_path=prim_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="list_isaac_physics_objects",
+            description=(
+                "List all prims with physics APIs: rigid bodies, colliders, "
+                "and joints under a root path."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def list_isaac_physics_objects(
+            root_path: str = "/",
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "list_isaac_physics_objects",
+                self._isaac_tools.list_isaac_physics_objects(
+                    root_path=root_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_collision_info",
+            description=(
+                "Get collision properties of a prim: enabled state "
+                "and mesh approximation type."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_collision_info(
+            prim_path: str,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_collision_info",
+                self._isaac_tools.get_isaac_collision_info(
+                    prim_path=prim_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_joint_info",
+            description=(
+                "Get joint information: type, connected bodies, limits, "
+                "and break force/torque."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_joint_info(
+            prim_path: str,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_joint_info",
+                self._isaac_tools.get_isaac_joint_info(
+                    prim_path=prim_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_mass_properties",
+            description=(
+                "Get mass properties: mass, density, center of mass, "
+                "and diagonal inertia tensor."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_mass_properties(
+            prim_path: str,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_mass_properties",
+                self._isaac_tools.get_isaac_mass_properties(
+                    prim_path=prim_path
+                ),
+            )
+
+        # -- Physics Configuration tools --------------------------------------
+
+        @self.mcp.tool(
+            name="add_isaac_rigid_body",
+            description=(
+                "Apply RigidBodyAPI to a prim, optionally making it kinematic."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def add_isaac_rigid_body(
+            prim_path: str, kinematic: bool = False
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "add_isaac_rigid_body",
+                self._isaac_tools.add_isaac_rigid_body(
+                    prim_path=prim_path, kinematic=kinematic
+                ),
+            )
+
+        @self.mcp.tool(
+            name="add_isaac_collision",
+            description=(
+                "Apply CollisionAPI to a prim with optional mesh approximation "
+                "(none, convexHull, convexDecomposition, boundingSphere, boundingCube)."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def add_isaac_collision(
+            prim_path: str, approximation: str = "none"
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "add_isaac_collision",
+                self._isaac_tools.add_isaac_collision(
+                    prim_path=prim_path, approximation=approximation
+                ),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_mass_properties",
+            description=(
+                "Set mass, density, and/or center of mass on a prim. "
+                "Applies MassAPI if not already present."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_mass_properties(
+            prim_path: str,
+            mass: Optional[float] = None,
+            density: Optional[float] = None,
+            center_of_mass: Optional[List[float]] = None,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_mass_properties",
+                self._isaac_tools.set_isaac_mass_properties(
+                    prim_path=prim_path,
+                    mass=mass,
+                    density=density,
+                    center_of_mass=center_of_mass,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_physics_material",
+            description=(
+                "Create or update a physics material with friction and "
+                "restitution coefficients."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_physics_material(
+            prim_path: str,
+            static_friction: float = 0.5,
+            dynamic_friction: float = 0.5,
+            restitution: float = 0.0,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_physics_material",
+                self._isaac_tools.set_isaac_physics_material(
+                    prim_path=prim_path,
+                    static_friction=static_friction,
+                    dynamic_friction=dynamic_friction,
+                    restitution=restitution,
+                ),
+            )
+
     def _register_blender_tools(self) -> None:
         """Register Blender runtime specific tools."""
 
