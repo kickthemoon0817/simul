@@ -1837,6 +1837,111 @@ class IsaacMCPServer(LoggerMixin):
                 ),
             )
 
+        # -- Simulation Control tools -----------------------------------------
+
+        @self.mcp.tool(
+            name="get_isaac_simulation_state",
+            description=(
+                "Get the current simulation state: playing, paused, or stopped, "
+                "along with current time and time-codes-per-second."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_simulation_state() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_simulation_state",
+                self._isaac_tools.get_isaac_simulation_state(),
+            )
+
+        @self.mcp.tool(
+            name="start_isaac_simulation",
+            description="Start (play) the simulation timeline.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def start_isaac_simulation() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "start_isaac_simulation",
+                self._isaac_tools.start_isaac_simulation(),
+            )
+
+        @self.mcp.tool(
+            name="stop_isaac_simulation",
+            description="Stop the simulation and reset to initial state.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def stop_isaac_simulation() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "stop_isaac_simulation",
+                self._isaac_tools.stop_isaac_simulation(),
+            )
+
+        @self.mcp.tool(
+            name="pause_isaac_simulation",
+            description="Pause the currently running simulation.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def pause_isaac_simulation() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "pause_isaac_simulation",
+                self._isaac_tools.pause_isaac_simulation(),
+            )
+
+        @self.mcp.tool(
+            name="step_isaac_simulation",
+            description=(
+                "Step the simulation forward by N physics steps."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def step_isaac_simulation(
+            num_steps: int = 1,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "step_isaac_simulation",
+                self._isaac_tools.step_isaac_simulation(
+                    num_steps=num_steps
+                ),
+            )
+
+        @self.mcp.tool(
+            name="reset_isaac_simulation",
+            description="Reset the simulation to initial state and time 0.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def reset_isaac_simulation() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "reset_isaac_simulation",
+                self._isaac_tools.reset_isaac_simulation(),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_simulation_time",
+            description=(
+                "Get current simulation time, start/end times, "
+                "and time-codes-per-second."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_simulation_time() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_simulation_time",
+                self._isaac_tools.get_isaac_simulation_time(),
+            )
+
     def _register_blender_tools(self) -> None:
         """Register Blender runtime specific tools."""
 
