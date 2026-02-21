@@ -9,7 +9,7 @@ import inspect
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Coroutine, Dict, List, Optional, Tuple, Type, Union
 
 from pydantic import BaseModel
 
@@ -47,6 +47,7 @@ from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
 from ..utils.timing import RateLimiter
 from .schemas import *
+from .tools.isaac_tools import IsaacTools
 
 logger = get_logger(__name__)
 
@@ -60,10 +61,11 @@ except Exception:
 _MCP_INSTRUCTIONS: str = (
     "Simul MCP provides tools for interacting with 3D simulation "
     "and DCC applications. "
-    "Use Isaac Sim tools (execute_isaac_script, ping_isaac) to "
-    "control a running NVIDIA Isaac Sim instance — execute "
-    "arbitrary Python with full access to omni.*, pxr.*, and "
-    "isaacsim.* APIs. "
+    "Use Isaac Sim tools to control a running NVIDIA Isaac Sim "
+    "instance — granular tools for scene inspection, prim "
+    "manipulation, physics, simulation control, materials, "
+    "viewport/camera, and asset/stage operations. The generic "
+    "execute_isaac_script tool is available for custom scripts. "
     "Use USD tools to load, inspect, and edit Universal Scene "
     "Description files. "
     "Use Blender tools when a Blender runtime is connected. "
@@ -114,6 +116,7 @@ class IsaacMCPServer(LoggerMixin):
             port=self.settings.isaac_sim.socket_port,
             timeout_seconds=self.settings.isaac_sim.socket_timeout,
         )
+        self._isaac_tools = IsaacTools(self.client, self.settings)
         self.blender_adapter = (
             BlenderRuntimeAdapter(self.settings) if is_blender_available() else None
         )
@@ -157,6 +160,33 @@ class IsaacMCPServer(LoggerMixin):
                 details={"tool": tool_name},
             ).dict()
         return None
+
+    async def _exec_isaac(
+        self,
+        tool_name: str,
+        coro: Coroutine[Any, Any, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Execute an Isaac Sim tool coroutine with rate limiting and
+        unified error handling.
+
+        Args:
+            tool_name: Name of the tool for rate limiting.
+            coro: Awaitable coroutine returned by an IsaacTools method.
+
+        Returns:
+            Tool result dict or error response dict.
+        """
+        rate_error = self._check_rate_limit(tool_name)
+        if rate_error is not None:
+            return rate_error
+        try:
+            return await coro
+        except Exception as exc:
+            logger.error("Isaac tool %s failed: %s", tool_name, exc)
+            return ErrorResponse(
+                error=str(exc), error_type=type(exc).__name__
+            ).dict()
 
     def _resolve_allowed_paths(self) -> List[Path]:
         allowed_paths: List[Path] = []
@@ -1237,6 +1267,861 @@ class IsaacMCPServer(LoggerMixin):
                 "address": self.client.address,
                 "timeout_seconds": self.client.timeout_seconds,
             }
+
+        # -- Scene Inspection tools -------------------------------------------
+
+        @self.mcp.tool(
+            name="get_isaac_stage_info",
+            description=(
+                "Get current stage metadata including root layer, up-axis, "
+                "meters-per-unit, total prim count, and default prim."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_stage_info() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_stage_info",
+                self._isaac_tools.get_isaac_stage_info(),
+            )
+
+        @self.mcp.tool(
+            name="list_isaac_prims",
+            description=(
+                "List prims in the current Isaac Sim stage under a given root path. "
+                "Supports depth control and prim type filtering."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def list_isaac_prims(
+            root_path: str = "/",
+            prim_type: Optional[str] = None,
+            max_depth: int = -1,
+            max_items: int = 500,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "list_isaac_prims",
+                self._isaac_tools.list_isaac_prims(
+                    root_path=root_path,
+                    prim_type=prim_type,
+                    max_depth=max_depth,
+                    max_items=max_items,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_prim_info",
+            description=(
+                "Get detailed information about a specific prim: type, attributes, "
+                "applied schemas, children, references, and relationships."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_prim_info(prim_path: str) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_prim_info",
+                self._isaac_tools.get_isaac_prim_info(prim_path=prim_path),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_prim_transform",
+            description=(
+                "Get the local and world transform of a prim including "
+                "translation, rotation, and scale."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_prim_transform(
+            prim_path: str, world_space: bool = True
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_prim_transform",
+                self._isaac_tools.get_isaac_prim_transform(
+                    prim_path=prim_path, world_space=world_space
+                ),
+            )
+
+        @self.mcp.tool(
+            name="search_isaac_prims",
+            description=(
+                "Search prims by type name or name pattern. "
+                "search_type can be 'type' or 'name'."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def search_isaac_prims(
+            search_type: str = "type",
+            query: str = "Mesh",
+            root_path: str = "/",
+            max_results: int = 100,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "search_isaac_prims",
+                self._isaac_tools.search_isaac_prims(
+                    search_type=search_type,
+                    query=query,
+                    root_path=root_path,
+                    max_results=max_results,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_scene_summary",
+            description=(
+                "Get a high-level summary of the current scene: prim type counts, "
+                "total prims, physics objects, cameras, lights, and materials."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_scene_summary() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_scene_summary",
+                self._isaac_tools.get_isaac_scene_summary(),
+            )
+
+        # -- Viewport & Camera tools ------------------------------------------
+
+        @self.mcp.tool(
+            name="get_isaac_camera_info",
+            description=(
+                "Get camera properties (focal length, clipping range, resolution) "
+                "for the active or specified camera."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_camera_info(
+            camera_path: Optional[str] = None,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_camera_info",
+                self._isaac_tools.get_isaac_camera_info(
+                    camera_path=camera_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="list_isaac_cameras",
+            description="List all camera prims in the current Isaac Sim stage.",
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def list_isaac_cameras() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "list_isaac_cameras",
+                self._isaac_tools.list_isaac_cameras(),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_camera",
+            description=(
+                "Set the active viewport camera position, target (look-at), "
+                "or switch to a specific camera prim."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_camera(
+            position: Optional[List[float]] = None,
+            target: Optional[List[float]] = None,
+            camera_path: Optional[str] = None,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_camera",
+                self._isaac_tools.set_isaac_camera(
+                    position=position,
+                    target=target,
+                    camera_path=camera_path,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="capture_isaac_viewport",
+            description=(
+                "Capture the current viewport as a PNG image and return "
+                "the file path or base64-encoded data."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def capture_isaac_viewport(
+            width: int = 1280,
+            height: int = 720,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "capture_isaac_viewport",
+                self._isaac_tools.capture_isaac_viewport(
+                    width=width, height=height
+                ),
+            )
+
+        # -- Prim Manipulation tools ------------------------------------------
+
+        @self.mcp.tool(
+            name="create_isaac_prim",
+            description=(
+                "Create a new USD prim at the given path with optional type "
+                "(Xform, Mesh, Sphere, Cube, Cylinder, Cone, Capsule, Plane)."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def create_isaac_prim(
+            prim_path: str,
+            prim_type: str = "Xform",
+            attributes: Optional[Dict[str, Any]] = None,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "create_isaac_prim",
+                self._isaac_tools.create_isaac_prim(
+                    prim_path=prim_path,
+                    prim_type=prim_type,
+                    attributes=attributes,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="delete_isaac_prim",
+            description="Delete a prim and all its children from the stage.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True,
+                destructive=True,
+            ),
+        )
+        async def delete_isaac_prim(prim_path: str) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "delete_isaac_prim",
+                self._isaac_tools.delete_isaac_prim(prim_path=prim_path),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_prim_transform",
+            description=(
+                "Set a prim's local transform: translate, rotate (euler XYZ "
+                "degrees), and/or scale."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_prim_transform(
+            prim_path: str,
+            translation: Optional[List[float]] = None,
+            rotation_euler: Optional[List[float]] = None,
+            scale: Optional[List[float]] = None,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_prim_transform",
+                self._isaac_tools.set_isaac_prim_transform(
+                    prim_path=prim_path,
+                    translation=translation,
+                    rotation_euler=rotation_euler,
+                    scale=scale,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_prim_visibility",
+            description="Show or hide a prim in the viewport.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_prim_visibility(
+            prim_path: str, visible: bool
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_prim_visibility",
+                self._isaac_tools.set_isaac_prim_visibility(
+                    prim_path=prim_path, visible=visible
+                ),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_prim_attribute",
+            description=(
+                "Set an arbitrary attribute value on a prim. "
+                "The attribute must already exist."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_prim_attribute(
+            prim_path: str,
+            attribute_name: str,
+            value: Any,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_prim_attribute",
+                self._isaac_tools.set_isaac_prim_attribute(
+                    prim_path=prim_path,
+                    attribute_name=attribute_name,
+                    value=value,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="duplicate_isaac_prim",
+            description="Duplicate a prim (deep copy) to a new path.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def duplicate_isaac_prim(
+            prim_path: str, new_path: str
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "duplicate_isaac_prim",
+                self._isaac_tools.duplicate_isaac_prim(
+                    prim_path=prim_path, new_path=new_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="reparent_isaac_prim",
+            description="Move a prim under a new parent in the hierarchy.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def reparent_isaac_prim(
+            prim_path: str, new_parent_path: str
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "reparent_isaac_prim",
+                self._isaac_tools.reparent_isaac_prim(
+                    prim_path=prim_path,
+                    new_parent_path=new_parent_path,
+                ),
+            )
+
+        # -- Physics Inspection tools -----------------------------------------
+
+        @self.mcp.tool(
+            name="get_isaac_physics_scene",
+            description=(
+                "Get physics scene configuration: gravity, solver settings, "
+                "and physics scene prim paths."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_physics_scene() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_physics_scene",
+                self._isaac_tools.get_isaac_physics_scene(),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_rigid_body_info",
+            description=(
+                "Get rigid body physics properties: mass, velocity, "
+                "angular velocity, and kinematic state."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_rigid_body_info(
+            prim_path: str,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_rigid_body_info",
+                self._isaac_tools.get_isaac_rigid_body_info(
+                    prim_path=prim_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="list_isaac_physics_objects",
+            description=(
+                "List all prims with physics APIs: rigid bodies, colliders, "
+                "and joints under a root path."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def list_isaac_physics_objects(
+            root_path: str = "/",
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "list_isaac_physics_objects",
+                self._isaac_tools.list_isaac_physics_objects(
+                    root_path=root_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_collision_info",
+            description=(
+                "Get collision properties of a prim: enabled state "
+                "and mesh approximation type."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_collision_info(
+            prim_path: str,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_collision_info",
+                self._isaac_tools.get_isaac_collision_info(
+                    prim_path=prim_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_joint_info",
+            description=(
+                "Get joint information: type, connected bodies, limits, "
+                "and break force/torque."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_joint_info(
+            prim_path: str,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_joint_info",
+                self._isaac_tools.get_isaac_joint_info(
+                    prim_path=prim_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_mass_properties",
+            description=(
+                "Get mass properties: mass, density, center of mass, "
+                "and diagonal inertia tensor."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_mass_properties(
+            prim_path: str,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_mass_properties",
+                self._isaac_tools.get_isaac_mass_properties(
+                    prim_path=prim_path
+                ),
+            )
+
+        # -- Physics Configuration tools --------------------------------------
+
+        @self.mcp.tool(
+            name="add_isaac_rigid_body",
+            description=(
+                "Apply RigidBodyAPI to a prim, optionally making it kinematic."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def add_isaac_rigid_body(
+            prim_path: str, kinematic: bool = False
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "add_isaac_rigid_body",
+                self._isaac_tools.add_isaac_rigid_body(
+                    prim_path=prim_path, kinematic=kinematic
+                ),
+            )
+
+        @self.mcp.tool(
+            name="add_isaac_collision",
+            description=(
+                "Apply CollisionAPI to a prim with optional mesh approximation "
+                "(none, convexHull, convexDecomposition, boundingSphere, boundingCube)."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def add_isaac_collision(
+            prim_path: str, approximation: str = "none"
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "add_isaac_collision",
+                self._isaac_tools.add_isaac_collision(
+                    prim_path=prim_path, approximation=approximation
+                ),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_mass_properties",
+            description=(
+                "Set mass, density, and/or center of mass on a prim. "
+                "Applies MassAPI if not already present."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_mass_properties(
+            prim_path: str,
+            mass: Optional[float] = None,
+            density: Optional[float] = None,
+            center_of_mass: Optional[List[float]] = None,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_mass_properties",
+                self._isaac_tools.set_isaac_mass_properties(
+                    prim_path=prim_path,
+                    mass=mass,
+                    density=density,
+                    center_of_mass=center_of_mass,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_physics_material",
+            description=(
+                "Create or update a physics material with friction and "
+                "restitution coefficients."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_physics_material(
+            prim_path: str,
+            static_friction: float = 0.5,
+            dynamic_friction: float = 0.5,
+            restitution: float = 0.0,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_physics_material",
+                self._isaac_tools.set_isaac_physics_material(
+                    prim_path=prim_path,
+                    static_friction=static_friction,
+                    dynamic_friction=dynamic_friction,
+                    restitution=restitution,
+                ),
+            )
+
+        # -- Simulation Control tools -----------------------------------------
+
+        @self.mcp.tool(
+            name="get_isaac_simulation_state",
+            description=(
+                "Get the current simulation state: playing, paused, or stopped, "
+                "along with current time and time-codes-per-second."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_simulation_state() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_simulation_state",
+                self._isaac_tools.get_isaac_simulation_state(),
+            )
+
+        @self.mcp.tool(
+            name="start_isaac_simulation",
+            description="Start (play) the simulation timeline.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def start_isaac_simulation() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "start_isaac_simulation",
+                self._isaac_tools.start_isaac_simulation(),
+            )
+
+        @self.mcp.tool(
+            name="stop_isaac_simulation",
+            description="Stop the simulation and reset to initial state.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def stop_isaac_simulation() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "stop_isaac_simulation",
+                self._isaac_tools.stop_isaac_simulation(),
+            )
+
+        @self.mcp.tool(
+            name="pause_isaac_simulation",
+            description="Pause the currently running simulation.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def pause_isaac_simulation() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "pause_isaac_simulation",
+                self._isaac_tools.pause_isaac_simulation(),
+            )
+
+        @self.mcp.tool(
+            name="step_isaac_simulation",
+            description=(
+                "Step the simulation forward by N physics steps."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def step_isaac_simulation(
+            num_steps: int = 1,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "step_isaac_simulation",
+                self._isaac_tools.step_isaac_simulation(
+                    num_steps=num_steps
+                ),
+            )
+
+        @self.mcp.tool(
+            name="reset_isaac_simulation",
+            description="Reset the simulation to initial state and time 0.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def reset_isaac_simulation() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "reset_isaac_simulation",
+                self._isaac_tools.reset_isaac_simulation(),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_simulation_time",
+            description=(
+                "Get current simulation time, start/end times, "
+                "and time-codes-per-second."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_simulation_time() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_simulation_time",
+                self._isaac_tools.get_isaac_simulation_time(),
+            )
+
+        # -- Materials & Appearance tools -------------------------------------
+
+        @self.mcp.tool(
+            name="get_isaac_material_info",
+            description=(
+                "Get material properties: shader type, bound inputs, "
+                "and connected textures for a material prim."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_material_info(
+            material_path: str,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_material_info",
+                self._isaac_tools.get_isaac_material_info(
+                    material_path=material_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="list_isaac_materials",
+            description="List all material prims in the current stage.",
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def list_isaac_materials() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "list_isaac_materials",
+                self._isaac_tools.list_isaac_materials(),
+            )
+
+        @self.mcp.tool(
+            name="assign_isaac_material",
+            description=(
+                "Bind a material to a prim so the prim renders "
+                "with that material's appearance."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def assign_isaac_material(
+            prim_path: str, material_path: str
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "assign_isaac_material",
+                self._isaac_tools.assign_isaac_material(
+                    prim_path=prim_path,
+                    material_path=material_path,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="set_isaac_material_property",
+            description=(
+                "Set an input property on a material's surface shader "
+                "(e.g. diffuse_color_constant, metallic_constant, "
+                "roughness_constant)."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def set_isaac_material_property(
+            material_path: str,
+            property_name: str,
+            value: Any,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "set_isaac_material_property",
+                self._isaac_tools.set_isaac_material_property(
+                    material_path=material_path,
+                    property_name=property_name,
+                    value=value,
+                ),
+            )
+
+        # -- Asset & Stage Operations tools -----------------------------------
+
+        @self.mcp.tool(
+            name="open_isaac_stage",
+            description="Open a USD stage file in Isaac Sim.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True,
+                destructive=True,
+            ),
+        )
+        async def open_isaac_stage(file_path: str) -> Dict[str, Any]:
+            if not self._is_path_allowed(file_path):
+                return ErrorResponse(
+                    error="File path is not allowed by sandbox policy",
+                    error_type="SandboxError",
+                    details={"file_path": file_path},
+                ).dict()
+            return await self._exec_isaac(
+                "open_isaac_stage",
+                self._isaac_tools.open_isaac_stage(file_path=file_path),
+            )
+
+        @self.mcp.tool(
+            name="save_isaac_stage",
+            description=(
+                "Save the current stage. Optionally provide a file path "
+                "to save-as to a new location."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def save_isaac_stage(
+            file_path: Optional[str] = None,
+        ) -> Dict[str, Any]:
+            if file_path is not None and not self._is_path_allowed(file_path):
+                return ErrorResponse(
+                    error="File path is not allowed by sandbox policy",
+                    error_type="SandboxError",
+                    details={"file_path": file_path},
+                ).dict()
+            return await self._exec_isaac(
+                "save_isaac_stage",
+                self._isaac_tools.save_isaac_stage(file_path=file_path),
+            )
+
+        @self.mcp.tool(
+            name="new_isaac_stage",
+            description="Create a new empty stage in Isaac Sim.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True,
+                destructive=True,
+            ),
+        )
+        async def new_isaac_stage() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "new_isaac_stage",
+                self._isaac_tools.new_isaac_stage(),
+            )
+
+        @self.mcp.tool(
+            name="import_isaac_asset",
+            description=(
+                "Import an external asset (USD, USDZ, OBJ, FBX) into "
+                "the current stage at a target path."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def import_isaac_asset(
+            asset_path: str,
+            target_path: str = "/World/ImportedAsset",
+        ) -> Dict[str, Any]:
+            if not self._is_path_allowed(asset_path):
+                return ErrorResponse(
+                    error="File path is not allowed by sandbox policy",
+                    error_type="SandboxError",
+                    details={"file_path": asset_path},
+                ).dict()
+            return await self._exec_isaac(
+                "import_isaac_asset",
+                self._isaac_tools.import_isaac_asset(
+                    asset_path=asset_path, target_path=target_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="add_isaac_reference",
+            description=(
+                "Add a USD reference to a prim so it composes in "
+                "content from another USD file."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def add_isaac_reference(
+            prim_path: str, reference_path: str
+        ) -> Dict[str, Any]:
+            if not self._is_path_allowed(reference_path):
+                return ErrorResponse(
+                    error="File path is not allowed by sandbox policy",
+                    error_type="SandboxError",
+                    details={"file_path": reference_path},
+                ).dict()
+            return await self._exec_isaac(
+                "add_isaac_reference",
+                self._isaac_tools.add_isaac_reference(
+                    prim_path=prim_path,
+                    reference_path=reference_path,
+                ),
+            )
 
     def _register_blender_tools(self) -> None:
         """Register Blender runtime specific tools."""

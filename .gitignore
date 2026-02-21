@@ -56,3 +56,5 @@ extscache/
 .sisyphus/
 plan-*.md
 
+# Logging
+logs/
