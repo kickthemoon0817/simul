@@ -47,6 +47,7 @@ from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
 from ..utils.timing import RateLimiter
 from .schemas import *
+from .tools.isaac_tools import IsaacTools
 
 logger = get_logger(__name__)
 
@@ -60,10 +61,11 @@ except Exception:
 _MCP_INSTRUCTIONS: str = (
     "Simul MCP provides tools for interacting with 3D simulation "
     "and DCC applications. "
-    "Use Isaac Sim tools (execute_isaac_script, ping_isaac) to "
-    "control a running NVIDIA Isaac Sim instance — execute "
-    "arbitrary Python with full access to omni.*, pxr.*, and "
-    "isaacsim.* APIs. "
+    "Use Isaac Sim tools to control a running NVIDIA Isaac Sim "
+    "instance — granular tools for scene inspection, prim "
+    "manipulation, physics, simulation control, materials, "
+    "viewport/camera, and asset/stage operations. The generic "
+    "execute_isaac_script tool is available for custom scripts. "
     "Use USD tools to load, inspect, and edit Universal Scene "
     "Description files. "
     "Use Blender tools when a Blender runtime is connected. "
@@ -114,6 +116,7 @@ class IsaacMCPServer(LoggerMixin):
             port=self.settings.isaac_sim.socket_port,
             timeout_seconds=self.settings.isaac_sim.socket_timeout,
         )
+        self._isaac_tools = IsaacTools(self.client, self.settings)
         self.blender_adapter = (
             BlenderRuntimeAdapter(self.settings) if is_blender_available() else None
         )
@@ -157,6 +160,47 @@ class IsaacMCPServer(LoggerMixin):
                 details={"tool": tool_name},
             ).dict()
         return None
+
+    async def _exec_isaac(
+        self, tool_name: str, coro: Any
+    ) -> Dict[str, Any]:
+        """
+        Execute an Isaac Sim tool coroutine with rate limiting and
+        unified error handling.
+
+        Args:
+            tool_name: Name of the tool for rate limiting.
+            coro: Awaitable coroutine returned by an IsaacTools method.
+
+        Returns:
+            Tool result dict or error response dict.
+        """
+        rate_error = self._check_rate_limit(tool_name)
+        if rate_error:
+            return rate_error
+        try:
+            return await coro
+        except ConnectionRefusedError:
+            return ErrorResponse(
+                error=(
+                    f"Isaac Sim is not reachable at {self.client.address}. "
+                    "Ensure Isaac Sim is running with the "
+                    "isaacsim.code_editor.vscode extension enabled."
+                ),
+                error_type="ConnectionError",
+            ).dict()
+        except TimeoutError:
+            return ErrorResponse(
+                error=(
+                    f"Script execution timed out after "
+                    f"{self.client.timeout_seconds}s on {self.client.address}."
+                ),
+                error_type="TimeoutError",
+            ).dict()
+        except Exception as exc:
+            return ErrorResponse(
+                error=str(exc), error_type="Exception"
+            ).dict()
 
     def _resolve_allowed_paths(self) -> List[Path]:
         allowed_paths: List[Path] = []
@@ -1237,6 +1281,128 @@ class IsaacMCPServer(LoggerMixin):
                 "address": self.client.address,
                 "timeout_seconds": self.client.timeout_seconds,
             }
+
+        # -- Scene Inspection tools -------------------------------------------
+
+        @self.mcp.tool(
+            name="get_isaac_stage_info",
+            description=(
+                "Get current stage metadata including root layer, up-axis, "
+                "meters-per-unit, total prim count, and default prim."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_stage_info() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_stage_info",
+                self._isaac_tools.get_isaac_stage_info(),
+            )
+
+        @self.mcp.tool(
+            name="list_isaac_prims",
+            description=(
+                "List prims in the current Isaac Sim stage under a given root path. "
+                "Supports depth control and prim type filtering."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def list_isaac_prims(
+            root_path: str = "/",
+            prim_type: Optional[str] = None,
+            max_depth: int = -1,
+            max_items: int = 500,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "list_isaac_prims",
+                self._isaac_tools.list_isaac_prims(
+                    root_path=root_path,
+                    prim_type=prim_type,
+                    max_depth=max_depth,
+                    max_items=max_items,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_prim_info",
+            description=(
+                "Get detailed information about a specific prim: type, attributes, "
+                "applied schemas, children, references, and relationships."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_prim_info(prim_path: str) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_prim_info",
+                self._isaac_tools.get_isaac_prim_info(prim_path=prim_path),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_prim_transform",
+            description=(
+                "Get the local and world transform of a prim including "
+                "translation, rotation, and scale."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_prim_transform(
+            prim_path: str, world_space: bool = True
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_prim_transform",
+                self._isaac_tools.get_isaac_prim_transform(
+                    prim_path=prim_path, world_space=world_space
+                ),
+            )
+
+        @self.mcp.tool(
+            name="search_isaac_prims",
+            description=(
+                "Search prims by type name or name pattern. "
+                "search_type can be 'type' or 'name'."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def search_isaac_prims(
+            search_type: str = "type",
+            query: str = "Mesh",
+            root_path: str = "/",
+            max_results: int = 100,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "search_isaac_prims",
+                self._isaac_tools.search_isaac_prims(
+                    search_type=search_type,
+                    query=query,
+                    root_path=root_path,
+                    max_results=max_results,
+                ),
+            )
+
+        @self.mcp.tool(
+            name="get_isaac_scene_summary",
+            description=(
+                "Get a high-level summary of the current scene: prim type counts, "
+                "total prims, physics objects, cameras, lights, and materials."
+            ),
+            annotations=self._tool_annotations(
+                read_only=True, idempotent=True, open_world=True
+            ),
+        )
+        async def get_isaac_scene_summary() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "get_isaac_scene_summary",
+                self._isaac_tools.get_isaac_scene_summary(),
+            )
 
     def _register_blender_tools(self) -> None:
         """Register Blender runtime specific tools."""
