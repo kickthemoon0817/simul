@@ -13,6 +13,7 @@ from .usd_tools import (
 )
 
 from .blender_tools import BlenderTools
+from .isaac_tools import IsaacTools
 from .unreal_tools import UnrealTools
 
 from .registry import (
@@ -29,6 +30,8 @@ __all__ = [
     "USDBBoxTools",
     # Blender tools
     "BlenderTools",
+    # Isaac tools
+    "IsaacTools",
     # Unreal tools
     "UnrealTools",
     # Registry

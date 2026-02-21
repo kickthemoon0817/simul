@@ -39,6 +39,13 @@ class ToolCategory(str, Enum):
     UNREAL_USD = "unreal_usd"
     UNREAL_AGENT = "unreal_agent"
     UNREAL_GEOMETRY = "unreal_geometry"
+    ISAAC_SCENE = "isaac_scene"
+    ISAAC_VIEWPORT = "isaac_viewport"
+    ISAAC_PRIM = "isaac_prim"
+    ISAAC_PHYSICS = "isaac_physics"
+    ISAAC_SIMULATION = "isaac_simulation"
+    ISAAC_MATERIAL = "isaac_material"
+    ISAAC_ASSET = "isaac_asset"
 
 
 @dataclass
@@ -51,6 +58,7 @@ class ToolInfo:
     method: Callable
     requires_blender: bool = False
     requires_unreal: bool = False
+    requires_isaac: bool = False
     requires_usd: bool = True
     enabled: bool = True
 
