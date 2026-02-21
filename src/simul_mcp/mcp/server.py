@@ -2023,6 +2023,96 @@ class IsaacMCPServer(LoggerMixin):
                 ),
             )
 
+        # -- Asset & Stage Operations tools -----------------------------------
+
+        @self.mcp.tool(
+            name="open_isaac_stage",
+            description="Open a USD stage file in Isaac Sim.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True,
+                destructive=True,
+            ),
+        )
+        async def open_isaac_stage(file_path: str) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "open_isaac_stage",
+                self._isaac_tools.open_isaac_stage(file_path=file_path),
+            )
+
+        @self.mcp.tool(
+            name="save_isaac_stage",
+            description=(
+                "Save the current stage. Optionally provide a file path "
+                "to save-as to a new location."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True
+            ),
+        )
+        async def save_isaac_stage(
+            file_path: Optional[str] = None,
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "save_isaac_stage",
+                self._isaac_tools.save_isaac_stage(file_path=file_path),
+            )
+
+        @self.mcp.tool(
+            name="new_isaac_stage",
+            description="Create a new empty stage in Isaac Sim.",
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=True, open_world=True,
+                destructive=True,
+            ),
+        )
+        async def new_isaac_stage() -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "new_isaac_stage",
+                self._isaac_tools.new_isaac_stage(),
+            )
+
+        @self.mcp.tool(
+            name="import_isaac_asset",
+            description=(
+                "Import an external asset (USD, USDZ, OBJ, FBX) into "
+                "the current stage at a target path."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def import_isaac_asset(
+            asset_path: str,
+            target_path: str = "/World/ImportedAsset",
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "import_isaac_asset",
+                self._isaac_tools.import_isaac_asset(
+                    asset_path=asset_path, target_path=target_path
+                ),
+            )
+
+        @self.mcp.tool(
+            name="add_isaac_reference",
+            description=(
+                "Add a USD reference to a prim so it composes in "
+                "content from another USD file."
+            ),
+            annotations=self._tool_annotations(
+                read_only=False, idempotent=False, open_world=True
+            ),
+        )
+        async def add_isaac_reference(
+            prim_path: str, reference_path: str
+        ) -> Dict[str, Any]:
+            return await self._exec_isaac(
+                "add_isaac_reference",
+                self._isaac_tools.add_isaac_reference(
+                    prim_path=prim_path,
+                    reference_path=reference_path,
+                ),
+            )
+
     def _register_blender_tools(self) -> None:
         """Register Blender runtime specific tools."""
 
