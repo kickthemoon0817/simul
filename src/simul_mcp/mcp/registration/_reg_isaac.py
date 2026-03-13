@@ -1,0 +1,1366 @@
+"""
+Isaac Sim TCP socket tool registration for Simul MCP Server.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+import json
+
+from ...adapters import ScriptResult
+from ..schemas import *
+
+if TYPE_CHECKING:
+    from ..server import SimulMCPServer
+
+
+def register_isaac_tools(server: "SimulMCPServer") -> None:
+    """
+    Register Isaac Sim tools.
+
+    Two lightweight tools that send Python code over TCP to a running
+    Isaac Sim instance via the stock isaacsim.code_editor.vscode extension.
+    """
+
+    @server.mcp.tool(
+        name="execute_isaac_script",
+        description=(
+            "Execute arbitrary Python code inside a running Isaac Sim application. "
+            "The code runs in Kit's Python scope with full access to omni.*, pxr.*, "
+            "and isaacsim.* APIs. stdout is captured and returned. For structured "
+            "results, print JSON via json.dumps(). Each execution is independent — "
+            "always import modules at the top of every script. "
+            "Call ping_isaac first to verify connectivity before sending scripts. "
+            "Read the 'simul://isaac-sim/skills' resource for scripting patterns, "
+            "API quick reference, and Isaac Sim 5.1.0 namespace migration notes."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=True, destructive=True
+        ),
+    )
+    async def execute_isaac_script(code: str) -> Dict[str, Any]:
+        """
+        Execute Python code inside the running Isaac Sim process.
+
+        The code is sent over TCP to the stock isaacsim.code_editor.vscode
+        extension (port 8226). stdout is captured and returned.
+
+        Args:
+            code: Python source code to execute in Isaac Sim.
+
+        Returns:
+            Dict with success, output, and optional error info.
+        """
+        MAX_CODE_SIZE: int = 100_000  # 100 KB
+        if len(code) > MAX_CODE_SIZE:
+            return ErrorResponse(
+                error=f"Code payload too large ({len(code)} bytes, max {MAX_CODE_SIZE}).",
+                error_type="PayloadTooLarge",
+            ).dict()
+
+        rate_error = server._check_rate_limit("execute_isaac_script")
+        if rate_error:
+            return rate_error
+        try:
+            result: ScriptResult = await server.client.execute(code)
+            if not result.success:
+                return ErrorResponse(
+                    error=result.error_value or "Script execution failed",
+                    error_type=result.error_name or "RuntimeError",
+                    details={"traceback": result.traceback} if result.traceback else None,
+                ).dict()
+
+            # If output is valid JSON, return it directly
+            output = result.output.strip()
+            if output:
+                try:
+                    return json.loads(output)
+                except json.JSONDecodeError:
+                    pass
+
+            return {"success": True, "output": result.output}
+
+        except ConnectionRefusedError:
+            return ErrorResponse(
+                error=(
+                    f"Isaac Sim is not reachable at {server.client.address}. "
+                    "Ensure Isaac Sim is running with the "
+                    "isaacsim.code_editor.vscode extension enabled. "
+                    "Use ping_isaac to verify connectivity."
+                ),
+                error_type="ConnectionError",
+            ).dict()
+        except TimeoutError:
+            return ErrorResponse(
+                error=(
+                    f"Script execution timed out after "
+                    f"{server.client.timeout_seconds}s on {server.client.address}. "
+                    "The script may be too slow or Isaac Sim may be unresponsive. "
+                    "Use ping_isaac to check if Isaac Sim is still reachable."
+                ),
+                error_type="TimeoutError",
+            ).dict()
+        except Exception as exc:
+            return ErrorResponse(error=str(exc), error_type="Exception").dict()
+
+    @server.mcp.tool(
+        name="ping_isaac",
+        description=(
+            "Pre-flight check: verify that a running Isaac Sim instance is "
+            "reachable on the configured TCP socket. Call this before "
+            "execute_isaac_script to confirm connectivity and get the target address."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def ping_isaac() -> Dict[str, Any]:
+        """
+        Ping Isaac Sim to verify connectivity.
+
+        Returns:
+            Dict with reachable status, address, and timeout.
+        """
+        rate_error = server._check_rate_limit("ping_isaac")
+        if rate_error:
+            return rate_error
+        reachable = await server.client.ping()
+        return {
+            "reachable": reachable,
+            "address": server.client.address,
+            "timeout_seconds": server.client.timeout_seconds,
+        }
+
+    # -- Scene Inspection tools -------------------------------------------
+
+    @server.mcp.tool(
+        name="get_isaac_stage_info",
+        description=(
+            "Get current stage metadata including root layer, up-axis, "
+            "meters-per-unit, total prim count, and default prim."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_stage_info() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_stage_info",
+            server._isaac_tools.get_isaac_stage_info(),
+        )
+
+    @server.mcp.tool(
+        name="list_isaac_prims",
+        description=(
+            "List prims in the current Isaac Sim stage under a given root path. "
+            "Supports depth control and prim type filtering."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def list_isaac_prims(
+        root_path: str = "/",
+        prim_type: Optional[str] = None,
+        max_depth: int = -1,
+        max_items: int = 500,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "list_isaac_prims",
+            server._isaac_tools.list_isaac_prims(
+                root_path=root_path,
+                prim_type=prim_type,
+                max_depth=max_depth,
+                max_items=max_items,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_prim_info",
+        description=(
+            "Get detailed information about a specific prim: type, attributes, "
+            "applied schemas, children, references, and relationships."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_prim_info(prim_path: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_prim_info",
+            server._isaac_tools.get_isaac_prim_info(prim_path=prim_path),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_prim_transform",
+        description=(
+            "Get the local and world transform of a prim including "
+            "translation, rotation, and scale."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_prim_transform(
+        prim_path: str, world_space: bool = True
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_prim_transform",
+            server._isaac_tools.get_isaac_prim_transform(
+                prim_path=prim_path, world_space=world_space
+            ),
+        )
+
+    @server.mcp.tool(
+        name="search_isaac_prims",
+        description=(
+            "Search prims by type name or name pattern. "
+            "search_type can be 'type' or 'name'."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def search_isaac_prims(
+        search_type: str = "type",
+        query: str = "Mesh",
+        root_path: str = "/",
+        max_results: int = 100,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "search_isaac_prims",
+            server._isaac_tools.search_isaac_prims(
+                search_type=search_type,
+                query=query,
+                root_path=root_path,
+                max_results=max_results,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_scene_summary",
+        description=(
+            "Get a high-level summary of the current scene: prim type counts, "
+            "total prims, physics objects, cameras, lights, and materials."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_scene_summary() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_scene_summary",
+            server._isaac_tools.get_isaac_scene_summary(),
+        )
+
+    # -- Viewport & Camera tools ------------------------------------------
+
+    @server.mcp.tool(
+        name="get_isaac_camera_info",
+        description=(
+            "Get camera properties (focal length, clipping range, resolution) "
+            "for the active or specified camera."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_camera_info(
+        camera_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_camera_info",
+            server._isaac_tools.get_isaac_camera_info(
+                camera_path=camera_path
+            ),
+        )
+
+    @server.mcp.tool(
+        name="list_isaac_cameras",
+        description="List all camera prims in the current Isaac Sim stage.",
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def list_isaac_cameras() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "list_isaac_cameras",
+            server._isaac_tools.list_isaac_cameras(),
+        )
+
+    @server.mcp.tool(
+        name="set_isaac_camera",
+        description=(
+            "Set the active viewport camera position, target (look-at), "
+            "or switch to a specific camera prim."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def set_isaac_camera(
+        position: Optional[List[float]] = None,
+        target: Optional[List[float]] = None,
+        camera_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "set_isaac_camera",
+            server._isaac_tools.set_isaac_camera(
+                position=position,
+                target=target,
+                camera_path=camera_path,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="capture_isaac_viewport",
+        description=(
+            "Capture the current viewport as a PNG image and return "
+            "the file path or base64-encoded data."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def capture_isaac_viewport(
+        width: int = 1280,
+        height: int = 720,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "capture_isaac_viewport",
+            server._isaac_tools.capture_isaac_viewport(
+                width=width, height=height
+            ),
+        )
+
+    # -- Prim Manipulation tools ------------------------------------------
+
+    @server.mcp.tool(
+        name="create_isaac_prim",
+        description=(
+            "Create a new USD prim at the given path with optional type "
+            "(Xform, Mesh, Sphere, Cube, Cylinder, Cone, Capsule, Plane)."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=True
+        ),
+    )
+    async def create_isaac_prim(
+        prim_path: str,
+        prim_type: str = "Xform",
+        attributes: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "create_isaac_prim",
+            server._isaac_tools.create_isaac_prim(
+                prim_path=prim_path,
+                prim_type=prim_type,
+                attributes=attributes,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="delete_isaac_prim",
+        description="Delete a prim and all its children from the stage.",
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True,
+            destructive=True,
+        ),
+    )
+    async def delete_isaac_prim(prim_path: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "delete_isaac_prim",
+            server._isaac_tools.delete_isaac_prim(prim_path=prim_path),
+        )
+
+    @server.mcp.tool(
+        name="set_isaac_prim_transform",
+        description=(
+            "Set a prim's local transform: translate, rotate (euler XYZ "
+            "degrees), and/or scale."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def set_isaac_prim_transform(
+        prim_path: str,
+        translation: Optional[List[float]] = None,
+        rotation_euler: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "set_isaac_prim_transform",
+            server._isaac_tools.set_isaac_prim_transform(
+                prim_path=prim_path,
+                translation=translation,
+                rotation_euler=rotation_euler,
+                scale=scale,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="set_isaac_prim_visibility",
+        description="Show or hide a prim in the viewport.",
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def set_isaac_prim_visibility(
+        prim_path: str, visible: bool
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "set_isaac_prim_visibility",
+            server._isaac_tools.set_isaac_prim_visibility(
+                prim_path=prim_path, visible=visible
+            ),
+        )
+
+    @server.mcp.tool(
+        name="set_isaac_prim_attribute",
+        description=(
+            "Set an arbitrary attribute value on a prim. "
+            "The attribute must already exist."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def set_isaac_prim_attribute(
+        prim_path: str,
+        attribute_name: str,
+        value: Any,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "set_isaac_prim_attribute",
+            server._isaac_tools.set_isaac_prim_attribute(
+                prim_path=prim_path,
+                attribute_name=attribute_name,
+                value=value,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="duplicate_isaac_prim",
+        description="Duplicate a prim (deep copy) to a new path.",
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=True
+        ),
+    )
+    async def duplicate_isaac_prim(
+        prim_path: str, new_path: str
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "duplicate_isaac_prim",
+            server._isaac_tools.duplicate_isaac_prim(
+                prim_path=prim_path, new_path=new_path
+            ),
+        )
+
+    @server.mcp.tool(
+        name="reparent_isaac_prim",
+        description="Move a prim under a new parent in the hierarchy.",
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def reparent_isaac_prim(
+        prim_path: str, new_parent_path: str
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "reparent_isaac_prim",
+            server._isaac_tools.reparent_isaac_prim(
+                prim_path=prim_path,
+                new_parent_path=new_parent_path,
+            ),
+        )
+
+    # -- Physics Inspection tools -----------------------------------------
+
+    @server.mcp.tool(
+        name="get_isaac_physics_scene",
+        description=(
+            "Get physics scene configuration: gravity, solver settings, "
+            "and physics scene prim paths."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_physics_scene() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_physics_scene",
+            server._isaac_tools.get_isaac_physics_scene(),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_rigid_body_info",
+        description=(
+            "Get rigid body physics properties: mass, velocity, "
+            "angular velocity, and kinematic state."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_rigid_body_info(
+        prim_path: str,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_rigid_body_info",
+            server._isaac_tools.get_isaac_rigid_body_info(
+                prim_path=prim_path
+            ),
+        )
+
+    @server.mcp.tool(
+        name="list_isaac_physics_objects",
+        description=(
+            "List all prims with physics APIs: rigid bodies, colliders, "
+            "and joints under a root path."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def list_isaac_physics_objects(
+        root_path: str = "/",
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "list_isaac_physics_objects",
+            server._isaac_tools.list_isaac_physics_objects(
+                root_path=root_path
+            ),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_collision_info",
+        description=(
+            "Get collision properties of a prim: enabled state "
+            "and mesh approximation type."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_collision_info(
+        prim_path: str,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_collision_info",
+            server._isaac_tools.get_isaac_collision_info(
+                prim_path=prim_path
+            ),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_joint_info",
+        description=(
+            "Get joint information: type, connected bodies, limits, "
+            "and break force/torque."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_joint_info(
+        prim_path: str,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_joint_info",
+            server._isaac_tools.get_isaac_joint_info(
+                prim_path=prim_path
+            ),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_mass_properties",
+        description=(
+            "Get mass properties: mass, density, center of mass, "
+            "and diagonal inertia tensor."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_mass_properties(
+        prim_path: str,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_mass_properties",
+            server._isaac_tools.get_isaac_mass_properties(
+                prim_path=prim_path
+            ),
+        )
+
+    # -- Physics Configuration tools --------------------------------------
+
+    @server.mcp.tool(
+        name="add_isaac_rigid_body",
+        description=(
+            "Apply RigidBodyAPI to a prim, optionally making it kinematic."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=True
+        ),
+    )
+    async def add_isaac_rigid_body(
+        prim_path: str, kinematic: bool = False
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "add_isaac_rigid_body",
+            server._isaac_tools.add_isaac_rigid_body(
+                prim_path=prim_path, kinematic=kinematic
+            ),
+        )
+
+    @server.mcp.tool(
+        name="add_isaac_collision",
+        description=(
+            "Apply CollisionAPI to a prim with optional mesh approximation "
+            "(none, convexHull, convexDecomposition, boundingSphere, boundingCube)."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=True
+        ),
+    )
+    async def add_isaac_collision(
+        prim_path: str, approximation: str = "none"
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "add_isaac_collision",
+            server._isaac_tools.add_isaac_collision(
+                prim_path=prim_path, approximation=approximation
+            ),
+        )
+
+    @server.mcp.tool(
+        name="set_isaac_mass_properties",
+        description=(
+            "Set mass, density, and/or center of mass on a prim. "
+            "Applies MassAPI if not already present."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def set_isaac_mass_properties(
+        prim_path: str,
+        mass: Optional[float] = None,
+        density: Optional[float] = None,
+        center_of_mass: Optional[List[float]] = None,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "set_isaac_mass_properties",
+            server._isaac_tools.set_isaac_mass_properties(
+                prim_path=prim_path,
+                mass=mass,
+                density=density,
+                center_of_mass=center_of_mass,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="set_isaac_physics_material",
+        description=(
+            "Create or update a physics material with friction and "
+            "restitution coefficients."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def set_isaac_physics_material(
+        prim_path: str,
+        static_friction: float = 0.5,
+        dynamic_friction: float = 0.5,
+        restitution: float = 0.0,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "set_isaac_physics_material",
+            server._isaac_tools.set_isaac_physics_material(
+                prim_path=prim_path,
+                static_friction=static_friction,
+                dynamic_friction=dynamic_friction,
+                restitution=restitution,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="create_isaac_physics_scene",
+        description=(
+            "Create a UsdPhysics.Scene prim with configurable gravity. "
+            "This is the prerequisite for any physics simulation — rigid bodies, "
+            "colliders, and joints require a physics scene to function."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=True
+        ),
+    )
+    async def create_isaac_physics_scene(
+        prim_path: str = "/World/PhysicsScene",
+        gravity_direction: Optional[List[float]] = None,
+        gravity_magnitude: float = 9.81,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "create_isaac_physics_scene",
+            server._isaac_tools.create_isaac_physics_scene(
+                prim_path=prim_path,
+                gravity_direction=gravity_direction,
+                gravity_magnitude=gravity_magnitude,
+            ),
+        )
+
+    # -- Simulation Control tools -----------------------------------------
+
+    @server.mcp.tool(
+        name="get_isaac_simulation_state",
+        description=(
+            "Get the current simulation state: playing, paused, or stopped, "
+            "along with current time and time-codes-per-second."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_simulation_state() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_simulation_state",
+            server._isaac_tools.get_isaac_simulation_state(),
+        )
+
+    @server.mcp.tool(
+        name="start_isaac_simulation",
+        description="Start (play) the simulation timeline.",
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def start_isaac_simulation() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "start_isaac_simulation",
+            server._isaac_tools.start_isaac_simulation(),
+        )
+
+    @server.mcp.tool(
+        name="stop_isaac_simulation",
+        description="Stop the simulation and reset to initial state.",
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def stop_isaac_simulation() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "stop_isaac_simulation",
+            server._isaac_tools.stop_isaac_simulation(),
+        )
+
+    @server.mcp.tool(
+        name="pause_isaac_simulation",
+        description="Pause the currently running simulation.",
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def pause_isaac_simulation() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "pause_isaac_simulation",
+            server._isaac_tools.pause_isaac_simulation(),
+        )
+
+    @server.mcp.tool(
+        name="step_isaac_simulation",
+        description=(
+            "Step the simulation forward by N physics steps."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=True
+        ),
+    )
+    async def step_isaac_simulation(
+        num_steps: int = 1,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "step_isaac_simulation",
+            server._isaac_tools.step_isaac_simulation(
+                num_steps=num_steps
+            ),
+        )
+
+    @server.mcp.tool(
+        name="reset_isaac_simulation",
+        description="Reset the simulation to initial state and time 0.",
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def reset_isaac_simulation() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "reset_isaac_simulation",
+            server._isaac_tools.reset_isaac_simulation(),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_simulation_time",
+        description=(
+            "Get current simulation time, start/end times, "
+            "and time-codes-per-second."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_simulation_time() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_simulation_time",
+            server._isaac_tools.get_isaac_simulation_time(),
+        )
+
+    # -- Materials & Appearance tools -------------------------------------
+
+    @server.mcp.tool(
+        name="get_isaac_material_info",
+        description=(
+            "Get material properties: shader type, bound inputs, "
+            "and connected textures for a material prim."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_material_info(
+        material_path: str,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_material_info",
+            server._isaac_tools.get_isaac_material_info(
+                material_path=material_path
+            ),
+        )
+
+    @server.mcp.tool(
+        name="list_isaac_materials",
+        description="List all material prims in the current stage.",
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def list_isaac_materials() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "list_isaac_materials",
+            server._isaac_tools.list_isaac_materials(),
+        )
+
+    @server.mcp.tool(
+        name="assign_isaac_material",
+        description=(
+            "Bind a material to a prim so the prim renders "
+            "with that material's appearance."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def assign_isaac_material(
+        prim_path: str, material_path: str
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "assign_isaac_material",
+            server._isaac_tools.assign_isaac_material(
+                prim_path=prim_path,
+                material_path=material_path,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="set_isaac_material_property",
+        description=(
+            "Set an input property on a material's surface shader "
+            "(e.g. diffuse_color_constant, metallic_constant, "
+            "roughness_constant)."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def set_isaac_material_property(
+        material_path: str,
+        property_name: str,
+        value: Any,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "set_isaac_material_property",
+            server._isaac_tools.set_isaac_material_property(
+                material_path=material_path,
+                property_name=property_name,
+                value=value,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="create_isaac_material",
+        description=(
+            "Create a new material with a surface shader. Supports "
+            "UsdPreviewSurface (portable) and OmniPBR (NVIDIA MDL). "
+            "Set diffuse color, roughness, metallic, and opacity. "
+            "After creation, use assign_isaac_material to bind it to prims."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=True
+        ),
+    )
+    async def create_isaac_material(
+        material_path: str,
+        shader_type: str = "UsdPreviewSurface",
+        diffuse_color: Optional[List[float]] = None,
+        roughness: float = 0.5,
+        metallic: float = 0.0,
+        opacity: float = 1.0,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "create_isaac_material",
+            server._isaac_tools.create_isaac_material(
+                material_path=material_path,
+                shader_type=shader_type,
+                diffuse_color=diffuse_color,
+                roughness=roughness,
+                metallic=metallic,
+                opacity=opacity,
+            ),
+        )
+
+    # -- Asset & Stage Operations tools -----------------------------------
+
+    @server.mcp.tool(
+        name="open_isaac_stage",
+        description="Open a USD stage file in Isaac Sim.",
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True,
+            destructive=True,
+        ),
+    )
+    async def open_isaac_stage(file_path: str) -> Dict[str, Any]:
+        if not server._is_path_allowed(file_path):
+            return ErrorResponse(
+                error="File path is not allowed by sandbox policy",
+                error_type="SandboxError",
+                details={"file_path": file_path},
+            ).dict()
+        return await server._exec_isaac(
+            "open_isaac_stage",
+            server._isaac_tools.open_isaac_stage(file_path=file_path),
+        )
+
+    @server.mcp.tool(
+        name="save_isaac_stage",
+        description=(
+            "Save the current stage. Optionally provide a file path "
+            "to save-as to a new location."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def save_isaac_stage(
+        file_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if file_path is not None and not server._is_path_allowed(file_path):
+            return ErrorResponse(
+                error="File path is not allowed by sandbox policy",
+                error_type="SandboxError",
+                details={"file_path": file_path},
+            ).dict()
+        return await server._exec_isaac(
+            "save_isaac_stage",
+            server._isaac_tools.save_isaac_stage(file_path=file_path),
+        )
+
+    @server.mcp.tool(
+        name="new_isaac_stage",
+        description="Create a new empty stage in Isaac Sim.",
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True,
+            destructive=True,
+        ),
+    )
+    async def new_isaac_stage() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "new_isaac_stage",
+            server._isaac_tools.new_isaac_stage(),
+        )
+
+    @server.mcp.tool(
+        name="import_isaac_asset",
+        description=(
+            "Import an external asset (USD, USDZ, OBJ, FBX) into "
+            "the current stage at a target path."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=True
+        ),
+    )
+    async def import_isaac_asset(
+        asset_path: str,
+        target_path: str = "/World/ImportedAsset",
+    ) -> Dict[str, Any]:
+        if not server._is_path_allowed(asset_path):
+            return ErrorResponse(
+                error="File path is not allowed by sandbox policy",
+                error_type="SandboxError",
+                details={"file_path": asset_path},
+            ).dict()
+        return await server._exec_isaac(
+            "import_isaac_asset",
+            server._isaac_tools.import_isaac_asset(
+                asset_path=asset_path, target_path=target_path
+            ),
+        )
+
+    @server.mcp.tool(
+        name="add_isaac_reference",
+        description=(
+            "Add a USD reference to a prim so it composes in "
+            "content from another USD file."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=True
+        ),
+    )
+    async def add_isaac_reference(
+        prim_path: str, reference_path: str
+    ) -> Dict[str, Any]:
+        if not server._is_path_allowed(reference_path):
+            return ErrorResponse(
+                error="File path is not allowed by sandbox policy",
+                error_type="SandboxError",
+                details={"file_path": reference_path},
+            ).dict()
+        return await server._exec_isaac(
+            "add_isaac_reference",
+            server._isaac_tools.add_isaac_reference(
+                prim_path=prim_path,
+                reference_path=reference_path,
+            ),
+        )
+
+    # -- Scene Inspection & Exploration tools -----------------------------
+
+    @server.mcp.tool(
+        name="get_isaac_bounding_box",
+        description=(
+            "Get the world-space axis-aligned bounding box of a prim "
+            "including min, max, size, and center coordinates."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_bounding_box(prim_path: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_bounding_box",
+            server._isaac_tools.get_isaac_bounding_box(prim_path=prim_path),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_mesh_info",
+        description=(
+            "Get mesh geometry details: vertex count, face count, "
+            "has normals, has UVs, and subdivision scheme."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_mesh_info(prim_path: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_mesh_info",
+            server._isaac_tools.get_isaac_mesh_info(prim_path=prim_path),
+        )
+
+    @server.mcp.tool(
+        name="list_isaac_lights",
+        description=(
+            "List all light prims in the scene with type, "
+            "intensity, and color information."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def list_isaac_lights(root_path: str = "/") -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "list_isaac_lights",
+            server._isaac_tools.list_isaac_lights(root_path=root_path),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_light_info",
+        description=(
+            "Get detailed light properties: intensity, color, "
+            "temperature, radius, shadow settings, and shaping."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_light_info(prim_path: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_light_info",
+            server._isaac_tools.get_isaac_light_info(prim_path=prim_path),
+        )
+
+    @server.mcp.tool(
+        name="create_isaac_light",
+        description=(
+            "Create a light prim in the scene. Supports DomeLight (environment/HDRI), "
+            "DistantLight (sun), SphereLight (point), RectLight (area), "
+            "DiskLight, and CylinderLight. Configure intensity, color, "
+            "color temperature, and texture."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=True
+        ),
+    )
+    async def create_isaac_light(
+        prim_path: str,
+        light_type: str = "DomeLight",
+        intensity: float = 1000.0,
+        color: Optional[List[float]] = None,
+        color_temperature: Optional[float] = None,
+        angle: Optional[float] = None,
+        texture_file: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "create_isaac_light",
+            server._isaac_tools.create_isaac_light(
+                prim_path=prim_path,
+                light_type=light_type,
+                intensity=intensity,
+                color=color,
+                color_temperature=color_temperature,
+                angle=angle,
+                texture_file=texture_file,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_prim_ancestors",
+        description=(
+            "Get the ancestor chain from root to a prim, showing "
+            "the full hierarchy path with types."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_prim_ancestors(prim_path: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_prim_ancestors",
+            server._isaac_tools.get_isaac_prim_ancestors(prim_path=prim_path),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_subtree",
+        description=(
+            "Get a full subtree as a flat list with depth info, "
+            "type, and child counts for each prim."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_subtree(
+        root_path: str = "/",
+        max_depth: int = 5,
+        max_prims: int = 1000,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_subtree",
+            server._isaac_tools.get_isaac_subtree(
+                root_path=root_path,
+                max_depth=max_depth,
+                max_prims=max_prims,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_prim_relationships",
+        description=(
+            "Get a prim's relationships: material binding, references, "
+            "payloads, variant sets, and USD relationships."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_prim_relationships(prim_path: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_prim_relationships",
+            server._isaac_tools.get_isaac_prim_relationships(prim_path=prim_path),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_layer_info",
+        description=(
+            "Get USD layer stack information: root layer, sublayers, "
+            "session layer, and layer dirty states."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_layer_info() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_layer_info",
+            server._isaac_tools.get_isaac_layer_info(),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_scene_stats",
+        description=(
+            "Get aggregate scene statistics: total vertices, faces, "
+            "meshes, lights, cameras, materials, and prim type counts."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_scene_stats(root_path: str = "/") -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_scene_stats",
+            server._isaac_tools.get_isaac_scene_stats(root_path=root_path),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_texture_dependencies",
+        description=(
+            "List all external texture files referenced by scene materials "
+            "with their referencing material paths."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_texture_dependencies(root_path: str = "/") -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_texture_dependencies",
+            server._isaac_tools.get_isaac_texture_dependencies(root_path=root_path),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_prim_variants",
+        description=(
+            "Get variant sets on a prim: available variants "
+            "and current selections for each set."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_prim_variants(prim_path: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_prim_variants",
+            server._isaac_tools.get_isaac_prim_variants(prim_path=prim_path),
+        )
+
+    @server.mcp.tool(
+        name="focus_isaac_viewport",
+        description=(
+            "Frame the viewport camera to focus on a specific prim, "
+            "zooming to fit it in view."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def focus_isaac_viewport(prim_path: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "focus_isaac_viewport",
+            server._isaac_tools.focus_isaac_viewport(prim_path=prim_path),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_selection",
+        description=(
+            "Get the currently selected prims in the Isaac Sim viewport "
+            "with their paths, names, and types."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_selection() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_selection",
+            server._isaac_tools.get_isaac_selection(),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_animation_info",
+        description=(
+            "Get animation information for a prim: which attributes "
+            "have time samples, sample counts, and time ranges."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_animation_info(prim_path: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_animation_info",
+            server._isaac_tools.get_isaac_animation_info(prim_path=prim_path),
+        )
+
+    @server.mcp.tool(
+        name="raycast_isaac_scene",
+        description=(
+            "Cast a ray into the physics scene and return the closest "
+            "hit prim, position, normal, and distance."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def raycast_isaac_scene(
+        origin: List[float],
+        direction: List[float],
+        max_distance: float = 10000.0,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "raycast_isaac_scene",
+            server._isaac_tools.raycast_isaac_scene(
+                origin=origin,
+                direction=direction,
+                max_distance=max_distance,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="find_isaac_prims_in_area",
+        description=(
+            "Find prims whose bounding box center is within a given "
+            "radius of a point. Results sorted by distance."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def find_isaac_prims_in_area(
+        center: List[float],
+        radius: float,
+        prim_type: Optional[str] = None,
+        root_path: str = "/",
+        max_results: int = 100,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "find_isaac_prims_in_area",
+            server._isaac_tools.find_isaac_prims_in_area(
+                center=center,
+                radius=radius,
+                prim_type=prim_type,
+                root_path=root_path,
+                max_results=max_results,
+            ),
+        )
+
