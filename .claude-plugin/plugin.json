@@ -1,6 +1,6 @@
 {
   "name": "simul",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "3D simulation skills — scene setup, physics, materials, camera, and simulation control via Isaac Sim, USD, Blender, and Unreal Engine",
   "author": {
     "name": "khemoo"
