@@ -55,6 +55,14 @@ extscache/
 # Agent working files
 .sisyphus/
 plan-*.md
+.omc/
+
+# Exploration dumps (prevent context flood)
+DIRECTORY_TREE.txt
+*_EXPLORATION.md
+MODULE_REFERENCE.md
+PROJECT_STRUCTURE.md
+PROJECT_STRUCTURE_DETAILED.md
 
 # Logging
 logs/

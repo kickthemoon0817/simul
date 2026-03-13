@@ -107,7 +107,7 @@ class TestUnrealToolRegistration:
             server_module, "UnrealRuntimeAdapter", FakeUnrealAdapter
         )
 
-        instance = server_module.IsaacMCPServer(settings=Settings())
+        instance = server_module.SimulMCPServer(settings=Settings())
         tool_names = {tool.name for tool in instance.mcp.tools}
 
         # Phase 0 tools
@@ -191,7 +191,7 @@ class TestUnrealToolRegistration:
         monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
         monkeypatch.setattr(server_module, "is_unreal_available", lambda: False)
 
-        instance = server_module.IsaacMCPServer(settings=Settings())
+        instance = server_module.SimulMCPServer(settings=Settings())
         tool_names = {tool.name for tool in instance.mcp.tools}
 
         assert "unreal_health_check" not in tool_names

@@ -34,6 +34,15 @@ class ServerConfig(BaseModel):
     )
 
 
+class IsaacInstanceConfig(BaseModel):
+    """Configuration for a single Isaac Sim instance."""
+
+    name: str = Field(description="Human-readable instance identifier")
+    host: str = Field(default="127.0.0.1", description="TCP socket host")
+    port: int = Field(default=8226, description="TCP socket port", ge=1024, le=65535)
+    timeout: float = Field(default=30.0, description="Socket timeout in seconds", gt=0.0)
+
+
 class IsaacSimConfig(BaseModel):
     """Isaac Sim configuration."""
 
@@ -64,6 +73,24 @@ class IsaacSimConfig(BaseModel):
         default=30.0,
         description="Timeout in seconds for Isaac Sim TCP socket operations",
         gt=0.0,
+    )
+
+    # Multi-instance support
+    instances: List[IsaacInstanceConfig] = Field(
+        default_factory=list,
+        description="Additional named Isaac Sim instances beyond the default",
+    )
+    scan_port_start: int = Field(
+        default=8226,
+        description="Start port for auto-discovery scan",
+        ge=1024,
+        le=65535,
+    )
+    scan_port_end: int = Field(
+        default=8236,
+        description="End port (exclusive) for auto-discovery scan",
+        ge=1024,
+        le=65535,
     )
 
     @field_validator("path")

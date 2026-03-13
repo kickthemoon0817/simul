@@ -1,8 +1,9 @@
 """
-MCP (Model Context Protocol) server implementation for Isaac Sim.
+MCP (Model Context Protocol) server for 3D simulation and DCC tools.
 
 This package provides the MCP server implementation with tool registry,
-connection management, and Isaac Sim integration.
+connection management, and integration for Isaac Sim, Blender, Unreal Engine,
+and headless USD operations.
 """
 
 from .schemas import (
@@ -71,14 +72,14 @@ from .schemas import (
     USDFileInfo,
 )
 from .server import (
-    IsaacMCPServer,
+    SimulMCPServer,
     create_server_instance,
     start_mcp_server,
 )
 
 __all__ = [
     # Server
-    "IsaacMCPServer",
+    "SimulMCPServer",
     "start_mcp_server",
     "create_server_instance",
     # USD Schemas

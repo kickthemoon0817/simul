@@ -1,0 +1,10 @@
+{
+  "name": "simul",
+  "version": "0.0.7",
+  "description": "3D simulation skills — scene setup, physics, materials, camera, and simulation control via Isaac Sim, USD, Blender, and Unreal Engine",
+  "author": {
+    "name": "khemoo"
+  },
+  "repository": "https://github.com/khemoo/simul-mcp",
+  "license": "MIT"
+}

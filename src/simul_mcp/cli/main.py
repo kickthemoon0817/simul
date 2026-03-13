@@ -1,27 +1,49 @@
 """
 CLI interface for Simul MCP Server.
 
-This module provides a Typer-based command-line interface for running
-the MCP server and utility commands.
+Top-level app ``simul`` with backend-specific sub-commands::
+
+    simul server          # start MCP server
+    simul info            # show capabilities
+    simul version         # show version
+    simul validate-config # validate YAML config
+    simul commands        # list all commands (JSON manifest)
+    simul isaac ping      # check Isaac Sim connectivity
+    simul isaac status    # instance status
+    simul isaac scene     # scene overview
+    simul isaac exec ...  # execute Python script
+    simul isaac start     # play simulation
+    simul usd info <f>    # analyse USD file
+    simul usd validate <f>
+    simul usd summary <f>
+
+Global ``--json`` flag forces structured JSON output on stdout for all
+commands.  When stdout is not a TTY the CLI auto-detects JSON mode.
 """
 
 import asyncio
+import json
 import socket
 from pathlib import Path
 from typing import Optional
+
 import typer
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
-from rich.text import Text
+from rich.table import Table
+
+from simul_mcp.cli.output import emit, emit_error, is_json_mode, set_json_mode
 from simul_mcp.config import get_settings, load_settings
 from simul_mcp.logging import setup_logging, get_logger
-from simul_mcp.mcp.server import start_mcp_server
-from simul_mcp.mcp.tools.registry import get_tool_registry
+from simul_mcp.mcp.server import SimulMCPServer, start_mcp_server
 from simul_mcp.adapters import (
     is_blender_available,
     is_headless_available,
 )
+
+# Import sub-apps
+from simul_mcp.cli.isaac import app as isaac_app
+from simul_mcp.cli.usd_cli import app as usd_app
 
 
 def _is_isaac_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -42,15 +64,36 @@ def _is_isaac_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
     except (ConnectionRefusedError, OSError, TimeoutError):
         return False
 
-# Initialize CLI
+
+# ---------------------------------------------------------------------------
+# Top-level app with global --json callback
+# ---------------------------------------------------------------------------
+def _global_callback(
+    json_output: bool = typer.Option(
+        False, "--json", help="Output structured JSON to stdout (auto-enabled when stdout is not a TTY)",
+    ),
+) -> None:
+    """Global options applied before any sub-command."""
+    if json_output:
+        set_json_mode(True)
+
+
 app = typer.Typer(
-    name="simul-mcp",
-    help="Simul – 3D Simulation & DCC Tools MCP Server",
+    name="simul",
+    help="Simul -- 3D Simulation & DCC Tools CLI",
     add_completion=False,
+    callback=_global_callback,
 )
 console = Console(stderr=True)
 
+# Register sub-apps
+app.add_typer(isaac_app, name="isaac", help="Isaac Sim commands")
+app.add_typer(usd_app, name="usd", help="USD file commands (headless)")
 
+
+# ---------------------------------------------------------------------------
+# server
+# ---------------------------------------------------------------------------
 @app.command()
 def server(
     config: Optional[Path] = typer.Option(
@@ -71,48 +114,41 @@ def server(
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Enable verbose logging"
     ),
-):
-    """Start the Isaac Sim MCP Server."""
+) -> None:
+    """Start the Simul MCP Server."""
     try:
-        # Load settings
         if config:
             settings = load_settings(config)
         else:
             settings = get_settings()
 
-        # Override log level if specified
         if log_level:
             settings.logging.level = log_level.upper()
-
         if verbose:
             settings.logging.level = "DEBUG"
 
-        # Setup logging
         setup_logging(settings)
         logger = get_logger(__name__)
 
-        # Check runtime availability
         isaac_host = settings.isaac_sim.socket_host
         isaac_port = settings.isaac_sim.socket_port
         isaac_reachable = _is_isaac_reachable(isaac_host, isaac_port)
         blender_available = is_blender_available()
         usd_available = is_headless_available()
 
-        # Display startup info
         console.print(
             Panel.fit(
-                f"[bold blue]Simul – 3D Simulation & DCC Tools[/bold blue]\n"
+                f"[bold blue]Simul -- 3D Simulation & DCC Tools[/bold blue]\n"
                 f"Transport: {transport}\n"
-                f"Isaac Sim (TCP :{isaac_port}): {'✓ reachable' if isaac_reachable else '✗ not reachable (tools will retry at call time)'}\n"
-                f"Blender: {'✓' if blender_available else '✗'}\n"
-                f"USD Headless: {'✓' if usd_available else '✗'}\n"
+                f"Isaac Sim (TCP :{isaac_port}): {'reachable' if isaac_reachable else 'not reachable (tools will retry at call time)'}\n"
+                f"Blender: {'available' if blender_available else 'unavailable'}\n"
+                f"USD Headless: {'available' if usd_available else 'unavailable'}\n"
                 f"Config: {config or 'default'}\n"
                 f"Log Level: {settings.logging.level}",
                 title="Starting Server",
             )
         )
 
-        # Start server
         logger.info(f"Starting Simul 3D MCP Server with {transport} transport")
         asyncio.run(start_mcp_server(settings, transport))
 
@@ -123,6 +159,9 @@ def server(
         raise typer.Exit(1)
 
 
+# ---------------------------------------------------------------------------
+# info
+# ---------------------------------------------------------------------------
 @app.command()
 def info(
     config: Optional[Path] = typer.Option(
@@ -134,117 +173,206 @@ def info(
         file_okay=True,
         dir_okay=False,
     ),
-):
+) -> None:
     """Show server information and capabilities."""
     try:
-        # Load settings
         if config:
             settings = load_settings(config)
         else:
             settings = get_settings()
 
-        # Check runtime availability
         isaac_host = settings.isaac_sim.socket_host
         isaac_port = settings.isaac_sim.socket_port
         isaac_reachable = _is_isaac_reachable(isaac_host, isaac_port)
         blender_available = is_blender_available()
         usd_available = is_headless_available()
 
-        # Get tool registry
-        registry = get_tool_registry(settings)
-        capabilities = registry.get_capabilities()
+        # Instantiate server to get actually registered tools
+        server_instance = SimulMCPServer(settings)
+        tool_names: list[str] = []
+        lp = getattr(server_instance.mcp, "local_provider", None)
+        if lp is not None:
+            components = getattr(lp, "_components", {})
+            tool_names = sorted(
+                k.split(":")[1].split("@")[0]
+                for k in components
+                if k.startswith("tool:")
+            )
 
-        # Display system info
+        # Categorise by name prefix
+        categories: dict[str, list[str]] = {
+            "Isaac Sim": [],
+            "Blender": [],
+            "Unreal": [],
+            "USD / Headless": [],
+            "Instance Management": [],
+        }
+        for name in tool_names:
+            if name.startswith(("list_isaac_instances", "set_active_isaac_instance")):
+                categories["Instance Management"].append(name)
+            elif name.startswith(("isaac_", "ping_isaac", "execute_isaac",
+                                  "get_isaac", "set_isaac", "create_isaac",
+                                  "delete_isaac", "search_isaac", "list_isaac",
+                                  "add_isaac", "duplicate_isaac", "reparent_isaac",
+                                  "import_isaac", "new_isaac", "open_isaac",
+                                  "save_isaac", "capture_isaac", "start_isaac",
+                                  "stop_isaac", "pause_isaac", "reset_isaac",
+                                  "step_isaac", "assign_isaac")):
+                categories["Isaac Sim"].append(name)
+            elif "blender" in name or "simready" in name:
+                categories["Blender"].append(name)
+            elif "unreal" in name:
+                categories["Unreal"].append(name)
+            else:
+                categories["USD / Headless"].append(name)
+
+        if is_json_mode():
+            data = {
+                "backends": {
+                    "isaac_sim": {"reachable": isaac_reachable, "port": isaac_port},
+                    "blender": {"available": blender_available},
+                    "usd_headless": {"available": usd_available},
+                },
+                "tool_count": len(tool_names),
+                "categories": {k: v for k, v in categories.items() if v},
+            }
+            emit(data)
+            return
+
         system_table = Table(title="System Information")
         system_table.add_column("Component", style="cyan")
         system_table.add_column("Status", style="green")
         system_table.add_column("Details")
-
         system_table.add_row(
             f"Isaac Sim (TCP :{isaac_port})",
-            "✓ Reachable" if isaac_reachable else "✗ Not Reachable",
+            "Reachable" if isaac_reachable else "Not Reachable",
             "Simulation & viewport via TCP socket"
             if isaac_reachable
             else "Isaac Sim tools will retry at call time",
         )
         system_table.add_row(
             "Blender Runtime",
-            "✓ Available" if blender_available else "✗ Not Available",
+            "Available" if blender_available else "Not Available",
             "Blender scene tools through bpy"
             if blender_available
             else "Install bpy to enable Blender tools",
         )
         system_table.add_row(
             "USD Headless",
-            "✓ Available" if usd_available else "✗ Not Available",
+            "Available" if usd_available else "Not Available",
             "pxr library for USD file operations" if usd_available else "No USD support",
         )
-
         console.print(system_table)
         console.print()
 
-        # Display tool categories
         categories_table = Table(title="Tool Categories")
         categories_table.add_column("Category", style="cyan")
-        categories_table.add_column("Total Tools", justify="center")
-        categories_table.add_column("Enabled", justify="center", style="green")
-        categories_table.add_column("Disabled", justify="center", style="red")
-
-        for category, info in capabilities["categories"].items():
-            categories_table.add_row(
-                category.replace("_", " ").title(),
-                str(info["total"]),
-                str(info["enabled"]),
-                str(info["total"] - info["enabled"]),
-            )
-
+        categories_table.add_column("Tools", justify="center")
+        for cat_name, cat_tools in categories.items():
+            if cat_tools:
+                categories_table.add_row(cat_name, str(len(cat_tools)))
         console.print(categories_table)
         console.print()
 
-        # Display individual tools
-        tools_table = Table(title="Available Tools")
+        tools_table = Table(title="Registered Tools")
         tools_table.add_column("Tool Name", style="cyan")
         tools_table.add_column("Category")
-        tools_table.add_column("Status", justify="center")
-        tools_table.add_column("Requirements")
-
-        for tool_name, tool_info in capabilities["tools"].items():
-            status = "✓ Enabled" if tool_info["enabled"] else "✗ Disabled"
-            status_style = "green" if tool_info["enabled"] else "red"
-
-            requirements = []
-            if tool_info.get("requires_blender"):
-                requirements.append("Blender")
-            if tool_info.get("requires_unreal"):
-                requirements.append("Unreal")
-            if tool_info.get("requires_usd"):
-                requirements.append("USD")
-
-            tools_table.add_row(
-                tool_name,
-                tool_info["category"].replace("_", " ").title(),
-                Text(status, style=status_style),
-                ", ".join(requirements) if requirements else "None",
-            )
-
+        for cat_name, cat_tools in categories.items():
+            for t in cat_tools:
+                tools_table.add_row(t, cat_name)
         console.print(tools_table)
 
-        # Summary
         console.print(
             Panel.fit(
                 f"[bold]Summary[/bold]\n"
-                f"Total Tools: {capabilities['total_tools']}\n"
-                f"Enabled: {capabilities['enabled_tools']}\n"
-                f"Disabled: {capabilities['total_tools'] - capabilities['enabled_tools']}",
+                f"Total Registered Tools: {len(tool_names)}",
                 title="Tool Summary",
             )
         )
 
     except Exception as e:
+        if is_json_mode():
+            emit_error(str(e), "InfoError")
         console.print(f"[red]Error getting server info: {e}[/red]")
         raise typer.Exit(1)
 
 
+# ---------------------------------------------------------------------------
+# commands  (P3: machine-readable introspection)
+# ---------------------------------------------------------------------------
+def _collect_commands(
+    typer_app: typer.Typer, prefix: str = "",
+) -> list[dict[str, object]]:
+    """Recursively collect command metadata from a Typer app tree."""
+    result: list[dict[str, object]] = []
+    click_app = typer.main.get_command(typer_app)
+
+    if hasattr(click_app, "list_commands"):
+        ctx = typer.Context(click_app)
+        for name in click_app.list_commands(ctx):
+            full_name = f"{prefix} {name}".strip() if prefix else name
+            cmd = click_app.get_command(ctx, name)
+            if cmd is None:
+                continue
+            if hasattr(cmd, "list_commands"):
+                # It's a group — recurse
+                sub_typer = None
+                for group in getattr(typer_app, "registered_groups", []):
+                    if getattr(group, "name", None) == name:
+                        sub_typer = getattr(group, "typer_instance", None)
+                        break
+                if sub_typer is not None:
+                    result.extend(_collect_commands(sub_typer, full_name))
+                else:
+                    # Fallback: list sub-commands from the click group
+                    sub_ctx = typer.Context(cmd, parent=ctx)
+                    for sub_name in cmd.list_commands(sub_ctx):
+                        sub_full = f"{full_name} {sub_name}"
+                        sub_cmd = cmd.get_command(sub_ctx, sub_name)
+                        if sub_cmd is None:
+                            continue
+                        params = []
+                        for p in sub_cmd.params:
+                            params.append({
+                                "name": p.name,
+                                "type": p.type.name if hasattr(p.type, "name") else str(p.type),
+                                "required": p.required,
+                                "default": str(p.default) if p.default is not None else None,
+                                "help": getattr(p, "help", None),
+                            })
+                        result.append({
+                            "command": sub_full,
+                            "description": sub_cmd.help or "",
+                            "params": params,
+                        })
+            else:
+                params = []
+                for p in cmd.params:
+                    params.append({
+                        "name": p.name,
+                        "type": p.type.name if hasattr(p.type, "name") else str(p.type),
+                        "required": p.required,
+                        "default": str(p.default) if p.default is not None else None,
+                        "help": getattr(p, "help", None),
+                    })
+                result.append({
+                    "command": full_name,
+                    "description": cmd.help or "",
+                    "params": params,
+                })
+    return result
+
+
+@app.command()
+def commands() -> None:
+    """List all available commands with parameters (always JSON)."""
+    cmds = _collect_commands(app)
+    print(json.dumps({"commands": cmds, "count": len(cmds)}, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# validate-config
+# ---------------------------------------------------------------------------
 @app.command()
 def validate_config(
     config: Path = typer.Argument(
@@ -254,169 +382,51 @@ def validate_config(
         file_okay=True,
         dir_okay=False,
     ),
-):
+) -> None:
     """Validate a configuration file."""
     try:
-        console.print(f"[cyan]Validating configuration file: {config}[/cyan]")
-
-        # Try to load settings
         settings = load_settings(config)
 
-        # Display validation results
-        console.print("[green]✓ Configuration file is valid[/green]")
+        if is_json_mode():
+            emit({
+                "valid": True,
+                "config_path": str(config),
+                "server_name": settings.server.name,
+                "log_level": settings.logging.level,
+                "usd_cache_enabled": settings.usd.cache_enabled,
+                "max_file_size_mb": settings.usd.max_file_size_mb,
+                "viewport_max_size": settings.viewport.max_size,
+            })
+            return
 
-        # Show key settings
+        console.print(f"[cyan]Validating configuration file: {config}[/cyan]")
+        console.print("[green]Configuration file is valid[/green]")
+
         settings_table = Table(title="Configuration Summary")
         settings_table.add_column("Setting", style="cyan")
         settings_table.add_column("Value")
-
         settings_table.add_row("Server Name", settings.server.name)
-        settings_table.add_row("Server Version", settings.server.version)
         settings_table.add_row("Log Level", settings.logging.level)
         settings_table.add_row("USD Cache Enabled", str(settings.usd.cache_enabled))
         settings_table.add_row("Max File Size (MB)", str(settings.usd.max_file_size_mb))
         settings_table.add_row("Viewport Max Size", str(settings.viewport.max_size))
-
         console.print(settings_table)
 
     except Exception as e:
-        console.print(f"[red]✗ Configuration validation failed: {e}[/red]")
+        if is_json_mode():
+            emit_error(str(e), "ValidationError")
+        console.print(f"[red]Configuration validation failed: {e}[/red]")
         raise typer.Exit(1)
 
 
+# ---------------------------------------------------------------------------
+# version
+# ---------------------------------------------------------------------------
 @app.command()
-def test_usd(
-    file_path: Path = typer.Argument(
-        ...,
-        help="Path to USD file to test",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-    ),
-    config: Optional[Path] = typer.Option(
-        None,
-        "--config",
-        "-c",
-        help="Path to configuration file",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-    ),
-):
-    """Test USD file loading and analysis."""
-    try:
-        # Load settings
-        if config:
-            settings = load_settings(config)
-        else:
-            settings = get_settings()
-
-        # Setup minimal logging
-        setup_logging(settings)
-
-        console.print(f"[cyan]Testing USD file: {file_path}[/cyan]")
-
-        # Check USD availability
-        usd_available = is_headless_available()
-        if not usd_available:
-            console.print("[red]Error: No USD support available[/red]")
-            raise typer.Exit(1)
-
-        # Test file loading
-        from simul_mcp.adapters import HeadlessUSDAdapter
-
-        adapter = HeadlessUSDAdapter(settings)
-        with adapter.create_session() as session:
-            console.print("[yellow]Loading USD file...[/yellow]")
-            stage_id = session.load_stage(file_path)
-
-            if not stage_id:
-                console.print("[red]✗ Failed to load USD file[/red]")
-                raise typer.Exit(1)
-
-            console.print(
-                f"[green]✓ Successfully loaded USD file (Stage ID: {stage_id})[/green]"
-            )
-
-            # Get stage info
-            console.print("[yellow]Analyzing stage...[/yellow]")
-            stage_info = session.get_stage_info(stage_id)
-
-            if stage_info:
-                # Display stage information
-                stage_table = Table(title="Stage Information")
-                stage_table.add_column("Property", style="cyan")
-                stage_table.add_column("Value")
-
-                stage_table.add_row("Up Axis", stage_info.up_axis)
-                stage_table.add_row("Meters per Unit", str(stage_info.meters_per_unit))
-                stage_table.add_row(
-                    "Time Codes per Second", str(stage_info.time_codes_per_second)
-                )
-                stage_table.add_row("Start Time", str(stage_info.start_time_code))
-                stage_table.add_row("End Time", str(stage_info.end_time_code))
-                stage_table.add_row("Frame Rate", str(stage_info.frame_rate))
-                stage_table.add_row("Total Prims", str(len(stage_info.all_prims)))
-                stage_table.add_row("Root Prims", str(len(stage_info.root_prims)))
-                stage_table.add_row("Default Prim", stage_info.default_prim or "None")
-
-                console.print(stage_table)
-
-                # Generate summary
-                console.print("[yellow]Generating scene summary...[/yellow]")
-                summary = session.summarize_stage(stage_id, include_meshes=True)
-
-                if summary:
-                    console.print("[green]✓ Scene analysis complete[/green]")
-
-                    # Show prim type counts
-                    if summary.prim_type_counts:
-                        prim_table = Table(title="Prim Types")
-                        prim_table.add_column("Type", style="cyan")
-                        prim_table.add_column("Count", justify="right")
-
-                        for prim_type, count in sorted(
-                            summary.prim_type_counts.items(),
-                            key=lambda x: x[1],
-                            reverse=True,
-                        ):
-                            prim_table.add_row(prim_type, str(count))
-
-                        console.print(prim_table)
-
-                    # Show mesh statistics
-                    if summary.mesh_statistics:
-                        mesh_stats = summary.mesh_statistics
-                        console.print(
-                            Panel.fit(
-                                f"[bold]Mesh Statistics[/bold]\n"
-                                f"Total Meshes: {mesh_stats.get('total_meshes', 0)}\n"
-                                f"Total Vertices: {mesh_stats.get('total_vertices', 0):,}\n"
-                                f"Total Faces: {mesh_stats.get('total_faces', 0):,}\n"
-                                f"Meshes with Normals: {mesh_stats.get('meshes_with_normals', 0)}\n"
-                                f"Meshes with UVs: {mesh_stats.get('meshes_with_uvs', 0)}\n"
-                                f"Closed Meshes: {mesh_stats.get('closed_meshes', 0)}",
-                                title="Mesh Analysis",
-                            )
-                        )
-                else:
-                    console.print("[yellow]⚠ Could not generate scene summary[/yellow]")
-            else:
-                console.print("[yellow]⚠ Could not get stage information[/yellow]")
-
-        console.print("[green]✓ USD file test completed successfully[/green]")
-
-    except Exception as e:
-        console.print(f"[red]✗ USD file test failed: {e}[/red]")
-        raise typer.Exit(1)
-
-
-@app.command()
-def version():
+def version() -> None:
     """Show version information."""
     try:
         from simul_mcp import __version__
-
         version_str = __version__
     except ImportError:
         version_str = "unknown"
@@ -426,13 +436,25 @@ def version():
     isaac_reachable = _is_isaac_reachable(
         settings.isaac_sim.socket_host, isaac_port
     )
+    blender_available = is_blender_available()
+    usd_available = is_headless_available()
+
+    if is_json_mode():
+        emit({
+            "version": version_str,
+            "isaac_sim": {"reachable": isaac_reachable, "port": isaac_port},
+            "blender": {"available": blender_available},
+            "usd_headless": {"available": usd_available},
+        })
+        return
+
     console.print(
         Panel.fit(
-            f"[bold blue]Simul – 3D Simulation & DCC Tools[/bold blue]\n"
+            f"[bold blue]Simul -- 3D Simulation & DCC Tools[/bold blue]\n"
             f"Version: {version_str}\n"
-            f"Isaac Sim (TCP :{isaac_port}): {'✓ reachable' if isaac_reachable else '✗ not reachable'}\n"
-            f"Blender: {'✓' if is_blender_available() else '✗'}\n"
-            f"USD Headless: {'✓' if is_headless_available() else '✗'}",
+            f"Isaac Sim (TCP :{isaac_port}): {'reachable' if isaac_reachable else 'not reachable'}\n"
+            f"Blender: {'available' if blender_available else 'unavailable'}\n"
+            f"USD Headless: {'available' if usd_available else 'unavailable'}",
             title="Version Information",
         )
     )
