@@ -133,12 +133,12 @@ The extension provides:
 ### Python API
 
 ```python
-from simul_mcp.mcp.server import IsaacMCPServer
+from simul_mcp.mcp.server import SimulMCPServer
 from simul_mcp.config import get_settings
 
 # Create and run server
 settings = get_settings()
-server = IsaacMCPServer(settings)
+server = SimulMCPServer(settings)
 await server.run("stdio")
 ```
 
@@ -290,10 +290,10 @@ This example shows how to:
 
 ```python
 import asyncio
-from simul_mcp.mcp.server import IsaacMCPServer
+from simul_mcp.mcp.server import SimulMCPServer
 
 async def example():
-    server = IsaacMCPServer()
+    server = SimulMCPServer()
 
     # Load USD file
     result = await server.mcp.tools["load_usd_file"]("scene.usd")

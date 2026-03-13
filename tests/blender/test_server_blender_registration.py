@@ -93,7 +93,7 @@ class TestBlenderToolRegistration:
         monkeypatch.setattr(server_module, "is_blender_available", lambda: True)
         monkeypatch.setattr(server_module, "BlenderRuntimeAdapter", FakeBlenderAdapter)
 
-        instance = server_module.IsaacMCPServer(settings=Settings())
+        instance = server_module.SimulMCPServer(settings=Settings())
         tool_names = {tool.name for tool in instance.mcp.tools}
 
         assert "get_blender_info" in tool_names
@@ -113,7 +113,7 @@ class TestBlenderToolRegistration:
         monkeypatch.setattr(server_module, "is_isaac_available", lambda: False)
         monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
 
-        instance = server_module.IsaacMCPServer(settings=Settings())
+        instance = server_module.SimulMCPServer(settings=Settings())
         tool_names = {tool.name for tool in instance.mcp.tools}
 
         assert "get_blender_info" not in tool_names

@@ -46,8 +46,8 @@ class FakeFastMCP:
         return self.tools
 
 
-def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.IsaacMCPServer:
-    """Instantiate IsaacMCPServer with all adapters stubbed out."""
+def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServer:
+    """Instantiate SimulMCPServer with all adapters stubbed out."""
     monkeypatch.setattr(server_module, "FASTMCP_AVAILABLE", True)
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
@@ -55,7 +55,7 @@ def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.IsaacMCPServe
     monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
     monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
 
-    return server_module.IsaacMCPServer(settings=Settings())
+    return server_module.SimulMCPServer(settings=Settings())
 
 
 class TestMCPDiscoverability:
