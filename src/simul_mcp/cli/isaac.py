@@ -299,7 +299,6 @@ def capture(
     if image_b64:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(base64.b64decode(image_b64))
-        data["file_path"] = str(output.resolve())
     else:
         if is_json_mode():
             emit_error("Viewport capture returned no image data", "CaptureError")
@@ -307,10 +306,10 @@ def capture(
         raise typer.Exit(1)
 
     if is_json_mode():
-        # Strip bulky base64 from JSON output — the file is on disk
-        data.pop("image_base64", None)
-        data.pop("image", None)
-        emit(data)
+        # Build output dict without bulky base64 — the file is on disk
+        out = {k: v for k, v in data.items() if k not in ("image_base64", "image")}
+        out["file_path"] = str(output.resolve())
+        emit(out)
         return
     console.print(f"[green]Captured[/green] {output.resolve()}")
 

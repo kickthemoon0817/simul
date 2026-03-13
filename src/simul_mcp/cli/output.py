@@ -45,7 +45,7 @@ def emit(data: Dict[str, Any]) -> None:
 
     Adds ``"success": true`` if not already present and no ``"error"`` key.
     """
-    out = data.copy()
+    out = data.copy()  # shallow — emit only touches top-level keys
     if "success" not in out and "error" not in out:
         out["success"] = True
     print(json.dumps(out))
