@@ -66,6 +66,7 @@ Repository = "https://github.com/khemoo/simul-mcp"
 Issues = "https://github.com/khemoo/simul-mcp/issues"
 
 [project.scripts]
+simul = "simul_mcp.cli.main:app"
 simul-mcp = "simul_mcp.cli.main:app"
 
 [tool.setuptools.packages.find]
