@@ -10,6 +10,7 @@ JSON output on stdout, making them consumable by AI agents.
 """
 
 import asyncio
+import base64
 import json
 import sys
 from pathlib import Path
@@ -61,6 +62,7 @@ def _run(coro: Any) -> Dict[str, Any]:
                 result.get("error_type", "Error"),
                 result.get("details"),
             )
+            return result  # unreachable (emit_error raises), but documents intent
         console.print(f"[red]{result.get('error_type', 'Error')}: {result['error']}[/red]")
         details = result.get("details")
         if details and details.get("traceback"):
@@ -293,12 +295,16 @@ def capture(
     data = _run(tools.capture_isaac_viewport(width=width, height=height))
 
     # Decode base64 image and write to disk
-    import base64
     image_b64 = data.get("image_base64") or data.get("image", "")
     if image_b64:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(base64.b64decode(image_b64))
         data["file_path"] = str(output.resolve())
+    else:
+        if is_json_mode():
+            emit_error("Viewport capture returned no image data", "CaptureError")
+        console.print("[red]Viewport capture returned no image data[/red]")
+        raise typer.Exit(1)
 
     if is_json_mode():
         # Strip bulky base64 from JSON output — the file is on disk
@@ -358,7 +364,7 @@ def step(
     port: Optional[int] = _port_opt,
 ) -> None:
     """Step the simulation forward by N physics frames."""
-    result = _run(_tools(host, port).step_isaac_simulation(steps=count))
+    result = _run(_tools(host, port).step_isaac_simulation(num_steps=count))
     if is_json_mode():
         emit(result)
         return
@@ -391,7 +397,7 @@ def list_prims(
 ) -> None:
     """List prims in the scene with optional filtering."""
     result = _run(_tools(host, port).list_isaac_prims(
-        root_path=root_path, depth=depth, prim_type=prim_type,
+        root_path=root_path, max_depth=depth, prim_type=prim_type,
     ))
     if is_json_mode():
         emit(result)
@@ -482,7 +488,7 @@ def delete_prim(
 def set_transform(
     prim_path: str = typer.Argument(..., help="USD path of the prim"),
     translate: Optional[str] = typer.Option(None, "--translate", "--pos", help="Position as x,y,z"),
-    rotate: Optional[str] = typer.Option(None, "--rotate", "--rot", help="Rotation quaternion as w,x,y,z"),
+    rotate: Optional[str] = typer.Option(None, "--rotate", "--rot", help="Euler angles in degrees as x,y,z"),
     scale: Optional[str] = typer.Option(None, "--scale", help="Scale as x,y,z"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
@@ -523,7 +529,7 @@ def search_prims(
 ) -> None:
     """Search for prims by name pattern."""
     result = _run(_tools(host, port).search_isaac_prims(
-        pattern=pattern, prim_type=prim_type, root_path=root_path,
+        search_type="name", query=pattern, root_path=root_path,
     ))
     if is_json_mode():
         emit(result)
