@@ -45,9 +45,10 @@ def emit(data: Dict[str, Any]) -> None:
 
     Adds ``"success": true`` if not already present and no ``"error"`` key.
     """
-    if "success" not in data and "error" not in data:
-        data["success"] = True
-    print(json.dumps(data))
+    out = data.copy()
+    if "success" not in out and "error" not in out:
+        out["success"] = True
+    print(json.dumps(out))
 
 
 def emit_error(

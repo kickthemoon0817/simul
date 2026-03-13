@@ -56,9 +56,11 @@ def _run(coro: Any) -> Dict[str, Any]:
     result = asyncio.run(coro)
     if result.get("error"):
         if is_json_mode():
-            result["success"] = False
-            print(json.dumps(result))
-            raise typer.Exit(1)
+            emit_error(
+                result["error"],
+                result.get("error_type", "Error"),
+                result.get("details"),
+            )
         console.print(f"[red]{result.get('error_type', 'Error')}: {result['error']}[/red]")
         details = result.get("details")
         if details and details.get("traceback"):
@@ -278,18 +280,33 @@ def capture(
     tools = _tools(host, port)
 
     if eye or target:
-        eye_list = [float(v) for v in (eye or "5,5,3").split(",")]
-        target_list = [float(v) for v in (target or "0,0,0").split(",")]
-        _run(tools.set_isaac_camera(eye=eye_list, target=target_list))
+        try:
+            eye_list = [float(v) for v in (eye or "5,5,3").split(",")]
+            target_list = [float(v) for v in (target or "0,0,0").split(",")]
+        except ValueError as e:
+            if is_json_mode():
+                emit_error(f"Invalid numeric value in camera args: {e}", "ValueError")
+            console.print(f"[red]Invalid numeric value in camera args: {e}[/red]")
+            raise typer.Exit(1)
+        _run(tools.set_isaac_camera(position=eye_list, target=target_list))
 
-    data = _run(tools.capture_isaac_viewport(
-        width=width, height=height, file_path=str(output.resolve()),
-    ))
+    data = _run(tools.capture_isaac_viewport(width=width, height=height))
+
+    # Decode base64 image and write to disk
+    import base64
+    image_b64 = data.get("image_base64") or data.get("image", "")
+    if image_b64:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(base64.b64decode(image_b64))
+        data["file_path"] = str(output.resolve())
 
     if is_json_mode():
+        # Strip bulky base64 from JSON output — the file is on disk
+        data.pop("image_base64", None)
+        data.pop("image", None)
         emit(data)
         return
-    console.print(f"[green]Captured[/green] {data.get('file_path', output)}")
+    console.print(f"[green]Captured[/green] {output.resolve()}")
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +453,9 @@ def create_prim(
     if is_json_mode():
         emit(result)
         return
-    console.print(f"[green]Created[/green] {result.get('prim_path', prim_path)} ({result.get('prim_type', prim_type)})")
+    created_path = result.get('prim_path', prim_path)
+    created_type = result.get('prim_type', prim_type)
+    console.print(f"[green]Created[/green] {created_path} ({created_type})")
 
 
 # ---------------------------------------------------------------------------
@@ -469,14 +488,20 @@ def set_transform(
     port: Optional[int] = _port_opt,
 ) -> None:
     """Set the transform (position, rotation, scale) of a prim."""
-    translate_list = [float(v) for v in translate.split(",")] if translate else None
-    rotate_list = [float(v) for v in rotate.split(",")] if rotate else None
-    scale_list = [float(v) for v in scale.split(",")] if scale else None
+    try:
+        translate_list = [float(v) for v in translate.split(",")] if translate else None
+        rotate_list = [float(v) for v in rotate.split(",")] if rotate else None
+        scale_list = [float(v) for v in scale.split(",")] if scale else None
+    except ValueError as e:
+        if is_json_mode():
+            emit_error(f"Invalid numeric value in transform args: {e}", "ValueError")
+        console.print(f"[red]Invalid numeric value in transform args: {e}[/red]")
+        raise typer.Exit(1)
 
     result = _run(_tools(host, port).set_isaac_prim_transform(
         prim_path=prim_path,
-        position=translate_list,
-        orientation=rotate_list,
+        translation=translate_list,
+        rotation_euler=rotate_list,
         scale=scale_list,
     ))
     if is_json_mode():
@@ -577,7 +602,13 @@ def create_physics_scene(
     port: Optional[int] = _port_opt,
 ) -> None:
     """Create a UsdPhysics.Scene with gravity settings."""
-    grav_dir_list = [float(v) for v in gravity_dir.split(",")]
+    try:
+        grav_dir_list = [float(v) for v in gravity_dir.split(",")]
+    except ValueError as e:
+        if is_json_mode():
+            emit_error(f"Invalid numeric value in --gravity-dir: {e}", "ValueError")
+        console.print(f"[red]Invalid numeric value in --gravity-dir: {e}[/red]")
+        raise typer.Exit(1)
     result = _run(_tools(host, port).create_isaac_physics_scene(
         prim_path=prim_path,
         gravity_direction=grav_dir_list,
@@ -598,7 +629,10 @@ def create_physics_scene(
 @app.command("create-light")
 def create_light(
     prim_path: str = typer.Argument(..., help="USD path for the new light"),
-    light_type: str = typer.Option("DomeLight", "--type", help="DomeLight, DistantLight, SphereLight, RectLight, DiskLight, CylinderLight"),
+    light_type: str = typer.Option(
+        "DomeLight", "--type",
+        help="DomeLight, DistantLight, SphereLight, RectLight, DiskLight, CylinderLight",
+    ),
     intensity: float = typer.Option(1000.0, "--intensity", "-i", help="Light intensity"),
     color: Optional[str] = typer.Option(None, "--color", help="RGB color as r,g,b (0-1 floats)"),
     temperature: Optional[float] = typer.Option(None, "--temperature", help="Color temperature in Kelvin"),
@@ -608,7 +642,13 @@ def create_light(
     port: Optional[int] = _port_opt,
 ) -> None:
     """Create a light prim in the scene."""
-    color_list = [float(v) for v in color.split(",")] if color else None
+    try:
+        color_list = [float(v) for v in color.split(",")] if color else None
+    except ValueError as e:
+        if is_json_mode():
+            emit_error(f"Invalid numeric value in --color: {e}", "ValueError")
+        console.print(f"[red]Invalid numeric value in --color: {e}[/red]")
+        raise typer.Exit(1)
     result = _run(_tools(host, port).create_isaac_light(
         prim_path=prim_path,
         light_type=light_type,
@@ -639,7 +679,21 @@ def create_material(
     port: Optional[int] = _port_opt,
 ) -> None:
     """Create a material with a surface shader."""
-    color_list = [float(v) for v in color.split(",")]
+    valid_shaders = ("UsdPreviewSurface", "OmniPBR")
+    if shader_type not in valid_shaders:
+        msg = f"Invalid shader_type '{shader_type}'. Must be one of: {valid_shaders}"
+        if is_json_mode():
+            emit_error(msg, "ValueError")
+        console.print(f"[red]{msg}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        color_list = [float(v) for v in color.split(",")]
+    except ValueError as e:
+        if is_json_mode():
+            emit_error(f"Invalid numeric value in --color: {e}", "ValueError")
+        console.print(f"[red]Invalid numeric value in --color: {e}[/red]")
+        raise typer.Exit(1)
     result = _run(_tools(host, port).create_isaac_material(
         material_path=material_path,
         shader_type=shader_type,
