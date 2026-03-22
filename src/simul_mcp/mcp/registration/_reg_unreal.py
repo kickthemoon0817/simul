@@ -13,8 +13,15 @@ if TYPE_CHECKING:
     from ..server import SimulMCPServer
 
 
-def register_unreal_tools(server: "SimulMCPServer") -> None:
-    """Register Unreal Engine runtime specific tools."""
+def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
+    """Register Unreal Engine runtime specific tools.
+
+    Args:
+        server: The MCP server instance.
+        thin: When True, only register essential MCP tools
+              (health_check, capture_viewport, execute_script).
+              Full operations are available via CLI: ``simul unreal --help``.
+    """
 
     @server.mcp.tool(
         name="unreal_health_check",
@@ -65,6 +72,129 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 (UnrealHealthCheckResponse, ErrorResponse),
                 "unreal_health_check",
             )
+
+    @server.mcp.tool(
+        name="capture_unreal_viewport",
+        description="Capture a viewport screenshot via HighResScreenshot.",
+        annotations=server._tool_annotations(
+            read_only=True,
+            idempotent=False,
+            open_world=True,
+        ),
+        output_schema=server._tool_output_schema(
+            UnrealCaptureViewportResponse, ErrorResponse
+        ),
+        task=server._task_optional(),
+    )
+    async def capture_unreal_viewport(
+        resolution_x: int = 1920,
+        resolution_y: int = 1080,
+        format: str = "png",
+    ) -> Dict[str, Any]:
+        """
+        Capture viewport screenshot.
+
+        Args:
+            resolution_x: Width in pixels.
+            resolution_y: Height in pixels.
+            format: Image format (png or jpeg).
+
+        Returns:
+            Capture result or error response.
+        """
+        rate_error = server._check_rate_limit("capture_unreal_viewport")
+        if rate_error:
+            return rate_error
+
+        try:
+            if not server.unreal_adapter or not server.unreal_adapter.is_available():
+                return ErrorResponse(
+                    error="Unreal runtime not available",
+                    error_type="RuntimeError",
+                ).dict()
+
+            with server.unreal_adapter.create_session() as session:
+                payload = await session.capture_viewport(
+                    resolution_x=resolution_x,
+                    resolution_y=resolution_y,
+                    format=format,
+                )
+                payload["success"] = True
+                result = UnrealCaptureViewportResponse(**payload).dict()
+                return server._validate_output(
+                    result,
+                    (UnrealCaptureViewportResponse, ErrorResponse),
+                    "capture_unreal_viewport",
+                )
+
+        except Exception as e:
+            server.logger.error("Error capturing Unreal viewport: %s", e)
+            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            return server._validate_output(
+                result,
+                (UnrealCaptureViewportResponse, ErrorResponse),
+                "capture_unreal_viewport",
+            )
+
+    @server.mcp.tool(
+        name="execute_unreal_script",
+        description=(
+            "Execute arbitrary Python code inside the Unreal Engine editor. "
+            "Use for operations not covered by other tools. The code runs via "
+            "PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return "
+            "structured data. For granular CLI operations see: simul unreal --help"
+        ),
+        annotations=server._tool_annotations(
+            read_only=False,
+            idempotent=False,
+            open_world=True,
+            destructive=True,
+        ),
+        output_schema=server._tool_output_schema(ErrorResponse),
+        task=server._task_optional(),
+    )
+    async def execute_unreal_script(
+        code: str,
+        mode: str = "ExecuteFile",
+    ) -> Dict[str, Any]:
+        """
+        Execute Python code inside Unreal Engine.
+
+        Args:
+            code: Python source code to execute.
+            mode: ExecuteFile (multi-line), EvaluateStatement (expression),
+                  or ExecuteStatement (single statement).
+
+        Returns:
+            Execution result with CommandResult, LogOutput, ReturnValue.
+        """
+        rate_error = server._check_rate_limit("execute_unreal_script")
+        if rate_error:
+            return rate_error
+
+        try:
+            if not server.unreal_adapter or not server.unreal_adapter.is_available():
+                return ErrorResponse(
+                    error="Unreal runtime not available",
+                    error_type="RuntimeError",
+                ).dict()
+
+            with server.unreal_adapter.create_session() as session:
+                raw = await session._execute_python(code, mode=mode)
+                parsed = session._parse_python_json(raw)
+                parsed["success"] = not parsed.get("error")
+                return parsed
+
+        except Exception as e:
+            server.logger.error("Error executing Unreal script: %s", e)
+            return ErrorResponse(error=str(e), error_type="Exception").dict()
+
+    # -- Thin mode: only health_check, capture_viewport, execute_script.
+    #    Full operations available via CLI: simul unreal --help
+    if thin:
+        return
+
+    # -- Full MCP tool set below -------------------------------------------
 
     @server.mcp.tool(
         name="get_unreal_engine_info",
@@ -528,69 +658,6 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
             )
 
     # -- Phase 2: Viewport & Visual Observation --
-
-    @server.mcp.tool(
-        name="capture_unreal_viewport",
-        description="Capture a viewport screenshot via HighResScreenshot.",
-        annotations=server._tool_annotations(
-            read_only=True,
-            idempotent=False,
-            open_world=True,
-        ),
-        output_schema=server._tool_output_schema(
-            UnrealCaptureViewportResponse, ErrorResponse
-        ),
-        task=server._task_optional(),
-    )
-    async def capture_unreal_viewport(
-        resolution_x: int = 1920,
-        resolution_y: int = 1080,
-        format: str = "png",
-    ) -> Dict[str, Any]:
-        """
-        Capture viewport screenshot.
-
-        Args:
-            resolution_x: Width in pixels.
-            resolution_y: Height in pixels.
-            format: Image format (png or jpeg).
-
-        Returns:
-            Capture result or error response.
-        """
-        rate_error = server._check_rate_limit("capture_unreal_viewport")
-        if rate_error:
-            return rate_error
-
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.capture_viewport(
-                    resolution_x=resolution_x,
-                    resolution_y=resolution_y,
-                    format=format,
-                )
-                payload["success"] = True
-                result = UnrealCaptureViewportResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealCaptureViewportResponse, ErrorResponse),
-                    "capture_unreal_viewport",
-                )
-
-        except Exception as e:
-            server.logger.error("Error capturing Unreal viewport: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealCaptureViewportResponse, ErrorResponse),
-                "capture_unreal_viewport",
-            )
 
     @server.mcp.tool(
         name="get_unreal_viewport_info",
