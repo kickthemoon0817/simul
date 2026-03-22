@@ -27,6 +27,7 @@ from ..adapters import (
     UnrealRuntimeAdapter,
     is_blender_available,
     is_headless_available,
+    is_unreal_available,
 )
 from .. import __version__ as _source_version
 from ..config import Settings, get_settings
@@ -203,8 +204,6 @@ class SimulMCPServer(LoggerMixin):
         )
 
         # Unreal adapter (lazy HTTP — no connection until first tool call)
-        from ..adapters import is_unreal_available, UnrealRuntimeAdapter
-
         self.unreal_adapter = (
             UnrealRuntimeAdapter(self.settings) if is_unreal_available() else None
         )
