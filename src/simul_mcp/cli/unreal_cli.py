@@ -43,7 +43,9 @@ def _session(
     timeout: Optional[int] = None,
 ) -> UnrealRuntimeSession:
     """Build an UnrealRuntimeSession with optional overrides."""
-    settings = get_settings()
+    from copy import deepcopy
+
+    settings = deepcopy(get_settings())
     if host:
         settings.unreal.host = host
     if port:
@@ -65,6 +67,7 @@ def _run(coro: Any) -> Dict[str, Any]:
     except Exception as e:
         if is_json_mode():
             emit_error(str(e), type(e).__name__)
+            return {}  # unreachable (emit_error raises), but documents intent
         console.print(f"[red]{type(e).__name__}: {e}[/red]")
         raise typer.Exit(1)
 
@@ -75,6 +78,7 @@ def _run(coro: Any) -> Dict[str, Any]:
                 result.get("error_type", "Error"),
                 result.get("details"),
             )
+            return result  # unreachable (emit_error raises), but documents intent
         console.print(f"[red]{result.get('error_type', 'Error')}: {result['error']}[/red]")
         raise typer.Exit(1)
     return result
@@ -228,7 +232,6 @@ def spawn(
     label: Optional[str] = typer.Option(None, "--label", "-l", help="Actor label"),
     location: Optional[str] = typer.Option(None, "--location", "--pos", help="Location as x,y,z"),
     rotation: Optional[str] = typer.Option(None, "--rotation", "--rot", help="Rotation as pitch,yaw,roll"),
-    scale: Optional[str] = typer.Option(None, "--scale", help="Scale as x,y,z"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
@@ -432,6 +435,14 @@ def capture(
     """Capture viewport screenshot to a file."""
     import base64
 
+    valid_formats = {"png", "jpeg", "jpg"}
+    if format not in valid_formats:
+        msg = f"Invalid format '{format}'. Must be one of: {', '.join(sorted(valid_formats))}"
+        if is_json_mode():
+            emit_error(msg, "ValueError")
+        console.print(f"[red]{msg}[/red]")
+        raise typer.Exit(1)
+
     session = _session(host, port)
     result = _run(session.capture_viewport(
         resolution_x=width,
@@ -468,6 +479,14 @@ def exec_script(
     port: Optional[int] = _port_opt,
 ) -> None:
     """Execute Python code inside Unreal Engine."""
+    valid_modes = {"ExecuteFile", "EvaluateStatement", "ExecuteStatement"}
+    if mode not in valid_modes:
+        msg = f"Invalid mode '{mode}'. Must be one of: {', '.join(sorted(valid_modes))}"
+        if is_json_mode():
+            emit_error(msg, "ValueError")
+        console.print(f"[red]{msg}[/red]")
+        raise typer.Exit(1)
+
     if script is None:
         if not sys.stdin.isatty():
             code = sys.stdin.read()

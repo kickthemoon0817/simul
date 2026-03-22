@@ -203,11 +203,6 @@ class SimulMCPServer(LoggerMixin):
             UnrealRuntimeAdapter(self.settings) if UnrealRuntimeAdapter is not None else None
         )
 
-        # Unreal adapter (lazy HTTP — no connection until first tool call)
-        self.unreal_adapter = (
-            UnrealRuntimeAdapter(self.settings) if is_unreal_available() else None
-        )
-
         # Initialize FastMCP server
         mcp_kwargs: Dict[str, Any] = {
             "name": "Simul – 3D Simulation & DCC Tools",

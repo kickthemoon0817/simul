@@ -102,6 +102,13 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         Returns:
             Capture result or error response.
         """
+        _VALID_FORMATS = {"png", "jpeg", "jpg"}
+        if format not in _VALID_FORMATS:
+            return ErrorResponse(
+                error=f"Invalid format '{format}'. Must be one of {sorted(_VALID_FORMATS)}",
+                error_type="ValidationError",
+            ).dict()
+
         rate_error = server._check_rate_limit("capture_unreal_viewport")
         if rate_error:
             return rate_error
@@ -168,6 +175,13 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         Returns:
             Execution result with CommandResult, LogOutput, ReturnValue.
         """
+        _VALID_EXEC_MODES = {"ExecuteFile", "EvaluateStatement", "ExecuteStatement"}
+        if mode not in _VALID_EXEC_MODES:
+            return ErrorResponse(
+                error=f"Invalid mode '{mode}'. Must be one of {sorted(_VALID_EXEC_MODES)}",
+                error_type="ValidationError",
+            ).dict()
+
         rate_error = server._check_rate_limit("execute_unreal_script")
         if rate_error:
             return rate_error
