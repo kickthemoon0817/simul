@@ -3392,7 +3392,7 @@ class IsaacTools(LoggerMixin):
             raw = ext_manager.get_extensions()
             extensions = []
             for ext in raw:
-                ext_id = ext.get("name", "") or ext.get("id", "")
+                ext_id = ext.get("id", "") or ext.get("name", "")
                 enabled = ext.get("enabled", False)
 
                 if {_enabled_only} and not enabled:
@@ -3404,6 +3404,7 @@ class IsaacTools(LoggerMixin):
                 extensions.append({{
                     "id": ext_id,
                     "enabled": enabled,
+                    "version": ext.get("version", ""),
                 }})
 
             extensions.sort(key=lambda e: e["id"])

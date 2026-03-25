@@ -734,10 +734,11 @@ def list_extensions(
     extensions = result.get("extensions", [])
     table = Table(title=f"Extensions ({result.get('count', len(extensions))})")
     table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Version", style="dim")
     table.add_column("Enabled", justify="center")
     for ext in extensions:
         status = "[green]yes[/green]" if ext.get("enabled") else "[red]no[/red]"
-        table.add_row(ext.get("id", "?"), status)
+        table.add_row(ext.get("id", "?"), ext.get("version", ""), status)
     console.print(table)
 
 
