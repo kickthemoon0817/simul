@@ -8,6 +8,7 @@ connection management, and 3D simulation/DCC integration based on FastMCP.
 import inspect
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Coroutine, Dict, List, Optional, Tuple, Type, Union
 
@@ -47,6 +48,7 @@ from ..logging import LoggerMixin, get_logger
 from ..utils.timing import RateLimiter
 from .schemas import *
 from .tools.isaac_tools import IsaacTools
+from .usage_tracker import ToolUsageTracker
 
 logger = get_logger(__name__)
 
@@ -116,6 +118,7 @@ class SimulMCPServer(LoggerMixin):
         self._project_root = Path(__file__).resolve().parents[3]
         self._allowed_paths = self._resolve_allowed_paths()
 
+        self.usage_tracker = ToolUsageTracker()
         self._rate_limiters: Dict[str, RateLimiter] = {}
         self._rate_limit_enabled = self.settings.security.rate_limiting_enabled
         self._rate_limit_rate = self.settings.security.requests_per_minute / 60.0
@@ -194,24 +197,41 @@ class SimulMCPServer(LoggerMixin):
         self,
         tool_name: str,
         coro: Coroutine[Any, Any, Dict[str, Any]],
+        params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Execute an Isaac Sim tool coroutine with rate limiting and
-        unified error handling.
+        Execute an Isaac Sim tool coroutine with rate limiting,
+        unified error handling, and usage tracking.
 
         Args:
             tool_name: Name of the tool for rate limiting.
             coro: Awaitable coroutine returned by an IsaacTools method.
+            params: Optional dict of call parameters for usage logging.
 
         Returns:
             Tool result dict or error response dict.
         """
         rate_error = self._check_rate_limit(tool_name)
         if rate_error is not None:
+            self.usage_tracker.record(
+                tool_name, 0.0, False, params=params, error="rate_limited",
+            )
             return rate_error
+        t0 = time.monotonic()
         try:
-            return await coro
+            result = await coro
+            duration_ms = (time.monotonic() - t0) * 1000
+            success = not result.get("error")
+            self.usage_tracker.record(
+                tool_name, duration_ms, success, params=params,
+                error=result.get("error") if not success else None,
+            )
+            return result
         except Exception as exc:
+            duration_ms = (time.monotonic() - t0) * 1000
+            self.usage_tracker.record(
+                tool_name, duration_ms, False, params=params, error=str(exc),
+            )
             logger.error("Isaac tool %s failed: %s", tool_name, exc)
             return ErrorResponse(
                 error=str(exc), error_type=type(exc).__name__
@@ -470,6 +490,7 @@ class SimulMCPServer(LoggerMixin):
             register_isaac_tools,
             register_blender_tools,
             register_unreal_tools,
+            register_stats_tools,
         )
 
         # Instance discovery and routing (must be first)
@@ -490,6 +511,9 @@ class SimulMCPServer(LoggerMixin):
 
         if is_unreal_available():
             register_unreal_tools(self)
+
+        # Usage statistics (always available)
+        register_stats_tools(self)
 
         # FastMCP 3.x stores tools in local_provider._components with
         # keys like "tool:<name>@".  Count entries whose key starts with
