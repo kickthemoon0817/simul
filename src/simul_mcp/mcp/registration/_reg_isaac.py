@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import json
+import time
 
 from ...adapters import ScriptResult
 from ..schemas import *
@@ -61,10 +62,28 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
 
         rate_error = server._check_rate_limit("execute_isaac_script")
         if rate_error:
+            server.usage_tracker.record(
+                "execute_isaac_script", 0.0, False,
+                params={"code_bytes": len(code)},
+                error="rate_limited",
+            )
             return rate_error
+
+        _MAX_LOG_CODE = 500
+        log_params: Dict[str, Any] = {
+            "code_bytes": len(code),
+            "code_preview": code[:_MAX_LOG_CODE] + ("..." if len(code) > _MAX_LOG_CODE else ""),
+        }
+        t0 = time.monotonic()
         try:
             result: ScriptResult = await server.client.execute(code)
+            duration_ms = (time.monotonic() - t0) * 1000
             if not result.success:
+                server.usage_tracker.record(
+                    "execute_isaac_script", duration_ms, False,
+                    params=log_params,
+                    error=result.error_value or "Script execution failed",
+                )
                 return ErrorResponse(
                     error=result.error_value or "Script execution failed",
                     error_type=result.error_name or "RuntimeError",
@@ -75,13 +94,28 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             output = result.output.strip()
             if output:
                 try:
-                    return json.loads(output)
+                    parsed = json.loads(output)
+                    server.usage_tracker.record(
+                        "execute_isaac_script", duration_ms, True,
+                        params=log_params,
+                    )
+                    return parsed
                 except json.JSONDecodeError:
                     pass
 
+            server.usage_tracker.record(
+                "execute_isaac_script", duration_ms, True,
+                params=log_params,
+            )
             return {"success": True, "output": result.output}
 
         except ConnectionRefusedError:
+            duration_ms = (time.monotonic() - t0) * 1000
+            server.usage_tracker.record(
+                "execute_isaac_script", duration_ms, False,
+                params=log_params,
+                error="ConnectionError",
+            )
             return ErrorResponse(
                 error=(
                     f"Isaac Sim is not reachable at {server.client.address}. "
@@ -92,6 +126,12 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 error_type="ConnectionError",
             ).dict()
         except TimeoutError:
+            duration_ms = (time.monotonic() - t0) * 1000
+            server.usage_tracker.record(
+                "execute_isaac_script", duration_ms, False,
+                params=log_params,
+                error="TimeoutError",
+            )
             return ErrorResponse(
                 error=(
                     f"Script execution timed out after "
@@ -102,6 +142,12 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 error_type="TimeoutError",
             ).dict()
         except Exception as exc:
+            duration_ms = (time.monotonic() - t0) * 1000
+            server.usage_tracker.record(
+                "execute_isaac_script", duration_ms, False,
+                params=log_params,
+                error=str(exc),
+            )
             return ErrorResponse(error=str(exc), error_type="Exception").dict()
 
     @server.mcp.tool(
