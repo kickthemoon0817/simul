@@ -3452,6 +3452,391 @@ class IsaacTools(LoggerMixin):
         """)
         return await self._execute_json_script(script)
 
+    # ------------------------------------------------------------------
+    # Carb settings
+    # ------------------------------------------------------------------
+
+    async def get_carb_settings(self, keys: List[str]) -> Dict[str, Any]:
+        """
+        Read one or more Carbonite settings by key path.
+
+        Args:
+            keys: List of setting key paths (e.g. ["/rtx/fog/enabled"]).
+
+        Returns:
+            Dict mapping each key to its current value.
+        """
+        _keys = json.dumps(keys)
+        script = textwrap.dedent(f"""\
+            import json
+            import carb.settings
+
+            settings = carb.settings.get_settings()
+            keys = {_keys}
+            result = {{}}
+            for key in keys:
+                val = settings.get(key)
+                try:
+                    if hasattr(val, '__iter__') and not isinstance(val, (str, list, tuple, dict)):
+                        val = list(val)
+                except Exception:
+                    val = str(val)
+                result[key] = val
+            print(json.dumps({{"settings": result}}))
+        """)
+        return await self._execute_json_script(script)
+
+    async def set_carb_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Write one or more Carbonite settings by key path.
+
+        Args:
+            settings: Dict mapping key paths to values
+                      (e.g. {"/rtx/fog/enabled": true, "/rtx/fog/fogEndDist": 200.0}).
+
+        Returns:
+            Dict with applied settings and their verified new values.
+        """
+        _settings = json.dumps(settings)
+        script = textwrap.dedent(f"""\
+            import json
+            import carb.settings
+
+            cs = carb.settings.get_settings()
+            to_set = {_settings}
+            applied = {{}}
+            for key, val in to_set.items():
+                cs.set(key, val)
+                new_val = cs.get(key)
+                try:
+                    if hasattr(new_val, '__iter__') and not isinstance(new_val, (str, list, tuple, dict)):
+                        new_val = list(new_val)
+                except Exception:
+                    new_val = str(new_val)
+                applied[key] = new_val
+            print(json.dumps({{"applied": applied, "count": len(applied)}}))
+        """)
+        return await self._execute_json_script(script)
+
+    # ------------------------------------------------------------------
+    # AOV / Replicator
+    # ------------------------------------------------------------------
+
+    async def read_aovs(
+        self,
+        aov_names: List[str],
+        camera_path: str = "/OmniverseKit_Persp",
+        resolution: Optional[List[int]] = None,
+        num_frames: int = 5,
+    ) -> Dict[str, Any]:
+        """
+        Attach annotators, render frames, and return per-AOV statistics.
+
+        Handles the full replicator pipeline in a single call: creates a
+        render product, attaches annotators, steps the renderer, reads
+        numpy data, computes statistics, cleans up, and returns results.
+
+        Args:
+            aov_names: AOV names to read (e.g. ["HdrColor", "DirectDiffuse"]).
+                       Maximum 16 entries.
+            camera_path: Camera prim path for the render product.
+            resolution: [width, height] for the render product. Defaults to
+                        [256, 256]. Max 3840x2160.
+            num_frames: Number of renderer update steps before reading.
+                        Clamped to [1, 60].
+
+        Returns:
+            Dict with per-AOV statistics (shape, dtype, min, max, mean,
+            rgb_max, rgb_mean, nonzero_pixels for color AOVs).
+        """
+        if len(aov_names) > 16:
+            return {"error": "aov_names must not exceed 16 entries", "error_type": "ValueError"}
+        num_frames = max(1, min(num_frames, 60))
+        res = resolution or [256, 256]
+        if len(res) != 2:
+            return {"error": "resolution must be [width, height]", "error_type": "ValueError"}
+        res = [max(1, min(res[0], 3840)), max(1, min(res[1], 2160))]
+
+        _aov_names = json.dumps(aov_names)
+        _camera = json.dumps(camera_path)
+        _res = json.dumps(res)
+        script = textwrap.dedent(f"""\
+            import json
+            import numpy as np
+            import omni.replicator.core as rep
+            import omni.kit.app
+
+            aov_names = {_aov_names}
+            camera = {_camera}
+            res = tuple({_res})
+            num_frames = {num_frames}
+
+            rp = rep.create.render_product(camera, res)
+            annotators = {{}}
+            attached = []
+            attach_errors = {{}}
+            for name in aov_names:
+                try:
+                    ann = rep.AnnotatorRegistry.get_annotator(name)
+                    ann.attach([rp])
+                    annotators[name] = ann
+                    attached.append(name)
+                except Exception as e:
+                    attach_errors[name] = str(e)
+
+            app = omni.kit.app.get_app()
+            for _ in range(num_frames + 10):
+                app.update()
+
+            import math
+            def _sf(v):
+                f = float(v)
+                return None if math.isnan(f) or math.isinf(f) else f
+
+            results = {{}}
+            for name, ann in annotators.items():
+                try:
+                    data = ann.get_data()
+                    if isinstance(data, np.ndarray) and data.size > 0:
+                        stats = {{
+                            "shape": list(data.shape),
+                            "dtype": str(data.dtype),
+                            "min": _sf(data.min()),
+                            "max": _sf(data.max()),
+                            "mean": _sf(data.mean()),
+                        }}
+                        if data.ndim == 3 and data.shape[2] >= 3:
+                            rgb = data[:, :, :3].astype(np.float32)
+                            stats["rgb_max"] = [_sf(rgb[:,:,i].max()) for i in range(3)]
+                            stats["rgb_mean"] = [_sf(rgb[:,:,i].mean()) for i in range(3)]
+                            nonzero = int((rgb.max(axis=2) > 0.001).sum())
+                            stats["nonzero_pixels"] = nonzero
+                            stats["total_pixels"] = int(rgb.shape[0] * rgb.shape[1])
+                        results[name] = stats
+                    else:
+                        results[name] = {{"error": "no data or empty array"}}
+                except Exception as e:
+                    results[name] = {{"error": str(e)}}
+
+            for ann in annotators.values():
+                ann.detach([rp])
+            rp.destroy()
+
+            output = {{
+                "aovs": results,
+                "attached": attached,
+                "camera": camera,
+                "resolution": list(res),
+                "num_frames": num_frames,
+            }}
+            if attach_errors:
+                output["attach_errors"] = attach_errors
+            print(json.dumps(output))
+        """)
+        return await self._execute_json_script(script)
+
+    async def list_aovs(self) -> Dict[str, Any]:
+        """
+        List all available AOV annotator names in the current session.
+
+        Returns:
+            Dict with list of available annotator names.
+        """
+        script = textwrap.dedent("""\
+            import json
+            import omni.replicator.core as rep
+
+            names = sorted(rep.AnnotatorRegistry.get_registered_annotators())
+            print(json.dumps({
+                "count": len(names),
+                "annotators": names,
+            }))
+        """)
+        return await self._execute_json_script(script)
+
+    # ------------------------------------------------------------------
+    # USD schema queries
+    # ------------------------------------------------------------------
+
+    async def query_usd_typed_prims(
+        self,
+        type_name: str,
+        attributes: Optional[List[str]] = None,
+        root_path: str = "/",
+        max_prims: int = 200,
+    ) -> Dict[str, Any]:
+        """
+        Query prims by USD schema type and read specified attributes.
+
+        Traverses the stage from root_path, finds prims matching the
+        schema type, and reads the requested attributes from each.
+
+        Args:
+            type_name: USD schema type (e.g. "UsdLux.DistantLight",
+                       "UsdGeom.Mesh", "UsdGeom.PointInstancer").
+            attributes: Attribute names to read from each prim.
+                        If None, returns prim paths only. Max 32 entries.
+            root_path: Root path to start traversal from.
+            max_prims: Maximum number of matching prims to return.
+                       Clamped to [1, 2000]. Defaults to 200.
+
+        Returns:
+            Dict with list of matching prims and their attribute values.
+        """
+        if attributes and len(attributes) > 32:
+            return {"error": "attributes must not exceed 32 entries", "error_type": "ValueError"}
+        max_prims = max(1, min(max_prims, 2000))
+
+        _type_name = json.dumps(type_name)
+        _attributes = json.dumps(attributes)
+        _root_path = json.dumps(root_path)
+        script = textwrap.dedent(f"""\
+            import json
+            import omni.usd
+            from pxr import Usd, UsdGeom, UsdLux, UsdShade, Sdf, Gf
+
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                print(json.dumps({{"error": "No stage is currently open"}}))
+            else:
+                type_str = {_type_name}
+                attr_names = [a for a in ({_attributes} or []) if a]
+                root_path = {_root_path}
+                max_prims = {max_prims}
+
+                parts = type_str.split(".")
+                schema_cls = None
+                if len(parts) == 2:
+                    mod_map = {{"UsdGeom": UsdGeom, "UsdLux": UsdLux, "UsdShade": UsdShade}}
+                    mod = mod_map.get(parts[0])
+                    if mod:
+                        schema_cls = getattr(mod, parts[1], None)
+
+                root_prim = stage.GetPrimAtPath(root_path) if root_path != "/" else stage.GetPseudoRoot()
+                prims_data = []
+                truncated = False
+
+                for prim in Usd.PrimRange(root_prim):
+                    if schema_cls is not None:
+                        if not prim.IsA(schema_cls):
+                            continue
+                    elif prim.GetTypeName() != type_str:
+                        continue
+
+                    prim_info = {{"path": str(prim.GetPath()), "type": prim.GetTypeName()}}
+
+                    if attr_names:
+                        attrs = {{}}
+                        typed_prim = schema_cls(prim) if schema_cls else None
+                        for attr_name in attr_names:
+                            val = None
+                            if typed_prim:
+                                cap_name = attr_name[0].upper() + attr_name[1:]
+                                getter = getattr(typed_prim, f"Get{{cap_name}}Attr", None)
+                                if getter:
+                                    try:
+                                        val = getter().Get()
+                                    except Exception:
+                                        pass
+                            if val is None:
+                                attr = prim.GetAttribute(attr_name)
+                                if attr and attr.HasValue():
+                                    val = attr.Get()
+                                else:
+                                    attr = prim.GetAttribute(f"inputs:{{attr_name}}")
+                                    if attr and attr.HasValue():
+                                        val = attr.Get()
+                            if isinstance(val, (Gf.Vec3f, Gf.Vec3d, Gf.Vec4f, Gf.Vec4d)):
+                                val = list(val)
+                            elif isinstance(val, Gf.Matrix4d):
+                                val = [list(val.GetRow(i)) for i in range(4)]
+                            elif isinstance(val, Sdf.AssetPath):
+                                val = str(val.path)
+                            elif hasattr(val, '__len__') and not isinstance(val, (str, list, dict)):
+                                try:
+                                    val = list(val)
+                                except Exception:
+                                    val = str(val)
+                            attrs[attr_name] = val
+                        prim_info["attributes"] = attrs
+                    prims_data.append(prim_info)
+
+                    if len(prims_data) >= max_prims:
+                        truncated = True
+                        break
+
+                print(json.dumps({{
+                    "type_filter": type_str,
+                    "root_path": root_path,
+                    "count": len(prims_data),
+                    "truncated": truncated,
+                    "max_prims": max_prims,
+                    "prims": prims_data,
+                }}))
+        """)
+        return await self._execute_json_script(script)
+
+    # ------------------------------------------------------------------
+    # Viewport / render info
+    # ------------------------------------------------------------------
+
+    async def get_viewport_info(self) -> Dict[str, Any]:
+        """
+        Get detailed information about the active viewport.
+
+        Returns:
+            Dict with viewport state: camera path, render product path,
+            resolution, and viewport name.
+        """
+        script = textwrap.dedent("""\
+            import json
+            from omni.kit.viewport.utility import get_active_viewport
+
+            viewport = get_active_viewport()
+            if not viewport:
+                print(json.dumps({"error": "No active viewport found"}))
+            else:
+                info = {
+                    "camera_path": str(viewport.camera_path),
+                    "render_product_path": str(viewport.render_product_path),
+                    "resolution": list(viewport.resolution),
+                    "name": None,
+                }
+                try:
+                    info["name"] = str(viewport.name)
+                except Exception:
+                    pass
+                print(json.dumps(info))
+        """)
+        return await self._execute_json_script(script)
+
+    async def list_render_vars(self) -> Dict[str, Any]:
+        """
+        List available render variable names from SyntheticData.
+
+        Returns:
+            Dict with render var templates and sensor type names.
+        """
+        script = textwrap.dedent("""\
+            import json
+
+            result = {}
+            try:
+                import omni.syntheticdata as syn
+                sd = syn.SyntheticData.Get()
+                templates = sorted(sd.get_registered_visualization_template_names())
+                result["render_var_templates"] = templates
+                result["render_var_count"] = len(templates)
+                sensor_types = sorted(sd.get_sensor_type_names())
+                result["sensor_types"] = sensor_types
+                result["sensor_type_count"] = len(sensor_types)
+            except Exception as e:
+                result["syntheticdata_error"] = str(e)
+
+            print(json.dumps(result))
+        """)
+        return await self._execute_json_script(script)
+
     async def disable_isaac_extension(self, extension_id: str) -> Dict[str, Any]:
         """
         Disable an extension by its ID in the running Isaac Sim instance.

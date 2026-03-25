@@ -1475,3 +1475,169 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
+    # ------------------------------------------------------------------
+    # Carb settings
+    # ------------------------------------------------------------------
+
+    @server.mcp.tool(
+        name="get_isaac_carb_settings",
+        description=(
+            "Read one or more Carbonite (carb) settings by key path. "
+            "Settings control RTX renderer options, fog, exposure, tone mapping, "
+            "and other runtime parameters. Key paths look like /rtx/fog/enabled, "
+            "/rtx/post/tonemap/op, /rtx/raytracing/showLights. "
+            "Returns the current value for each requested key."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_carb_settings(keys: List[str]) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_carb_settings",
+            server._isaac_tools.get_carb_settings(keys=keys),
+        )
+
+    @server.mcp.tool(
+        name="set_isaac_carb_settings",
+        description=(
+            "Write one or more Carbonite (carb) settings by key path. "
+            "Takes a dict of key-value pairs (e.g. {\"/rtx/fog/enabled\": true, "
+            "\"/rtx/fog/fogEndDist\": 200.0}). Returns the verified new values "
+            "after applying. Changes take effect immediately in the renderer."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def set_isaac_carb_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "set_isaac_carb_settings",
+            server._isaac_tools.set_carb_settings(settings=settings),
+        )
+
+    # ------------------------------------------------------------------
+    # AOV / Replicator
+    # ------------------------------------------------------------------
+
+    @server.mcp.tool(
+        name="read_isaac_aovs",
+        description=(
+            "Read one or more AOV (render pass) buffers and return per-AOV "
+            "statistics. Handles the full replicator pipeline in a single call: "
+            "creates a render product, attaches annotators, renders frames, "
+            "reads numpy data, computes stats (shape, min, max, mean, "
+            "rgb_max, rgb_mean, nonzero_pixels for color AOVs), and cleans up. "
+            "Common AOVs: HdrColor, DirectDiffuse, DirectSpecular, "
+            "IndirectDiffuse, Reflections, AmbientOcclusion, Depth, Normal."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=False, open_world=True
+        ),
+    )
+    async def read_isaac_aovs(
+        aov_names: List[str],
+        camera_path: str = "/OmniverseKit_Persp",
+        resolution: Optional[List[int]] = None,
+        num_frames: int = 5,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "read_isaac_aovs",
+            server._isaac_tools.read_aovs(
+                aov_names=aov_names,
+                camera_path=camera_path,
+                resolution=resolution,
+                num_frames=num_frames,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="list_isaac_aovs",
+        description=(
+            "List all available AOV annotator names registered in the current "
+            "Isaac Sim session. Use this to discover which AOV names can be "
+            "passed to read_isaac_aovs."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def list_isaac_aovs() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "list_isaac_aovs",
+            server._isaac_tools.list_aovs(),
+        )
+
+    # ------------------------------------------------------------------
+    # USD schema queries
+    # ------------------------------------------------------------------
+
+    @server.mcp.tool(
+        name="query_isaac_typed_prims",
+        description=(
+            "Query prims by USD schema type and optionally read their "
+            "attributes. Traverses the stage from root_path, finds all prims "
+            "matching the schema type, and reads the requested attributes. "
+            "Supported types: UsdLux.DistantLight, UsdLux.SphereLight, "
+            "UsdLux.DomeLight, UsdGeom.Mesh, UsdGeom.PointInstancer, "
+            "UsdGeom.Xform, UsdShade.Material, or any USD type name. "
+            "Attributes are read via schema API first (e.g. 'intensity' -> "
+            "GetIntensityAttr), then fallback to generic and inputs: prefix."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def query_isaac_typed_prims(
+        type_name: str,
+        attributes: Optional[List[str]] = None,
+        root_path: str = "/",
+        max_prims: int = 200,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "query_isaac_typed_prims",
+            server._isaac_tools.query_usd_typed_prims(
+                type_name=type_name,
+                attributes=attributes,
+                root_path=root_path,
+                max_prims=max_prims,
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Viewport / render info
+    # ------------------------------------------------------------------
+
+    @server.mcp.tool(
+        name="get_isaac_viewport_info",
+        description=(
+            "Get detailed information about the active viewport including "
+            "camera path, render product path, resolution, and viewport name."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_viewport_info() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_viewport_info",
+            server._isaac_tools.get_viewport_info(),
+        )
+
+    @server.mcp.tool(
+        name="list_isaac_render_vars",
+        description=(
+            "List available render variable (AOV) names from SyntheticData "
+            "and sensor types. Use this to discover what render passes and "
+            "sensor data are available in the current session."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def list_isaac_render_vars() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "list_isaac_render_vars",
+            server._isaac_tools.list_render_vars(),
+        )
+
