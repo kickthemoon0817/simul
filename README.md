@@ -30,18 +30,15 @@ Simul-MCP is designed for multi-engine workflows. Isaac Sim is the primary runti
 - NumPy
 
 ### Isaac Sim Requirements (Optional)
-- NVIDIA Isaac Sim 2023.1.1+
-- Omniverse Kit SDK
-- Isaac Sim Python environment
+- NVIDIA Isaac Sim 5.1.0+
+- `isaacsim.code_editor.vscode` extension enabled (TCP port 8226)
 
 ## Installation
 
-### Development Installation
-
 ```bash
 # Clone the repository
-git clone https://github.com/khemoo/simul-mcp.git
-cd simul-mcp
+git clone https://github.com/kickthemoon0817/simul.git
+cd simul
 
 # Install in development mode
 pip install -e .
@@ -50,14 +47,64 @@ pip install -e .
 pip install -e ".[dev,test]"
 ```
 
-### Isaac Sim Installation
+## Agent Integration
 
-1. Install NVIDIA Isaac Sim
-2. Copy the extension to Isaac Sim's extensions directory:
-   ```bash
-   cp -r exts/khemoo.simul.mcp $ISAAC_SIM_PATH/exts/
-   ```
-3. Enable the extension in Isaac Sim's Extension Manager
+Simul MCP works with any MCP-compatible AI coding agent. Configure your agent to use the `simul-mcp server` command as an MCP server.
+
+### Claude Code
+
+Add to `~/.claude/settings.json` under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "simul": {
+      "command": "simul-mcp",
+      "args": ["server"]
+    }
+  }
+}
+```
+
+Or use the CLI:
+
+```bash
+claude mcp add simul -- simul-mcp server
+```
+
+### Codex (OpenAI)
+
+Add to `~/.codex/config.json`:
+
+```json
+{
+  "mcpServers": {
+    "simul": {
+      "command": "simul-mcp",
+      "args": ["server"]
+    }
+  }
+}
+```
+
+### OpenCode
+
+Add to `~/.config/opencode/config.json` under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "simul": {
+      "command": "simul-mcp",
+      "args": ["server"]
+    }
+  }
+}
+```
+
+### Prerequisites for Isaac Sim Tools
+
+Isaac Sim tools require a running Isaac Sim instance with the `isaacsim.code_editor.vscode` extension enabled (TCP port 8226). Launch Isaac Sim before using any `isaac_*` tools. Use `ping_isaac` to verify connectivity.
 
 ## Quick Start
 
@@ -79,14 +126,16 @@ simul-mcp test-usd examples/isaac/sample.usd --verbose
 
 # Check server capabilities
 simul-mcp info
+
+# View tool usage statistics
+simul-mcp stats
 ```
 
-### 3. Use in Isaac Sim
+### 3. Use with Isaac Sim
 
-1. Launch Isaac Sim
-2. Enable the "Isaac Sim MCP Server" extension
-3. Use the MCP Server panel to control the server
-4. Connect your AI model to the MCP server
+1. Launch Isaac Sim with the `isaacsim.code_editor.vscode` extension enabled
+2. Start your AI agent (Claude Code, Codex, or OpenCode) with simul MCP configured
+3. The agent can now use 75+ Isaac Sim tools for scene control, rendering, physics, and more
 
 ## Usage
 
@@ -218,41 +267,63 @@ export SIMUL_MCP_VIEWPORT_MAX_SIZE=4096
 
 ## MCP Tools
 
-The server provides the following MCP tools:
+The server provides 75+ tools across multiple backends. Key tool categories:
 
-### USD File Operations
+### Headless USD (no runtime required)
 
-- `load_usd_file`: Load a USD file and return stage information
-- `validate_usd_file`: Validate a USD file without loading it
+`load_usd_file`, `validate_usd_file`, `get_prim_info`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box`, `create_prim`, `delete_prim`, `update_prim_attributes`
 
-### USD Scene Operations
+### Isaac Sim — Scene Inspection
 
-- `get_prim_info`: Get detailed information about a USD prim
-- `search_prims`: Search for prims by type or name pattern
-- `summarize_scene`: Generate comprehensive scene summaries for LLM consumption
+`get_isaac_stage_info`, `list_isaac_prims`, `get_isaac_prim_info`, `get_isaac_prim_transform`, `search_isaac_prims`, `get_isaac_scene_summary`, `get_isaac_subtree`, `get_isaac_prim_ancestors`, `get_isaac_prim_relationships`, `get_isaac_prim_variants`, `get_isaac_scene_stats`
 
-### USD Mesh Operations
+### Isaac Sim — Prim Manipulation
 
-- `get_mesh_info`: Get detailed mesh information and statistics including topology validation
+`create_isaac_prim`, `delete_isaac_prim`, `set_isaac_prim_transform`, `set_isaac_prim_visibility`, `set_isaac_prim_attribute`, `duplicate_isaac_prim`, `reparent_isaac_prim`
 
-### USD Bounding Box Operations
+### Isaac Sim — Viewport & Camera
 
-- `get_bounding_box`: Compute bounding boxes for prims or entire stages in world or local space
+`list_isaac_cameras`, `get_isaac_camera_info`, `set_isaac_camera`, `capture_isaac_viewport`, `focus_isaac_viewport`, `get_isaac_viewport_info`
 
-### Isaac Sim Operations (when available)
+### Isaac Sim — Physics
 
-- `capture_viewport`: Capture the Isaac Sim viewport as an image
-- `control_simulation`: Control simulation playback (play, pause, stop, reset, step)
-- `set_camera_view`: Set the viewport camera position and orientation
-- `focus_on_prim`: Focus the camera on a specific prim
-- `get_simulation_status`: Get current simulation status
-- `get_viewport_info`: Get viewport information and capabilities
-- `get_camera_info`: Get camera information and capabilities
+`get_isaac_physics_scene`, `create_isaac_physics_scene`, `get_isaac_rigid_body_info`, `add_isaac_rigid_body`, `add_isaac_collision`, `get_isaac_collision_info`, `get_isaac_joint_info`, `get_isaac_mass_properties`, `set_isaac_mass_properties`, `set_isaac_physics_material`, `list_isaac_physics_objects`
 
-### Blender Operations (when available)
+### Isaac Sim — Simulation Control
 
-- `get_blender_info`: Get active Blender runtime details through `bpy`
-- `list_blender_scene_objects`: List objects in the active Blender scene or collection
+`get_isaac_simulation_state`, `start_isaac_simulation`, `pause_isaac_simulation`, `stop_isaac_simulation`, `step_isaac_simulation`, `reset_isaac_simulation`, `get_isaac_simulation_time`
+
+### Isaac Sim — Materials
+
+`get_isaac_material_info`, `list_isaac_materials`, `assign_isaac_material`, `set_isaac_material_property`, `create_isaac_material`
+
+### Isaac Sim — Rendering & AOVs
+
+`read_isaac_aovs`, `list_isaac_aovs`, `list_isaac_render_vars`, `get_isaac_carb_settings`, `set_isaac_carb_settings`
+
+### Isaac Sim — USD Schema Queries
+
+`query_isaac_typed_prims` — find prims by schema type (UsdLux, UsdGeom, UsdShade) and read attributes in one call
+
+### Isaac Sim — Extensions & Assets
+
+`list_isaac_extensions`, `enable_isaac_extension`, `disable_isaac_extension`, `open_isaac_stage`, `save_isaac_stage`, `new_isaac_stage`, `import_isaac_asset`, `add_isaac_reference`
+
+### Isaac Sim — Advanced
+
+`execute_isaac_script` (custom Python), `ping_isaac`, `raycast_isaac_scene`, `find_isaac_prims_in_area`, `get_isaac_texture_dependencies`, `list_isaac_instances`, `set_active_isaac_instance`
+
+### Observability
+
+`get_tool_usage_stats`, `reset_tool_usage_stats` — per-tool call counts, success rates, and durations via persistent JSONL log
+
+### Blender (when runtime connected)
+
+52 tools for scene objects, materials, rigid bodies, constraints, modifiers, mesh operations, animation, physics baking, viewport capture, and SimReady compliance.
+
+### Unreal Engine (when runtime connected)
+
+55 tools for actors, physics, materials, mesh operations, viewport, asset import/export, and procedural generation.
 
 ## Examples
 
@@ -504,9 +575,9 @@ This project is licensed under the MIT License. See LICENSE for details.
 
 For issues and questions:
 
-- GitHub Issues: https://github.com/khemoo/simul-mcp/issues
-- Documentation: https://github.com/khemoo/simul-mcp/wiki
-- Discussions: https://github.com/khemoo/simul-mcp/discussions
+- GitHub Issues: https://github.com/kickthemoon0817/simul/issues
+- Documentation: https://github.com/kickthemoon0817/simul/wiki
+- Discussions: https://github.com/kickthemoon0817/simul/discussions
 
 ## Acknowledgments
 
