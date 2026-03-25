@@ -9,8 +9,11 @@ so the CLI ``simul stats`` command can read historical data.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
+
+logger = logging.getLogger(__name__)
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -88,7 +91,7 @@ class ToolUsageTracker:
 
         self._log_dir = log_dir or _DEFAULT_LOG_DIR
         self._log_file = self._log_dir / "tool_usage.jsonl"
-        self._log_dir.mkdir(parents=True, exist_ok=True)
+        self._log_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def record(
         self,
@@ -127,10 +130,14 @@ class ToolUsageTracker:
     def _append_log(self, rec: CallRecord) -> None:
         """Append a single record to the JSONL log file."""
         try:
-            with open(self._log_file, "a") as f:
+            with open(
+                os.open(self._log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600),
+                "w",
+                encoding="utf-8",
+            ) as f:
                 f.write(json.dumps(rec.to_dict()) + "\n")
-        except OSError:
-            pass  # best-effort — don't crash on write failure
+        except OSError as exc:
+            logger.debug("Failed to write usage log: %s", exc)
 
     # ------------------------------------------------------------------
     # In-memory queries (MCP tool)
@@ -180,9 +187,9 @@ class ToolUsageTracker:
         self._stats.clear()
         self._recent.clear()
         try:
-            self._log_file.write_text("")
-        except OSError:
-            pass
+            self._log_file.write_text("", encoding="utf-8")
+        except OSError as exc:
+            logger.debug("Failed to truncate usage log: %s", exc)
 
     # ------------------------------------------------------------------
     # Persistent log queries (CLI)
@@ -215,7 +222,7 @@ class ToolUsageTracker:
         stats: Dict[str, ToolStats] = {}
         recent: List[Dict[str, Any]] = []
 
-        with open(log_file, "r") as f:
+        with open(log_file, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:

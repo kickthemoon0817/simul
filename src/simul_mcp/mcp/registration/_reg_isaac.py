@@ -69,10 +69,8 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             )
             return rate_error
 
-        _MAX_LOG_CODE = 500
         log_params: Dict[str, Any] = {
             "code_bytes": len(code),
-            "code_preview": code[:_MAX_LOG_CODE] + ("..." if len(code) > _MAX_LOG_CODE else ""),
         }
         t0 = time.monotonic()
         try:
@@ -1418,7 +1416,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         name="list_isaac_extensions",
         description=(
             "List all extensions registered in the running Isaac Sim instance. "
-            "Returns each extension's ID, version, enabled status, and install path. "
+            "Returns each extension's ID, version, and enabled status. "
             "Use enabled_only=true to filter to active extensions, or search to "
             "filter by extension ID substring."
         ),
