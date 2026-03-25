@@ -1592,6 +1592,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         type_name: str,
         attributes: Optional[List[str]] = None,
         root_path: str = "/",
+        max_prims: int = 200,
     ) -> Dict[str, Any]:
         return await server._exec_isaac(
             "query_isaac_typed_prims",
@@ -1599,6 +1600,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 type_name=type_name,
                 attributes=attributes,
                 root_path=root_path,
+                max_prims=max_prims,
             ),
         )
 
