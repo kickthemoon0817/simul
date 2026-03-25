@@ -3588,6 +3588,11 @@ class IsaacTools(LoggerMixin):
             for _ in range(num_frames + 10):
                 app.update()
 
+            import math
+            def _sf(v):
+                f = float(v)
+                return None if math.isnan(f) or math.isinf(f) else f
+
             results = {{}}
             for name, ann in annotators.items():
                 try:
@@ -3596,14 +3601,14 @@ class IsaacTools(LoggerMixin):
                         stats = {{
                             "shape": list(data.shape),
                             "dtype": str(data.dtype),
-                            "min": float(data.min()),
-                            "max": float(data.max()),
-                            "mean": float(data.mean()),
+                            "min": _sf(data.min()),
+                            "max": _sf(data.max()),
+                            "mean": _sf(data.mean()),
                         }}
                         if data.ndim == 3 and data.shape[2] >= 3:
                             rgb = data[:, :, :3].astype(np.float32)
-                            stats["rgb_max"] = [float(rgb[:,:,i].max()) for i in range(3)]
-                            stats["rgb_mean"] = [float(rgb[:,:,i].mean()) for i in range(3)]
+                            stats["rgb_max"] = [_sf(rgb[:,:,i].max()) for i in range(3)]
+                            stats["rgb_mean"] = [_sf(rgb[:,:,i].mean()) for i in range(3)]
                             nonzero = int((rgb.max(axis=2) > 0.001).sum())
                             stats["nonzero_pixels"] = nonzero
                             stats["total_pixels"] = int(rgb.shape[0] * rgb.shape[1])
@@ -3695,7 +3700,7 @@ class IsaacTools(LoggerMixin):
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
                 type_str = {_type_name}
-                attr_names = {_attributes}
+                attr_names = [a for a in ({_attributes} or []) if a]
                 root_path = {_root_path}
                 max_prims = {max_prims}
 
