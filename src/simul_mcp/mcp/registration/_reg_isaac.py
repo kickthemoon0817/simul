@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import json
+import time
 
 from ...adapters import ScriptResult
 from ..schemas import *
@@ -61,10 +62,26 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
 
         rate_error = server._check_rate_limit("execute_isaac_script")
         if rate_error:
+            server.usage_tracker.record(
+                "execute_isaac_script", 0.0, False,
+                params={"code_bytes": len(code)},
+                error="rate_limited",
+            )
             return rate_error
+
+        log_params: Dict[str, Any] = {
+            "code_bytes": len(code),
+        }
+        t0 = time.monotonic()
         try:
             result: ScriptResult = await server.client.execute(code)
+            duration_ms = (time.monotonic() - t0) * 1000
             if not result.success:
+                server.usage_tracker.record(
+                    "execute_isaac_script", duration_ms, False,
+                    params=log_params,
+                    error=result.error_value or "Script execution failed",
+                )
                 return ErrorResponse(
                     error=result.error_value or "Script execution failed",
                     error_type=result.error_name or "RuntimeError",
@@ -75,13 +92,28 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             output = result.output.strip()
             if output:
                 try:
-                    return json.loads(output)
+                    parsed = json.loads(output)
+                    server.usage_tracker.record(
+                        "execute_isaac_script", duration_ms, True,
+                        params=log_params,
+                    )
+                    return parsed
                 except json.JSONDecodeError:
                     pass
 
+            server.usage_tracker.record(
+                "execute_isaac_script", duration_ms, True,
+                params=log_params,
+            )
             return {"success": True, "output": result.output}
 
         except ConnectionRefusedError:
+            duration_ms = (time.monotonic() - t0) * 1000
+            server.usage_tracker.record(
+                "execute_isaac_script", duration_ms, False,
+                params=log_params,
+                error="ConnectionError",
+            )
             return ErrorResponse(
                 error=(
                     f"Isaac Sim is not reachable at {server.client.address}. "
@@ -92,6 +124,12 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 error_type="ConnectionError",
             ).dict()
         except TimeoutError:
+            duration_ms = (time.monotonic() - t0) * 1000
+            server.usage_tracker.record(
+                "execute_isaac_script", duration_ms, False,
+                params=log_params,
+                error="TimeoutError",
+            )
             return ErrorResponse(
                 error=(
                     f"Script execution timed out after "
@@ -102,6 +140,12 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 error_type="TimeoutError",
             ).dict()
         except Exception as exc:
+            duration_ms = (time.monotonic() - t0) * 1000
+            server.usage_tracker.record(
+                "execute_isaac_script", duration_ms, False,
+                params=log_params,
+                error=str(exc),
+            )
             return ErrorResponse(error=str(exc), error_type="Exception").dict()
 
     @server.mcp.tool(
@@ -1361,6 +1405,73 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 prim_type=prim_type,
                 root_path=root_path,
                 max_results=max_results,
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Extension management
+    # ------------------------------------------------------------------
+
+    @server.mcp.tool(
+        name="list_isaac_extensions",
+        description=(
+            "List all extensions registered in the running Isaac Sim instance. "
+            "Returns each extension's ID, version, and enabled status. "
+            "Use enabled_only=true to filter to active extensions, or search to "
+            "filter by extension ID substring."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def list_isaac_extensions(
+        enabled_only: bool = False,
+        search: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "list_isaac_extensions",
+            server._isaac_tools.list_isaac_extensions(
+                enabled_only=enabled_only,
+                search=search,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="enable_isaac_extension",
+        description=(
+            "Enable an extension by its ID in the running Isaac Sim instance. "
+            "The extension is enabled immediately. Use list_isaac_extensions "
+            "first to discover available extension IDs."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def enable_isaac_extension(extension_id: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "enable_isaac_extension",
+            server._isaac_tools.enable_isaac_extension(
+                extension_id=extension_id,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="disable_isaac_extension",
+        description=(
+            "Disable an extension by its ID in the running Isaac Sim instance. "
+            "The extension is disabled immediately. Use list_isaac_extensions "
+            "first to check which extensions are currently enabled."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True,
+            destructive=True,
+        ),
+    )
+    async def disable_isaac_extension(extension_id: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "disable_isaac_extension",
+            server._isaac_tools.disable_isaac_extension(
+                extension_id=extension_id,
             ),
         )
 

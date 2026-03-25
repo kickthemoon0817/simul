@@ -3362,3 +3362,129 @@ class IsaacTools(LoggerMixin):
                     }}))
         """)
         return await self._execute_json_script(script)
+
+    # ------------------------------------------------------------------
+    # Extension management
+    # ------------------------------------------------------------------
+
+    async def list_isaac_extensions(
+        self,
+        enabled_only: bool = False,
+        search: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        List extensions registered in the running Isaac Sim instance.
+
+        Args:
+            enabled_only: If True, return only enabled extensions.
+            search: Optional substring filter on extension ID.
+
+        Returns:
+            Dict with extensions list, each containing id and enabled status.
+        """
+        _enabled_only = repr(enabled_only)
+        _search = repr(search)
+        script = textwrap.dedent(f"""\
+            import json
+            import omni.kit.app
+
+            ext_manager = omni.kit.app.get_app().get_extension_manager()
+            raw = ext_manager.get_extensions()
+            extensions = []
+            for ext in raw:
+                ext_id = ext.get("id", "") or ext.get("name", "")
+                enabled = ext.get("enabled", False)
+
+                if {_enabled_only} and not enabled:
+                    continue
+                search_term = {_search}
+                if search_term and search_term.lower() not in ext_id.lower():
+                    continue
+
+                extensions.append({{
+                    "id": ext_id,
+                    "enabled": enabled,
+                    "version": ext.get("version", ""),
+                }})
+
+            extensions.sort(key=lambda e: e["id"])
+            print(json.dumps({{
+                "count": len(extensions),
+                "extensions": extensions,
+            }}))
+        """)
+        return await self._execute_json_script(script)
+
+    async def enable_isaac_extension(self, extension_id: str) -> Dict[str, Any]:
+        """
+        Enable an extension by its ID in the running Isaac Sim instance.
+
+        Args:
+            extension_id: The extension name (e.g. "isaacsim.core.utils", "omni.physx").
+
+        Returns:
+            Dict with success status and extension info after enabling.
+        """
+        _ext_id = repr(extension_id)
+        script = textwrap.dedent(f"""\
+            import json
+            import omni.kit.app
+
+            ext_id = {_ext_id}
+            ext_manager = omni.kit.app.get_app().get_extension_manager()
+            ext_manager.set_extension_enabled_immediate(ext_id, True)
+
+            # Verify the extension is now enabled
+            found = False
+            for ext in ext_manager.get_extensions():
+                eid = ext.get("id", "") or ext.get("name", "")
+                if eid == ext_id:
+                    found = True
+                    print(json.dumps({{
+                        "extension_id": ext_id,
+                        "enabled": ext.get("enabled", False),
+                        "version": ext.get("version", ""),
+                    }}))
+                    break
+
+            if not found:
+                print(json.dumps({{"error": "Extension not found: " + ext_id}}))
+        """)
+        return await self._execute_json_script(script)
+
+    async def disable_isaac_extension(self, extension_id: str) -> Dict[str, Any]:
+        """
+        Disable an extension by its ID in the running Isaac Sim instance.
+
+        Args:
+            extension_id: The extension name (e.g. "isaacsim.core.utils", "omni.physx").
+
+        Returns:
+            Dict with success status and extension info after disabling.
+        """
+        _ext_id = repr(extension_id)
+        script = textwrap.dedent(f"""\
+            import json
+            import omni.kit.app
+
+            ext_id = {_ext_id}
+            ext_manager = omni.kit.app.get_app().get_extension_manager()
+            ext_manager.set_extension_enabled_immediate(ext_id, False)
+
+            # Verify the extension is now disabled
+            found = False
+            for ext in ext_manager.get_extensions():
+                eid = ext.get("id", "") or ext.get("name", "")
+                if eid == ext_id:
+                    found = True
+                    print(json.dumps({{
+                        "extension_id": ext_id,
+                        "enabled": ext.get("enabled", False),
+                        "version": ext.get("version", ""),
+                    }}))
+                    break
+
+            if not found:
+                print(json.dumps({{"error": "Extension not found: " + ext_id}}))
+        """)
+        return await self._execute_json_script(script)

@@ -460,5 +460,75 @@ def version() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# stats
+# ---------------------------------------------------------------------------
+@app.command()
+def stats(
+    tool_name: Optional[str] = typer.Option(None, "--tool", "-t", help="Filter to a specific tool"),
+    recent: int = typer.Option(0, "--recent", "-r", help="Show last N call records"),
+    reset: bool = typer.Option(False, "--reset", help="Clear all usage stats"),
+) -> None:
+    """Show tool usage statistics from the persistent log."""
+    from simul_mcp.mcp.usage_tracker import ToolUsageTracker
+
+    if reset:
+        tracker = ToolUsageTracker()
+        tracker.reset()
+        if is_json_mode():
+            emit({"success": True, "message": "Stats cleared"})
+        else:
+            console.print("[green]Usage stats cleared[/green]")
+        return
+
+    data = ToolUsageTracker.load_from_log(tool_name=tool_name, limit=recent)
+
+    if is_json_mode():
+        emit(data)
+        return
+
+    tools = data.get("tools", {})
+    if not tools:
+        console.print("[dim]No tool usage recorded yet.[/dim]")
+        return
+
+    table = Table(title=f"Tool Usage ({data.get('total_calls', 0)} total calls)")
+    table.add_column("Tool", style="cyan", no_wrap=True)
+    table.add_column("Calls", justify="right")
+    table.add_column("OK", justify="right", style="green")
+    table.add_column("Fail", justify="right", style="red")
+    table.add_column("Avg (ms)", justify="right", style="dim")
+
+    for name, s in tools.items():
+        table.add_row(
+            name,
+            str(s["total_calls"]),
+            str(s["successes"]),
+            str(s["failures"]),
+            f"{s['avg_duration_ms']:.1f}",
+        )
+    console.print(table)
+
+    recent_records = data.get("recent", [])
+    if recent_records:
+        console.print()
+        log_table = Table(title=f"Recent Calls (last {len(recent_records)})")
+        log_table.add_column("Tool", style="cyan")
+        log_table.add_column("Duration", justify="right")
+        log_table.add_column("Status", justify="center")
+        log_table.add_column("Params", style="dim")
+
+        for rec in recent_records:
+            status = "[green]OK[/green]" if rec.get("success") else f"[red]{rec.get('error', 'FAIL')}[/red]"
+            params_str = json.dumps(rec.get("params", {}), separators=(",", ":")) if rec.get("params") else ""
+            log_table.add_row(
+                rec.get("tool", "?"),
+                f"{rec.get('duration_ms', 0):.1f}ms",
+                status,
+                params_str[:80],
+            )
+        console.print(log_table)
+
+
 if __name__ == "__main__":
     app()

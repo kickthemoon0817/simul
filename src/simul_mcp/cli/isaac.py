@@ -711,3 +711,72 @@ def create_material(
         emit(result)
         return
     console.print(f"[green]Created[/green] {shader_type} material at {material_path}")
+
+
+# ---------------------------------------------------------------------------
+# list-extensions
+# ---------------------------------------------------------------------------
+@app.command("list-extensions")
+def list_extensions(
+    enabled_only: bool = typer.Option(False, "--enabled", help="Show only enabled extensions"),
+    search: Optional[str] = typer.Option(None, "--search", "-s", help="Filter by extension ID substring"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """List extensions registered in the running Isaac Sim instance."""
+    result = _run(_tools(host, port).list_isaac_extensions(
+        enabled_only=enabled_only,
+        search=search,
+    ))
+    if is_json_mode():
+        emit(result)
+        return
+    extensions = result.get("extensions", [])
+    table = Table(title=f"Extensions ({result.get('count', len(extensions))})")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Version", style="dim")
+    table.add_column("Enabled", justify="center")
+    for ext in extensions:
+        status = "[green]yes[/green]" if ext.get("enabled") else "[red]no[/red]"
+        table.add_row(ext.get("id", "?"), ext.get("version", ""), status)
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# enable-extension
+# ---------------------------------------------------------------------------
+@app.command("enable-extension")
+def enable_extension(
+    extension_id: str = typer.Argument(..., help="Extension ID to enable (e.g. omni.physx)"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Enable an extension by ID in the running Isaac Sim instance."""
+    result = _run(_tools(host, port).enable_isaac_extension(extension_id=extension_id))
+    if is_json_mode():
+        emit(result)
+        return
+    if result.get("enabled"):
+        console.print(f"[green]Enabled[/green] {extension_id} (v{result.get('version', '?')})")
+    else:
+        console.print(f"[yellow]Warning:[/yellow] {extension_id} may not have been enabled — check with list-extensions")
+
+
+# ---------------------------------------------------------------------------
+# disable-extension
+# ---------------------------------------------------------------------------
+@app.command("disable-extension")
+def disable_extension(
+    extension_id: str = typer.Argument(..., help="Extension ID to disable (e.g. omni.physx)"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Disable an extension by ID in the running Isaac Sim instance."""
+    result = _run(_tools(host, port).disable_isaac_extension(extension_id=extension_id))
+    if is_json_mode():
+        emit(result)
+        return
+    if not result.get("enabled"):
+        console.print(f"[red]Disabled[/red] {extension_id}")
+    else:
+        console.print(f"[yellow]Warning:[/yellow] {extension_id} may still be enabled — check with list-extensions")
