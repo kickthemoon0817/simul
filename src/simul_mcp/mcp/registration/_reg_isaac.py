@@ -1410,3 +1410,70 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
+    # ------------------------------------------------------------------
+    # Extension management
+    # ------------------------------------------------------------------
+
+    @server.mcp.tool(
+        name="list_isaac_extensions",
+        description=(
+            "List all extensions registered in the running Isaac Sim instance. "
+            "Returns each extension's ID, version, enabled status, and install path. "
+            "Use enabled_only=true to filter to active extensions, or search to "
+            "filter by extension ID substring."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def list_isaac_extensions(
+        enabled_only: bool = False,
+        search: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "list_isaac_extensions",
+            server._isaac_tools.list_isaac_extensions(
+                enabled_only=enabled_only,
+                search=search,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="enable_isaac_extension",
+        description=(
+            "Enable an extension by its ID in the running Isaac Sim instance. "
+            "The extension is enabled immediately. Use list_isaac_extensions "
+            "first to discover available extension IDs."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def enable_isaac_extension(extension_id: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "enable_isaac_extension",
+            server._isaac_tools.enable_isaac_extension(
+                extension_id=extension_id,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="disable_isaac_extension",
+        description=(
+            "Disable an extension by its ID in the running Isaac Sim instance. "
+            "The extension is disabled immediately. Use list_isaac_extensions "
+            "first to check which extensions are currently enabled."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True,
+            destructive=True,
+        ),
+    )
+    async def disable_isaac_extension(extension_id: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "disable_isaac_extension",
+            server._isaac_tools.disable_isaac_extension(
+                extension_id=extension_id,
+            ),
+        )
+
