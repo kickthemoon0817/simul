@@ -64,12 +64,26 @@ _MCP_INSTRUCTIONS: str = (
     "and DCC applications. Use Isaac Sim tools to control a running NVIDIA Isaac Sim "
     "instance — granular tools for scene inspection, prim "
     "manipulation, physics, simulation control, materials, "
-    "viewport/camera, and asset/stage operations. The generic "
-    "execute_isaac_script tool is available for custom scripts. "
+    "viewport/camera, rendering, and asset/stage operations. "
     "Use USD tools to load, inspect, and edit Universal Scene "
     "Description files. "
     "Use Blender tools when a Blender runtime is connected. "
     "Use Unreal tools when an Unreal Engine instance is connected.\n\n"
+    "IMPORTANT — ALWAYS prefer granular tools over execute_isaac_script:\n"
+    "  - RTX/renderer settings → get/set_isaac_carb_settings\n"
+    "  - AOV/render pass reads → read_isaac_aovs (full pipeline in one call)\n"
+    "  - Available AOVs → list_isaac_aovs\n"
+    "  - Find prims by type + read attributes → query_isaac_typed_prims\n"
+    "  - Viewport state → get_isaac_viewport_info\n"
+    "  - Render variables → list_isaac_render_vars\n"
+    "  - Scene inspection → get_isaac_prim_info, list_isaac_prims, search_isaac_prims\n"
+    "  - Physics → get_isaac_rigid_body_info, get_isaac_collision_info, etc.\n"
+    "  - Materials → get_isaac_material_info, create_isaac_material, etc.\n"
+    "  - Simulation → start/stop/step_isaac_simulation\n"
+    "  - Camera → set_isaac_camera, capture_isaac_viewport\n"
+    "Only use execute_isaac_script as a LAST RESORT for operations that "
+    "have no matching granular tool. Never use execute_isaac_script for "
+    "tasks that a granular tool can handle.\n\n"
     "ROUTING — tool name prefixes determine the backend:\n"
     "  isaac_* tools → require a running Isaac Sim instance (TCP socket).\n"
     "  Non-prefixed USD tools (load_usd_file, get_prim_info, create_prim, "
@@ -81,11 +95,7 @@ _MCP_INSTRUCTIONS: str = (
     "  1. Call list_isaac_instances to discover all running instances "
     "and see which stage each has loaded.\n"
     "  2. Call set_active_isaac_instance to switch to the correct one.\n"
-    "  3. All subsequent isaac_* calls route to that instance.\n\n"
-    "When working with a live Isaac Sim session, prefer isaac_* tools. "
-    "Use execute_isaac_script for operations not covered by granular tools. "
-    "Read the 'simul://isaac-sim/skills' resource for scripting patterns "
-    "and API reference before writing execute_isaac_script code."
+    "  3. All subsequent isaac_* calls route to that instance."
 )
 
 _FASTMCP_SUPPORTS_INSTRUCTIONS: bool = (
@@ -379,9 +389,9 @@ class SimulMCPServer(LoggerMixin):
             "simul://isaac-sim/skills",
             name="Isaac Sim Scripting Skills",
             description=(
-                "Isaac Sim 5.1.0 scripting reference for execute_isaac_script: "
-                "API patterns, code templates, namespace migration notes, "
-                "and a quick-reference table for common operations."
+                "Isaac Sim 5.1.0 scripting reference: API patterns, "
+                "namespace migration notes, and quick-reference table. "
+                "Only consult this when no granular tool exists for your task."
             ),
         )
         def isaac_sim_skills() -> str:
