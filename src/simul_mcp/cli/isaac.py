@@ -780,3 +780,239 @@ def disable_extension(
         console.print(f"[red]Disabled[/red] {extension_id}")
     else:
         console.print(f"[yellow]Warning:[/yellow] {extension_id} may still be enabled — check with list-extensions")
+
+
+# ---------------------------------------------------------------------------
+# get-carb-settings
+# ---------------------------------------------------------------------------
+@app.command("get-carb-settings")
+def get_carb_settings(
+    keys: List[str] = typer.Argument(..., help="Carb setting key paths (e.g. /rtx/fog/enabled)"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Read one or more Carbonite settings by key path."""
+    result = _run(_tools(host, port).get_carb_settings(keys=keys))
+    if is_json_mode():
+        emit(result)
+        return
+    settings = result.get("settings", {})
+    table = Table(title="Carb Settings")
+    table.add_column("Key", style="cyan", no_wrap=True)
+    table.add_column("Value")
+    for key, val in settings.items():
+        table.add_row(key, str(val))
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# set-carb-settings
+# ---------------------------------------------------------------------------
+@app.command("set-carb-settings")
+def set_carb_settings(
+    assignments: List[str] = typer.Argument(..., help="Key=value pairs (e.g. /rtx/fog/enabled=true /rtx/fog/fogEndDist=200.0)"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Write one or more Carbonite settings. Pass key=value pairs."""
+    parsed: Dict[str, Any] = {}
+    for a in assignments:
+        if "=" not in a:
+            emit_error(f"Invalid format: {a!r} — expected key=value")
+            raise typer.Exit(1)
+        key, raw_val = a.split("=", 1)
+        val: Any = raw_val
+        if raw_val.lower() == "true":
+            val = True
+        elif raw_val.lower() == "false":
+            val = False
+        else:
+            try:
+                val = int(raw_val)
+            except ValueError:
+                try:
+                    val = float(raw_val)
+                except ValueError:
+                    pass
+        parsed[key] = val
+    result = _run(_tools(host, port).set_carb_settings(settings=parsed))
+    if is_json_mode():
+        emit(result)
+        return
+    applied = result.get("applied", {})
+    table = Table(title=f"Applied ({result.get('count', len(applied))} settings)")
+    table.add_column("Key", style="cyan", no_wrap=True)
+    table.add_column("Value", style="green")
+    for key, val in applied.items():
+        table.add_row(key, str(val))
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# read-aovs
+# ---------------------------------------------------------------------------
+@app.command("read-aovs")
+def read_aovs(
+    aov_names: List[str] = typer.Argument(..., help="AOV names to read (e.g. HdrColor DirectDiffuse)"),
+    camera: str = typer.Option("/OmniverseKit_Persp", "--camera", "-c", help="Camera prim path"),
+    width: int = typer.Option(256, "--width", "-W", help="Render width"),
+    height: int = typer.Option(256, "--height", "-H", help="Render height"),
+    frames: int = typer.Option(5, "--frames", "-f", help="Number of render frames before reading"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Read AOV buffers and return per-AOV statistics."""
+    result = _run(_tools(host, port).read_aovs(
+        aov_names=aov_names,
+        camera_path=camera,
+        resolution=[width, height],
+        num_frames=frames,
+    ))
+    if is_json_mode():
+        emit(result)
+        return
+    aovs = result.get("aovs", {})
+    if not aovs:
+        console.print("[dim]No AOV data returned.[/dim]")
+        return
+    for name, stats in aovs.items():
+        if "error" in stats:
+            console.print(f"[red]{name}[/red]: {stats['error']}")
+            continue
+        table = Table(title=f"AOV: {name}")
+        table.add_column("Stat", style="cyan")
+        table.add_column("Value", justify="right")
+        for k, v in stats.items():
+            if isinstance(v, list):
+                table.add_row(k, ", ".join(f"{x:.4f}" if isinstance(x, float) else str(x) for x in v))
+            elif isinstance(v, float):
+                table.add_row(k, f"{v:.6f}")
+            else:
+                table.add_row(k, str(v))
+        console.print(table)
+    attach_errors = result.get("attach_errors", {})
+    if attach_errors:
+        for name, err in attach_errors.items():
+            console.print(f"[yellow]Attach failed:[/yellow] {name}: {err}")
+
+
+# ---------------------------------------------------------------------------
+# list-aovs
+# ---------------------------------------------------------------------------
+@app.command("list-aovs")
+def list_aovs(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """List all available AOV annotator names."""
+    result = _run(_tools(host, port).list_aovs())
+    if is_json_mode():
+        emit(result)
+        return
+    annotators = result.get("annotators", [])
+    console.print(f"[bold]Available AOVs ({result.get('count', len(annotators))}):[/bold]")
+    for name in annotators:
+        console.print(f"  {name}")
+
+
+# ---------------------------------------------------------------------------
+# query-typed-prims
+# ---------------------------------------------------------------------------
+@app.command("query-typed-prims")
+def query_typed_prims(
+    type_name: str = typer.Argument(..., help="USD schema type (e.g. UsdLux.DistantLight, UsdGeom.Mesh)"),
+    attributes: Optional[List[str]] = typer.Option(None, "--attr", "-a", help="Attributes to read"),
+    root_path: str = typer.Option("/", "--root", "-r", help="Root path to start traversal"),
+    max_prims: int = typer.Option(200, "--max", "-m", help="Max prims to return"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Query prims by USD schema type and read attributes."""
+    result = _run(_tools(host, port).query_usd_typed_prims(
+        type_name=type_name,
+        attributes=attributes,
+        root_path=root_path,
+        max_prims=max_prims,
+    ))
+    if is_json_mode():
+        emit(result)
+        return
+    prims = result.get("prims", [])
+    truncated = result.get("truncated", False)
+    title = f"{result.get('type_filter', type_name)} ({result.get('count', len(prims))} found)"
+    if truncated:
+        title += f" [yellow](truncated at {max_prims})[/yellow]"
+    table = Table(title=title)
+    table.add_column("Path", style="cyan", no_wrap=True)
+    table.add_column("Type", style="dim")
+    if attributes:
+        for attr in attributes:
+            table.add_column(attr)
+    for prim in prims:
+        row = [prim.get("path", "?"), prim.get("type", "?")]
+        if attributes:
+            attrs = prim.get("attributes", {})
+            for attr in attributes:
+                val = attrs.get(attr)
+                if isinstance(val, list) and len(val) <= 4:
+                    row.append(", ".join(f"{x:.3f}" if isinstance(x, float) else str(x) for x in val))
+                elif isinstance(val, float):
+                    row.append(f"{val:.4f}")
+                else:
+                    row.append(str(val) if val is not None else "[dim]None[/dim]")
+        table.add_row(*row)
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# viewport-info
+# ---------------------------------------------------------------------------
+@app.command("viewport-info")
+def viewport_info(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Get active viewport information."""
+    result = _run(_tools(host, port).get_viewport_info())
+    if is_json_mode():
+        emit(result)
+        return
+    if result.get("error"):
+        console.print(f"[red]Error:[/red] {result['error']}")
+        return
+    table = Table(title="Active Viewport")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value")
+    for key in ("camera_path", "render_product_path", "resolution", "name"):
+        val = result.get(key)
+        if val is not None:
+            table.add_row(key, str(val))
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# list-render-vars
+# ---------------------------------------------------------------------------
+@app.command("list-render-vars")
+def list_render_vars(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """List available render variable names from SyntheticData."""
+    result = _run(_tools(host, port).list_render_vars())
+    if is_json_mode():
+        emit(result)
+        return
+    if result.get("syntheticdata_error"):
+        console.print(f"[red]Error:[/red] {result['syntheticdata_error']}")
+        return
+    templates = result.get("render_var_templates", [])
+    if templates:
+        console.print(f"[bold]Render Var Templates ({result.get('render_var_count', len(templates))}):[/bold]")
+        for name in templates:
+            console.print(f"  {name}")
+    sensors = result.get("sensor_types", [])
+    if sensors:
+        console.print(f"\n[bold]Sensor Types ({result.get('sensor_type_count', len(sensors))}):[/bold]")
+        for name in sensors:
+            console.print(f"  {name}")
