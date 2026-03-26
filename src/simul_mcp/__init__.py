@@ -5,7 +5,7 @@ A Model Context Protocol (MCP) server for simulation and DCC tools that provides
 USD scene understanding, mesh operations, and runtime integration capabilities.
 """
 
-__version__ = "0.0.10"
+__version__ = "0.0.11"
 __author__ = "khemoo"
 __email__ = ""
 
