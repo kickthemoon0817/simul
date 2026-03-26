@@ -386,6 +386,7 @@ class SimulMCPServer(LoggerMixin):
     def _register_resources(self) -> None:
         """Register MCP resources for agent context."""
         skills_path = self._project_root / "skills.md"
+        docs_api_dir = self._project_root / "docs" / "api"
 
         @self.mcp.resource(
             "simul://isaac-sim/skills",
@@ -400,6 +401,68 @@ class SimulMCPServer(LoggerMixin):
             if skills_path.is_file():
                 return skills_path.read_text(encoding="utf-8")
             return "skills.md not found at project root."
+
+        def _make_api_reader(fpath: Path) -> str:
+            """Read an API reference doc from docs/api/."""
+            if fpath.is_file():
+                return fpath.read_text(encoding="utf-8")
+            return f"{fpath.name} not found."
+
+        @self.mcp.resource(
+            "simul://isaac-sim/api/core",
+            name="Isaac Sim Core API",
+            description="SimulationContext, PhysicsContext, Articulation, RigidPrim, XFormPrim reference.",
+        )
+        def api_core() -> str:
+            return _make_api_reader(docs_api_dir / "core.md")
+
+        @self.mcp.resource(
+            "simul://isaac-sim/api/sensors",
+            name="Isaac Sim Sensors API",
+            description="Camera, IMU, Contact, LiDAR (PhysX/RTX), Proximity sensor reference.",
+        )
+        def api_sensors() -> str:
+            return _make_api_reader(docs_api_dir / "sensors.md")
+
+        @self.mcp.resource(
+            "simul://isaac-sim/api/physics",
+            name="Isaac Sim Physics API",
+            description="PhysX interface, tensor API, collision queries, CCT, vehicle physics reference.",
+        )
+        def api_physics() -> str:
+            return _make_api_reader(docs_api_dir / "physics.md")
+
+        @self.mcp.resource(
+            "simul://isaac-sim/api/replicator",
+            name="Isaac Sim Replicator API",
+            description="Annotators, Writers, Orchestrator, domain randomization reference.",
+        )
+        def api_replicator() -> str:
+            return _make_api_reader(docs_api_dir / "replicator.md")
+
+        @self.mcp.resource(
+            "simul://isaac-sim/api/robots",
+            name="Isaac Sim Robots API",
+            description="Manipulators, grippers, IK, motion planning, wheeled robots reference.",
+        )
+        def api_robots() -> str:
+            return _make_api_reader(docs_api_dir / "robots.md")
+
+        @self.mcp.resource(
+            "simul://isaac-sim/api/rendering",
+            name="Isaac Sim Rendering API",
+            description="Viewport, HydraTexture, RTX post-processing, capture reference.",
+        )
+        def api_rendering() -> str:
+            return _make_api_reader(docs_api_dir / "rendering.md")
+
+        @self.mcp.resource(
+            "simul://isaac-sim/api/assets",
+            name="Isaac Sim Assets API",
+            description="URDF/MJCF import, Cloner, OmniGraph nodes reference.",
+        )
+        def api_assets() -> str:
+            return _make_api_reader(docs_api_dir / "assets.md")
 
     def _switch_active_instance(self, name: str) -> None:
         """
