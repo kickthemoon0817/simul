@@ -5,6 +5,8 @@ This module provides bounding box computation, caching, and utilities
 for USD prims and stages using the pxr library.
 """
 
+from __future__ import annotations
+
 from typing import Dict, List, Optional, Any, Tuple, Union
 import numpy as np
 
@@ -25,6 +27,13 @@ from ..utils.math import BBox, bbox_union, bbox_from_points
 logger = get_logger(__name__)
 
 
+def _default_time_code() -> Any:
+    """Return a USD default time code only when pxr is available."""
+    if not PXR_AVAILABLE or Usd is None:
+        return None
+    return Usd.TimeCode.Default()
+
+
 class BBoxCache(LoggerMixin):
     """
     Bounding box cache for USD prims.
@@ -33,7 +42,7 @@ class BBoxCache(LoggerMixin):
     with support for world and local coordinate spaces.
     """
     
-    def __init__(self, stage: Usd.Stage, time_code: float = Usd.TimeCode.Default()):
+    def __init__(self, stage: Usd.Stage, time_code: Optional[Any] = None):
         """
         Initialize bounding box cache.
         
@@ -45,14 +54,17 @@ class BBoxCache(LoggerMixin):
             raise ImportError("pxr library not available. Please install USD Python bindings.")
         
         self.stage = stage
-        self.time_code = time_code
+        self.time_code = _default_time_code() if time_code is None else time_code
         self._world_bbox_cache: Dict[str, BBox] = {}
         self._local_bbox_cache: Dict[str, BBox] = {}
         self._usd_bbox_cache: Optional[UsdGeom.BBoxCache] = None
         
         # Initialize USD's built-in bbox cache
         try:
-            self._usd_bbox_cache = UsdGeom.BBoxCache(time_code, includedPurposes=[UsdGeom.Tokens.default_])
+            self._usd_bbox_cache = UsdGeom.BBoxCache(
+                self.time_code,
+                includedPurposes=[UsdGeom.Tokens.default_],
+            )
         except Exception as e:
             self.logger.warning(f"Could not initialize USD BBoxCache: {e}")
         
@@ -323,19 +335,27 @@ def dict_to_bbox(bbox_dict: Dict[str, List[float]]) -> BBox:
 
 
 # Convenience functions
-def compute_world_bbox(prim: Usd.Prim, time_code: float = Usd.TimeCode.Default()) -> Optional[BBox]:
+def compute_world_bbox(
+    prim: Usd.Prim, time_code: Optional[Any] = None
+) -> Optional[BBox]:
     """Compute world bounding box for a prim."""
     cache = BBoxCache(prim.GetStage(), time_code)
     return cache.compute_world_bbox(prim)
 
 
-def compute_local_bbox(prim: Usd.Prim, time_code: float = Usd.TimeCode.Default()) -> Optional[BBox]:
+def compute_local_bbox(
+    prim: Usd.Prim, time_code: Optional[Any] = None
+) -> Optional[BBox]:
     """Compute local bounding box for a prim."""
     cache = BBoxCache(prim.GetStage(), time_code)
     return cache.compute_local_bbox(prim)
 
 
-def get_prim_bbox(prim: Usd.Prim, world_space: bool = True, time_code: float = Usd.TimeCode.Default()) -> Optional[BBox]:
+def get_prim_bbox(
+    prim: Usd.Prim,
+    world_space: bool = True,
+    time_code: Optional[Any] = None,
+) -> Optional[BBox]:
     """Get bounding box for a prim in world or local space."""
     cache = BBoxCache(prim.GetStage(), time_code)
     if world_space:
@@ -344,7 +364,9 @@ def get_prim_bbox(prim: Usd.Prim, world_space: bool = True, time_code: float = U
         return cache.compute_local_bbox(prim)
 
 
-def get_stage_bbox(stage: Usd.Stage, time_code: float = Usd.TimeCode.Default()) -> Optional[BBox]:
+def get_stage_bbox(
+    stage: Usd.Stage, time_code: Optional[Any] = None
+) -> Optional[BBox]:
     """Get bounding box for an entire stage."""
     cache = BBoxCache(stage, time_code)
     return cache.get_stage_bbox()

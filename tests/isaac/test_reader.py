@@ -16,9 +16,17 @@ import sys
 src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
-from simul_mcp.usd.reader import USDReader, USDStageInfo, USDPrimInfo, PrimType
+from simul_mcp.usd.reader import (
+    PXR_AVAILABLE as READER_PXR_AVAILABLE,
+    PrimType,
+    USDLayerInfo,
+    USDPrimInfo,
+    USDReader,
+    USDStageInfo,
+)
 
 
+@pytest.mark.skipif(not READER_PXR_AVAILABLE, reason="pxr library not available")
 class TestUSDReader:
     """Test cases for USDReader class."""
 
@@ -235,17 +243,32 @@ class TestUSDStageInfo:
 
     def test_stage_info_creation(self):
         """Test USDStageInfo creation."""
+        layer = USDLayerInfo(
+            identifier="/test/path.usd",
+            display_name="path.usd",
+            real_path="/test/path.usd",
+            file_format="usd",
+            version="1.0",
+            comment="",
+            documentation="",
+            is_anonymous=False,
+            is_dirty=False,
+            permission="edit",
+        )
         stage_info = USDStageInfo(
+            root_layer_path="/test/path.usd",
+            session_layer_path=None,
+            layers=[layer],
+            default_prim_path="/World",
             up_axis="Y",
             meters_per_unit=1.0,
             time_codes_per_second=24.0,
             start_time_code=1.0,
             end_time_code=100.0,
             frame_rate=24.0,
-            all_prims=["/World", "/World/Cube"],
+            prim_count=2,
             root_prims=["/World"],
-            layers=["/test/path.usd"],
-            default_prim="/World",
+            stage_variables={},
         )
 
         assert stage_info.up_axis == "Y"
@@ -254,10 +277,10 @@ class TestUSDStageInfo:
         assert stage_info.start_time_code == 1.0
         assert stage_info.end_time_code == 100.0
         assert stage_info.frame_rate == 24.0
-        assert len(stage_info.all_prims) == 2
+        assert stage_info.prim_count == 2
         assert len(stage_info.root_prims) == 1
         assert len(stage_info.layers) == 1
-        assert stage_info.default_prim == "/World"
+        assert stage_info.default_prim_path == "/World"
 
 
 class TestUSDPrimInfo:
@@ -273,13 +296,21 @@ class TestUSDPrimInfo:
             is_active=True,
             is_loaded=True,
             is_defined=True,
+            is_abstract=False,
             is_instance=False,
+            is_prototype=False,
+            has_authored_references=False,
+            has_authored_payloads=False,
+            has_authored_inherits=False,
+            has_authored_specializes=False,
             purpose="default",
             visibility="inherited",
             kind="component",
             children=["/World/Cube/Material"],
             attributes={"points": "array"},
             metadata={"comment": "Test cube"},
+            relationships={},
+            parent="/World",
         )
 
         assert prim_info.path == "/World/Cube"
@@ -299,6 +330,7 @@ class TestUSDPrimInfo:
 
 
 # Integration tests (require actual USD files)
+@pytest.mark.skipif(not READER_PXR_AVAILABLE, reason="pxr library not available")
 class TestUSDReaderIntegration:
     """Integration tests for USDReader with real USD files."""
 

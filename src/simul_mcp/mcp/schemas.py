@@ -33,16 +33,16 @@ class BoundingBox(BaseModel):
     """Bounding box representation."""
 
     min: List[float] = Field(
-        ..., description="Minimum point [x, y, z]", min_items=3, max_items=3
+        ..., description="Minimum point [x, y, z]", min_length=3, max_length=3
     )
     max: List[float] = Field(
-        ..., description="Maximum point [x, y, z]", min_items=3, max_items=3
+        ..., description="Maximum point [x, y, z]", min_length=3, max_length=3
     )
     center: Optional[List[float]] = Field(
-        None, description="Center point [x, y, z]", min_items=3, max_items=3
+        None, description="Center point [x, y, z]", min_length=3, max_length=3
     )
     size: Optional[List[float]] = Field(
-        None, description="Size [width, height, depth]", min_items=3, max_items=3
+        None, description="Size [width, height, depth]", min_length=3, max_length=3
     )
     volume: Optional[float] = Field(None, description="Bounding box volume")
 
@@ -51,13 +51,13 @@ class Transform(BaseModel):
     """3D transformation representation."""
 
     translation: List[float] = Field(
-        ..., description="Translation [x, y, z]", min_items=3, max_items=3
+        ..., description="Translation [x, y, z]", min_length=3, max_length=3
     )
     rotation: List[float] = Field(
-        ..., description="Rotation quaternion [w, x, y, z]", min_items=4, max_items=4
+        ..., description="Rotation quaternion [w, x, y, z]", min_length=4, max_length=4
     )
     scale: List[float] = Field(
-        ..., description="Scale [x, y, z]", min_items=3, max_items=3
+        ..., description="Scale [x, y, z]", min_length=3, max_length=3
     )
 
 
@@ -277,13 +277,13 @@ class BlenderObjectInfoResponse(BaseModel):
     name: str = Field(..., description="Object name")
     object_type: str = Field(..., description="Blender object type")
     location: List[float] = Field(
-        ..., description="World location [x, y, z]", min_items=3, max_items=3
+        ..., description="World location [x, y, z]", min_length=3, max_length=3
     )
     rotation_euler: List[float] = Field(
-        ..., description="Rotation in Euler radians [x, y, z]", min_items=3, max_items=3
+        ..., description="Rotation in Euler radians [x, y, z]", min_length=3, max_length=3
     )
     scale: List[float] = Field(
-        ..., description="Scale [x, y, z]", min_items=3, max_items=3
+        ..., description="Scale [x, y, z]", min_length=3, max_length=3
     )
     parent_name: Optional[str] = Field(None, description="Parent object name")
     children_names: List[str] = Field(
@@ -339,10 +339,10 @@ class BlenderBoundingBoxResponse(BaseModel):
         ..., description="Eight bounding box corners as [x, y, z] lists"
     )
     bbox_min: List[float] = Field(
-        ..., description="Axis-aligned minimum [x, y, z]", min_items=3, max_items=3
+        ..., description="Axis-aligned minimum [x, y, z]", min_length=3, max_length=3
     )
     bbox_max: List[float] = Field(
-        ..., description="Axis-aligned maximum [x, y, z]", min_items=3, max_items=3
+        ..., description="Axis-aligned maximum [x, y, z]", min_length=3, max_length=3
     )
     world_space: bool = Field(..., description="Whether corners are in world space")
 
@@ -438,14 +438,14 @@ class BlenderDistanceResponse(BaseModel):
     location_a: List[float] = Field(
         ...,
         description="World location of first object [x, y, z]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     location_b: List[float] = Field(
         ...,
         description="World location of second object [x, y, z]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
 
 
@@ -454,10 +454,10 @@ class BlenderBoundsCheckRequest(BaseModel):
 
     object_name: str = Field(..., description="Object name to check")
     bounds_min: List[float] = Field(
-        ..., description="Minimum bounds [x, y, z]", min_items=3, max_items=3
+        ..., description="Minimum bounds [x, y, z]", min_length=3, max_length=3
     )
     bounds_max: List[float] = Field(
-        ..., description="Maximum bounds [x, y, z]", min_items=3, max_items=3
+        ..., description="Maximum bounds [x, y, z]", min_length=3, max_length=3
     )
 
 
@@ -472,8 +472,8 @@ class BlenderBoundsCheckResponse(BaseModel):
     object_location: List[float] = Field(
         ...,
         description="Object world location [x, y, z]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
 
 
@@ -523,13 +523,13 @@ class BlenderSetCameraViewRequest(BaseModel):
     """Request to set the active camera's transform."""
 
     location: List[float] = Field(
-        ..., description="Camera location [x, y, z]", min_items=3, max_items=3
+        ..., description="Camera location [x, y, z]", min_length=3, max_length=3
     )
     rotation_euler: List[float] = Field(
         ...,
         description="Camera rotation [rx, ry, rz] in radians",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     camera_name: Optional[str] = Field(
         None, description="Target camera name. Uses active camera when None."
@@ -544,14 +544,14 @@ class BlenderSetCameraViewResponse(BaseModel):
     location: List[float] = Field(
         ...,
         description="New camera location [x, y, z]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     rotation_euler: List[float] = Field(
         ...,
         description="New camera rotation [rx, ry, rz]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
 
 
@@ -563,14 +563,14 @@ class BlenderCameraInfoResponse(BaseModel):
     location: List[float] = Field(
         ...,
         description="Camera location [x, y, z]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     rotation_euler: List[float] = Field(
         ...,
         description="Camera rotation [rx, ry, rz]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     lens: float = Field(..., description="Focal length in mm")
     sensor_width: float = Field(..., description="Sensor width in mm")
@@ -603,14 +603,14 @@ class BlenderFocusOnObjectResponse(BaseModel):
     camera_location: List[float] = Field(
         ...,
         description="New camera location [x, y, z]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     look_at: List[float] = Field(
         ...,
         description="Point the camera is aimed at [x, y, z]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
 
 
@@ -676,20 +676,20 @@ class BlenderCreateObjectRequest(BaseModel):
     location: List[float] = Field(
         default_factory=lambda: [0.0, 0.0, 0.0],
         description="Initial location [x, y, z]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     rotation_euler: List[float] = Field(
         default_factory=lambda: [0.0, 0.0, 0.0],
         description="Initial rotation [rx, ry, rz] radians",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     scale: List[float] = Field(
         default_factory=lambda: [1.0, 1.0, 1.0],
         description="Initial scale [sx, sy, sz]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
 
 
@@ -702,8 +702,8 @@ class BlenderCreateObjectResponse(BaseModel):
     location: List[float] = Field(
         ...,
         description="Object location [x, y, z]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
 
 
@@ -727,20 +727,20 @@ class BlenderSetTransformRequest(BaseModel):
     location: Optional[List[float]] = Field(
         None,
         description="New location [x, y, z]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     rotation_euler: Optional[List[float]] = Field(
         None,
         description="New rotation [rx, ry, rz] radians",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     scale: Optional[List[float]] = Field(
         None,
         description="New scale [sx, sy, sz]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
 
 
@@ -752,20 +752,20 @@ class BlenderSetTransformResponse(BaseModel):
     location: List[float] = Field(
         ...,
         description="Final location [x, y, z]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     rotation_euler: List[float] = Field(
         ...,
         description="Final rotation [rx, ry, rz]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     scale: List[float] = Field(
         ...,
         description="Final scale [sx, sy, sz]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
 
 
@@ -1081,8 +1081,8 @@ class BlenderKeyframeSummaryEntry(BaseModel):
     frame_range: List[int] = Field(
         ...,
         description="[first_frame, last_frame] of keyframes",
-        min_items=2,
-        max_items=2,
+        min_length=2,
+        max_length=2,
     )
 
 
@@ -1155,8 +1155,8 @@ class BlenderAddForceFieldRequest(BaseModel):
     location: List[float] = Field(
         default_factory=lambda: [0.0, 0.0, 0.0],
         description="World-space XYZ location",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     name: Optional[str] = Field(None, description="Optional name for the field")
 
@@ -1171,8 +1171,8 @@ class BlenderAddForceFieldResponse(BaseModel):
     location: List[float] = Field(
         ...,
         description="Location of the field [x, y, z]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
 
 
@@ -1194,8 +1194,8 @@ class BlenderGetForceFieldInfoResponse(BaseModel):
     location: List[float] = Field(
         ...,
         description="World-space location [x, y, z]",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
 
 
@@ -1214,8 +1214,8 @@ class BlenderAddConstraintRequest(BaseModel):
     location: Optional[List[float]] = Field(
         None,
         description="Optional location for the constraint empty",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     disable_collisions: bool = Field(
         True, description="Disable collisions between constrained objects"
@@ -1268,14 +1268,14 @@ class BlenderGetPhysicsStateResponse(BaseModel):
     location: List[float] = Field(
         ...,
         description="World-space XYZ position",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     rotation_euler: List[float] = Field(
         ...,
         description="Rotation as Euler angles (radians)",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     is_active: bool = Field(..., description="Whether object has active rigid body")
     has_rigid_body: bool = Field(
@@ -1295,20 +1295,20 @@ class BlenderTrajectoryPoint(BaseModel):
     location: List[float] = Field(
         ...,
         description="XYZ position",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     rotation_euler: List[float] = Field(
         ...,
         description="Euler rotation (radians)",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     velocity: Optional[List[float]] = Field(
         None,
         description="Estimated velocity (computed from position delta)",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
 
 
@@ -1407,7 +1407,7 @@ class BlenderCreateMeshFromDataRequest(BaseModel):
     vertices: List[List[float]] = Field(
         ...,
         description="List of vertex positions, each [x, y, z]",
-        min_items=1,
+        min_length=1,
     )
     edges: List[List[int]] = Field(
         default_factory=list,
@@ -1420,8 +1420,8 @@ class BlenderCreateMeshFromDataRequest(BaseModel):
     location: Optional[List[float]] = Field(
         None,
         description="World-space location [x, y, z] for the object origin",
-        min_items=3,
-        max_items=3,
+        min_length=3,
+        max_length=3,
     )
     collection_name: Optional[str] = Field(
         None,
@@ -1697,10 +1697,10 @@ class FocusPrimResponse(BaseModel):
     stage_id: str = Field(..., description="Stage identifier")
     prim_path: str = Field(..., description="Prim path")
     focus_point: List[float] = Field(
-        ..., description="Focus point [x, y, z]", min_items=3, max_items=3
+        ..., description="Focus point [x, y, z]", min_length=3, max_length=3
     )
     camera_position: List[float] = Field(
-        ..., description="Camera position [x, y, z]", min_items=3, max_items=3
+        ..., description="Camera position [x, y, z]", min_length=3, max_length=3
     )
     message: str = Field(..., description="Status message")
 

@@ -42,12 +42,12 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.blender_adapter.create_session() as session:
                 runtime_info = session.get_runtime_info()
                 runtime_info["success"] = True
-                result = BlenderInfoResponse(**runtime_info).dict()
+                result = BlenderInfoResponse(**runtime_info).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderInfoResponse, ErrorResponse),
@@ -56,7 +56,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error(f"Error getting Blender runtime info: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderInfoResponse, ErrorResponse),
@@ -111,7 +111,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.blender_adapter.create_session() as session:
                 objects_payload = session.list_scene_objects(
@@ -120,7 +120,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     max_items=input_data.max_items,
                 )
                 objects_payload["success"] = True
-                result = BlenderSceneObjectsResponse(**objects_payload).dict()
+                result = BlenderSceneObjectsResponse(**objects_payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderSceneObjectsResponse, ErrorResponse),
@@ -129,7 +129,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error(f"Error listing Blender scene objects: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderSceneObjectsResponse, ErrorResponse),
@@ -169,11 +169,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_object_info(input_data.object_name)
                 payload["success"] = True
-                result = BlenderObjectInfoResponse(**payload).dict()
+                result = BlenderObjectInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderObjectInfoResponse, ErrorResponse),
@@ -181,7 +181,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error getting Blender object info: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderObjectInfoResponse, ErrorResponse),
@@ -219,11 +219,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_mesh_info(input_data.object_name)
                 payload["success"] = True
-                result = BlenderMeshInfoResponse(**payload).dict()
+                result = BlenderMeshInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderMeshInfoResponse, ErrorResponse),
@@ -231,7 +231,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error getting Blender mesh info: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderMeshInfoResponse, ErrorResponse),
@@ -271,14 +271,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_bounding_box(
                     input_data.object_name,
                     input_data.world_space,
                 )
                 payload["success"] = True
-                result = BlenderBoundingBoxResponse(**payload).dict()
+                result = BlenderBoundingBoxResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderBoundingBoxResponse, ErrorResponse),
@@ -286,7 +286,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error getting Blender bounding box: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderBoundingBoxResponse, ErrorResponse),
@@ -330,7 +330,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.search_objects(
                     input_data.name_pattern,
@@ -338,7 +338,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.max_results,
                 )
                 payload["success"] = True
-                result = BlenderSearchObjectsResponse(**payload).dict()
+                result = BlenderSearchObjectsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderSearchObjectsResponse, ErrorResponse),
@@ -346,7 +346,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error searching Blender objects: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderSearchObjectsResponse, ErrorResponse),
@@ -376,11 +376,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.summarize_scene()
                 payload["success"] = True
-                result = BlenderSceneSummaryResponse(**payload).dict()
+                result = BlenderSceneSummaryResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderSceneSummaryResponse, ErrorResponse),
@@ -388,7 +388,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error summarizing Blender scene: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderSceneSummaryResponse, ErrorResponse),
@@ -426,13 +426,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_material_info(
                     input_data.material_name,
                 )
                 payload["success"] = True
-                result = BlenderMaterialInfoResponse(**payload).dict()
+                result = BlenderMaterialInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderMaterialInfoResponse, ErrorResponse),
@@ -440,7 +440,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error getting Blender material info: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderMaterialInfoResponse, ErrorResponse),
@@ -480,14 +480,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_distance_between(
                     input_data.object_name_a,
                     input_data.object_name_b,
                 )
                 payload["success"] = True
-                result = BlenderDistanceResponse(**payload).dict()
+                result = BlenderDistanceResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderDistanceResponse, ErrorResponse),
@@ -495,7 +495,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error measuring Blender distance: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderDistanceResponse, ErrorResponse),
@@ -537,7 +537,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.check_object_bounds(
                     input_data.object_name,
@@ -545,7 +545,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.bounds_max,
                 )
                 payload["success"] = True
-                result = BlenderBoundsCheckResponse(**payload).dict()
+                result = BlenderBoundsCheckResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderBoundsCheckResponse, ErrorResponse),
@@ -553,7 +553,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error checking Blender bounds: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderBoundsCheckResponse, ErrorResponse),
@@ -599,7 +599,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.capture_viewport(
                     input_data.width,
@@ -608,7 +608,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.use_render_fallback,
                 )
                 payload["success"] = True
-                result = BlenderCaptureViewportResponse(**payload).dict()
+                result = BlenderCaptureViewportResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderCaptureViewportResponse, ErrorResponse),
@@ -616,7 +616,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error capturing Blender viewport: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderCaptureViewportResponse, ErrorResponse),
@@ -658,7 +658,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.set_camera_view(
                     list(input_data.location),
@@ -666,7 +666,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.camera_name,
                 )
                 payload["success"] = True
-                result = BlenderSetCameraViewResponse(**payload).dict()
+                result = BlenderSetCameraViewResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderSetCameraViewResponse, ErrorResponse),
@@ -674,7 +674,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error setting Blender camera view: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderSetCameraViewResponse, ErrorResponse),
@@ -706,11 +706,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_camera_info(camera_name)
                 payload["success"] = True
-                result = BlenderCameraInfoResponse(**payload).dict()
+                result = BlenderCameraInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderCameraInfoResponse, ErrorResponse),
@@ -718,7 +718,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error getting Blender camera info: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderCameraInfoResponse, ErrorResponse),
@@ -760,7 +760,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.focus_on_object(
                     input_data.object_name,
@@ -768,7 +768,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.camera_name,
                 )
                 payload["success"] = True
-                result = BlenderFocusOnObjectResponse(**payload).dict()
+                result = BlenderFocusOnObjectResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderFocusOnObjectResponse, ErrorResponse),
@@ -776,7 +776,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error focusing Blender camera: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderFocusOnObjectResponse, ErrorResponse),
@@ -806,11 +806,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_viewport_info()
                 payload["success"] = True
-                result = BlenderViewportInfoResponse(**payload).dict()
+                result = BlenderViewportInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderViewportInfoResponse, ErrorResponse),
@@ -818,7 +818,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error getting Blender viewport info: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderViewportInfoResponse, ErrorResponse),
@@ -868,7 +868,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.capture_viewport_sequence(
                     input_data.start_frame,
@@ -879,7 +879,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.jpeg_quality,
                 )
                 payload["success"] = True
-                result = BlenderCaptureSequenceResponse(**payload).dict()
+                result = BlenderCaptureSequenceResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderCaptureSequenceResponse, ErrorResponse),
@@ -887,7 +887,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error capturing Blender viewport sequence: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderCaptureSequenceResponse, ErrorResponse),
@@ -935,7 +935,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.create_object(
                     input_data.object_type,
@@ -945,7 +945,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     list(input_data.scale),
                 )
                 payload["success"] = True
-                result = BlenderCreateObjectResponse(**payload).dict()
+                result = BlenderCreateObjectResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderCreateObjectResponse, ErrorResponse),
@@ -953,7 +953,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error creating Blender object: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderCreateObjectResponse, ErrorResponse),
@@ -992,11 +992,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.delete_object(input_data.object_name)
                 payload["success"] = True
-                result = BlenderDeleteObjectResponse(**payload).dict()
+                result = BlenderDeleteObjectResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderDeleteObjectResponse, ErrorResponse),
@@ -1004,7 +1004,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error deleting Blender object: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderDeleteObjectResponse, ErrorResponse),
@@ -1048,7 +1048,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 loc = list(input_data.location) if input_data.location else None
                 rot = (
@@ -1064,7 +1064,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     sc,
                 )
                 payload["success"] = True
-                result = BlenderSetTransformResponse(**payload).dict()
+                result = BlenderSetTransformResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderSetTransformResponse, ErrorResponse),
@@ -1072,7 +1072,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error setting Blender transform: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderSetTransformResponse, ErrorResponse),
@@ -1112,14 +1112,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.set_object_parent(
                     input_data.child_name,
                     input_data.parent_name,
                 )
                 payload["success"] = True
-                result = BlenderSetParentResponse(**payload).dict()
+                result = BlenderSetParentResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderSetParentResponse, ErrorResponse),
@@ -1127,7 +1127,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error setting Blender parent: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderSetParentResponse, ErrorResponse),
@@ -1167,14 +1167,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.clear_object_parent(
                     input_data.object_name,
                     input_data.keep_transform,
                 )
                 payload["success"] = True
-                result = BlenderClearParentResponse(**payload).dict()
+                result = BlenderClearParentResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderClearParentResponse, ErrorResponse),
@@ -1182,7 +1182,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error clearing Blender parent: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderClearParentResponse, ErrorResponse),
@@ -1228,7 +1228,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.assign_material(
                     input_data.object_name,
@@ -1238,7 +1238,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.roughness,
                 )
                 payload["success"] = True
-                result = BlenderAssignMaterialResponse(**payload).dict()
+                result = BlenderAssignMaterialResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderAssignMaterialResponse, ErrorResponse),
@@ -1246,7 +1246,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error assigning Blender material: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderAssignMaterialResponse, ErrorResponse),
@@ -1290,7 +1290,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.add_modifier(
                     input_data.object_name,
@@ -1299,7 +1299,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     dict(input_data.params),
                 )
                 payload["success"] = True
-                result = BlenderAddModifierResponse(**payload).dict()
+                result = BlenderAddModifierResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderAddModifierResponse, ErrorResponse),
@@ -1307,7 +1307,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error adding Blender modifier: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderAddModifierResponse, ErrorResponse),
@@ -1357,7 +1357,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 col = list(input_data.color) if input_data.color else None
                 payload = session.set_light_params(
@@ -1370,7 +1370,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.shadow_soft_size,
                 )
                 payload["success"] = True
-                result = BlenderSetLightParamsResponse(**payload).dict()
+                result = BlenderSetLightParamsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderSetLightParamsResponse, ErrorResponse),
@@ -1378,7 +1378,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error setting Blender light params: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderSetLightParamsResponse, ErrorResponse),
@@ -1419,11 +1419,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.open_blend_file(input_data.file_path)
                 payload["success"] = True
-                result = BlenderOpenFileResponse(**payload).dict()
+                result = BlenderOpenFileResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderOpenFileResponse, ErrorResponse),
@@ -1431,7 +1431,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error opening Blender file: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderOpenFileResponse, ErrorResponse),
@@ -1469,11 +1469,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.save_blend_file(input_data.file_path)
                 payload["success"] = True
-                result = BlenderSaveFileResponse(**payload).dict()
+                result = BlenderSaveFileResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderSaveFileResponse, ErrorResponse),
@@ -1481,7 +1481,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error saving Blender file: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderSaveFileResponse, ErrorResponse),
@@ -1521,14 +1521,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.import_file(
                     input_data.file_path,
                     input_data.file_format,
                 )
                 payload["success"] = True
-                result = BlenderImportFileResponse(**payload).dict()
+                result = BlenderImportFileResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderImportFileResponse, ErrorResponse),
@@ -1536,7 +1536,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error(f"Error importing Blender file: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderImportFileResponse, ErrorResponse),
@@ -1580,7 +1580,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.export_file(
                     file_path=input_data.file_path,
@@ -1588,7 +1588,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     selected_only=input_data.selected_only,
                 )
                 payload["success"] = True
-                result = BlenderExportFileResponse(**payload).dict()
+                result = BlenderExportFileResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderExportFileResponse, ErrorResponse),
@@ -1596,7 +1596,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error exporting Blender file: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderExportFileResponse, ErrorResponse),
@@ -1626,11 +1626,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_file_info()
                 payload["success"] = True
-                result = BlenderFileInfoResponse(**payload).dict()
+                result = BlenderFileInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderFileInfoResponse, ErrorResponse),
@@ -1638,7 +1638,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error getting file info: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderFileInfoResponse, ErrorResponse),
@@ -1676,11 +1676,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.set_frame(input_data.frame)
                 payload["success"] = True
-                result = BlenderSetFrameResponse(**payload).dict()
+                result = BlenderSetFrameResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderSetFrameResponse, ErrorResponse),
@@ -1688,7 +1688,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error setting frame: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderSetFrameResponse, ErrorResponse),
@@ -1718,11 +1718,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_frame()
                 payload["success"] = True
-                result = BlenderGetFrameResponse(**payload).dict()
+                result = BlenderGetFrameResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderGetFrameResponse, ErrorResponse),
@@ -1730,7 +1730,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error getting frame: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderGetFrameResponse, ErrorResponse),
@@ -1770,14 +1770,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.set_frame_range(
                     input_data.frame_start,
                     input_data.frame_end,
                 )
                 payload["success"] = True
-                result = BlenderSetFrameRangeResponse(**payload).dict()
+                result = BlenderSetFrameRangeResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderSetFrameRangeResponse, ErrorResponse),
@@ -1785,7 +1785,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error setting frame range: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderSetFrameRangeResponse, ErrorResponse),
@@ -1823,11 +1823,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.play_animation(input_data.action)
                 payload["success"] = True
-                result = BlenderPlayAnimationResponse(**payload).dict()
+                result = BlenderPlayAnimationResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderPlayAnimationResponse, ErrorResponse),
@@ -1835,7 +1835,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error controlling animation: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderPlayAnimationResponse, ErrorResponse),
@@ -1879,7 +1879,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.insert_keyframe(
                     input_data.object_name,
@@ -1888,7 +1888,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.index,
                 )
                 payload["success"] = True
-                result = BlenderInsertKeyframeResponse(**payload).dict()
+                result = BlenderInsertKeyframeResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -1899,7 +1899,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error inserting keyframe: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (
@@ -1946,7 +1946,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.delete_keyframe(
                     input_data.object_name,
@@ -1955,7 +1955,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.index,
                 )
                 payload["success"] = True
-                result = BlenderDeleteKeyframeResponse(**payload).dict()
+                result = BlenderDeleteKeyframeResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -1966,7 +1966,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error deleting keyframe: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (
@@ -2007,13 +2007,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_keyframes(
                     input_data.object_name,
                 )
                 payload["success"] = True
-                result = BlenderGetKeyframesResponse(**payload).dict()
+                result = BlenderGetKeyframesResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -2024,7 +2024,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error getting keyframes: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (
@@ -2081,7 +2081,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.setup_rigid_body(
                     input_data.object_name,
@@ -2094,7 +2094,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.angular_damping,
                 )
                 payload["success"] = True
-                result = BlenderSetupRigidBodyResponse(**payload).dict()
+                result = BlenderSetupRigidBodyResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -2105,7 +2105,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error setting up rigid body: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (
@@ -2152,7 +2152,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.add_force_field(
                     input_data.field_type,
@@ -2161,7 +2161,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.name,
                 )
                 payload["success"] = True
-                result = BlenderAddForceFieldResponse(**payload).dict()
+                result = BlenderAddForceFieldResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -2172,7 +2172,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error adding force field: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (
@@ -2213,13 +2213,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_force_field_info(
                     input_data.object_name,
                 )
                 payload["success"] = True
-                result = BlenderGetForceFieldInfoResponse(**payload).dict()
+                result = BlenderGetForceFieldInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -2230,7 +2230,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error getting force field info: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (
@@ -2279,7 +2279,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.add_rigid_body_constraint(
                     input_data.constraint_type,
@@ -2289,7 +2289,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.disable_collisions,
                 )
                 payload["success"] = True
-                result = BlenderAddConstraintResponse(**payload).dict()
+                result = BlenderAddConstraintResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -2300,7 +2300,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error adding rigid body constraint: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (
@@ -2341,13 +2341,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_constraint_info(
                     input_data.object_name,
                 )
                 payload["success"] = True
-                result = BlenderGetConstraintInfoResponse(**payload).dict()
+                result = BlenderGetConstraintInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -2358,7 +2358,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error getting constraint info: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (
@@ -2399,13 +2399,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_physics_state(
                     input_data.object_name,
                 )
                 payload["success"] = True
-                result = BlenderGetPhysicsStateResponse(**payload).dict()
+                result = BlenderGetPhysicsStateResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -2416,7 +2416,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error getting physics state: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (
@@ -2463,7 +2463,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_object_trajectory(
                     input_data.object_name,
@@ -2472,7 +2472,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.step,
                 )
                 payload["success"] = True
-                result = BlenderGetTrajectoryResponse(**payload).dict()
+                result = BlenderGetTrajectoryResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -2483,7 +2483,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error getting trajectory: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (
@@ -2526,14 +2526,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.bake_simulation(
                     input_data.frame_start,
                     input_data.frame_end,
                 )
                 payload["success"] = True
-                result = BlenderBakeSimulationResponse(**payload).dict()
+                result = BlenderBakeSimulationResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -2544,7 +2544,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error baking simulation: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (
@@ -2577,12 +2577,12 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 session.free_bake()
                 result = BlenderFreeBakeResponse(
                     success=True,
-                ).dict()
+                ).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -2593,7 +2593,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error freeing bake: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (
@@ -2641,7 +2641,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.execute_script(
                     input_data.script,
@@ -2649,7 +2649,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
                 has_error = payload.get("error") is not None
                 payload["success"] = not has_error
-                result = BlenderExecuteScriptResponse(**payload).dict()
+                result = BlenderExecuteScriptResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (BlenderExecuteScriptResponse, ErrorResponse),
@@ -2657,7 +2657,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error executing Blender script: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (BlenderExecuteScriptResponse, ErrorResponse),
@@ -2708,7 +2708,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Blender runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.create_mesh_from_data(
                     name=input_data.name,
@@ -2721,7 +2721,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     collection_name=input_data.collection_name,
                 )
                 payload["success"] = True
-                result = BlenderCreateMeshFromDataResponse(**payload).dict()
+                result = BlenderCreateMeshFromDataResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -2732,7 +2732,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error creating mesh from data: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (
@@ -2780,11 +2780,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             with server.blender_adapter.create_session() as session:
                 payload = session.apply_simready_metadata(
                     object_name=input_data.object_name,
-                    metadata=input_data.metadata.dict(exclude_none=True),
+                    metadata=input_data.metadata.model_dump(exclude_none=True),
                 )
                 result = SimReadyApplyMetadataResponse(
                     success=True, **payload
-                ).dict()
+                ).model_dump()
                 return server._validate_output(
                     result,
                     (SimReadyApplyMetadataResponse, ErrorResponse),
@@ -2792,7 +2792,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error applying SimReady metadata: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (SimReadyApplyMetadataResponse, ErrorResponse),
@@ -2834,7 +2834,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 payload = session.get_simready_metadata(
                     object_name=input_data.object_name,
                 )
-                result = SimReadyGetMetadataResponse(success=True, **payload).dict()
+                result = SimReadyGetMetadataResponse(success=True, **payload).model_dump()
                 return server._validate_output(
                     result,
                     (SimReadyGetMetadataResponse, ErrorResponse),
@@ -2842,7 +2842,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error getting SimReady metadata: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (SimReadyGetMetadataResponse, ErrorResponse),
@@ -2899,7 +2899,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     check_materials=input_data.check_materials,
                     check_hierarchy=input_data.check_hierarchy,
                 )
-                result = SimReadyValidateResponse(success=True, **payload).dict()
+                result = SimReadyValidateResponse(success=True, **payload).model_dump()
                 return server._validate_output(
                     result,
                     (SimReadyValidateResponse, ErrorResponse),
@@ -2907,7 +2907,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error validating SimReady compliance: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (SimReadyValidateResponse, ErrorResponse),
@@ -2958,7 +2958,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     embed_metadata=input_data.embed_metadata,
                     validate_before_export=input_data.validate_before_export,
                 )
-                result = SimReadyExportResponse(success=True, **payload).dict()
+                result = SimReadyExportResponse(success=True, **payload).model_dump()
                 return server._validate_output(
                     result,
                     (SimReadyExportResponse, ErrorResponse),
@@ -2966,7 +2966,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error exporting SimReady USD: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (SimReadyExportResponse, ErrorResponse),
@@ -3013,14 +3013,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     root_name=input_data.root_name,
                     child_names=input_data.child_names,
                     semantic=(
-                        input_data.semantic.dict(exclude_none=True)
+                        input_data.semantic.model_dump(exclude_none=True)
                         if input_data.semantic
                         else None
                     ),
                 )
                 result = SimReadySetupHierarchyResponse(
                     success=True, **payload
-                ).dict()
+                ).model_dump()
                 return server._validate_output(
                     result,
                     (
@@ -3031,7 +3031,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error setting up SimReady hierarchy: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (

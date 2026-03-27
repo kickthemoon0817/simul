@@ -172,7 +172,14 @@ class TestMeshOperations:
                     [1, 1, 1],
                 ],
                 "face_vertex_counts": [4, 4, 4, 4, 4, 4],
-                "face_vertex_indices": list(range(24)),
+                "face_vertex_indices": [
+                    0, 1, 3, 2,
+                    4, 6, 7, 5,
+                    0, 2, 6, 4,
+                    1, 5, 7, 3,
+                    0, 4, 5, 1,
+                    2, 3, 7, 6,
+                ],
                 "normals": None,
                 "uvs": None,
                 "colors": None,
@@ -385,9 +392,7 @@ class TestConvenienceFunctions:
         result = extract_mesh_data(mock_prim)
 
         mock_mesh_ops_class.assert_called_once()
-        mock_ops.extract_mesh_data.assert_called_once_with(
-            mock_prim, mock_prim.__class__.TimeCode.Default()
-        )
+        mock_ops.extract_mesh_data.assert_called_once_with(mock_prim, None)
         assert result == {"test": "data"}
 
     @patch("simul_mcp.usd.mesh_ops.MeshOperations")
@@ -421,9 +426,7 @@ class TestConvenienceFunctions:
         result = get_mesh_statistics(mock_prim)
 
         mock_mesh_ops_class.assert_called_once()
-        mock_ops.get_mesh_statistics.assert_called_once_with(
-            mock_prim, mock_prim.__class__.TimeCode.Default()
-        )
+        mock_ops.get_mesh_statistics.assert_called_once_with(mock_prim, None)
         assert result == mock_info
 
 

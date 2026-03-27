@@ -4,6 +4,7 @@ USD headless file operation tool registration for Simul MCP Server.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ..schemas import *
@@ -52,14 +53,14 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 error="File path is not allowed by sandbox policy",
                 error_type="SandboxError",
                 details={"file_path": input_data.file_path},
-            ).dict()
+            ).model_dump()
 
         try:
             adapter = server.headless_adapter
             if not adapter:
                 return ErrorResponse(
                     error="No USD adapter available", error_type="AdapterError"
-                ).dict()
+                ).model_dump()
 
             with adapter.create_session() as session:
                 stage_id = session.load_stage(input_data.file_path)
@@ -81,7 +82,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                             != stage_info.end_time_code,
                             layer_count=len(stage_info.layers),
                             default_prim=stage_info.default_prim,
-                        ).dict()
+                        ).model_dump()
                         return server._validate_output(
                             result, (StageInfo, ErrorResponse), "load_usd_file"
                         )
@@ -89,14 +90,14 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             result = ErrorResponse(
                 error=f"Failed to load USD file: {input_data.file_path}",
                 error_type="LoadError",
-            ).dict()
+            ).model_dump()
             return server._validate_output(
                 result, (StageInfo, ErrorResponse), "load_usd_file"
             )
 
         except Exception as e:
             server.logger.error(f"Error loading USD file {input_data.file_path}: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result, (StageInfo, ErrorResponse), "load_usd_file"
             )
@@ -128,7 +129,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 error="File path is not allowed by sandbox policy",
                 error_type="SandboxError",
                 details={"file_path": input_data.file_path},
-            ).dict()
+            ).model_dump()
 
         try:
             path = Path(input_data.file_path)
@@ -146,7 +147,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 format=path.suffix.lower().lstrip("."),
                 is_valid=file_exists and is_file and valid_extension and size_ok,
                 can_read=file_exists and is_file and valid_extension,
-            ).dict()
+            ).model_dump()
             return server._validate_output(
                 result, (USDFileInfo, ErrorResponse), "validate_usd_file"
             )
@@ -154,7 +155,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.logger.error(
                 f"Error validating USD file {input_data.file_path}: {e}"
             )
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result, (USDFileInfo, ErrorResponse), "validate_usd_file"
             )
@@ -198,7 +199,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             if not adapter:
                 return ErrorResponse(
                     error="No USD adapter available", error_type="AdapterError"
-                ).dict()
+                ).model_dump()
 
             with adapter.create_session() as session:
                 prim_info = session.get_prim_info(
@@ -252,7 +253,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                         material_bindings=material_bindings,
                         attributes=prim_info.attributes,
                         metadata=prim_info.metadata,
-                    ).dict()
+                    ).model_dump()
                     return server._validate_output(
                         result, (PrimInfo, ErrorResponse), "get_prim_info"
                     )
@@ -260,7 +261,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             result = ErrorResponse(
                 error=f"Prim not found: {input_data.prim_path}",
                 error_type="NotFoundError",
-            ).dict()
+            ).model_dump()
             return server._validate_output(
                 result, (PrimInfo, ErrorResponse), "get_prim_info"
             )
@@ -270,7 +271,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 "Error getting prim info "
                 f"{input_data.stage_id}:{input_data.prim_path}: {e}"
             )
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result, (PrimInfo, ErrorResponse), "get_prim_info"
             )
@@ -313,7 +314,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             if not adapter:
                 return ErrorResponse(
                     error="No USD adapter available", error_type="AdapterError"
-                ).dict()
+                ).model_dump()
 
             with adapter.create_session() as session:
                 success = session.create_prim(
@@ -328,7 +329,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                         stage_id=input_data.stage_id,
                         prim_path=input_data.prim_path,
                         message=f"Created prim {input_data.prim_path}",
-                    ).dict()
+                    ).model_dump()
                     return server._validate_output(
                         result, (PrimActionResponse, ErrorResponse), "create_prim"
                     )
@@ -336,7 +337,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             result = ErrorResponse(
                 error=f"Failed to create prim: {input_data.prim_path}",
                 error_type="CreateError",
-            ).dict()
+            ).model_dump()
             return server._validate_output(
                 result, (PrimActionResponse, ErrorResponse), "create_prim"
             )
@@ -346,7 +347,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 "Error creating prim "
                 f"{input_data.stage_id}:{input_data.prim_path}: {e}"
             )
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result, (PrimActionResponse, ErrorResponse), "create_prim"
             )
@@ -387,7 +388,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             if not adapter:
                 return ErrorResponse(
                     error="No USD adapter available", error_type="AdapterError"
-                ).dict()
+                ).model_dump()
 
             with adapter.create_session() as session:
                 success = session.update_prim_attributes(
@@ -401,7 +402,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                         stage_id=input_data.stage_id,
                         prim_path=input_data.prim_path,
                         message=f"Updated prim {input_data.prim_path}",
-                    ).dict()
+                    ).model_dump()
                     return server._validate_output(
                         result,
                         (PrimActionResponse, ErrorResponse),
@@ -411,7 +412,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             result = ErrorResponse(
                 error=f"Failed to update prim: {input_data.prim_path}",
                 error_type="UpdateError",
-            ).dict()
+            ).model_dump()
             return server._validate_output(
                 result,
                 (PrimActionResponse, ErrorResponse),
@@ -423,7 +424,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 "Error updating prim "
                 f"{input_data.stage_id}:{input_data.prim_path}: {e}"
             )
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (PrimActionResponse, ErrorResponse),
@@ -461,7 +462,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             if not adapter:
                 return ErrorResponse(
                     error="No USD adapter available", error_type="AdapterError"
-                ).dict()
+                ).model_dump()
 
             with adapter.create_session() as session:
                 success = session.delete_prim(
@@ -473,7 +474,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                         stage_id=input_data.stage_id,
                         prim_path=input_data.prim_path,
                         message=f"Deleted prim {input_data.prim_path}",
-                    ).dict()
+                    ).model_dump()
                     return server._validate_output(
                         result, (PrimActionResponse, ErrorResponse), "delete_prim"
                     )
@@ -481,7 +482,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             result = ErrorResponse(
                 error=f"Failed to delete prim: {input_data.prim_path}",
                 error_type="DeleteError",
-            ).dict()
+            ).model_dump()
             return server._validate_output(
                 result, (PrimActionResponse, ErrorResponse), "delete_prim"
             )
@@ -491,7 +492,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 "Error deleting prim "
                 f"{input_data.stage_id}:{input_data.prim_path}: {e}"
             )
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result, (PrimActionResponse, ErrorResponse), "delete_prim"
             )
@@ -525,14 +526,14 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             if not adapter:
                 return ErrorResponse(
                     error="No USD adapter available", error_type="AdapterError"
-                ).dict()
+                ).model_dump()
 
             with adapter.create_session() as session:
                 mesh_info = session.get_mesh_info(
                     input_data.stage_id, input_data.prim_path
                 )
                 if mesh_info:
-                    result = MeshInfo(**mesh_info).dict()
+                    result = MeshInfo(**mesh_info).model_dump()
                     return server._validate_output(
                         result, (MeshInfo, ErrorResponse), "get_mesh_info"
                     )
@@ -540,7 +541,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             result = ErrorResponse(
                 error=f"Mesh not found: {input_data.prim_path}",
                 error_type="NotFoundError",
-            ).dict()
+            ).model_dump()
             return server._validate_output(
                 result, (MeshInfo, ErrorResponse), "get_mesh_info"
             )
@@ -550,7 +551,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 "Error getting mesh info "
                 f"{input_data.stage_id}:{input_data.prim_path}: {e}"
             )
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result, (MeshInfo, ErrorResponse), "get_mesh_info"
             )
@@ -602,7 +603,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             if not adapter:
                 return ErrorResponse(
                     error="No USD adapter available", error_type="AdapterError"
-                ).dict()
+                ).model_dump()
 
             with adapter.create_session() as session:
                 results: List[str] = []
@@ -624,14 +625,14 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                     query=input_data.query,
                     results=results,
                     count=len(results),
-                ).dict()
+                ).model_dump()
                 return server._validate_output(
                     result, (PrimSearchResponse, ErrorResponse), "search_prims"
                 )
 
         except Exception as e:
             server.logger.error(f"Error searching prims {input_data.stage_id}: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result, (PrimSearchResponse, ErrorResponse), "search_prims"
             )
@@ -682,7 +683,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             if not adapter:
                 return ErrorResponse(
                     error="No USD adapter available", error_type="AdapterError"
-                ).dict()
+                ).model_dump()
 
             with adapter.create_session() as session:
                 if input_data.prim_path:
@@ -702,7 +703,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                         prim_path=input_data.prim_path,
                         bbox=bbox,
                         world_space=input_data.world_space,
-                    ).dict()
+                    ).model_dump()
                     return server._validate_output(
                         result, (BBoxResponse, ErrorResponse), "get_bounding_box"
                     )
@@ -710,7 +711,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                     result = ErrorResponse(
                         error="Could not compute bounding box",
                         error_type="ComputationError",
-                    ).dict()
+                    ).model_dump()
                     return server._validate_output(
                         result, (BBoxResponse, ErrorResponse), "get_bounding_box"
                     )
@@ -720,7 +721,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 "Error computing bounding box "
                 f"{input_data.stage_id}:{input_data.prim_path}: {e}"
             )
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result, (BBoxResponse, ErrorResponse), "get_bounding_box"
             )
@@ -773,7 +774,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             if not adapter:
                 return ErrorResponse(
                     error="No USD adapter available", error_type="AdapterError"
-                ).dict()
+                ).model_dump()
 
             with adapter.create_session() as session:
                 summary = session.summarize_stage(
@@ -806,7 +807,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                         stage_id=input_data.stage_id,
                         summary=summary_dict,
                         digest=digest,
-                    ).dict()
+                    ).model_dump()
                     return server._validate_output(
                         result,
                         (SceneSummaryResponse, ErrorResponse),
@@ -816,7 +817,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                     result = ErrorResponse(
                         error="Could not generate scene summary",
                         error_type="ComputationError",
-                    ).dict()
+                    ).model_dump()
                     return server._validate_output(
                         result,
                         (SceneSummaryResponse, ErrorResponse),
@@ -825,8 +826,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error(f"Error summarizing scene {input_data.stage_id}: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result, (SceneSummaryResponse, ErrorResponse), "summarize_scene"
             )
-

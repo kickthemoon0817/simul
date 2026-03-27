@@ -35,13 +35,17 @@ app = typer.Typer(
 console = Console(stderr=True)
 
 
-def _tools(host: Optional[str] = None, port: Optional[int] = None, timeout: float = 30.0) -> IsaacTools:
+def _tools(
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    timeout: Optional[float] = None,
+) -> IsaacTools:
     """Build an IsaacTools instance from settings with optional overrides."""
     settings = get_settings()
     client = IsaacSocketClient(
         host=host or settings.isaac_sim.socket_host,
         port=port or settings.isaac_sim.socket_port,
-        timeout_seconds=timeout,
+        timeout_seconds=timeout or settings.isaac_sim.socket_timeout,
     )
     return IsaacTools(client, settings)
 
@@ -74,7 +78,12 @@ def _run(coro: Any) -> Dict[str, Any]:
 # Common host/port/timeout options
 _host_opt = typer.Option(None, "--host", "-H", help="Isaac Sim host")
 _port_opt = typer.Option(None, "--port", "-p", help="Isaac Sim port")
-_timeout_opt = typer.Option(30.0, "--timeout", "-t", help="Timeout in seconds")
+_timeout_opt = typer.Option(
+    None,
+    "--timeout",
+    "-t",
+    help="Timeout in seconds (defaults to isaac_sim.socket_timeout)",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +93,7 @@ _timeout_opt = typer.Option(30.0, "--timeout", "-t", help="Timeout in seconds")
 def ping(
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
-    timeout: float = typer.Option(5.0, "--timeout", "-t", help="Timeout in seconds"),
+    timeout: Optional[float] = _timeout_opt,
 ) -> None:
     """Check connectivity to Isaac Sim."""
     tools = _tools(host, port, timeout)

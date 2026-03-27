@@ -6,6 +6,7 @@ environment variables, YAML files, and validation.
 """
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from functools import lru_cache
@@ -13,6 +14,11 @@ from functools import lru_cache
 import yaml
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_CONFIG_FILE = "config/isaac/default.yaml"
+_ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 
 class ServerConfig(BaseModel):
@@ -254,6 +260,10 @@ class LoggingConfig(BaseModel):
     console_colored: bool = Field(
         default=True, description="Enable colored console output"
     )
+    components: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Component-specific logging levels",
+    )
 
     @field_validator("level")
     @classmethod
@@ -374,9 +384,347 @@ class Settings(BaseSettings):
     )
 
 
+def _compact_dict(values: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop None values so Settings can keep model defaults."""
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def _coalesce(*values: Any) -> Any:
+    """Return the first non-None value."""
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _resolve_config_file(config_file: Union[str, Path]) -> Path:
+    """Resolve config paths relative to cwd first, then the repo root."""
+    candidate = Path(os.path.expandvars(str(config_file))).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    if candidate.exists():
+        return candidate.resolve()
+    return (_PROJECT_ROOT / candidate).resolve()
+
+
+def _expand_string(value: str, env: Dict[str, str]) -> str:
+    """Expand ${VAR} placeholders using environment values."""
+
+    def _replace(match: re.Match[str]) -> str:
+        var_name = match.group(1)
+        return env.get(var_name, match.group(0))
+
+    return _ENV_PLACEHOLDER_PATTERN.sub(_replace, value)
+
+
+def _expand_placeholders(value: Any, env: Dict[str, str]) -> Any:
+    """Recursively expand ${VAR} placeholders in nested YAML data."""
+    if isinstance(value, dict):
+        return {key: _expand_placeholders(item, env) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_expand_placeholders(item, env) for item in value]
+    if isinstance(value, str):
+        return _expand_string(value, env)
+    return value
+
+
+def _normalise_optional_path(value: Any) -> Optional[str]:
+    """Treat unresolved placeholders in optional path fields as unset."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or _ENV_PLACEHOLDER_PATTERN.search(stripped):
+            return None
+        return stripped
+    return str(value)
+
+
+def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten the repo's nested YAML layout into the Settings model shape."""
+    env = dict(os.environ)
+    env.setdefault("PROJECT_ROOT", str(_PROJECT_ROOT))
+    raw = _expand_placeholders(config_data, env)
+
+    server = raw.get("server") or {}
+    isaac = raw.get("isaac_sim") or {}
+    isaac_kit = isaac.get("kit") or {}
+    isaac_resolution = isaac_kit.get("resolution") or {}
+    usd = raw.get("usd") or {}
+    usd_stage = usd.get("stage") or {}
+    usd_cache = usd.get("cache") or {}
+    usd_files = usd.get("files") or {}
+    usd_performance = usd.get("performance") or {}
+    mesh = raw.get("mesh") or {}
+    mesh_decimation = mesh.get("decimation") or {}
+    mesh_analysis = mesh.get("analysis") or {}
+    mesh_export = mesh.get("export") or {}
+    viewport = raw.get("viewport") or {}
+    viewport_capture = viewport.get("capture") or {}
+    viewport_rendering = viewport.get("rendering") or {}
+    viewport_camera = viewport.get("camera") or {}
+    logging_cfg = raw.get("logging") or {}
+    logging_file = logging_cfg.get("file") or {}
+    logging_console = logging_cfg.get("console") or {}
+    security = raw.get("security") or {}
+    security_sandbox = security.get("sandbox") or {}
+    security_rate = security.get("rate_limiting") or {}
+    performance = raw.get("performance") or {}
+    performance_memory = performance.get("memory") or {}
+    performance_threading = performance.get("threading") or {}
+    performance_caching = performance.get("caching") or {}
+    development = raw.get("development") or {}
+    development_testing = development.get("testing") or {}
+
+    return _compact_dict(
+        {
+            "server": _compact_dict(
+                {
+                    "name": server.get("name"),
+                    "host": server.get("host"),
+                    "port": server.get("port"),
+                    "max_connections": server.get("max_connections"),
+                    "timeout": server.get("timeout"),
+                    "enable_cors": server.get("enable_cors"),
+                    "cors_origins": server.get("cors_origins"),
+                }
+            ),
+            "isaac_sim": _compact_dict(
+                {
+                    "path": _normalise_optional_path(isaac.get("path")),
+                    "headless": _coalesce(isaac.get("headless"), isaac_kit.get("headless")),
+                    "enable_livestream": _coalesce(
+                        isaac.get("enable_livestream"),
+                        isaac_kit.get("enable_livestream"),
+                    ),
+                    "livestream_port": _coalesce(
+                        isaac.get("livestream_port"),
+                        isaac_kit.get("livestream_port"),
+                    ),
+                    "enable_webrtc": _coalesce(
+                        isaac.get("enable_webrtc"),
+                        isaac_kit.get("enable_webrtc"),
+                    ),
+                    "width": _coalesce(isaac.get("width"), isaac_resolution.get("width")),
+                    "height": _coalesce(isaac.get("height"), isaac_resolution.get("height")),
+                    "socket_host": isaac.get("socket_host"),
+                    "socket_port": isaac.get("socket_port"),
+                    "socket_timeout": isaac.get("socket_timeout"),
+                    "instances": isaac.get("instances"),
+                    "scan_port_start": isaac.get("scan_port_start"),
+                    "scan_port_end": isaac.get("scan_port_end"),
+                }
+            ),
+            "blender": raw.get("blender"),
+            "unreal": raw.get("unreal"),
+            "usd": _compact_dict(
+                {
+                    "cache_enabled": _coalesce(
+                        usd.get("cache_enabled"), usd_cache.get("enabled")
+                    ),
+                    "cache_size": _coalesce(usd.get("cache_size"), usd_cache.get("size")),
+                    "stage_cache_limit": _coalesce(
+                        usd.get("stage_cache_limit"), usd_cache.get("stage_cache_limit")
+                    ),
+                    "load_rules": _coalesce(usd.get("load_rules"), usd_stage.get("load_rules")),
+                    "population_mask": _coalesce(
+                        usd.get("population_mask"), usd_stage.get("population_mask")
+                    ),
+                    "interpolation_type": _coalesce(
+                        usd.get("interpolation_type"), usd_stage.get("interpolation_type")
+                    ),
+                    "enable_instancing": _coalesce(
+                        usd.get("enable_instancing"), usd_stage.get("enable_instancing")
+                    ),
+                    "enable_multithreading": _coalesce(
+                        usd.get("enable_multithreading"),
+                        usd_performance.get("enable_multithreading"),
+                    ),
+                    "max_concurrent_operations": _coalesce(
+                        usd.get("max_concurrent_operations"),
+                        usd_performance.get("max_concurrent_operations"),
+                    ),
+                    "operation_timeout": _coalesce(
+                        usd.get("operation_timeout"), usd_performance.get("operation_timeout")
+                    ),
+                    "allowed_extensions": _coalesce(
+                        usd.get("allowed_extensions"), usd_files.get("allowed_extensions")
+                    ),
+                    "max_file_size_mb": _coalesce(
+                        usd.get("max_file_size_mb"), usd_files.get("max_file_size_mb")
+                    ),
+                }
+            ),
+            "mesh": _compact_dict(
+                {
+                    "decimation_enabled": _coalesce(
+                        mesh.get("decimation_enabled"), mesh_decimation.get("enabled")
+                    ),
+                    "max_faces": _coalesce(mesh.get("max_faces"), mesh_decimation.get("max_faces")),
+                    "preserve_boundaries": _coalesce(
+                        mesh.get("preserve_boundaries"),
+                        mesh_decimation.get("preserve_boundaries"),
+                    ),
+                    "preserve_topology": _coalesce(
+                        mesh.get("preserve_topology"), mesh_decimation.get("preserve_topology")
+                    ),
+                    "compute_normals": _coalesce(
+                        mesh.get("compute_normals"), mesh_analysis.get("compute_normals")
+                    ),
+                    "compute_tangents": _coalesce(
+                        mesh.get("compute_tangents"), mesh_analysis.get("compute_tangents")
+                    ),
+                    "validate_topology": _coalesce(
+                        mesh.get("validate_topology"), mesh_analysis.get("validate_topology")
+                    ),
+                    "include_materials": _coalesce(
+                        mesh.get("include_materials"), mesh_export.get("include_materials")
+                    ),
+                    "include_textures": _coalesce(
+                        mesh.get("include_textures"), mesh_export.get("include_textures")
+                    ),
+                    "texture_resolution": _coalesce(
+                        mesh.get("texture_resolution"), mesh_export.get("texture_resolution")
+                    ),
+                }
+            ),
+            "viewport": _compact_dict(
+                {
+                    "default_width": _coalesce(
+                        viewport.get("default_width"), viewport_capture.get("width")
+                    ),
+                    "default_height": _coalesce(
+                        viewport.get("default_height"), viewport_capture.get("height")
+                    ),
+                    "max_size": _coalesce(viewport.get("max_size"), viewport_capture.get("max_size")),
+                    "format": _coalesce(viewport.get("format"), viewport_capture.get("format")),
+                    "quality": _coalesce(viewport.get("quality"), viewport_capture.get("quality")),
+                    "samples_per_pixel": _coalesce(
+                        viewport.get("samples_per_pixel"),
+                        viewport_rendering.get("samples_per_pixel"),
+                    ),
+                    "max_bounces": _coalesce(
+                        viewport.get("max_bounces"), viewport_rendering.get("max_bounces")
+                    ),
+                    "enable_denoising": _coalesce(
+                        viewport.get("enable_denoising"),
+                        viewport_rendering.get("enable_denoising"),
+                    ),
+                    "fov": _coalesce(viewport.get("fov"), viewport_camera.get("fov")),
+                    "near_plane": _coalesce(
+                        viewport.get("near_plane"), viewport_camera.get("near_plane")
+                    ),
+                    "far_plane": _coalesce(
+                        viewport.get("far_plane"), viewport_camera.get("far_plane")
+                    ),
+                }
+            ),
+            "logging": _compact_dict(
+                {
+                    "level": logging_cfg.get("level"),
+                    "format": logging_cfg.get("format"),
+                    "file_enabled": _coalesce(
+                        logging_cfg.get("file_enabled"), logging_file.get("enabled")
+                    ),
+                    "file_path": _coalesce(logging_cfg.get("file_path"), logging_file.get("path")),
+                    "file_max_size": _coalesce(
+                        logging_cfg.get("file_max_size"), logging_file.get("max_size")
+                    ),
+                    "file_backup_count": _coalesce(
+                        logging_cfg.get("file_backup_count"),
+                        logging_file.get("backup_count"),
+                    ),
+                    "console_enabled": _coalesce(
+                        logging_cfg.get("console_enabled"), logging_console.get("enabled")
+                    ),
+                    "console_colored": _coalesce(
+                        logging_cfg.get("console_colored"), logging_console.get("colored")
+                    ),
+                    "components": logging_cfg.get("components"),
+                }
+            ),
+            "security": _compact_dict(
+                {
+                    "sandbox_enabled": _coalesce(
+                        security.get("sandbox_enabled"), security_sandbox.get("enabled")
+                    ),
+                    "allowed_paths": _coalesce(
+                        security.get("allowed_paths"), security_sandbox.get("allowed_paths")
+                    ),
+                    "rate_limiting_enabled": _coalesce(
+                        security.get("rate_limiting_enabled"),
+                        security_rate.get("enabled"),
+                    ),
+                    "requests_per_minute": _coalesce(
+                        security.get("requests_per_minute"),
+                        security_rate.get("requests_per_minute"),
+                    ),
+                    "burst_size": _coalesce(
+                        security.get("burst_size"), security_rate.get("burst_size")
+                    ),
+                }
+            ),
+            "performance": _compact_dict(
+                {
+                    "memory_limit_gb": _coalesce(
+                        performance.get("memory_limit_gb"), performance_memory.get("limit_gb")
+                    ),
+                    "gc_threshold": _coalesce(
+                        performance.get("gc_threshold"), performance_memory.get("gc_threshold")
+                    ),
+                    "enable_memory_profiling": _coalesce(
+                        performance.get("enable_memory_profiling"),
+                        performance_memory.get("enable_memory_profiling"),
+                    ),
+                    "max_workers": _coalesce(
+                        performance.get("max_workers"), performance_threading.get("max_workers")
+                    ),
+                    "enable_async_operations": _coalesce(
+                        performance.get("enable_async_operations"),
+                        performance_threading.get("enable_async_operations"),
+                    ),
+                    "enable_result_caching": _coalesce(
+                        performance.get("enable_result_caching"),
+                        performance_caching.get("enable_result_caching"),
+                    ),
+                    "cache_ttl_seconds": _coalesce(
+                        performance.get("cache_ttl_seconds"),
+                        performance_caching.get("cache_ttl_seconds"),
+                    ),
+                    "max_cache_entries": _coalesce(
+                        performance.get("max_cache_entries"),
+                        performance_caching.get("max_cache_entries"),
+                    ),
+                }
+            ),
+            "features": raw.get("features"),
+            "development": _compact_dict(
+                {
+                    "debug_mode": development.get("debug_mode"),
+                    "profiling_enabled": development.get("profiling_enabled"),
+                    "verbose_usd_logging": development.get("verbose_usd_logging"),
+                    "enable_hot_reload": development.get("enable_hot_reload"),
+                    "enable_mock_isaac": _coalesce(
+                        development.get("enable_mock_isaac"),
+                        development_testing.get("enable_mock_isaac"),
+                    ),
+                    "use_test_data": _coalesce(
+                        development.get("use_test_data"),
+                        development_testing.get("use_test_data"),
+                    ),
+                    "skip_gpu_operations": _coalesce(
+                        development.get("skip_gpu_operations"),
+                        development_testing.get("skip_gpu_operations"),
+                    ),
+                }
+            ),
+        }
+    )
+
+
 def _load_yaml_settings(config_file: Union[str, Path]) -> Dict[str, Any]:
     """Load YAML settings from file path and return dict payload."""
-    config_path = Path(config_file)
+    config_path = _resolve_config_file(config_file)
     if not config_path.exists():
         return {}
 
@@ -384,24 +732,32 @@ def _load_yaml_settings(config_file: Union[str, Path]) -> Dict[str, Any]:
         with open(config_path, "r", encoding="utf-8") as f:
             config_data = yaml.safe_load(f)
         if isinstance(config_data, dict):
-            return config_data
+            return _normalise_settings_payload(config_data)
         return {}
     except Exception as e:
         print(f"Warning: Failed to load config file {config_path}: {e}")
         return {}
 
 
-@lru_cache()
-def get_settings() -> Settings:
-    """Get cached settings instance."""
-    config_file = os.getenv("CONFIG_FILE", "config/default.yaml")
-    config_data = _load_yaml_settings(config_file)
+@lru_cache(maxsize=None)
+def _get_cached_settings(cache_key: tuple[str, Optional[float]]) -> Settings:
+    """Load settings with a cache key that changes with path or mtime."""
+    config_path, _mtime = cache_key
+    config_data = _load_yaml_settings(config_path)
     return Settings(**config_data)
+
+
+def get_settings() -> Settings:
+    """Get settings keyed by the resolved config path and file mtime."""
+    config_file = os.getenv("CONFIG_FILE", _DEFAULT_CONFIG_FILE)
+    resolved = _resolve_config_file(config_file)
+    mtime = resolved.stat().st_mtime if resolved.exists() else None
+    return _get_cached_settings((str(resolved), mtime))
 
 
 def load_config_from_file(config_path: Union[str, Path]) -> Settings:
     """Load configuration from a specific YAML file."""
-    config_path = Path(config_path)
+    config_path = _resolve_config_file(config_path)
 
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
@@ -430,17 +786,22 @@ def validate_settings(settings: Settings) -> List[str]:
                 errors.append(f"Isaac Sim python executable not found: {python_exe}")
 
     # Validate log file directory
-    log_path = Path(settings.logging.file_path)
-    log_dir = log_path.parent
-    if not log_dir.exists():
-        try:
-            log_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            errors.append(f"Cannot create log directory {log_dir}: {e}")
+    if settings.logging.file_enabled:
+        log_path = Path(settings.logging.file_path)
+        if not log_path.is_absolute():
+            log_path = _PROJECT_ROOT / log_path
+        log_dir = log_path.parent
+        if not log_dir.exists():
+            try:
+                log_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                errors.append(f"Cannot create log directory {log_dir}: {e}")
 
     # Validate allowed paths exist
     for path_str in settings.security.allowed_paths:
         path = Path(path_str)
+        if not path.is_absolute():
+            path = _PROJECT_ROOT / path
         if not path.exists() and not path_str.startswith("/tmp"):
             errors.append(f"Allowed path does not exist: {path_str}")
 

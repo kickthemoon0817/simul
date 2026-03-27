@@ -33,7 +33,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from simul_mcp.cli.output import emit, emit_error, is_json_mode, set_json_mode
-from simul_mcp.config import get_settings, load_settings
+from simul_mcp.config import get_settings, load_settings, validate_settings
 from simul_mcp.logging import setup_logging, get_logger
 from simul_mcp.mcp.server import SimulMCPServer, start_mcp_server
 from simul_mcp.adapters import (
@@ -386,21 +386,31 @@ def validate_config(
     """Validate a configuration file."""
     try:
         settings = load_settings(config)
+        errors = validate_settings(settings)
+        is_valid = not errors
 
         if is_json_mode():
-            emit({
-                "valid": True,
-                "config_path": str(config),
-                "server_name": settings.server.name,
-                "log_level": settings.logging.level,
-                "usd_cache_enabled": settings.usd.cache_enabled,
-                "max_file_size_mb": settings.usd.max_file_size_mb,
-                "viewport_max_size": settings.viewport.max_size,
-            })
+            emit(
+                {
+                    "valid": is_valid,
+                    "config_path": str(config),
+                    "server_name": settings.server.name,
+                    "log_level": settings.logging.level,
+                    "usd_cache_enabled": settings.usd.cache_enabled,
+                    "max_file_size_mb": settings.usd.max_file_size_mb,
+                    "viewport_max_size": settings.viewport.max_size,
+                    "errors": errors,
+                }
+            )
+            if not is_valid:
+                raise typer.Exit(1)
             return
 
         console.print(f"[cyan]Validating configuration file: {config}[/cyan]")
-        console.print("[green]Configuration file is valid[/green]")
+        if is_valid:
+            console.print("[green]Configuration file is valid[/green]")
+        else:
+            console.print("[red]Configuration file is invalid[/red]")
 
         settings_table = Table(title="Configuration Summary")
         settings_table.add_column("Setting", style="cyan")
@@ -411,7 +421,16 @@ def validate_config(
         settings_table.add_row("Max File Size (MB)", str(settings.usd.max_file_size_mb))
         settings_table.add_row("Viewport Max Size", str(settings.viewport.max_size))
         console.print(settings_table)
+        if errors:
+            error_table = Table(title="Validation Errors")
+            error_table.add_column("Error", style="red")
+            for error in errors:
+                error_table.add_row(error)
+            console.print(error_table)
+            raise typer.Exit(1)
 
+    except typer.Exit:
+        raise
     except Exception as e:
         if is_json_mode():
             emit_error(str(e), "ValidationError")

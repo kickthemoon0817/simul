@@ -116,7 +116,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
                 error=f"Unknown instance '{instance_name}'. Available: {available}",
                 error_type="NotFoundError",
                 details={"available": available},
-            ).dict()
+            ).model_dump()
 
         client = server._isaac_clients[instance_name]
         port = client._port
@@ -182,7 +182,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         if not client:
             return ErrorResponse(
                 error="No active instance", error_type="StateError"
-            ).dict()
+            ).model_dump()
 
         port = client._port
         _agent_id = agent_id or f"agent-{id(server):x}"

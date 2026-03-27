@@ -44,12 +44,12 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.health_check()
                 payload["success"] = True
-                result = UnrealHealthCheckResponse(**payload).dict()
+                result = UnrealHealthCheckResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealHealthCheckResponse, ErrorResponse),
@@ -58,7 +58,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error("Error in Unreal health check: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealHealthCheckResponse, ErrorResponse),
@@ -94,12 +94,12 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_engine_info()
                 payload["success"] = True
-                result = UnrealEngineInfoResponse(**payload).dict()
+                result = UnrealEngineInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealEngineInfoResponse, ErrorResponse),
@@ -108,7 +108,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error("Error getting Unreal engine info: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealEngineInfoResponse, ErrorResponse),
@@ -144,12 +144,12 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_loaded_map()
                 payload["success"] = True
-                result = UnrealLoadedMapResponse(**payload).dict()
+                result = UnrealLoadedMapResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealLoadedMapResponse, ErrorResponse),
@@ -158,7 +158,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error("Error getting Unreal loaded map: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealLoadedMapResponse, ErrorResponse),
@@ -207,7 +207,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.list_actors(
@@ -216,7 +216,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     max_results=max_results,
                 )
                 payload["success"] = True
-                result = UnrealListActorsResponse(**payload).dict()
+                result = UnrealListActorsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealListActorsResponse, ErrorResponse),
@@ -225,7 +225,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error("Error listing Unreal actors: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealListActorsResponse, ErrorResponse),
@@ -264,12 +264,12 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_actor_info(actor_path)
                 payload["success"] = True
-                result = UnrealGetActorInfoResponse(**payload).dict()
+                result = UnrealGetActorInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealGetActorInfoResponse, ErrorResponse),
@@ -278,7 +278,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error("Error getting Unreal actor info: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealGetActorInfoResponse, ErrorResponse),
@@ -325,7 +325,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             parsed_classes = (
                 [c.strip() for c in class_names.split(",") if c.strip()]
@@ -346,7 +346,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     max_results=max_results,
                 )
                 payload["success"] = True
-                result = UnrealSearchAssetsResponse(**payload).dict()
+                result = UnrealSearchAssetsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSearchAssetsResponse, ErrorResponse),
@@ -355,7 +355,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error("Error searching Unreal assets: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSearchAssetsResponse, ErrorResponse),
@@ -394,12 +394,12 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.describe_object(object_path)
                 payload["success"] = True
-                result = UnrealDescribeObjectResponse(**payload).dict()
+                result = UnrealDescribeObjectResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealDescribeObjectResponse, ErrorResponse),
@@ -408,7 +408,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error("Error describing Unreal object: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealDescribeObjectResponse, ErrorResponse),
@@ -453,14 +453,14 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_actor_thumbnail(
                     asset_path=asset_path, width=width, height=height
                 )
                 payload["success"] = True
-                result = UnrealGetThumbnailResponse(**payload).dict()
+                result = UnrealGetThumbnailResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealGetThumbnailResponse, ErrorResponse),
@@ -469,7 +469,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error("Error getting Unreal thumbnail: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealGetThumbnailResponse, ErrorResponse),
@@ -505,12 +505,12 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.summarize_scene()
                 payload["success"] = True
-                result = UnrealSceneSummaryResponse(**payload).dict()
+                result = UnrealSceneSummaryResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSceneSummaryResponse, ErrorResponse),
@@ -519,7 +519,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error("Error summarizing Unreal scene: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSceneSummaryResponse, ErrorResponse),
@@ -566,7 +566,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.capture_viewport(
@@ -575,7 +575,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     format=format,
                 )
                 payload["success"] = True
-                result = UnrealCaptureViewportResponse(**payload).dict()
+                result = UnrealCaptureViewportResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealCaptureViewportResponse, ErrorResponse),
@@ -584,7 +584,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error("Error capturing Unreal viewport: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealCaptureViewportResponse, ErrorResponse),
@@ -620,12 +620,12 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_viewport_info()
                 payload["success"] = True
-                result = UnrealViewportInfoResponse(**payload).dict()
+                result = UnrealViewportInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealViewportInfoResponse, ErrorResponse),
@@ -634,7 +634,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error("Error getting Unreal viewport info: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealViewportInfoResponse, ErrorResponse),
@@ -687,7 +687,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.set_camera_view(
@@ -696,7 +696,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     fov=fov,
                 )
                 payload["success"] = True
-                result = UnrealSetCameraViewResponse(**payload).dict()
+                result = UnrealSetCameraViewResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSetCameraViewResponse, ErrorResponse),
@@ -705,7 +705,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error("Error setting Unreal camera view: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSetCameraViewResponse, ErrorResponse),
@@ -748,14 +748,14 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.focus_on_actor(
                     actor_path=actor_path, distance=distance
                 )
                 payload["success"] = True
-                result = UnrealFocusActorResponse(**payload).dict()
+                result = UnrealFocusActorResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealFocusActorResponse, ErrorResponse),
@@ -764,7 +764,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
 
         except Exception as e:
             server.logger.error("Error focusing on Unreal actor: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealFocusActorResponse, ErrorResponse),
@@ -805,7 +805,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.spawn_actor(
                     asset_path=asset_path,
@@ -814,7 +814,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     label=label or None,
                 )
                 payload["success"] = True
-                result = UnrealSpawnActorResponse(**payload).dict()
+                result = UnrealSpawnActorResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSpawnActorResponse, ErrorResponse),
@@ -822,7 +822,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error spawning Unreal actor: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSpawnActorResponse, ErrorResponse),
@@ -855,11 +855,11 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.delete_actor(actor_path=actor_path)
                 payload["success"] = True
-                result = UnrealDeleteActorResponse(**payload).dict()
+                result = UnrealDeleteActorResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealDeleteActorResponse, ErrorResponse),
@@ -867,7 +867,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error deleting Unreal actor: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealDeleteActorResponse, ErrorResponse),
@@ -908,7 +908,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.set_actor_transform(
                     actor_path=actor_path,
@@ -917,7 +917,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     scale=(scale_x, scale_y, scale_z),
                 )
                 payload["success"] = True
-                result = UnrealSetActorTransformResponse(**payload).dict()
+                result = UnrealSetActorTransformResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSetActorTransformResponse, ErrorResponse),
@@ -925,7 +925,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error setting Unreal actor transform: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSetActorTransformResponse, ErrorResponse),
@@ -960,7 +960,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.set_actor_property(
                     actor_path=actor_path,
@@ -969,7 +969,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     generate_transaction=generate_transaction,
                 )
                 payload["success"] = True
-                result = UnrealSetActorPropertyResponse(**payload).dict()
+                result = UnrealSetActorPropertyResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSetActorPropertyResponse, ErrorResponse),
@@ -977,7 +977,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error setting Unreal actor property: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSetActorPropertyResponse, ErrorResponse),
@@ -1011,7 +1011,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.call_actor_function(
                     actor_path=actor_path,
@@ -1019,7 +1019,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     parameters=parameters or None,
                 )
                 payload["success"] = True
-                result = UnrealCallActorFunctionResponse(**payload).dict()
+                result = UnrealCallActorFunctionResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealCallActorFunctionResponse, ErrorResponse),
@@ -1027,7 +1027,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error calling Unreal actor function: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealCallActorFunctionResponse, ErrorResponse),
@@ -1060,14 +1060,14 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.set_actor_parent(
                     actor_path=actor_path,
                     parent_path=parent_path or None,
                 )
                 payload["success"] = True
-                result = UnrealSetActorParentResponse(**payload).dict()
+                result = UnrealSetActorParentResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSetActorParentResponse, ErrorResponse),
@@ -1075,7 +1075,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error setting Unreal actor parent: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSetActorParentResponse, ErrorResponse),
@@ -1109,7 +1109,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.add_component(
                     actor_path=actor_path,
@@ -1117,7 +1117,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     component_name=component_name or None,
                 )
                 payload["success"] = True
-                result = UnrealAddComponentResponse(**payload).dict()
+                result = UnrealAddComponentResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealAddComponentResponse, ErrorResponse),
@@ -1125,7 +1125,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error adding Unreal component: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealAddComponentResponse, ErrorResponse),
@@ -1159,7 +1159,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.set_actor_visibility(
                     actor_path=actor_path,
@@ -1167,7 +1167,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     propagate=propagate,
                 )
                 payload["success"] = True
-                result = UnrealSetActorVisibilityResponse(**payload).dict()
+                result = UnrealSetActorVisibilityResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSetActorVisibilityResponse, ErrorResponse),
@@ -1175,7 +1175,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error setting Unreal actor visibility: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSetActorVisibilityResponse, ErrorResponse),
@@ -1211,13 +1211,13 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_material_info(
                     material_path=material_path,
                 )
                 payload["success"] = True
-                result = UnrealGetMaterialInfoResponse(**payload).dict()
+                result = UnrealGetMaterialInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealGetMaterialInfoResponse, ErrorResponse),
@@ -1225,7 +1225,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error getting Unreal material info: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealGetMaterialInfoResponse, ErrorResponse),
@@ -1262,7 +1262,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             scalar_params = (
                 json_lib.loads(scalar_params_json) if scalar_params_json else None
@@ -1282,7 +1282,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     texture_params=texture_params,
                 )
                 payload["success"] = True
-                result = UnrealSetMaterialParamsResponse(**payload).dict()
+                result = UnrealSetMaterialParamsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSetMaterialParamsResponse, ErrorResponse),
@@ -1290,7 +1290,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error setting Unreal material params: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSetMaterialParamsResponse, ErrorResponse),
@@ -1324,7 +1324,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.create_material_instance(
                     parent_path=parent_path,
@@ -1332,7 +1332,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     save_path=save_path,
                 )
                 payload["success"] = True
-                result = UnrealCreateMaterialInstanceResponse(**payload).dict()
+                result = UnrealCreateMaterialInstanceResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealCreateMaterialInstanceResponse, ErrorResponse),
@@ -1340,7 +1340,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error creating Unreal material instance: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealCreateMaterialInstanceResponse, ErrorResponse),
@@ -1374,7 +1374,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.assign_material(
                     actor_path=actor_path,
@@ -1382,7 +1382,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     slot_index=slot_index,
                 )
                 payload["success"] = True
-                result = UnrealAssignMaterialResponse(**payload).dict()
+                result = UnrealAssignMaterialResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealAssignMaterialResponse, ErrorResponse),
@@ -1390,7 +1390,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error assigning Unreal material: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealAssignMaterialResponse, ErrorResponse),
@@ -1430,7 +1430,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.set_light_params(
                     actor_path=actor_path,
@@ -1444,7 +1444,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     cast_shadows=cast_shadows,
                 )
                 payload["success"] = True
-                result = UnrealSetLightParamsResponse(**payload).dict()
+                result = UnrealSetLightParamsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSetLightParamsResponse, ErrorResponse),
@@ -1452,7 +1452,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error setting Unreal light params: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSetLightParamsResponse, ErrorResponse),
@@ -1485,14 +1485,14 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.set_render_settings(
                     setting_name=setting_name,
                     setting_value=setting_value,
                 )
                 payload["success"] = True
-                result = UnrealSetRenderSettingsResponse(**payload).dict()
+                result = UnrealSetRenderSettingsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSetRenderSettingsResponse, ErrorResponse),
@@ -1500,7 +1500,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error setting Unreal render settings: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSetRenderSettingsResponse, ErrorResponse),
@@ -1534,11 +1534,11 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.control_simulation(action=action)
                 payload["success"] = True
-                result = UnrealControlSimulationResponse(**payload).dict()
+                result = UnrealControlSimulationResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealControlSimulationResponse, ErrorResponse),
@@ -1546,7 +1546,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error controlling Unreal simulation: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealControlSimulationResponse, ErrorResponse),
@@ -1576,11 +1576,11 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_simulation_status()
                 payload["success"] = True
-                result = UnrealGetSimulationStatusResponse(**payload).dict()
+                result = UnrealGetSimulationStatusResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealGetSimulationStatusResponse, ErrorResponse),
@@ -1588,7 +1588,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error getting Unreal simulation status: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealGetSimulationStatusResponse, ErrorResponse),
@@ -1622,7 +1622,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.enable_physics(
                     actor_path=actor_path,
@@ -1630,7 +1630,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     simulate_physics=simulate_physics,
                 )
                 payload["success"] = True
-                result = UnrealEnablePhysicsResponse(**payload).dict()
+                result = UnrealEnablePhysicsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealEnablePhysicsResponse, ErrorResponse),
@@ -1638,7 +1638,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error enabling Unreal physics: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealEnablePhysicsResponse, ErrorResponse),
@@ -1672,7 +1672,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.set_collision(
                     actor_path=actor_path,
@@ -1680,7 +1680,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     collision_enabled=collision_enabled,
                 )
                 payload["success"] = True
-                result = UnrealSetCollisionResponse(**payload).dict()
+                result = UnrealSetCollisionResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSetCollisionResponse, ErrorResponse),
@@ -1688,7 +1688,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error setting Unreal collision: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSetCollisionResponse, ErrorResponse),
@@ -1727,7 +1727,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.apply_force(
                     actor_path=actor_path,
@@ -1740,7 +1740,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     location_z=location_z,
                 )
                 payload["success"] = True
-                result = UnrealApplyForceResponse(**payload).dict()
+                result = UnrealApplyForceResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealApplyForceResponse, ErrorResponse),
@@ -1748,7 +1748,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error applying Unreal force: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealApplyForceResponse, ErrorResponse),
@@ -1784,7 +1784,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.set_physics_params(
                     actor_path=actor_path,
@@ -1794,7 +1794,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     enable_gravity=enable_gravity,
                 )
                 payload["success"] = True
-                result = UnrealSetPhysicsParamsResponse(**payload).dict()
+                result = UnrealSetPhysicsParamsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSetPhysicsParamsResponse, ErrorResponse),
@@ -1802,7 +1802,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error setting Unreal physics params: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSetPhysicsParamsResponse, ErrorResponse),
@@ -1842,7 +1842,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.import_usd(
                     usd_path=usd_path,
@@ -1852,7 +1852,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     scale_factor=scale_factor,
                 )
                 payload["success"] = True
-                result = UnrealImportUsdResponse(**payload).dict()
+                result = UnrealImportUsdResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealImportUsdResponse, ErrorResponse),
@@ -1860,7 +1860,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error importing USD to Unreal: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealImportUsdResponse, ErrorResponse),
@@ -1897,7 +1897,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.export_usd(
                     actor_paths=paths,
@@ -1907,7 +1907,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     convert_to_meters=convert_to_meters,
                 )
                 payload["success"] = True
-                result = UnrealExportUsdResponse(**payload).dict()
+                result = UnrealExportUsdResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealExportUsdResponse, ErrorResponse),
@@ -1915,7 +1915,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error exporting Unreal USD: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealExportUsdResponse, ErrorResponse),
@@ -1959,7 +1959,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.convert_to_simready(
                     actor_paths=paths,
@@ -1969,7 +1969,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     semantic_labels=labels,
                 )
                 payload["success"] = True
-                result = UnrealConvertToSimreadyResponse(**payload).dict()
+                result = UnrealConvertToSimreadyResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealConvertToSimreadyResponse, ErrorResponse),
@@ -1977,7 +1977,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error converting to SimReady: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealConvertToSimreadyResponse, ErrorResponse),
@@ -2015,14 +2015,14 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.validate_simready_asset(
                     asset_path=asset_path,
                     checks=check_list,
                 )
                 payload["success"] = True
-                result = UnrealValidateSimreadyResponse(**payload).dict()
+                result = UnrealValidateSimreadyResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealValidateSimreadyResponse, ErrorResponse),
@@ -2030,7 +2030,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error validating SimReady asset: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealValidateSimreadyResponse, ErrorResponse),
@@ -2060,11 +2060,11 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_interchange_info()
                 payload["success"] = True
-                result = UnrealGetInterchangeInfoResponse(**payload).dict()
+                result = UnrealGetInterchangeInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealGetInterchangeInfoResponse, ErrorResponse),
@@ -2072,7 +2072,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error getting interchange info: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealGetInterchangeInfoResponse, ErrorResponse),
@@ -2111,11 +2111,11 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.batch_operations(operations=ops)
                 payload["success"] = True
-                result = UnrealBatchOperationsResponse(**payload).dict()
+                result = UnrealBatchOperationsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealBatchOperationsResponse, ErrorResponse),
@@ -2123,7 +2123,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error in batch Unreal operations: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealBatchOperationsResponse, ErrorResponse),
@@ -2158,7 +2158,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.query_scene_graph(
                     root_path=root_path,
@@ -2167,7 +2167,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     class_filter=class_filter,
                 )
                 payload["success"] = True
-                result = UnrealQuerySceneGraphResponse(**payload).dict()
+                result = UnrealQuerySceneGraphResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealQuerySceneGraphResponse, ErrorResponse),
@@ -2175,7 +2175,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error querying scene graph: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealQuerySceneGraphResponse, ErrorResponse),
@@ -2213,14 +2213,14 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.analyze_scene_for_robotics(
                     analysis_types=types_list,
                     actor_filter=actor_filter,
                 )
                 payload["success"] = True
-                result = UnrealAnalyzeSceneForRoboticsResponse(**payload).dict()
+                result = UnrealAnalyzeSceneForRoboticsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealAnalyzeSceneForRoboticsResponse, ErrorResponse),
@@ -2228,7 +2228,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error analyzing scene for robotics: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealAnalyzeSceneForRoboticsResponse, ErrorResponse),
@@ -2268,7 +2268,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.generate_procedural_scene(
                     scene_type=scene_type,
@@ -2277,7 +2277,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     bounds_max=bmax,
                 )
                 payload["success"] = True
-                result = UnrealGenerateProceduralSceneResponse(**payload).dict()
+                result = UnrealGenerateProceduralSceneResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealGenerateProceduralSceneResponse, ErrorResponse),
@@ -2285,7 +2285,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error generating procedural scene: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealGenerateProceduralSceneResponse, ErrorResponse),
@@ -2319,7 +2319,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_actor_by_semantic_label(
                     label=label,
@@ -2327,7 +2327,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     max_results=max_results,
                 )
                 payload["success"] = True
-                result = UnrealGetActorBySemanticLabelResponse(**payload).dict()
+                result = UnrealGetActorBySemanticLabelResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealGetActorBySemanticLabelResponse, ErrorResponse),
@@ -2335,7 +2335,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error finding actors by label: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealGetActorBySemanticLabelResponse, ErrorResponse),
@@ -2379,7 +2379,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.generate_mesh_primitive(
                     primitive_type=primitive_type,
@@ -2389,7 +2389,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     actor_label=actor_label,
                 )
                 payload["success"] = True
-                result = UnrealGenerateMeshPrimitiveResponse(**payload).dict()
+                result = UnrealGenerateMeshPrimitiveResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealGenerateMeshPrimitiveResponse, ErrorResponse),
@@ -2397,7 +2397,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error generating mesh primitive: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealGenerateMeshPrimitiveResponse, ErrorResponse),
@@ -2431,7 +2431,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.apply_mesh_boolean(
                     target_mesh_path=target_mesh_path,
@@ -2439,7 +2439,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     operation=operation,
                 )
                 payload["success"] = True
-                result = UnrealApplyMeshBooleanResponse(**payload).dict()
+                result = UnrealApplyMeshBooleanResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealApplyMeshBooleanResponse, ErrorResponse),
@@ -2447,7 +2447,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error applying mesh boolean: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealApplyMeshBooleanResponse, ErrorResponse),
@@ -2479,13 +2479,13 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.compute_convex_hull(
                     mesh_path=mesh_path,
                 )
                 payload["success"] = True
-                result = UnrealComputeConvexHullResponse(**payload).dict()
+                result = UnrealComputeConvexHullResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealComputeConvexHullResponse, ErrorResponse),
@@ -2493,7 +2493,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error computing convex hull: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealComputeConvexHullResponse, ErrorResponse),
@@ -2529,7 +2529,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.decompose_convex_hull(
                     mesh_path=mesh_path,
@@ -2539,7 +2539,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     resolution=resolution,
                 )
                 payload["success"] = True
-                result = UnrealDecomposeConvexHullResponse(**payload).dict()
+                result = UnrealDecomposeConvexHullResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealDecomposeConvexHullResponse, ErrorResponse),
@@ -2547,7 +2547,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error decomposing convex hull: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealDecomposeConvexHullResponse, ErrorResponse),
@@ -2587,7 +2587,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.edit_mesh_topology(
                     mesh_path=mesh_path,
@@ -2600,7 +2600,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     count=count,
                 )
                 payload["success"] = True
-                result = UnrealEditMeshTopologyResponse(**payload).dict()
+                result = UnrealEditMeshTopologyResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealEditMeshTopologyResponse, ErrorResponse),
@@ -2608,7 +2608,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error editing mesh topology: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealEditMeshTopologyResponse, ErrorResponse),
@@ -2642,7 +2642,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.subdivide_mesh(
                     mesh_path=mesh_path,
@@ -2650,7 +2650,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     scheme=scheme,
                 )
                 payload["success"] = True
-                result = UnrealSubdivideMeshResponse(**payload).dict()
+                result = UnrealSubdivideMeshResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSubdivideMeshResponse, ErrorResponse),
@@ -2658,7 +2658,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error subdividing mesh: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSubdivideMeshResponse, ErrorResponse),
@@ -2693,7 +2693,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.simplify_mesh(
                     mesh_path=mesh_path,
@@ -2702,7 +2702,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     max_error=max_error,
                 )
                 payload["success"] = True
-                result = UnrealSimplifyMeshResponse(**payload).dict()
+                result = UnrealSimplifyMeshResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealSimplifyMeshResponse, ErrorResponse),
@@ -2710,7 +2710,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error simplifying mesh: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealSimplifyMeshResponse, ErrorResponse),
@@ -2748,7 +2748,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.cut_mesh_plane(
                     mesh_path=mesh_path,
@@ -2758,7 +2758,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     keep_both_sides=keep_both_sides,
                 )
                 payload["success"] = True
-                result = UnrealCutMeshPlaneResponse(**payload).dict()
+                result = UnrealCutMeshPlaneResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealCutMeshPlaneResponse, ErrorResponse),
@@ -2766,7 +2766,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error cutting mesh with plane: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealCutMeshPlaneResponse, ErrorResponse),
@@ -2804,14 +2804,14 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.validate_mesh(
                     mesh_path=mesh_path,
                     checks=check_list,
                 )
                 payload["success"] = True
-                result = UnrealValidateMeshResponse(**payload).dict()
+                result = UnrealValidateMeshResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealValidateMeshResponse, ErrorResponse),
@@ -2819,7 +2819,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error validating mesh: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealValidateMeshResponse, ErrorResponse),
@@ -2858,7 +2858,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.convert_mesh_format(
                     mesh_path=mesh_path,
@@ -2866,7 +2866,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     tessellation_options=tess_opts,
                 )
                 payload["success"] = True
-                result = UnrealConvertMeshFormatResponse(**payload).dict()
+                result = UnrealConvertMeshFormatResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealConvertMeshFormatResponse, ErrorResponse),
@@ -2874,7 +2874,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error converting mesh format: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealConvertMeshFormatResponse, ErrorResponse),
@@ -2910,7 +2910,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.remesh_mesh(
                     mesh_path=mesh_path,
@@ -2920,7 +2920,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     smoothing_iterations=smoothing_iterations,
                 )
                 payload["success"] = True
-                result = UnrealRemeshMeshResponse(**payload).dict()
+                result = UnrealRemeshMeshResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealRemeshMeshResponse, ErrorResponse),
@@ -2928,7 +2928,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error remeshing: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealRemeshMeshResponse, ErrorResponse),
@@ -2963,7 +2963,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.compute_mesh_uv(
                     mesh_path=mesh_path,
@@ -2972,7 +2972,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                     island_padding=island_padding,
                 )
                 payload["success"] = True
-                result = UnrealComputeMeshUvResponse(**payload).dict()
+                result = UnrealComputeMeshUvResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealComputeMeshUvResponse, ErrorResponse),
@@ -2980,7 +2980,7 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 )
         except Exception as e:
             server.logger.error("Error computing mesh UVs: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealComputeMeshUvResponse, ErrorResponse),

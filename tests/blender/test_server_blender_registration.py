@@ -89,7 +89,6 @@ class TestBlenderToolRegistration:
         monkeypatch.setattr(server_module, "TaskConfig", None)
 
         monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_isaac_available", lambda: False)
         monkeypatch.setattr(server_module, "is_blender_available", lambda: True)
         monkeypatch.setattr(server_module, "BlenderRuntimeAdapter", FakeBlenderAdapter)
 
@@ -110,7 +109,6 @@ class TestBlenderToolRegistration:
         monkeypatch.setattr(server_module, "TaskConfig", None)
 
         monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_isaac_available", lambda: False)
         monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
 
         instance = server_module.SimulMCPServer(settings=Settings())
