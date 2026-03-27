@@ -48,6 +48,7 @@ from ..logging import LoggerMixin, get_logger
 from ..utils.timing import RateLimiter
 from .schemas import *
 from .tools.isaac_tools import IsaacTools
+from .session_manager import SessionManager
 from .usage_tracker import ToolUsageTracker
 
 logger = get_logger(__name__)
@@ -131,6 +132,9 @@ class SimulMCPServer(LoggerMixin):
         self._allowed_paths = self._resolve_allowed_paths()
 
         self.usage_tracker = ToolUsageTracker()
+        self.session_manager = SessionManager()
+        self._current_agent_id: Optional[str] = None
+        self._current_port: Optional[int] = None
         self._rate_limiters: Dict[str, RateLimiter] = {}
         self._rate_limit_enabled = self.settings.security.rate_limiting_enabled
         self._rate_limit_rate = self.settings.security.requests_per_minute / 60.0
@@ -238,6 +242,10 @@ class SimulMCPServer(LoggerMixin):
                 tool_name, duration_ms, success, params=params,
                 error=result.get("error") if not success else None,
             )
+            if self._current_agent_id and self._current_port:
+                self.session_manager.get_instance_session(
+                    self._current_port
+                ).heartbeat(self._current_agent_id, tool_name)
             return result
         except Exception as exc:
             duration_ms = (time.monotonic() - t0) * 1000
