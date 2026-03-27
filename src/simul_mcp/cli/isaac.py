@@ -1080,3 +1080,76 @@ def runtime_info(
             if val is not None:
                 table.add_row(k, str(val))
         console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# logs
+# ---------------------------------------------------------------------------
+@app.command("logs")
+def logs(
+    level: str = typer.Option("warn", "--level", "-l", help="Minimum level: verbose, info, warn, error"),
+    last_n: int = typer.Option(50, "--last", "-n", help="Number of recent entries to show"),
+    source: Optional[str] = typer.Option(None, "--source", "-s", help="Filter by source module substring"),
+    search: Optional[str] = typer.Option(None, "--search", "-q", help="Search within log messages"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Read recent log entries from the Isaac Sim console."""
+    result = _run(_tools(host, port).get_isaac_logs(
+        level=level, last_n=last_n, source_filter=source, search=search,
+    ))
+    if is_json_mode():
+        emit(result)
+        return
+    if result.get("error"):
+        console.print(f"[red]Error:[/red] {result['error']}")
+        return
+
+    counts = result.get("counts", {})
+    console.print(
+        f"[dim]Log:[/dim] {result.get('log_file', '?')}  "
+        f"[dim]Totals:[/dim] "
+        f"[red]{counts.get('error', 0)} errors[/red], "
+        f"[yellow]{counts.get('warn', 0)} warnings[/yellow], "
+        f"[blue]{counts.get('info', 0)} info[/blue], "
+        f"[dim]{counts.get('verbose', 0)} verbose[/dim]"
+    )
+    console.print()
+
+    entries = result.get("entries", [])
+    if not entries:
+        console.print("[dim]No matching log entries.[/dim]")
+        return
+
+    level_styles = {"error": "red bold", "warn": "yellow", "info": "blue", "verbose": "dim"}
+    for e in entries:
+        lvl = e.get("level", "?")
+        style = level_styles.get(lvl, "")
+        ts = e.get("timestamp", "")
+        src = e.get("source", "")
+        msg = e.get("message", "")
+        ts_str = f"[dim]{ts}[/dim] " if ts else ""
+        console.print(f"{ts_str}[{style}]{lvl.upper():>5s}[/{style}] [{src}] {msg}")
+
+
+# ---------------------------------------------------------------------------
+# set-log-level
+# ---------------------------------------------------------------------------
+@app.command("set-log-level")
+def set_log_level_cmd(
+    level: str = typer.Argument(..., help="Log level: verbose, info, warn, error"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Set the Carbonite logging threshold for Isaac Sim."""
+    result = _run(_tools(host, port).set_isaac_log_level(level=level))
+    if is_json_mode():
+        emit(result)
+        return
+    if result.get("error"):
+        console.print(f"[red]Error:[/red] {result['error']}")
+        return
+    console.print(
+        f"Log level: [dim]{result.get('previous_level', '?')}[/dim] → "
+        f"[green]{result.get('current_level', '?')}[/green]"
+    )

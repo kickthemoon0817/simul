@@ -3971,6 +3971,154 @@ class IsaacTools(LoggerMixin):
         """)
         return await self._execute_json_script(script)
 
+    async def get_isaac_logs(
+        self,
+        level: str = "warn",
+        last_n: int = 50,
+        source_filter: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Read recent log entries from the running Isaac Sim instance.
+
+        Reads the Kit log file and returns the last N entries, optionally
+        filtered by level and source module.
+
+        Args:
+            level: Minimum log level to return: "verbose", "info", "warn", "error".
+                   Defaults to "warn" (warnings and errors only).
+            last_n: Number of most recent matching entries to return. Max 500.
+            source_filter: Optional source module substring filter (e.g. "physx", "omni.usd").
+            search: Optional text search within log messages.
+
+        Returns:
+            Dict with log entries, counts per level, and log file path.
+        """
+        last_n = max(1, min(last_n, 500))
+        _level = json.dumps(level.lower())
+        _last_n = last_n
+        _source_filter = json.dumps(source_filter)
+        _search = json.dumps(search)
+        script = textwrap.dedent(f"""\
+            import json
+            import re
+            import os
+            import glob
+
+            level_filter = {_level}
+            last_n = {_last_n}
+            source_filter = {_source_filter}
+            search_text = {_search}
+
+            level_priority = {{"verbose": 0, "info": 1, "warn": 2, "warning": 2, "error": 3, "fatal": 4}}
+            min_priority = level_priority.get(level_filter, 2)
+
+            # Find the most recent Kit log file
+            log_dir = os.path.expanduser("~/.nvidia-omniverse/logs/Kit")
+            log_files = []
+            for root, dirs, files in os.walk(log_dir):
+                for f in files:
+                    if f.endswith(".log"):
+                        full = os.path.join(root, f)
+                        log_files.append((os.path.getmtime(full), full))
+            log_files.sort(reverse=True)
+            log_path = log_files[0][1] if log_files else None
+
+            if not log_path:
+                print(json.dumps({{"error": "No Kit log file found"}}))
+            else:
+                pattern = re.compile(
+                    r'\\[(Info|Warning|Warn|Error|Fatal|Verbose)\\]\\s*\\[([^\\]]+)\\]\\s*(.*)',
+                    re.IGNORECASE
+                )
+                entries = []
+                counts = {{"verbose": 0, "info": 0, "warn": 0, "error": 0}}
+
+                with open(log_path, "r", errors="replace") as f:
+                    for line in f:
+                        m = pattern.search(line)
+                        if not m:
+                            continue
+                        raw_level = m.group(1).lower()
+                        if raw_level == "warning":
+                            raw_level = "warn"
+                        source = m.group(2)
+                        message = m.group(3).strip()
+
+                        if raw_level in counts:
+                            counts[raw_level] += 1
+
+                        priority = level_priority.get(raw_level, 0)
+                        if priority < min_priority:
+                            continue
+                        if source_filter and source_filter.lower() not in source.lower():
+                            continue
+                        if search_text and search_text.lower() not in message.lower():
+                            continue
+
+                        timestamp = ""
+                        ts_match = re.match(r'(\\d{{4}}-\\d{{2}}-\\d{{2}}T[\\d:]+Z)', line)
+                        if ts_match:
+                            timestamp = ts_match.group(1)
+
+                        entries.append({{
+                            "timestamp": timestamp,
+                            "level": raw_level,
+                            "source": source,
+                            "message": message[:500],
+                        }})
+
+                tail = entries[-last_n:] if len(entries) > last_n else entries
+                print(json.dumps({{
+                    "log_file": log_path,
+                    "total_matching": len(entries),
+                    "returned": len(tail),
+                    "counts": counts,
+                    "entries": tail,
+                }}))
+        """)
+        return await self._execute_json_script(script)
+
+    async def set_isaac_log_level(self, level: str) -> Dict[str, Any]:
+        """
+        Set the Carbonite logging threshold level for the running Isaac Sim instance.
+
+        Args:
+            level: Log level: "verbose", "info", "warn", "error".
+
+        Returns:
+            Dict with the previous and new log level.
+        """
+        _level = json.dumps(level.lower())
+        script = textwrap.dedent(f"""\
+            import json
+            import carb.logging
+
+            logging = carb.logging.acquire_logging()
+            level_map = {{
+                "verbose": carb.logging.LEVEL_VERBOSE,
+                "info": carb.logging.LEVEL_INFO,
+                "warn": carb.logging.LEVEL_WARN,
+                "error": carb.logging.LEVEL_ERROR,
+            }}
+            level_names = {{v: k for k, v in level_map.items()}}
+
+            requested = {_level}
+            if requested not in level_map:
+                print(json.dumps({{"error": f"Invalid level: {{requested}}. Use: verbose, info, warn, error"}}))
+            else:
+                old_level = logging.get_level_threshold()
+                old_name = level_names.get(old_level, str(old_level))
+                logging.set_level_threshold(level_map[requested])
+                new_level = logging.get_level_threshold()
+                new_name = level_names.get(new_level, str(new_level))
+                print(json.dumps({{
+                    "previous_level": old_name,
+                    "current_level": new_name,
+                }}))
+        """)
+        return await self._execute_json_script(script)
+
     async def disable_isaac_extension(self, extension_id: str) -> Dict[str, Any]:
         """
         Disable an extension by its ID in the running Isaac Sim instance.

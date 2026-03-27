@@ -1646,6 +1646,52 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     # ------------------------------------------------------------------
 
     @server.mcp.tool(
+        name="get_isaac_logs",
+        description=(
+            "Read recent log entries from the running Isaac Sim console. "
+            "Returns entries filtered by minimum level (verbose/info/warn/error), "
+            "optional source module filter, and optional text search. "
+            "Includes per-level counts and log file path. Use this to diagnose "
+            "errors, warnings, or check what happened during a simulation."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_logs(
+        level: str = "warn",
+        last_n: int = 50,
+        source_filter: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_logs",
+            server._isaac_tools.get_isaac_logs(
+                level=level,
+                last_n=last_n,
+                source_filter=source_filter,
+                search=search,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="set_isaac_log_level",
+        description=(
+            "Set the Carbonite logging threshold for the running Isaac Sim. "
+            "Levels: verbose, info, warn, error. Lower levels include all "
+            "higher levels. Use 'verbose' for maximum detail when debugging."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=False
+        ),
+    )
+    async def set_isaac_log_level(level: str) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "set_isaac_log_level",
+            server._isaac_tools.set_isaac_log_level(level=level),
+        )
+
+    @server.mcp.tool(
         name="get_isaac_runtime_info",
         description=(
             "Get consolidated runtime diagnostics from the running Isaac Sim "
