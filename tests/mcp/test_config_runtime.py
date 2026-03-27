@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -36,7 +37,18 @@ def test_load_settings_supports_nested_repo_config_without_isaac_env(
     assert settings.isaac_sim.headless is False
     assert settings.logging.file_enabled is True
     assert settings.logging.file_path == "logs/simul_mcp.log"
+    assert settings.logging.file_backup_count == 5
+    assert settings.logging.console_colored is True
     assert settings.usd.cache_enabled is True
+    assert settings.usd.max_concurrent_operations == 10
+    assert settings.mesh.include_textures is True
+    assert settings.mesh.texture_resolution == 1024
+    assert settings.viewport.fov == 45.0
+    assert settings.viewport.max_bounces == 4
+    assert settings.security.rate_limiting_enabled is True
+    assert settings.security.requests_per_minute == 60
+    assert settings.development.enable_mock_isaac is False
+    assert settings.development.skip_gpu_operations is False
     assert any(path.endswith("/examples") for path in settings.security.allowed_paths)
 
 
@@ -87,6 +99,16 @@ def test_setup_logging_fallback_honors_disabled_handlers(tmp_path) -> None:
         }
     )
 
-    setup_logging(settings=settings, config_file=tmp_path / "missing-logging.yaml")
-
-    assert not log_path.exists()
+    root_logger = logging.getLogger()
+    original_handlers = list(root_logger.handlers)
+    original_level = root_logger.level
+    original_propagate = root_logger.propagate
+    try:
+        setup_logging(settings=settings, config_file=tmp_path / "missing-logging.yaml")
+        assert not log_path.exists()
+    finally:
+        for handler in list(root_logger.handlers):
+            handler.close()
+        root_logger.handlers = original_handlers
+        root_logger.setLevel(original_level)
+        root_logger.propagate = original_propagate

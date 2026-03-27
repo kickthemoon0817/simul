@@ -122,7 +122,7 @@ class TestUSDReader:
         assert stage_info.start_time_code == 1.0
         assert stage_info.end_time_code == 100.0
         assert stage_info.frame_rate == 24.0
-        assert len(stage_info.all_prims) == 2
+        assert stage_info.prim_count == 2
         assert len(stage_info.root_prims) == 1
         assert len(stage_info.layers) == 1
 
@@ -214,28 +214,24 @@ class TestUSDReader:
     def test_caching_enabled(self):
         """Test reader with caching enabled."""
         reader = USDReader(enable_caching=True)
-        assert reader.cache_enabled is True
-        assert reader._stage_cache is not None
-        assert reader._prim_cache is not None
+        assert reader.enable_caching is True
+        assert reader._stage_cache == {}
 
     def test_caching_disabled(self):
         """Test reader with caching disabled."""
         reader = USDReader(enable_caching=False)
-        assert reader.cache_enabled is False
-        assert reader._stage_cache is None
-        assert reader._prim_cache is None
+        assert reader.enable_caching is False
+        assert reader._stage_cache == {}
 
     def test_clear_cache(self, usd_reader):
         """Test cache clearing."""
         # Enable caching for this test
-        usd_reader.cache_enabled = True
+        usd_reader.enable_caching = True
         usd_reader._stage_cache = {"test": "value"}
-        usd_reader._prim_cache = {"test": "value"}
 
         usd_reader.clear_cache()
 
         assert len(usd_reader._stage_cache) == 0
-        assert len(usd_reader._prim_cache) == 0
 
 
 class TestUSDStageInfo:
@@ -350,7 +346,7 @@ class TestUSDReaderIntegration:
 
         stage_info = reader.get_stage_info(stage)
         assert isinstance(stage_info, USDStageInfo)
-        assert len(stage_info.all_prims) > 0
+        assert stage_info.prim_count > 0
 
 
 if __name__ == "__main__":
