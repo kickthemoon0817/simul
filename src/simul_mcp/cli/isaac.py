@@ -1016,3 +1016,67 @@ def list_render_vars(
         console.print(f"\n[bold]Sensor Types ({result.get('sensor_type_count', len(sensors))}):[/bold]")
         for name in sensors:
             console.print(f"  {name}")
+
+
+# ---------------------------------------------------------------------------
+# runtime-info
+# ---------------------------------------------------------------------------
+@app.command("runtime-info")
+def runtime_info(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Get consolidated runtime diagnostics from Isaac Sim."""
+    result = _run(_tools(host, port).get_runtime_info())
+    if is_json_mode():
+        emit(result)
+        return
+
+    sections = [
+        ("App", "app", ["version", "python_version", "update_number"]),
+        ("Timeline", "timeline", ["is_playing", "is_stopped", "current_time", "fps"]),
+        ("Physics Config", "physics_config", ["gpu_dynamics_enabled", "physics_dt", "solver_type"]),
+        ("Renderer", "renderer", ["gpu_name", "raytracing_mode", "hgi_driver"]),
+        ("Stage", "stage", ["url", "prim_count"]),
+        ("Extensions", "extensions", ["total", "enabled"]),
+    ]
+    for title, key, fields in sections:
+        data = result.get(key, {})
+        error = result.get(f"{key}_error")
+        if error:
+            console.print(f"[red]{title}:[/red] {error}")
+            continue
+        if not data:
+            continue
+        table = Table(title=title, show_header=False, box=None, padding=(0, 2))
+        table.add_column(style="cyan")
+        table.add_column()
+        for f in fields:
+            val = data.get(f)
+            if val is not None:
+                table.add_row(f, str(val))
+        console.print(table)
+        console.print()
+
+    # Physics stats (dynamic body counts)
+    physics = result.get("physics", {})
+    if physics:
+        table = Table(title="Physics Stats", show_header=False, box=None, padding=(0, 2))
+        table.add_column(style="cyan")
+        table.add_column(justify="right")
+        for k, v in sorted(physics.items()):
+            table.add_row(k, str(v))
+        console.print(table)
+        console.print()
+
+    # Viewport
+    viewport = result.get("viewport", {})
+    if viewport and viewport.get("camera_path"):
+        table = Table(title="Viewport", show_header=False, box=None, padding=(0, 2))
+        table.add_column(style="cyan")
+        table.add_column()
+        for k in ("camera_path", "resolution", "fps"):
+            val = viewport.get(k)
+            if val is not None:
+                table.add_row(k, str(val))
+        console.print(table)

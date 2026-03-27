@@ -3837,6 +3837,140 @@ class IsaacTools(LoggerMixin):
         """)
         return await self._execute_json_script(script)
 
+    # ------------------------------------------------------------------
+    # Runtime diagnostics
+    # ------------------------------------------------------------------
+
+    async def get_runtime_info(self) -> Dict[str, Any]:
+        """
+        Get consolidated runtime diagnostics from the running Isaac Sim instance.
+
+        Collects Kit app info, timeline state, physics stats, GPU/renderer
+        info, and viewport state in a single call.
+
+        Returns:
+            Dict with app, timeline, physics, renderer, and viewport sections.
+        """
+        script = textwrap.dedent("""\
+            import json
+            import sys
+            import time as _time
+
+            info = {}
+
+            # Kit app info
+            try:
+                import omni.kit.app
+                app = omni.kit.app.get_app()
+                info["app"] = {
+                    "version": str(app.get_build_version()),
+                    "python_version": sys.version.split()[0],
+                    "update_number": int(app.get_update_number()),
+                }
+            except Exception as e:
+                info["app_error"] = str(e)
+
+            # Timeline state
+            try:
+                import omni.timeline
+                tl = omni.timeline.get_timeline_interface()
+                info["timeline"] = {
+                    "is_playing": tl.is_playing(),
+                    "is_stopped": tl.is_stopped(),
+                    "current_time": tl.get_current_time(),
+                    "start_time": tl.get_start_time(),
+                    "end_time": tl.get_end_time(),
+                    "fps": tl.get_time_codes_per_second(),
+                }
+            except Exception as e:
+                info["timeline_error"] = str(e)
+
+            # Physics stats
+            try:
+                import omni.physx
+                physx = omni.physx.get_physx_interface()
+                stats = physx.get_physics_stats()
+                info["physics"] = stats if isinstance(stats, dict) else {}
+                info["physics"]["cuda_available"] = physx.is_cuda_lib_present()
+            except Exception as e:
+                info["physics_error"] = str(e)
+
+            # Physics scene settings
+            try:
+                import carb.settings
+                settings = carb.settings.get_settings()
+                gpu_dynamics = settings.get("/physics/gpuDynamicsEnabled")
+                physics_dt = settings.get("/persistent/simulation/defaultPhysicsDt")
+                solver_type = settings.get("/persistent/physics/solverType")
+                info["physics_config"] = {
+                    "gpu_dynamics_enabled": gpu_dynamics,
+                    "physics_dt": physics_dt,
+                    "solver_type": solver_type,
+                }
+            except Exception as e:
+                info["physics_config_error"] = str(e)
+
+            # Renderer info
+            try:
+                import carb.settings
+                settings = carb.settings.get_settings()
+                info["renderer"] = {
+                    "active_gpu": settings.get("/renderer/activeGpu"),
+                    "gpu_name": settings.get("/renderer/gpuName"),
+                    "hgi_driver": settings.get("/renderer/hgi/driver"),
+                    "raytracing_mode": settings.get("/rtx/rendermode"),
+                    "realtime_mode": settings.get("/rtx/ecoMode/enabled"),
+                }
+            except Exception as e:
+                info["renderer_error"] = str(e)
+
+            # Viewport info
+            try:
+                from omni.kit.viewport.utility import get_active_viewport
+                viewport = get_active_viewport()
+                if viewport:
+                    info["viewport"] = {
+                        "camera_path": str(viewport.camera_path),
+                        "resolution": list(viewport.resolution),
+                        "fps": viewport.fps if hasattr(viewport, "fps") else None,
+                    }
+                else:
+                    info["viewport"] = {"status": "no active viewport"}
+            except Exception as e:
+                info["viewport_error"] = str(e)
+
+            # Stage summary
+            try:
+                import omni.usd
+                ctx = omni.usd.get_context()
+                stage = ctx.get_stage()
+                if stage:
+                    info["stage"] = {
+                        "url": ctx.get_stage_url(),
+                        "prim_count": len(list(stage.Traverse())),
+                    }
+                else:
+                    info["stage"] = {"status": "no stage open"}
+            except Exception as e:
+                info["stage_error"] = str(e)
+
+            # Extensions summary
+            try:
+                import omni.kit.app
+                ext_mgr = omni.kit.app.get_app().get_extension_manager()
+                all_exts = ext_mgr.get_extensions()
+                enabled = [e for e in all_exts if e.get("enabled")]
+                info["extensions"] = {
+                    "total": len(all_exts),
+                    "enabled": len(enabled),
+                }
+            except Exception as e:
+                info["extensions_error"] = str(e)
+
+            print(json.dumps(info))
+        """)
+        return await self._execute_json_script(script)
+
     async def disable_isaac_extension(self, extension_id: str) -> Dict[str, Any]:
         """
         Disable an extension by its ID in the running Isaac Sim instance.

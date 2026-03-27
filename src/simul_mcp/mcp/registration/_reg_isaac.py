@@ -1641,3 +1641,27 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             server._isaac_tools.list_render_vars(),
         )
 
+    # ------------------------------------------------------------------
+    # Runtime diagnostics
+    # ------------------------------------------------------------------
+
+    @server.mcp.tool(
+        name="get_isaac_runtime_info",
+        description=(
+            "Get consolidated runtime diagnostics from the running Isaac Sim "
+            "instance: Kit app version, timeline state, physics stats "
+            "(rigid body/articulation/shape counts, CUDA availability), "
+            "GPU/renderer info, viewport state, stage summary, and extension "
+            "counts. Use this for a quick health check or to understand the "
+            "current state of the simulation environment."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_runtime_info() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_runtime_info",
+            server._isaac_tools.get_runtime_info(),
+        )
+
