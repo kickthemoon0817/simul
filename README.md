@@ -122,7 +122,7 @@ simul-mcp server --config config/custom.yaml --verbose
 
 ```bash
 # Analyze a USD file
-simul-mcp test-usd examples/isaac/sample.usd --verbose
+simul-mcp usd info /path/to/scene.usd
 
 # Check server capabilities
 simul-mcp info
@@ -146,7 +146,7 @@ simul-mcp stats
 simul-mcp server
 
 # Start with custom configuration
-simul-mcp server --config config/custom.yaml
+simul-mcp server --config config/isaac/default.yaml
 
 # Start with verbose logging
 simul-mcp server --verbose
@@ -155,7 +155,7 @@ simul-mcp server --verbose
 simul-mcp info
 
 # Test USD file loading and analysis
-simul-mcp test-usd scene.usd --verbose
+simul-mcp usd info /path/to/scene.usd
 
 # Validate configuration file
 simul-mcp validate-config config/isaac/default.yaml
@@ -199,11 +199,11 @@ from simul_mcp.adapters import HeadlessUSDAdapter
 adapter = HeadlessUSDAdapter()
 with adapter.create_session() as session:
     # Load USD file
-    stage_id = session.load_stage("scene.usd")
+    stage_id = session.load_stage("/path/to/scene.usd")
 
     # Get stage information
     stage_info = session.get_stage_info(stage_id)
-    print(f"Stage has {len(stage_info.all_prims)} prims")
+    print(f"Stage has {stage_info.prim_count} prims")
 
     # Generate scene summary
     summary = session.summarize_stage(stage_id)
@@ -225,34 +225,40 @@ The server uses YAML configuration files. See `config/isaac/default.yaml` for al
 
 ```yaml
 server:
-  name: "simul-mcp"
-  version: "1.0.0"
-  description: "Isaac Sim MCP Server"
+  name: "Simul - 3D Simulation & DCC Tools"
 
 logging:
   level: "INFO"
   format: "detailed"
-  handlers:
-    - "console"
-    - "file"
   file:
+    enabled: true
     path: "logs/simul_mcp.log"
-    max_size_mb: 10
+    max_size: "10MB"
     backup_count: 5
+  console:
+    enabled: true
+    colored: true
 
 usd:
-  cache_enabled: true
-  max_file_size_mb: 500
-  allowed_extensions: [".usd", ".usda", ".usdc", ".usdz"]
+  cache:
+    enabled: true
+    stage_cache_limit: 10
+  files:
+    max_file_size_mb: 500
+    allowed_extensions: [".usd", ".usda", ".usdc", ".usdz"]
 
 viewport:
-  max_size: 2048
-  default_format: "png"
+  capture:
+    width: 1920
+    height: 1080
+    max_size: 2048
+    format: "png"
 
 isaac_sim:
-  auto_initialize_world: true
-  default_physics_dt: 0.016667  # 60 FPS
-  default_rendering_dt: 0.016667
+  path: "${ISAAC_SIM_PATH}"
+  socket_host: "127.0.0.1"
+  socket_port: 8226
+  socket_timeout: 30.0
 ```
 
 ### Environment Variables
@@ -260,9 +266,9 @@ isaac_sim:
 You can override configuration using environment variables:
 
 ```bash
-export SIMUL_MCP_LOG_LEVEL=DEBUG
-export SIMUL_MCP_USD_CACHE_ENABLED=false
-export SIMUL_MCP_VIEWPORT_MAX_SIZE=4096
+export LOGGING__LEVEL=DEBUG
+export USD__CACHE_ENABLED=false
+export VIEWPORT__MAX_SIZE=4096
 ```
 
 ## MCP Tools
@@ -331,7 +337,7 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 ```python
 # examples/isaac/sample_usd_reader.py
-python examples/isaac/sample_usd_reader.py scene.usd --verbose
+python examples/isaac/sample_usd_reader.py /path/to/scene.usd --verbose
 ```
 
 This example demonstrates:
@@ -347,7 +353,7 @@ This example demonstrates:
 
 ```python
 # examples/isaac/http_client_mcp.py
-python examples/isaac/http_client_mcp.py --server http://localhost:8000 --usd-file scene.usd
+python examples/isaac/http_client_mcp.py --server http://localhost:8000 --usd-file /path/to/scene.usd
 ```
 
 This example shows how to:
@@ -367,7 +373,7 @@ async def example():
     server = SimulMCPServer()
 
     # Load USD file
-    result = await server.mcp.tools["load_usd_file"]("scene.usd")
+    result = await server.mcp.tools["load_usd_file"]("/path/to/scene.usd")
     if result.get("success", True):
         stage_id = result["stage_id"]
 
@@ -564,7 +570,7 @@ simul-mcp server --log-level DEBUG
 Or set environment variable:
 
 ```bash
-export SIMUL_MCP_LOG_LEVEL=DEBUG
+export LOGGING__LEVEL=DEBUG
 ```
 
 ## License

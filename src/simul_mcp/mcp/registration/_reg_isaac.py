@@ -58,7 +58,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             return ErrorResponse(
                 error=f"Code payload too large ({len(code)} bytes, max {MAX_CODE_SIZE}).",
                 error_type="PayloadTooLarge",
-            ).dict()
+            ).model_dump()
 
         rate_error = server._check_rate_limit("execute_isaac_script")
         if rate_error:
@@ -86,7 +86,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                     error=result.error_value or "Script execution failed",
                     error_type=result.error_name or "RuntimeError",
                     details={"traceback": result.traceback} if result.traceback else None,
-                ).dict()
+                ).model_dump()
 
             # If output is valid JSON, return it directly
             output = result.output.strip()
@@ -122,7 +122,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                     "Use ping_isaac to verify connectivity."
                 ),
                 error_type="ConnectionError",
-            ).dict()
+            ).model_dump()
         except TimeoutError:
             duration_ms = (time.monotonic() - t0) * 1000
             server.usage_tracker.record(
@@ -138,7 +138,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                     "Use ping_isaac to check if Isaac Sim is still reachable."
                 ),
                 error_type="TimeoutError",
-            ).dict()
+            ).model_dump()
         except Exception as exc:
             duration_ms = (time.monotonic() - t0) * 1000
             server.usage_tracker.record(
@@ -146,7 +146,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 params=log_params,
                 error=str(exc),
             )
-            return ErrorResponse(error=str(exc), error_type="Exception").dict()
+            return ErrorResponse(error=str(exc), error_type="Exception").model_dump()
 
     @server.mcp.tool(
         name="ping_isaac",
@@ -990,7 +990,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 error="File path is not allowed by sandbox policy",
                 error_type="SandboxError",
                 details={"file_path": file_path},
-            ).dict()
+            ).model_dump()
         return await server._exec_isaac(
             "open_isaac_stage",
             server._isaac_tools.open_isaac_stage(file_path=file_path),
@@ -1014,7 +1014,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 error="File path is not allowed by sandbox policy",
                 error_type="SandboxError",
                 details={"file_path": file_path},
-            ).dict()
+            ).model_dump()
         return await server._exec_isaac(
             "save_isaac_stage",
             server._isaac_tools.save_isaac_stage(file_path=file_path),
@@ -1053,7 +1053,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 error="File path is not allowed by sandbox policy",
                 error_type="SandboxError",
                 details={"file_path": asset_path},
-            ).dict()
+            ).model_dump()
         return await server._exec_isaac(
             "import_isaac_asset",
             server._isaac_tools.import_isaac_asset(
@@ -1079,7 +1079,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 error="File path is not allowed by sandbox policy",
                 error_type="SandboxError",
                 details={"file_path": reference_path},
-            ).dict()
+            ).model_dump()
         return await server._exec_isaac(
             "add_isaac_reference",
             server._isaac_tools.add_isaac_reference(

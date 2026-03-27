@@ -70,7 +70,7 @@ class IsaacTools(LoggerMixin):
                     "isaacsim.code_editor.vscode extension enabled."
                 ),
                 error_type="ConnectionError",
-            ).dict()
+            ).model_dump()
         except TimeoutError:
             logger.error(
                 "Script timed out after %ss on %s",
@@ -84,12 +84,12 @@ class IsaacTools(LoggerMixin):
                     f"{self._client.address}."
                 ),
                 error_type="TimeoutError",
-            ).dict()
+            ).model_dump()
         except Exception as exc:
             logger.error("Script execution failed: %s", exc, exc_info=True)
             return ErrorResponse(
                 error=str(exc), error_type="Exception"
-            ).dict()
+            ).model_dump()
 
         if not result.success:
             return ErrorResponse(
@@ -100,14 +100,14 @@ class IsaacTools(LoggerMixin):
                     if result.traceback
                     else None
                 ),
-            ).dict()
+            ).model_dump()
 
         output = result.output.strip()
         if not output:
             return ErrorResponse(
                 error="Script produced no output",
                 error_type="EmptyOutput",
-            ).dict()
+            ).model_dump()
 
         try:
             data: Dict[str, Any] = json.loads(output)
@@ -118,7 +118,7 @@ class IsaacTools(LoggerMixin):
                 error=f"Failed to parse script output as JSON: {exc}",
                 error_type="JSONDecodeError",
                 details={"raw_output": output[:2000]},
-            ).dict()
+            ).model_dump()
 
     # ------------------------------------------------------------------
     # Phase 1: Scene Inspection (Read-only)
@@ -2663,7 +2663,7 @@ class IsaacTools(LoggerMixin):
             return ErrorResponse(
                 error=f"Invalid light_type '{light_type}'. Must be one of: {valid_types}",
                 error_type="ValueError",
-            ).dict()
+            ).model_dump()
         script = textwrap.dedent(f"""\
             import json
             import omni.usd

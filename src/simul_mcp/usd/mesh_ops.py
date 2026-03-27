@@ -5,6 +5,8 @@ This module provides mesh extraction, analysis, decimation, and export
 functionality for USD mesh prims using the pxr library.
 """
 
+from __future__ import annotations
+
 from typing import Dict, List, Optional, Any, Tuple, Union
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +28,18 @@ from ..utils.timing import monitor_performance
 from ..utils.math import Vector3, BBox, bbox_from_points
 
 logger = get_logger(__name__)
+
+
+def _default_time_code() -> Any:
+    """Return a USD default time code only when pxr is available."""
+    if not PXR_AVAILABLE or Usd is None:
+        return None
+    return Usd.TimeCode.Default()
+
+
+def _path_to_str(path_value: Any) -> str:
+    """Normalise real USD paths and mocked path objects to plain strings."""
+    return getattr(path_value, "pathString", str(path_value))
 
 
 @dataclass
@@ -67,7 +81,9 @@ class MeshOperations(LoggerMixin):
         self.logger.info("Mesh operations initialized")
     
     @monitor_performance("mesh_ops.extract_mesh_data")
-    def extract_mesh_data(self, mesh_prim: Usd.Prim, time_code: float = Usd.TimeCode.Default()) -> Dict[str, Any]:
+    def extract_mesh_data(
+        self, mesh_prim: Usd.Prim, time_code: Optional[Any] = None
+    ) -> Dict[str, Any]:
         """
         Extract comprehensive mesh data from a USD mesh prim.
         
@@ -82,6 +98,7 @@ class MeshOperations(LoggerMixin):
             raise ValueError(f"Prim {mesh_prim.GetPath()} is not a mesh")
         
         mesh = UsdGeom.Mesh(mesh_prim)
+        time_code = _default_time_code() if time_code is None else time_code
         
         try:
             # Get basic mesh data
@@ -129,7 +146,7 @@ class MeshOperations(LoggerMixin):
             interpolate_boundary = mesh.GetInterpolateBoundaryAttr().Get()
             
             mesh_data = {
-                'prim_path': str(mesh_prim.GetPath()),
+                'prim_path': _path_to_str(mesh_prim.GetPath()),
                 'points': points_array.tolist() if points_array.size > 0 else [],
                 'face_vertex_counts': face_counts_array.tolist() if face_counts_array.size > 0 else [],
                 'face_vertex_indices': face_indices_array.tolist() if face_indices_array.size > 0 else [],
@@ -153,7 +170,9 @@ class MeshOperations(LoggerMixin):
             raise
     
     @monitor_performance("mesh_ops.get_mesh_statistics")
-    def get_mesh_statistics(self, mesh_prim: Usd.Prim, time_code: float = Usd.TimeCode.Default()) -> MeshInfo:
+    def get_mesh_statistics(
+        self, mesh_prim: Usd.Prim, time_code: Optional[Any] = None
+    ) -> MeshInfo:
         """
         Get comprehensive statistics about a mesh.
         
@@ -168,6 +187,7 @@ class MeshOperations(LoggerMixin):
             raise ValueError(f"Prim {mesh_prim.GetPath()} is not a mesh")
         
         mesh = UsdGeom.Mesh(mesh_prim)
+        time_code = _default_time_code() if time_code is None else time_code
         
         try:
             # Extract basic mesh data
@@ -207,7 +227,7 @@ class MeshOperations(LoggerMixin):
             subsets = self._get_geometry_subsets(mesh_prim)
             
             mesh_info = MeshInfo(
-                prim_path=str(mesh_prim.GetPath()),
+                prim_path=_path_to_str(mesh_prim.GetPath()),
                 vertex_count=vertex_count,
                 face_count=face_count,
                 point_count=point_count,
@@ -377,7 +397,7 @@ class MeshOperations(LoggerMixin):
                     subset = UsdGeom.Subset(child)
                     subset_info = {
                         'name': child.GetName(),
-                        'path': str(child.GetPath()),
+                        'path': _path_to_str(child.GetPath()),
                         'element_type': subset.GetElementTypeAttr().Get(),
                         'family_name': subset.GetFamilyNameAttr().Get(),
                         'indices': list(subset.GetIndicesAttr().Get() or [])
@@ -390,13 +410,17 @@ class MeshOperations(LoggerMixin):
 
 
 # Convenience functions
-def extract_mesh_data(mesh_prim: Usd.Prim, time_code: float = Usd.TimeCode.Default()) -> Dict[str, Any]:
+def extract_mesh_data(
+    mesh_prim: Usd.Prim, time_code: Optional[Any] = None
+) -> Dict[str, Any]:
     """Extract mesh data from a USD mesh prim."""
     ops = MeshOperations()
     return ops.extract_mesh_data(mesh_prim, time_code)
 
 
-def get_mesh_statistics(mesh_prim: Usd.Prim, time_code: float = Usd.TimeCode.Default()) -> MeshInfo:
+def get_mesh_statistics(
+    mesh_prim: Usd.Prim, time_code: Optional[Any] = None
+) -> MeshInfo:
     """Get mesh statistics."""
     ops = MeshOperations()
     return ops.get_mesh_statistics(mesh_prim, time_code)

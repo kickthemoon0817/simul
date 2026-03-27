@@ -89,17 +89,17 @@ docs:
 
 # Running
 run-server:
-	python -m simul_mcp.cli.main server --host localhost --port 8765
+	python -m simul_mcp.cli.main server --config config/isaac/default.yaml
 
 run-headless:
-	python -m simul_mcp.cli.main server --headless --host localhost --port 8765
+	python -m simul_mcp.cli.main server --config config/isaac/default.yaml
 
 run-isaac:
 	@if [ -z "$(ISAAC_SIM_PATH)" ]; then \
 		echo "Error: ISAAC_SIM_PATH not set. Run 'make setup-isaac' first"; \
 		exit 1; \
 	fi
-	$(ISAAC_SIM_PATH)/python.sh -m simul_mcp.cli.main server --isaac-mode
+	$(ISAAC_SIM_PATH)/python.sh -m simul_mcp.cli.main server --config config/isaac/default.yaml
 
 # Development utilities
 dev-setup: install-dev setup-isaac
@@ -149,4 +149,4 @@ debug-isaac:
 		echo "Error: ISAAC_SIM_PATH not set"; \
 		exit 1; \
 	fi
-	$(ISAAC_SIM_PATH)/python.sh -m debugpy --listen 5678 --wait-for-client -m simul_mcp.cli.main server --isaac-mode
+	$(ISAAC_SIM_PATH)/python.sh -m debugpy --listen 5678 --wait-for-client -m simul_mcp.cli.main server --config config/isaac/default.yaml

@@ -40,8 +40,10 @@ from ..adapters import (
     BlenderRuntimeAdapter,
     HeadlessUSDAdapter,
     IsaacSocketClient,
+    UnrealRuntimeAdapter,
     is_blender_available,
     is_headless_available,
+    is_unreal_available,
 )
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
@@ -58,7 +60,7 @@ try:
 
     _PACKAGE_VERSION: str = _pkg_version("simul-mcp")
 except Exception:
-    _PACKAGE_VERSION = "0.0.6"
+    _PACKAGE_VERSION = "0.0.13"
 
 _MCP_INSTRUCTIONS: str = (
     "Simul MCP provides tools for interacting with 3D simulation "
@@ -206,7 +208,7 @@ class SimulMCPServer(LoggerMixin):
                 error="Rate limit exceeded",
                 error_type="RateLimitError",
                 details={"tool": tool_name},
-            ).dict()
+            ).model_dump()
         return None
 
     async def _exec_isaac(
@@ -255,7 +257,7 @@ class SimulMCPServer(LoggerMixin):
             logger.error("Isaac tool %s failed: %s", tool_name, exc)
             return ErrorResponse(
                 error=str(exc), error_type=type(exc).__name__
-            ).dict()
+            ).model_dump()
 
     def _resolve_allowed_paths(self) -> List[Path]:
         allowed_paths: List[Path] = []
@@ -300,7 +302,7 @@ class SimulMCPServer(LoggerMixin):
         except Exception as e:
             return ErrorResponse(
                 error=str(e), error_type="ValidationError", details={"input": kwargs}
-            ).dict()
+            ).model_dump()
 
     def _validate_output(
         self,
@@ -309,7 +311,7 @@ class SimulMCPServer(LoggerMixin):
         tool_name: str,
     ) -> Dict[str, Any]:
         if isinstance(result, BaseModel):
-            payload: Any = result.dict()
+            payload: Any = result.model_dump()
         else:
             payload = result
 
@@ -325,7 +327,7 @@ class SimulMCPServer(LoggerMixin):
                 error="Tool returned invalid response type",
                 error_type="ValidationError",
                 details={"type": type(payload).__name__},
-            ).dict()
+            ).model_dump()
 
         for model in models:
             try:
@@ -338,7 +340,7 @@ class SimulMCPServer(LoggerMixin):
             error="Tool response failed schema validation",
             error_type="ValidationError",
             details={"tool": tool_name},
-        ).dict()
+        ).model_dump()
 
     def _tool_annotations(
         self,
@@ -395,8 +397,14 @@ class SimulMCPServer(LoggerMixin):
         """Register MCP resources for agent context."""
         skills_path = self._project_root / "skills.md"
         docs_api_dir = self._project_root / "docs" / "api"
+        resource = getattr(self.mcp, "resource", None)
+        if not callable(resource):
+            self.logger.debug(
+                "FastMCP resource API unavailable; skipping resource registration"
+            )
+            return
 
-        @self.mcp.resource(
+        @resource(
             "simul://isaac-sim/skills",
             name="Isaac Sim Scripting Skills",
             description=(
@@ -416,7 +424,7 @@ class SimulMCPServer(LoggerMixin):
                 return fpath.read_text(encoding="utf-8")
             return f"{fpath.name} not found."
 
-        @self.mcp.resource(
+        @resource(
             "simul://isaac-sim/api/core",
             name="Isaac Sim Core API",
             description="SimulationContext, PhysicsContext, Articulation, RigidPrim, XFormPrim reference.",
@@ -424,7 +432,7 @@ class SimulMCPServer(LoggerMixin):
         def api_core() -> str:
             return _make_api_reader(docs_api_dir / "core.md")
 
-        @self.mcp.resource(
+        @resource(
             "simul://isaac-sim/api/sensors",
             name="Isaac Sim Sensors API",
             description="Camera, IMU, Contact, LiDAR (PhysX/RTX), Proximity sensor reference.",
@@ -432,7 +440,7 @@ class SimulMCPServer(LoggerMixin):
         def api_sensors() -> str:
             return _make_api_reader(docs_api_dir / "sensors.md")
 
-        @self.mcp.resource(
+        @resource(
             "simul://isaac-sim/api/physics",
             name="Isaac Sim Physics API",
             description="PhysX interface, tensor API, collision queries, CCT, vehicle physics reference.",
@@ -440,7 +448,7 @@ class SimulMCPServer(LoggerMixin):
         def api_physics() -> str:
             return _make_api_reader(docs_api_dir / "physics.md")
 
-        @self.mcp.resource(
+        @resource(
             "simul://isaac-sim/api/replicator",
             name="Isaac Sim Replicator API",
             description="Annotators, Writers, Orchestrator, domain randomization reference.",
@@ -448,7 +456,7 @@ class SimulMCPServer(LoggerMixin):
         def api_replicator() -> str:
             return _make_api_reader(docs_api_dir / "replicator.md")
 
-        @self.mcp.resource(
+        @resource(
             "simul://isaac-sim/api/robots",
             name="Isaac Sim Robots API",
             description="Manipulators, grippers, IK, motion planning, wheeled robots reference.",
@@ -456,7 +464,7 @@ class SimulMCPServer(LoggerMixin):
         def api_robots() -> str:
             return _make_api_reader(docs_api_dir / "robots.md")
 
-        @self.mcp.resource(
+        @resource(
             "simul://isaac-sim/api/rendering",
             name="Isaac Sim Rendering API",
             description="Viewport, HydraTexture, RTX post-processing, capture reference.",
@@ -464,7 +472,7 @@ class SimulMCPServer(LoggerMixin):
         def api_rendering() -> str:
             return _make_api_reader(docs_api_dir / "rendering.md")
 
-        @self.mcp.resource(
+        @resource(
             "simul://isaac-sim/api/assets",
             name="Isaac Sim Assets API",
             description="URDF/MJCF import, Cloner, OmniGraph nodes reference.",
@@ -590,8 +598,6 @@ class SimulMCPServer(LoggerMixin):
             register_blender_tools(self)
 
         # Unreal tools (independent of Blender availability)
-        from ..adapters import is_unreal_available
-
         if is_unreal_available():
             register_unreal_tools(self)
 

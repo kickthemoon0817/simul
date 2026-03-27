@@ -100,7 +100,6 @@ class TestUnrealToolRegistration:
         monkeypatch.setattr(server_module, "TaskConfig", None)
 
         monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_isaac_available", lambda: False)
         monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
         monkeypatch.setattr(server_module, "is_unreal_available", lambda: True)
         monkeypatch.setattr(
@@ -187,7 +186,6 @@ class TestUnrealToolRegistration:
         monkeypatch.setattr(server_module, "TaskConfig", None)
 
         monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_isaac_available", lambda: False)
         monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
         monkeypatch.setattr(server_module, "is_unreal_available", lambda: False)
 
@@ -203,4 +201,3 @@ class TestUnrealToolRegistration:
         assert "spawn_unreal_actor" not in tool_names
         assert "delete_unreal_actor" not in tool_names
         assert "set_unreal_actor_transform" not in tool_names
-

@@ -5,6 +5,8 @@ This module provides scene and prim summarization functionality to generate
 concise, LLM-friendly descriptions of USD scenes and their contents.
 """
 
+from __future__ import annotations
+
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 import json
