@@ -97,7 +97,13 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                         "execute_isaac_script", duration_ms, True,
                         params=log_params,
                     )
-                    return parsed
+                    if isinstance(parsed, dict):
+                        return parsed
+                    return {
+                        "success": True,
+                        "output": result.output,
+                        "parsed": parsed,
+                    }
                 except json.JSONDecodeError:
                     pass
 
@@ -1878,4 +1884,3 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "get_isaac_runtime_info",
             server._isaac_tools.get_runtime_info(),
         )
-

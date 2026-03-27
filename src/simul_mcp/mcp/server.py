@@ -45,6 +45,7 @@ from ..adapters import (
     is_headless_available,
     is_unreal_available,
 )
+from .. import __version__ as _source_version
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
 from ..utils.timing import RateLimiter
@@ -60,7 +61,7 @@ try:
 
     _PACKAGE_VERSION: str = _pkg_version("simul-mcp")
 except Exception:
-    _PACKAGE_VERSION = "0.0.13"
+    _PACKAGE_VERSION = _source_version
 
 _MCP_INSTRUCTIONS: str = (
     "Simul MCP provides tools for interacting with 3D simulation "
