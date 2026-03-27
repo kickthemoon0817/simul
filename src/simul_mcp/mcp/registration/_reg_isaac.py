@@ -1642,6 +1642,174 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         )
 
     # ------------------------------------------------------------------
+    # OmniGraph
+    # ------------------------------------------------------------------
+
+    @server.mcp.tool(
+        name="list_isaac_graphs",
+        description=(
+            "List all OmniGraph graphs in the current Isaac Sim session. "
+            "Returns each graph's path, evaluator type, pipeline stage, "
+            "node count, and backing type. Use this to discover available "
+            "graphs before querying or modifying their nodes."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def list_isaac_graphs() -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "list_isaac_graphs",
+            server._isaac_tools.list_isaac_graphs(),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_graph_nodes",
+        description=(
+            "List nodes in an OmniGraph graph with their types, input/output "
+            "attributes, and connections. Use this to inspect graph structure, "
+            "find node types, and trace data flow between nodes."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_graph_nodes(
+        graph_path: str,
+        max_nodes: int = 200,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "get_isaac_graph_nodes",
+            server._isaac_tools.get_isaac_graph_nodes(
+                graph_path=graph_path,
+                max_nodes=max_nodes,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="create_isaac_graph_node",
+        description=(
+            "Create a node in an OmniGraph graph. Specify the graph path, "
+            "desired node path, and node type ID. Use list_isaac_graph_node_types "
+            "to discover available node types. Common types include "
+            "omni.graph.nodes.OnPlaybackTick, omni.graph.nodes.ReadVariable, "
+            "isaacsim.core.nodes.IsaacArticulationController."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=True
+        ),
+    )
+    async def create_isaac_graph_node(
+        graph_path: str,
+        node_path: str,
+        node_type: str,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "create_isaac_graph_node",
+            server._isaac_tools.create_isaac_graph_node(
+                graph_path=graph_path,
+                node_path=node_path,
+                node_type=node_type,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="connect_isaac_graph_nodes",
+        description=(
+            "Connect two OmniGraph node attributes by their full paths. "
+            "Source is typically an outputs: attribute, target is an inputs: "
+            "attribute. Example: connect "
+            "'/World/Graph/OnTick.outputs:tick' to "
+            "'/World/Graph/Controller.inputs:execIn'."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def connect_isaac_graph_nodes(
+        source_attr_path: str,
+        target_attr_path: str,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "connect_isaac_graph_nodes",
+            server._isaac_tools.connect_isaac_graph_nodes(
+                source_attr_path=source_attr_path,
+                target_attr_path=target_attr_path,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="set_isaac_graph_node_values",
+        description=(
+            "Set attribute values on an OmniGraph node. Pass a dict of "
+            "attribute names to values. Attribute names should include the "
+            "namespace prefix (e.g. 'inputs:velocity', 'inputs:enabled'). "
+            "Use get_isaac_graph_nodes to discover attribute names first."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def set_isaac_graph_node_values(
+        node_path: str,
+        values: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "set_isaac_graph_node_values",
+            server._isaac_tools.set_isaac_graph_node_values(
+                node_path=node_path,
+                values=values,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="list_isaac_graph_node_types",
+        description=(
+            "List available OmniGraph node types that can be used with "
+            "create_isaac_graph_node. Use search to filter by substring "
+            "(e.g. 'Isaac', 'OnPlayback', 'Articulation'). Returns "
+            "registered node type IDs."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def list_isaac_graph_node_types(
+        search: Optional[str] = None,
+        max_types: int = 200,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "list_isaac_graph_node_types",
+            server._isaac_tools.list_isaac_graph_node_types(
+                search=search,
+                max_types=max_types,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="delete_isaac_graph_node",
+        description=(
+            "Delete a node from an OmniGraph graph. Removes the node "
+            "and all its connections."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True,
+            destructive=True,
+        ),
+    )
+    async def delete_isaac_graph_node(
+        graph_path: str,
+        node_path: str,
+    ) -> Dict[str, Any]:
+        return await server._exec_isaac(
+            "delete_isaac_graph_node",
+            server._isaac_tools.delete_isaac_graph_node(
+                graph_path=graph_path,
+                node_path=node_path,
+            ),
+        )
+
+    # ------------------------------------------------------------------
     # Runtime diagnostics
     # ------------------------------------------------------------------
 
