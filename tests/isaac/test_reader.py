@@ -333,9 +333,15 @@ class TestUSDReaderIntegration:
     @pytest.fixture
     def temp_usd_file(self):
         """Create a temporary USD file for testing."""
-        # This would create a simple USD file for testing
-        # For now, skip if pxr is not available
-        pytest.skip("Integration tests require pxr library and test USD files")
+        with tempfile.NamedTemporaryFile(suffix=".usda", delete=False) as handle:
+            handle.write(
+                b'#usda 1.0\n(\n    defaultPrim = "World"\n)\n\ndef Xform "World"\n{\n    def Cube "Cube"\n    {\n    }\n}\n'
+            )
+            path = Path(handle.name)
+        try:
+            yield str(path)
+        finally:
+            path.unlink(missing_ok=True)
 
     def test_load_real_usd_file(self, temp_usd_file):
         """Test loading a real USD file."""
