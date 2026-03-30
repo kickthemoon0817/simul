@@ -1,0 +1,43 @@
+# SECURITY: The bridge extension socket accepts TCP connections WITHOUT
+# authentication. By default it binds to 127.0.0.1 (localhost only).
+# Set ISAAC_BIND_HOST=0.0.0.0 only in trusted networks.
+# For remote access, use SSH tunnels or a reverse proxy with auth.
+#
+# The bridge handles both typed JSON and raw Python (VS Code compat)
+# protocols on a single port. The VS Code extension is kept as a
+# fallback but is not required for normal operation.
+
+services:
+  isaac-sim:
+    image: ${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim:5.1.0}
+    container_name: ${ISAAC_SIM_CONTAINER_NAME:-simul-isaac51}
+    user: "${ISAAC_SIM_UID:-1000}:${ISAAC_SIM_GID:-1000}"
+    gpus: all
+    entrypoint:
+      - /isaac-sim/isaac-sim.sh
+    command:
+      - --allow-root
+      - --no-window
+      - --ext-folder
+      - /tmp/extsUser
+      - --enable
+      - khemoo.simul.mcp
+      - --enable
+      - isaacsim.code_editor.vscode
+      - --/exts/khemoo.simul.mcp/host=${ISAAC_BIND_HOST:-127.0.0.1}
+      - --/exts/khemoo.simul.mcp/port=${ISAAC_BRIDGE_PORT:-8229}
+      - --/exts/khemoo.simul.mcp/allow_unsafe_execution=true
+      - --/exts/khemoo.simul.mcp/max_port_retries=${ISAAC_MAX_PORT_RETRIES:-10}
+      - --/exts/khemoo.simul.mcp/discovery_dir=/tmp/simul-mcp
+      - --/exts/isaacsim.code_editor.vscode/host=${ISAAC_BIND_HOST:-127.0.0.1}
+      - --/exts/isaacsim.code_editor.vscode/port=${ISAAC_VSCODE_PORT:-8226}
+    environment:
+      ACCEPT_EULA: "Y"
+      PRIVACY_CONSENT: "Y"
+      OMNI_KIT_ALLOW_ROOT: "1"
+    ports:
+      - "127.0.0.1:${ISAAC_BRIDGE_PORT:-8229}:${ISAAC_BRIDGE_PORT:-8229}"
+      - "127.0.0.1:${ISAAC_VSCODE_PORT:-8226}:${ISAAC_VSCODE_PORT:-8226}"
+    volumes:
+      - ./exts/khemoo.simul.mcp:/tmp/extsUser/khemoo.simul.mcp:ro
+      - ${SIMUL_DISCOVERY_DIR:-/tmp/simul-mcp}:/tmp/simul-mcp
