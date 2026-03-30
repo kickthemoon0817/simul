@@ -737,8 +737,7 @@ class TestUnrealRuntimeAdapter:
     ) -> None:
         """Adapter reports available when aiohttp present and config enabled."""
         monkeypatch.setattr(unreal_runtime, "UNREAL_AVAILABLE", True)
-        settings = Settings()
-        settings.unreal.enabled = True
+        settings = Settings(unreal={"enabled": True})
         adapter = unreal_runtime.UnrealRuntimeAdapter(settings=settings)
 
         assert adapter.is_available() is True
@@ -748,8 +747,7 @@ class TestUnrealRuntimeAdapter:
     ) -> None:
         """Adapter reports unavailable when config disabled."""
         monkeypatch.setattr(unreal_runtime, "UNREAL_AVAILABLE", True)
-        settings = Settings()
-        settings.unreal.enabled = False
+        settings = Settings(unreal={"enabled": False})
         adapter = unreal_runtime.UnrealRuntimeAdapter(settings=settings)
 
         assert adapter.is_available() is False
@@ -769,8 +767,7 @@ class TestUnrealRuntimeAdapter:
     ) -> None:
         """Capabilities include Phase 0 endpoints when available."""
         monkeypatch.setattr(unreal_runtime, "UNREAL_AVAILABLE", True)
-        settings = Settings()
-        settings.unreal.enabled = True
+        settings = Settings(unreal={"enabled": True})
         adapter = unreal_runtime.UnrealRuntimeAdapter(settings=settings)
 
         caps = adapter.get_capabilities()

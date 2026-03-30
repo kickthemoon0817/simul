@@ -40,6 +40,9 @@ def test_load_settings_supports_nested_repo_config_without_isaac_env(
     assert settings.logging.file_backup_count == 5
     assert settings.logging.console_colored is True
     assert settings.usd.cache_enabled is True
+    assert settings.isaac_sim.bridge_enabled is True
+    assert settings.isaac_sim.bridge_port == 8229
+    assert settings.isaac_sim.bridge_fallback_to_vscode is True
     assert settings.usd.max_concurrent_operations == 10
     assert settings.mesh.include_textures is True
     assert settings.mesh.texture_resolution == 1024
@@ -50,6 +53,43 @@ def test_load_settings_supports_nested_repo_config_without_isaac_env(
     assert settings.development.enable_mock_isaac is False
     assert settings.development.skip_gpu_operations is False
     assert any(path.endswith("/examples") for path in settings.security.allowed_paths)
+
+
+def test_load_settings_normalizes_nested_instance_bridge_config(tmp_path) -> None:
+    """Per-instance nested bridge settings should flatten into the Settings model."""
+    config_path = tmp_path / "instances.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "isaac_sim:",
+                "  instances:",
+                "    - name: verifier",
+                "      host: 127.0.0.1",
+                "      port: 8326",
+                "      timeout: 12.5",
+                "      bridge:",
+                "        enabled: true",
+                "        host: 127.0.0.1",
+                "        port: 8329",
+                "        timeout: 8.0",
+                "        fallback_to_vscode: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(config_path)
+
+    assert len(settings.isaac_sim.instances) == 1
+    instance = settings.isaac_sim.instances[0]
+    assert instance.name == "verifier"
+    assert instance.port == 8326
+    assert instance.timeout == 12.5
+    assert instance.bridge_enabled is True
+    assert instance.bridge_host == "127.0.0.1"
+    assert instance.bridge_port == 8329
+    assert instance.bridge_timeout == 8.0
+    assert instance.bridge_fallback_to_vscode is False
 
 
 def test_get_settings_tracks_config_file_changes(tmp_path, monkeypatch) -> None:
