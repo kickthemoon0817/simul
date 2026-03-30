@@ -43,12 +43,28 @@ def _make_error_result(
 def _make_tools(
     execute_return: Optional[ScriptResult] = None,
     execute_side_effect: Optional[Exception] = None,
+    bridge_response: Optional[Dict[str, Any]] = None,
+    bridge_side_effect: Optional[Exception] = None,
 ) -> IsaacTools:
     """Build an IsaacTools instance backed by a fully-mocked client."""
     client: MagicMock = MagicMock()
     client.address = "127.0.0.1:8226"
     client.timeout_seconds = 30.0
+    client.bridge_enabled = bridge_response is not None or bridge_side_effect is not None
+    client.fallback_to_vscode = True
     client.execute = AsyncMock(
+        return_value=execute_return,
+        side_effect=execute_side_effect,
+    )
+    client.bridge_request = AsyncMock(
+        return_value=bridge_response,
+        side_effect=bridge_side_effect,
+    )
+    client.execute_bridge_script_only = AsyncMock(
+        return_value=execute_return,
+        side_effect=execute_side_effect,
+    )
+    client.execute_vscode_only = AsyncMock(
         return_value=execute_return,
         side_effect=execute_side_effect,
     )
@@ -170,6 +186,84 @@ class TestSceneInspection:
         assert result["stage_url"] == "file:///test.usd"
         assert result["total_prims"] == 42
         assert result["up_axis"] == "Y"
+
+    def test_get_isaac_stage_info_uses_typed_bridge_when_available(self) -> None:
+        """Typed bridge stage info should be preferred over raw script execution."""
+        tools = _make_tools(
+            execute_return=_make_result({"legacy": True}),
+            bridge_response={
+                "status": "ok",
+                "payload": {
+                    "stage_url": "file:///bridge.usd",
+                    "total_prims": 7,
+                    "transport": "simul_bridge",
+                },
+            },
+        )
+
+        result = asyncio.run(tools.get_isaac_stage_info())
+
+        assert result["success"] is True
+        assert result["stage_url"] == "file:///bridge.usd"
+        tools._client.bridge_request.assert_awaited_once_with("get_stage_info", {})
+        tools._client.execute.assert_not_called()
+        tools._client.execute_vscode_only.assert_not_called()
+
+    def test_get_isaac_stage_info_falls_back_to_vscode_when_typed_bridge_is_unavailable(
+        self,
+    ) -> None:
+        """Typed bridge fallbacks should use the VS Code socket, not raw bridge exec."""
+        tools = _make_tools(
+            execute_return=_make_result(
+                {
+                    "stage_url": "file:///fallback.usd",
+                    "total_prims": 3,
+                }
+            ),
+            bridge_response={
+                "status": "error",
+                "error": {
+                    "name": "UnknownAction",
+                    "message": "not implemented",
+                },
+            },
+        )
+
+        result = asyncio.run(tools.get_isaac_stage_info())
+
+        assert result["success"] is True
+        assert result["stage_url"] == "file:///fallback.usd"
+        tools._client.bridge_request.assert_awaited_once_with("get_stage_info", {})
+        tools._client.execute_vscode_only.assert_awaited_once()
+        tools._client.execute_bridge_script_only.assert_not_called()
+
+    def test_raw_script_only_tools_use_vscode_when_bridge_mode_is_enabled(self) -> None:
+        """Raw-only tool paths should avoid execute_script on the typed bridge."""
+        tools = _make_tools(
+            execute_return=_make_result(
+                {
+                    "stage_url": "file:///fallback.usd",
+                    "total_prims": 3,
+                    "max_depth": 1,
+                    "has_physics": False,
+                    "has_animation": False,
+                    "type_counts": {},
+                    "root_prims": ["/World"],
+                    "up_axis": "Z",
+                    "meters_per_unit": 1.0,
+                }
+            ),
+            bridge_response={"status": "ok", "payload": {"reachable": True}},
+        )
+
+        result = asyncio.run(tools.get_isaac_scene_summary())
+
+        assert result["success"] is True
+        # With the corrected default transport routing, raw-script tools that
+        # don't explicitly set transport_mode go through execute() which
+        # handles bridge-first-then-fallback internally.
+        tools._client.execute.assert_awaited_once()
+        tools._client.execute_bridge_script_only.assert_not_called()
 
     def test_list_isaac_prims_defaults(self) -> None:
         """list_isaac_prims returns prim listing with defaults."""

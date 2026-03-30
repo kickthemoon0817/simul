@@ -5,14 +5,15 @@ This module provides Pydantic-based configuration management with support for
 environment variables, YAML files, and validation.
 """
 
+import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from functools import lru_cache
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +24,8 @@ _ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 class ServerConfig(BaseModel):
     """MCP Server configuration."""
+
+    model_config = ConfigDict(frozen=True)
 
     name: str = Field(
         default="Simul – 3D Simulation & DCC Tools",
@@ -43,14 +46,41 @@ class ServerConfig(BaseModel):
 class IsaacInstanceConfig(BaseModel):
     """Configuration for a single Isaac Sim instance."""
 
+    model_config = ConfigDict(frozen=True)
+
     name: str = Field(description="Human-readable instance identifier")
     host: str = Field(default="127.0.0.1", description="TCP socket host")
     port: int = Field(default=8226, description="TCP socket port", ge=1024, le=65535)
     timeout: float = Field(default=30.0, description="Socket timeout in seconds", gt=0.0)
+    bridge_enabled: bool = Field(
+        default=True,
+        description="Prefer the custom bridge extension for this instance",
+    )
+    bridge_host: Optional[str] = Field(
+        default=None,
+        description="Override host for the custom bridge extension",
+    )
+    bridge_port: Optional[int] = Field(
+        default=None,
+        description="Override port for the custom bridge extension",
+        ge=1024,
+        le=65535,
+    )
+    bridge_timeout: Optional[float] = Field(
+        default=None,
+        description="Override timeout for bridge transport operations",
+        gt=0.0,
+    )
+    bridge_fallback_to_vscode: bool = Field(
+        default=True,
+        description="Allow fallback to the VS Code socket for this instance",
+    )
 
 
 class IsaacSimConfig(BaseModel):
     """Isaac Sim configuration."""
+
+    model_config = ConfigDict(frozen=True)
 
     path: Optional[str] = Field(
         default=None, description="Path to Isaac Sim installation"
@@ -80,6 +110,29 @@ class IsaacSimConfig(BaseModel):
         description="Timeout in seconds for Isaac Sim TCP socket operations",
         gt=0.0,
     )
+    bridge_enabled: bool = Field(
+        default=True,
+        description="Prefer the custom Isaac Sim bridge extension when available",
+    )
+    bridge_host: str = Field(
+        default="127.0.0.1",
+        description="Host for the custom Isaac Sim bridge extension",
+    )
+    bridge_port: int = Field(
+        default=8229,
+        description="Port for the custom Isaac Sim bridge extension",
+        ge=1024,
+        le=65535,
+    )
+    bridge_timeout: float = Field(
+        default=30.0,
+        description="Timeout in seconds for bridge transport operations",
+        gt=0.0,
+    )
+    bridge_fallback_to_vscode: bool = Field(
+        default=True,
+        description="Fallback to the VS Code extension transport when the bridge is unavailable",
+    )
 
     # Multi-instance support
     instances: List[IsaacInstanceConfig] = Field(
@@ -98,6 +151,10 @@ class IsaacSimConfig(BaseModel):
         ge=1024,
         le=65535,
     )
+    discovery_dir: str = Field(
+        default="/tmp/simul-mcp",
+        description="Directory where bridge extensions write port discovery files",
+    )
 
     @field_validator("path")
     @classmethod
@@ -111,9 +168,21 @@ class IsaacSimConfig(BaseModel):
                 raise ValueError(f"Isaac Sim python executable not found in: {v}")
         return v
 
+    @model_validator(mode="after")
+    def _validate_port_range(self) -> "IsaacSimConfig":
+        """Ensure scan_port_start < scan_port_end to avoid empty scan ranges."""
+        if self.scan_port_start >= self.scan_port_end:
+            raise ValueError(
+                f"scan_port_start ({self.scan_port_start}) must be less than "
+                f"scan_port_end ({self.scan_port_end})"
+            )
+        return self
+
 
 class BlenderConfig(BaseModel):
     """Blender runtime configuration."""
+
+    model_config = ConfigDict(frozen=True)
 
     enabled: bool = Field(default=True, description="Enable Blender runtime tools")
     binary_path: Optional[str] = Field(
@@ -147,6 +216,8 @@ class BlenderConfig(BaseModel):
 class UnrealConfig(BaseModel):
     """Unreal Engine Remote Control API configuration."""
 
+    model_config = ConfigDict(frozen=True)
+
     enabled: bool = Field(default=True, description="Enable Unreal Engine runtime tools")
     host: str = Field(default="localhost", description="Remote Control API host")
     port: int = Field(
@@ -174,6 +245,8 @@ class UnrealConfig(BaseModel):
 
 class USDConfig(BaseModel):
     """USD configuration."""
+
+    model_config = ConfigDict(frozen=True)
 
     cache_enabled: bool = Field(default=True, description="Enable USD caching")
     cache_size: int = Field(default=1000, description="USD cache size", ge=1)
@@ -205,6 +278,8 @@ class USDConfig(BaseModel):
 class MeshConfig(BaseModel):
     """Mesh processing configuration."""
 
+    model_config = ConfigDict(frozen=True)
+
     decimation_enabled: bool = Field(default=True, description="Enable mesh decimation")
     max_faces: int = Field(
         default=50000, description="Maximum faces for decimation", ge=1
@@ -230,6 +305,8 @@ class MeshConfig(BaseModel):
 class ViewportConfig(BaseModel):
     """Viewport configuration."""
 
+    model_config = ConfigDict(frozen=True)
+
     default_width: int = Field(
         default=1920, description="Default viewport width", ge=640
     )
@@ -249,6 +326,8 @@ class ViewportConfig(BaseModel):
 
 class LoggingConfig(BaseModel):
     """Logging configuration."""
+
+    model_config = ConfigDict(frozen=True)
 
     level: str = Field(default="INFO", description="Log level")
     format: str = Field(default="detailed", description="Log format")
@@ -278,6 +357,8 @@ class LoggingConfig(BaseModel):
 class SecurityConfig(BaseModel):
     """Security configuration."""
 
+    model_config = ConfigDict(frozen=True)
+
     sandbox_enabled: bool = Field(default=True, description="Enable sandbox mode")
     allowed_paths: List[str] = Field(
         default_factory=lambda: ["examples", "tests/data", "/tmp/simul_mcp"],
@@ -296,6 +377,8 @@ class SecurityConfig(BaseModel):
 
 class PerformanceConfig(BaseModel):
     """Performance configuration."""
+
+    model_config = ConfigDict(frozen=True)
 
     memory_limit_gb: int = Field(default=8, description="Memory limit in GB", ge=1)
     gc_threshold: int = Field(
@@ -322,6 +405,8 @@ class PerformanceConfig(BaseModel):
 class FeatureFlags(BaseModel):
     """Feature flags configuration."""
 
+    model_config = ConfigDict(frozen=True)
+
     enable_mesh_analysis: bool = Field(default=True, description="Enable mesh analysis")
     enable_material_extraction: bool = Field(
         default=True, description="Enable material extraction"
@@ -346,6 +431,8 @@ class FeatureFlags(BaseModel):
 
 class DevelopmentConfig(BaseModel):
     """Development configuration."""
+
+    model_config = ConfigDict(frozen=True)
 
     debug_mode: bool = Field(default=False, description="Enable debug mode")
     profiling_enabled: bool = Field(default=False, description="Enable profiling")
@@ -440,6 +527,53 @@ def _normalise_optional_path(value: Any) -> Optional[str]:
     return str(value)
 
 
+def _normalise_isaac_instances(value: Any) -> Optional[List[Dict[str, Any]]]:
+    """Flatten optional per-instance bridge settings from nested YAML layout."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("instances must be a list of dicts")
+
+    instances: List[Dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError(f"Each instance must be a dict, got {type(item).__name__}")
+
+
+        bridge = item.get("bridge") or {}
+        instances.append(
+            _compact_dict(
+                {
+                    "name": item.get("name"),
+                    "host": item.get("host"),
+                    "port": item.get("port"),
+                    "timeout": item.get("timeout"),
+                    "bridge_enabled": _coalesce(
+                        item.get("bridge_enabled"),
+                        bridge.get("enabled"),
+                    ),
+                    "bridge_host": _coalesce(
+                        item.get("bridge_host"),
+                        bridge.get("host"),
+                    ),
+                    "bridge_port": _coalesce(
+                        item.get("bridge_port"),
+                        bridge.get("port"),
+                    ),
+                    "bridge_timeout": _coalesce(
+                        item.get("bridge_timeout"),
+                        bridge.get("timeout"),
+                    ),
+                    "bridge_fallback_to_vscode": _coalesce(
+                        item.get("bridge_fallback_to_vscode"),
+                        bridge.get("fallback_to_vscode"),
+                    ),
+                }
+            )
+        )
+    return instances
+
+
 def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
     """Flatten the repo's nested YAML layout into the Settings model shape."""
     env = dict(os.environ)
@@ -449,6 +583,7 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
     server = raw.get("server") or {}
     isaac = raw.get("isaac_sim") or {}
     isaac_kit = isaac.get("kit") or {}
+    isaac_bridge = isaac.get("bridge") or {}
     isaac_resolution = isaac_kit.get("resolution") or {}
     usd = raw.get("usd") or {}
     usd_stage = usd.get("stage") or {}
@@ -510,9 +645,26 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     "socket_host": isaac.get("socket_host"),
                     "socket_port": isaac.get("socket_port"),
                     "socket_timeout": isaac.get("socket_timeout"),
-                    "instances": isaac.get("instances"),
+                    "bridge_enabled": _coalesce(
+                        isaac.get("bridge_enabled"), isaac_bridge.get("enabled")
+                    ),
+                    "bridge_host": _coalesce(
+                        isaac.get("bridge_host"), isaac_bridge.get("host")
+                    ),
+                    "bridge_port": _coalesce(
+                        isaac.get("bridge_port"), isaac_bridge.get("port")
+                    ),
+                    "bridge_timeout": _coalesce(
+                        isaac.get("bridge_timeout"), isaac_bridge.get("timeout")
+                    ),
+                    "bridge_fallback_to_vscode": _coalesce(
+                        isaac.get("bridge_fallback_to_vscode"),
+                        isaac_bridge.get("fallback_to_vscode"),
+                    ),
+                    "instances": _normalise_isaac_instances(isaac.get("instances")),
                     "scan_port_start": isaac.get("scan_port_start"),
                     "scan_port_end": isaac.get("scan_port_end"),
+                    "discovery_dir": isaac.get("discovery_dir"),
                 }
             ),
             "blender": raw.get("blender"),
@@ -735,12 +887,12 @@ def _load_yaml_settings(config_file: Union[str, Path]) -> Dict[str, Any]:
             return _normalise_settings_payload(config_data)
         return {}
     except Exception as e:
-        print(f"Warning: Failed to load config file {config_path}: {e}")
+        logging.getLogger(__name__).warning("Failed to load config file %s: %s", config_path, e)
         return {}
 
 
-@lru_cache(maxsize=None)
-def _get_cached_settings(cache_key: tuple[str, Optional[float]]) -> Settings:
+@lru_cache(maxsize=1)
+def _get_cached_settings(cache_key: Tuple[str, Optional[float]]) -> Settings:
     """Load settings with a cache key that changes with path or mtime."""
     config_path, _mtime = cache_key
     config_data = _load_yaml_settings(config_path)
@@ -751,7 +903,10 @@ def get_settings() -> Settings:
     """Get settings keyed by the resolved config path and file mtime."""
     config_file = os.getenv("CONFIG_FILE", _DEFAULT_CONFIG_FILE)
     resolved = _resolve_config_file(config_file)
-    mtime = resolved.stat().st_mtime if resolved.exists() else None
+    try:
+        mtime = resolved.stat().st_mtime
+    except OSError:
+        mtime = None
     return _get_cached_settings((str(resolved), mtime))
 
 
@@ -774,16 +929,6 @@ def load_settings(config_path: Union[str, Path]) -> Settings:
 def validate_settings(settings: Settings) -> List[str]:
     """Validate settings and return list of validation errors."""
     errors = []
-
-    # Validate Isaac Sim path if provided
-    if settings.isaac_sim.path:
-        isaac_path = Path(settings.isaac_sim.path)
-        if not isaac_path.exists():
-            errors.append(f"Isaac Sim path does not exist: {settings.isaac_sim.path}")
-        else:
-            python_exe = isaac_path / ("python.bat" if os.name == "nt" else "python.sh")
-            if not python_exe.exists():
-                errors.append(f"Isaac Sim python executable not found: {python_exe}")
 
     # Validate log file directory
     if settings.logging.file_enabled:

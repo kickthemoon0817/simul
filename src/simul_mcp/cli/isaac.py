@@ -13,6 +13,7 @@ import asyncio
 import base64
 import json
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,9 +44,14 @@ def _tools(
     """Build an IsaacTools instance from settings with optional overrides."""
     settings = get_settings()
     client = IsaacSocketClient(
-        host=host or settings.isaac_sim.socket_host,
-        port=port or settings.isaac_sim.socket_port,
-        timeout_seconds=timeout or settings.isaac_sim.socket_timeout,
+        host=host if host is not None else settings.isaac_sim.socket_host,
+        port=port if port is not None else settings.isaac_sim.socket_port,
+        bridge_host=settings.isaac_sim.bridge_host,
+        bridge_port=settings.isaac_sim.bridge_port,
+        bridge_timeout_seconds=settings.isaac_sim.bridge_timeout,
+        prefer_bridge=settings.isaac_sim.bridge_enabled,
+        fallback_to_vscode=settings.isaac_sim.bridge_fallback_to_vscode,
+        timeout_seconds=timeout if timeout is not None else settings.isaac_sim.socket_timeout,
     )
     return IsaacTools(client, settings)
 
@@ -73,6 +79,22 @@ def _run(coro: Any) -> Dict[str, Any]:
             console.print(Panel(details["traceback"], title="Traceback", border_style="red"))
         raise typer.Exit(1)
     return result
+
+
+def _parse_script_result(result: Any) -> Dict[str, Any]:
+    """Parse a raw script result, preferring JSON output when available."""
+    if not result.success:
+        raise RuntimeError(result.error_value or result.error_name or "Script execution failed")
+    output = result.output.strip()
+    if not output:
+        return {}
+    try:
+        parsed = json.loads(output)
+    except (json.JSONDecodeError, ValueError):
+        return {"output": result.output}
+    if isinstance(parsed, dict):
+        return parsed
+    return {"parsed": parsed}
 
 
 # Common host/port/timeout options
@@ -110,6 +132,172 @@ def ping(
         raise typer.Exit(1)
 
 
+@app.command("bridge-capabilities")
+def bridge_capabilities(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+    timeout: Optional[float] = _timeout_opt,
+) -> None:
+    """Show the current typed bridge capability envelope."""
+    tools = _tools(host, port, timeout)
+    try:
+        response = asyncio.run(tools._client.bridge_request("capabilities", {}))
+    except (ConnectionRefusedError, TimeoutError, ValueError) as exc:
+        if is_json_mode():
+            emit_error(str(exc), type(exc).__name__)
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    if response.get("status") != "ok":
+        error = response.get("error", {})
+        message = str(error.get("message", "Bridge request failed"))
+        error_name = str(error.get("name", "BridgeError"))
+        if is_json_mode():
+            emit_error(message, error_name)
+        console.print(f"[red]{error_name}: {message}[/red]")
+        raise typer.Exit(1)
+
+    payload = response.get("payload", {})
+    result = {
+        "bridge_address": tools._client.bridge_address,
+        "transport": payload.get("transport"),
+        "protocol_version": response.get("protocol_version"),
+        "allow_unsafe_execution": payload.get("allow_unsafe_execution"),
+        "actions": payload.get("actions", []),
+    }
+    if is_json_mode():
+        emit(result)
+        return
+
+    table = Table(title=f"Bridge Capabilities @ {tools._client.bridge_address}")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value")
+    table.add_row("Transport", str(result.get("transport")))
+    table.add_row("Protocol", str(result.get("protocol_version")))
+    table.add_row(
+        "execute_script",
+        "enabled" if result.get("allow_unsafe_execution") else "disabled",
+    )
+    table.add_row("Actions", ", ".join(result.get("actions", [])))
+    console.print(table)
+
+
+@app.command("bridge-config")
+def bridge_config(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+    timeout: Optional[float] = _timeout_opt,
+) -> None:
+    """Read the current bridge settings from the running Isaac Sim instance."""
+    tools = _tools(host, port, timeout)
+    script = textwrap.dedent(
+        """\
+        import json
+        import carb
+        import omni.kit.app
+
+        settings = carb.settings.get_settings()
+        manager = omni.kit.app.get_app().get_extension_manager()
+        print(json.dumps({
+            "extension_enabled": manager.is_extension_enabled("khemoo.simul.mcp"),
+            "host": settings.get("/exts/khemoo.simul.mcp/host"),
+            "port": int(settings.get("/exts/khemoo.simul.mcp/port")),
+            "allow_unsafe_execution": bool(settings.get("/exts/khemoo.simul.mcp/allow_unsafe_execution")),
+            "max_request_bytes": int(settings.get("/exts/khemoo.simul.mcp/max_request_bytes")),
+            "max_response_bytes": int(settings.get("/exts/khemoo.simul.mcp/max_response_bytes")),
+        }))
+        """
+    )
+    try:
+        result = asyncio.run(tools._client.execute_vscode_only(script))
+        parsed = _parse_script_result(result)
+    except (ConnectionRefusedError, TimeoutError, RuntimeError, ValueError) as exc:
+        if is_json_mode():
+            emit_error(str(exc), type(exc).__name__)
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    if is_json_mode():
+        emit(parsed)
+        return
+
+    table = Table(title="Bridge Config")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value")
+    for key in (
+        "extension_enabled",
+        "host",
+        "port",
+        "allow_unsafe_execution",
+        "max_request_bytes",
+        "max_response_bytes",
+    ):
+        table.add_row(key, str(parsed.get(key)))
+    console.print(table)
+
+
+@app.command("bridge-set-unsafe")
+def bridge_set_unsafe(
+    enable: bool = typer.Option(
+        True,
+        "--enable/--disable",
+        help="Enable or disable bridge execute_script permission.",
+    ),
+    restart: bool = typer.Option(
+        True,
+        "--restart/--no-restart",
+        help="Restart the bridge extension after updating the setting.",
+    ),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+    timeout: Optional[float] = _timeout_opt,
+) -> None:
+    """Toggle bridge execute_script permission inside the running Isaac Sim instance."""
+    tools = _tools(host, port, timeout)
+    script = textwrap.dedent(
+        f"""\
+        import json
+        import carb
+        import omni.kit.app
+
+        settings = carb.settings.get_settings()
+        settings.set("/exts/khemoo.simul.mcp/allow_unsafe_execution", {str(enable)})
+        manager = omni.kit.app.get_app().get_extension_manager()
+        extension_name = "khemoo.simul.mcp"
+        enabled = manager.is_extension_enabled(extension_name)
+        restarted = False
+        if enabled and {str(restart)}:
+            manager.set_extension_enabled_immediate(extension_name, False)
+            manager.set_extension_enabled_immediate(extension_name, True)
+            restarted = True
+
+        print(json.dumps({{
+            "allow_unsafe_execution": {str(enable)},
+            "restart_requested": {str(restart)},
+            "restarted": restarted,
+        }}))
+        """
+    )
+    try:
+        result = asyncio.run(tools._client.execute_vscode_only(script))
+        parsed = _parse_script_result(result)
+    except (ConnectionRefusedError, TimeoutError, RuntimeError, ValueError) as exc:
+        if is_json_mode():
+            emit_error(str(exc), type(exc).__name__)
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    if is_json_mode():
+        emit(parsed)
+        return
+
+    state = "enabled" if parsed.get("allow_unsafe_execution") else "disabled"
+    console.print(
+        f"[green]execute_script[/green] {state}"
+        + (" and bridge restarted" if parsed.get("restarted") else "")
+    )
+
+
 # ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
@@ -120,8 +308,20 @@ def status(
 ) -> None:
     """Show Isaac Sim instance status -- stage, prims, simulation state."""
     tools = _tools(host, port)
-    stage = _run(tools.get_isaac_stage_info())
-    sim = _run(tools.get_isaac_simulation_state())
+
+    async def _fetch() -> tuple:
+        return await asyncio.gather(
+            tools.get_isaac_stage_info(),
+            tools.get_isaac_simulation_state(),
+        )
+
+    stage, sim = asyncio.run(_fetch())
+    for r in (stage, sim):
+        if isinstance(r, dict) and r.get("error"):
+            if is_json_mode():
+                emit_error(r["error"], r.get("error_type", "Error"), r.get("details"))
+            console.print(f"[red]{r.get('error_type', 'Error')}: {r['error']}[/red]")
+            raise typer.Exit(1)
 
     if is_json_mode():
         emit({"stage": stage, "simulation": sim})
@@ -151,11 +351,23 @@ def scene(
 ) -> None:
     """Print a scene overview -- prim types, lights, cameras, physics objects."""
     tools = _tools(host, port)
-    summary = _run(tools.get_isaac_scene_summary())
-    stats = _run(tools.get_isaac_scene_stats())
-    cameras = _run(tools.list_isaac_cameras())
-    lights = _run(tools.list_isaac_lights())
-    physics = _run(tools.list_isaac_physics_objects())
+
+    async def _fetch() -> tuple:
+        return await asyncio.gather(
+            tools.get_isaac_scene_summary(),
+            tools.get_isaac_scene_stats(),
+            tools.list_isaac_cameras(),
+            tools.list_isaac_lights(),
+            tools.list_isaac_physics_objects(),
+        )
+
+    summary, stats, cameras, lights, physics = asyncio.run(_fetch())
+    for r in (summary, stats, cameras, lights, physics):
+        if isinstance(r, dict) and r.get("error"):
+            if is_json_mode():
+                emit_error(r["error"], r.get("error_type", "Error"), r.get("details"))
+            console.print(f"[red]{r.get('error_type', 'Error')}: {r['error']}[/red]")
+            raise typer.Exit(1)
 
     if is_json_mode():
         emit({
@@ -211,7 +423,7 @@ def exec_script(
     script: Optional[str] = typer.Argument(None, help="Python code string or path to a .py file"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
-    timeout: float = _timeout_opt,
+    timeout: Optional[float] = _timeout_opt,
     raw: bool = typer.Option(False, "--raw", "-r", help="Print raw output without formatting"),
 ) -> None:
     """Execute Python code inside Isaac Sim. Accepts a code string or .py file path."""
@@ -230,7 +442,10 @@ def exec_script(
 
     tools = _tools(host, port, timeout)
     try:
-        result = asyncio.run(tools._client.execute(code))
+        if tools._client.bridge_enabled:
+            result = asyncio.run(tools._client.execute_vscode_only(code))
+        else:
+            result = asyncio.run(tools._client.execute(code))
     except (ConnectionRefusedError, TimeoutError) as exc:
         if is_json_mode():
             emit_error(str(exc), type(exc).__name__)
@@ -248,7 +463,7 @@ def exec_script(
             output_data["parsed"] = json.loads(result.output)
         except (json.JSONDecodeError, ValueError):
             pass
-        print(json.dumps(output_data))
+        emit(output_data)
         if not result.success:
             raise typer.Exit(1)
         return
@@ -530,7 +745,6 @@ def set_transform(
 @app.command("search-prims")
 def search_prims(
     pattern: str = typer.Argument(..., help="Name pattern to search for (supports * and ? wildcards)"),
-    prim_type: Optional[str] = typer.Option(None, "--type", help="Filter by prim type"),
     root_path: str = typer.Option("/", "--root", "-r", help="Root prim path"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
@@ -827,7 +1041,9 @@ def set_carb_settings(
     parsed: Dict[str, Any] = {}
     for a in assignments:
         if "=" not in a:
-            emit_error(f"Invalid format: {a!r} — expected key=value")
+            if is_json_mode():
+                emit_error(f"Invalid format: {a!r} — expected key=value")
+            console.print(f"[red]Invalid format: {a!r} — expected key=value[/red]")
             raise typer.Exit(1)
         key, raw_val = a.split("=", 1)
         val: Any = raw_val
@@ -865,7 +1081,7 @@ def read_aovs(
     aov_names: List[str] = typer.Argument(..., help="AOV names to read (e.g. HdrColor DirectDiffuse)"),
     camera: str = typer.Option("/OmniverseKit_Persp", "--camera", "-c", help="Camera prim path"),
     width: int = typer.Option(256, "--width", "-W", help="Render width"),
-    height: int = typer.Option(256, "--height", "-H", help="Render height"),
+    height: int = typer.Option(256, "--height", help="Render height"),
     frames: int = typer.Option(5, "--frames", "-f", help="Number of render frames before reading"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,

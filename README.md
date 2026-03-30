@@ -31,7 +31,8 @@ Simul-MCP is designed for multi-engine workflows. Isaac Sim is the primary runti
 
 ### Isaac Sim Requirements (Optional)
 - NVIDIA Isaac Sim 5.1.0+
-- `isaacsim.code_editor.vscode` extension enabled (TCP port 8226)
+- `khemoo.simul.mcp` bridge extension preferred on TCP port 8229
+- `isaacsim.code_editor.vscode` kept as compatibility fallback on TCP port 8226
 
 ## Installation
 
@@ -104,7 +105,7 @@ Add to `~/.config/opencode/config.json` under `mcpServers`:
 
 ### Prerequisites for Isaac Sim Tools
 
-Isaac Sim tools require a running Isaac Sim instance with the `isaacsim.code_editor.vscode` extension enabled (TCP port 8226). Launch Isaac Sim before using any `isaac_*` tools. Use `ping_isaac` to verify connectivity.
+Isaac Sim tools prefer a running Isaac Sim instance with the repo-owned `khemoo.simul.mcp` bridge extension enabled on TCP port 8229. When that bridge is unavailable, the client falls back to `isaacsim.code_editor.vscode` on TCP port 8226. Use `ping_isaac` to verify connectivity.
 
 ## Quick Start
 
@@ -133,9 +134,43 @@ simul-mcp stats
 
 ### 3. Use with Isaac Sim
 
-1. Launch Isaac Sim with the `isaacsim.code_editor.vscode` extension enabled
-2. Start your AI agent (Claude Code, Codex, or OpenCode) with simul MCP configured
-3. The agent can now use 75+ Isaac Sim tools for scene control, rendering, physics, and more
+1. Launch Isaac Sim with the `khemoo.simul.mcp` bridge extension enabled
+2. Keep `isaacsim.code_editor.vscode` enabled if you want transport fallback
+3. Start your AI agent (Claude Code, Codex, or OpenCode) with simul MCP configured
+4. The agent can now use 75+ Isaac Sim tools for scene control, rendering, physics, and more
+
+### Containerized Isaac Sim 5.1.0
+
+For Linux hosts, the repo includes a Docker Compose file that runs the official
+`nvcr.io/nvidia/isaac-sim:5.1.0` image with the bridge extension mounted from
+this checkout:
+
+```bash
+docker compose -f compose.isaac-sim.yml up -d
+```
+
+This Compose file:
+- publishes the bridge and VS Code sockets from the container to the host
+- mounts `./exts/khemoo.simul.mcp` into `/tmp/extsUser/khemoo.simul.mcp`
+- starts `/isaac-sim/isaac-sim.sh --allow-root --no-window`
+- enables both `khemoo.simul.mcp` and `isaacsim.code_editor.vscode`
+- binds the bridge inside the container on `0.0.0.0:${ISAAC_BRIDGE_PORT:-8229}`
+- enables bridge `execute_script` by default for easy local use
+- binds the VS Code fallback inside the container on `0.0.0.0:${ISAAC_VSCODE_PORT:-8226}`
+- publishes those ports back to the host on the same numbers
+- keeps the container stateless by default so validation runs start cleanly
+
+To stop it:
+
+```bash
+docker compose -f compose.isaac-sim.yml down
+```
+
+Override ports or the image tag with standard Compose environment variables, for example:
+
+```bash
+ISAAC_BRIDGE_PORT=8829 ISAAC_VSCODE_PORT=8826 docker compose -f compose.isaac-sim.yml up -d
+```
 
 ## Usage
 
@@ -259,6 +294,12 @@ isaac_sim:
   socket_host: "127.0.0.1"
   socket_port: 8226
   socket_timeout: 30.0
+  bridge:
+    enabled: true
+    host: "127.0.0.1"
+    port: 8229
+    timeout: 30.0
+    fallback_to_vscode: true
 ```
 
 ### Environment Variables
