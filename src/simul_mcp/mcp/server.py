@@ -5,6 +5,7 @@ This module provides the main MCP server class with tool registry,
 connection management, and 3D simulation/DCC integration based on FastMCP.
 """
 
+import asyncio
 import inspect
 import json
 import os
@@ -152,17 +153,27 @@ class SimulMCPServer(LoggerMixin):
         # Multi-instance Isaac Sim registry
         self._isaac_clients: Dict[str, IsaacSocketClient] = {}
         self._active_instance: str = "default"
-        default_client = IsaacSocketClient(
-            host=self.settings.isaac_sim.socket_host,
-            port=self.settings.isaac_sim.socket_port,
-            timeout_seconds=self.settings.isaac_sim.socket_timeout,
+        default_client = self._build_isaac_client(
+            socket_host=self.settings.isaac_sim.socket_host,
+            socket_port=self.settings.isaac_sim.socket_port,
+            socket_timeout=self.settings.isaac_sim.socket_timeout,
+            bridge_enabled=self.settings.isaac_sim.bridge_enabled,
+            bridge_host=self.settings.isaac_sim.bridge_host,
+            bridge_port=self.settings.isaac_sim.bridge_port,
+            bridge_timeout=self.settings.isaac_sim.bridge_timeout,
+            bridge_fallback_to_vscode=self.settings.isaac_sim.bridge_fallback_to_vscode,
         )
         self._isaac_clients["default"] = default_client
         for inst in self.settings.isaac_sim.instances:
-            self._isaac_clients[inst.name] = IsaacSocketClient(
-                host=inst.host,
-                port=inst.port,
-                timeout_seconds=inst.timeout,
+            self._isaac_clients[inst.name] = self._build_isaac_client(
+                socket_host=inst.host,
+                socket_port=inst.port,
+                socket_timeout=inst.timeout,
+                bridge_enabled=inst.bridge_enabled,
+                bridge_host=inst.bridge_host,
+                bridge_port=inst.bridge_port,
+                bridge_timeout=inst.bridge_timeout,
+                bridge_fallback_to_vscode=inst.bridge_fallback_to_vscode,
             )
         self.client = default_client
         self._isaac_tools = IsaacTools(self.client, self.settings)
@@ -496,28 +507,173 @@ class SimulMCPServer(LoggerMixin):
         self.client = client
         self._isaac_tools._client = client
 
+    def _bridge_port_for_socket(self, socket_port: int) -> int:
+        """Derive the bridge port for an Isaac instance from its socket port."""
+        derived = (
+            self.settings.isaac_sim.bridge_port
+            + (socket_port - self.settings.isaac_sim.socket_port)
+        )
+        return max(1024, min(derived, 65535))
+
+    def _build_isaac_client(
+        self,
+        *,
+        socket_host: str,
+        socket_port: int,
+        socket_timeout: float,
+        bridge_enabled: bool,
+        bridge_host: Optional[str] = None,
+        bridge_port: Optional[int] = None,
+        bridge_timeout: Optional[float] = None,
+        bridge_fallback_to_vscode: Optional[bool] = None,
+    ) -> IsaacSocketClient:
+        """Create one bridge-aware Isaac client from default or per-instance config."""
+        resolved_bridge_port = (
+            bridge_port
+            if bridge_port is not None
+            else self._bridge_port_for_socket(socket_port)
+        )
+        resolved_bridge_timeout = (
+            bridge_timeout
+            if bridge_timeout is not None
+            else self.settings.isaac_sim.bridge_timeout
+        )
+        resolved_fallback = (
+            bridge_fallback_to_vscode
+            if bridge_fallback_to_vscode is not None
+            else self.settings.isaac_sim.bridge_fallback_to_vscode
+        )
+        return IsaacSocketClient(
+            host=socket_host,
+            port=socket_port,
+            bridge_host=bridge_host or socket_host,
+            bridge_port=resolved_bridge_port,
+            bridge_timeout_seconds=resolved_bridge_timeout,
+            prefer_bridge=bridge_enabled,
+            fallback_to_vscode=resolved_fallback,
+            timeout_seconds=socket_timeout,
+        )
+
+    async def _discover_from_files(self) -> Dict[str, IsaacSocketClient]:
+        """
+        Discover Isaac Sim instances from bridge discovery files.
+
+        Each running bridge extension writes a JSON file to the discovery
+        directory containing its PID, host, and actual bound port.
+        Stale files (dead PIDs) are cleaned up automatically.
+        """
+        discovery_dir = self.settings.isaac_sim.discovery_dir
+        if not os.path.isdir(discovery_dir):
+            return {}
+
+        existing_ports: set[int] = {
+            c._port for c in self._isaac_clients.values()
+        }
+
+        discovered: Dict[str, IsaacSocketClient] = {}
+        for filename in os.listdir(discovery_dir):
+            if not filename.endswith(".json"):
+                continue
+            filepath = os.path.join(discovery_dir, filename)
+            try:
+                with open(filepath, "r") as f:
+                    data = json.loads(f.read())
+            except (OSError, json.JSONDecodeError):
+                continue
+
+            pid = data.get("pid")
+            host = data.get("host", "127.0.0.1")
+            port = data.get("port")
+
+            if not isinstance(port, int) or port in existing_ports:
+                continue
+
+            # Check if PID is still alive
+            if isinstance(pid, int):
+                try:
+                    os.kill(pid, 0)  # signal 0 = check existence
+                except ProcessLookupError:
+                    # Process is dead -- clean up stale file
+                    try:
+                        os.remove(filepath)
+                    except OSError:
+                        pass
+                    continue
+                except PermissionError:
+                    pass  # Process exists but we can't signal it -- that's fine
+
+            client = self._build_isaac_client(
+                socket_host=host,
+                socket_port=port,
+                socket_timeout=min(self.settings.isaac_sim.socket_timeout, 3.0),
+                bridge_enabled=True,
+                bridge_host=host,
+                bridge_port=port,
+                bridge_timeout=min(self.settings.isaac_sim.bridge_timeout, 3.0),
+                bridge_fallback_to_vscode=self.settings.isaac_sim.bridge_fallback_to_vscode,
+            )
+
+            # Verify the instance is actually reachable
+            if await client.ping():
+                name = f"isaac-{port}"
+                discovered[name] = client
+
+        return discovered
+
     async def _scan_isaac_instances(self) -> Dict[str, IsaacSocketClient]:
         """
         Scan the configured port range for running Isaac Sim instances.
 
         Returns any newly discovered instances not already in the registry.
-        Existing named instances are never overwritten.
+        Existing named instances are never overwritten.  Phase 1 discovers
+        instances via discovery files; Phase 2 fills gaps with a port scan.
+        All port-scan candidate pings run concurrently via ``asyncio.gather``
+        to avoid sequential timeouts.
         """
+        # Phase 1: fast discovery via files
+        file_discovered = await self._discover_from_files()
+
+        # Phase 2: port scan for instances without discovery files
         scan_start = self.settings.isaac_sim.scan_port_start
         scan_end = self.settings.isaac_sim.scan_port_end
         host = self.settings.isaac_sim.socket_host
         timeout = self.settings.isaac_sim.socket_timeout
-        existing_ports = {c._port for c in self._isaac_clients.values() if c._host == host}
+        existing_ports: set[int] = {
+            c._port for c in self._isaac_clients.values() if c._host == host
+        }
+        existing_ports.update(c._port for c in file_discovered.values())
 
-        discovered: Dict[str, IsaacSocketClient] = {}
+        candidates: Dict[int, IsaacSocketClient] = {}
         for port in range(scan_start, scan_end):
             if port in existing_ports:
                 continue
-            candidate = IsaacSocketClient(host=host, port=port, timeout_seconds=min(timeout, 3.0))
-            if await candidate.ping():
-                name = f"isaac-{port}"
-                discovered[name] = candidate
-        return discovered
+            candidates[port] = self._build_isaac_client(
+                socket_host=host,
+                socket_port=port,
+                socket_timeout=min(timeout, 3.0),
+                bridge_enabled=self.settings.isaac_sim.bridge_enabled,
+                bridge_host=self.settings.isaac_sim.bridge_host,
+                bridge_port=self._bridge_port_for_socket(port),
+                bridge_timeout=min(self.settings.isaac_sim.bridge_timeout, 3.0),
+                bridge_fallback_to_vscode=self.settings.isaac_sim.bridge_fallback_to_vscode,
+            )
+
+        if not candidates:
+            return file_discovered
+
+        ping_results = await asyncio.gather(
+            *(client.ping() for client in candidates.values()),
+            return_exceptions=True,
+        )
+
+        discovered: Dict[str, IsaacSocketClient] = {}
+        for (port, client), result in zip(candidates.items(), ping_results):
+            if result is True:
+                discovered[f"isaac-{port}"] = client
+
+        # Merge: file discovery takes priority
+        file_discovered.update(discovered)
+        return file_discovered
 
     async def _get_instance_brief(
         self, name: str, client: IsaacSocketClient
@@ -544,7 +700,26 @@ class SimulMCPServer(LoggerMixin):
             "is_playing": None,
         }
         try:
-            result = await client.execute(
+            if client.bridge_enabled:
+                stage_info = await client.bridge_request("get_stage_info", {})
+                sim_state = await client.bridge_request("get_simulation_state", {})
+                if stage_info.get("status") == "ok":
+                    payload = stage_info.get("payload", {})
+                    info["reachable"] = True
+                    info["stage_url"] = payload.get("stage_url")
+                    info["up_axis"] = payload.get("up_axis")
+                    info["prim_count"] = payload.get("total_prims")
+                if sim_state.get("status") == "ok":
+                    payload = sim_state.get("payload", {})
+                    info["reachable"] = True
+                    info["is_playing"] = payload.get("is_playing")
+                if info["reachable"]:
+                    return info
+
+            if not client.fallback_to_vscode:
+                return info
+
+            result = await client.execute_vscode_only(
                 "import json, omni.usd, omni.timeline\n"
                 "ctx = omni.usd.get_context()\n"
                 "stage = ctx.get_stage()\n"
@@ -565,9 +740,8 @@ class SimulMCPServer(LoggerMixin):
                 info["prim_count"] = data.get("prim_count")
                 info["is_playing"] = data.get("is_playing")
             else:
-                # Reachable but script failed — still mark as reachable
                 info["reachable"] = True
-        except (ConnectionRefusedError, TimeoutError, OSError):
+        except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
             info["reachable"] = False
         except (json.JSONDecodeError, KeyError):
             info["reachable"] = True
@@ -615,6 +789,14 @@ class SimulMCPServer(LoggerMixin):
             tool_count = sum(1 for k in components if k.startswith("tool:"))
         self.logger.info(f"Registered {tool_count} MCP tools")
 
+    async def shutdown(self) -> None:
+        """Release server resources on shutdown."""
+        self._isaac_clients.clear()
+        self._rate_limiters.clear()
+        self.usage_tracker._stats.clear()
+        self.usage_tracker._recent.clear()
+        logger.info("Simul 3D MCP Server shut down")
+
     async def run(self, transport: str = "stdio") -> None:
         """
         Run the MCP server.
@@ -639,6 +821,8 @@ class SimulMCPServer(LoggerMixin):
         except Exception as e:
             self.logger.error("Error running MCP server: %s", e)
             raise
+        finally:
+            await self.shutdown()
 
     def get_capabilities(self) -> List[str]:
         """Get list of server capabilities."""

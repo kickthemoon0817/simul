@@ -44,8 +44,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         """
         Execute Python code inside the running Isaac Sim process.
 
-        The code is sent over TCP to the stock isaacsim.code_editor.vscode
-        extension (port 8226). stdout is captured and returned.
+        The code is sent over the configured raw-script transport. When the
+        typed bridge is enabled, raw script execution still uses the VS Code
+        socket so the bridge can stay on the typed control path.
 
         Args:
             code: Python source code to execute in Isaac Sim.
@@ -74,7 +75,10 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         }
         t0 = time.monotonic()
         try:
-            result: ScriptResult = await server.client.execute(code)
+            if server.client.bridge_enabled:
+                result = await server.client.execute_vscode_only(code)
+            else:
+                result = await server.client.execute(code)
             duration_ms = (time.monotonic() - t0) * 1000
             if not result.success:
                 server.usage_tracker.record(
