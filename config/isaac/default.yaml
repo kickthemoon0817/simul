@@ -9,8 +9,10 @@ server:
   timeout: 30
   enable_cors: true
   cors_origins:
-    - "http://localhost:*"
-    - "https://localhost:*"
+    - "http://localhost:8765"
+    - "https://localhost:8765"
+    - "http://localhost:8226"
+    - "http://localhost:8229"
 
 # Isaac Sim Configuration
 isaac_sim:
@@ -21,6 +23,17 @@ isaac_sim:
   socket_host: "127.0.0.1"
   socket_port: 8226
   socket_timeout: 30.0
+
+  # Preferred bridge extension transport. Falls back to VS Code when unavailable.
+  bridge:
+    enabled: true
+    host: "127.0.0.1"
+    port: 8229
+    timeout: 30.0
+    fallback_to_vscode: true
+
+  # Discovery directory for bridge extension port files
+  discovery_dir: "/tmp/simul-mcp"
 
   # Kit configuration
   kit:
