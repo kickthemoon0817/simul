@@ -566,9 +566,11 @@ class SimulMCPServer(LoggerMixin):
         if not os.path.isdir(discovery_dir):
             return {}
 
-        existing_ports: set[int] = {
-            c._port for c in self._isaac_clients.values()
-        }
+        existing_ports: set[int] = set()
+        for c in self._isaac_clients.values():
+            existing_ports.add(c._port)  # vscode port
+            if c._bridge_configured and c._bridge_port is not None:
+                existing_ports.add(c._bridge_port)  # bridge port
 
         discovered: Dict[str, IsaacSocketClient] = {}
         for filename in os.listdir(discovery_dir):
@@ -584,6 +586,10 @@ class SimulMCPServer(LoggerMixin):
             pid = data.get("pid")
             host = data.get("host", "127.0.0.1")
             port = data.get("port")
+
+            # Only trust loopback addresses from discovery files
+            if host not in ("127.0.0.1", "::1", "localhost"):
+                continue
 
             if not isinstance(port, int) or port in existing_ports:
                 continue

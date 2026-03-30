@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import traceback
 from typing import Any
 
 from .executor import ScriptExecutor
@@ -40,6 +42,8 @@ class IsaacMCPServerExtension(OmniExtBase):
         self._request_lock: asyncio.Lock | None = None
         self._host = "127.0.0.1"
         self._port = 8229
+        self._max_port_retries = 10
+        self._discovery_dir = "/tmp/simul-mcp"
         self._ui_builder: BridgeUIBuilder | None = None
 
     def on_startup(self, ext_id: str) -> None:
@@ -136,17 +140,15 @@ class IsaacMCPServerExtension(OmniExtBase):
         try:
             output, exception, trace = await self._executor.execute(code)
             if exception is not None:
-                import traceback as tb_mod
                 return {
                     "status": "error",
                     "output": output,
                     "ename": type(exception).__name__,
                     "evalue": str(exception),
-                    "traceback": tb_mod.format_exception(type(exception), exception, exception.__traceback__),
+                    "traceback": traceback.format_exception(type(exception), exception, exception.__traceback__),
                 }
             return {"status": "ok", "output": output}
         except Exception as exc:
-            import traceback
             return {
                 "status": "error",
                 "output": "",
@@ -245,7 +247,6 @@ class IsaacMCPServerExtension(OmniExtBase):
             settings.set("/exts/khemoo.simul.mcp/port", actual_port)
             self._port = actual_port
         # Write discovery file
-        import os
         self._server.write_discovery_file(self._discovery_dir, os.getpid())
         carb.log_info(f"Simul MCP bridge serving at {self._server.address}")
         self._refresh_ui()

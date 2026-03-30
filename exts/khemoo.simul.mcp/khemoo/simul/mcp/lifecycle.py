@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import struct
+import tempfile
 from typing import Any, Awaitable, Callable
 
 from .protocol import BridgeRequest, BridgeResponse
@@ -52,6 +54,8 @@ class BridgeServerLifecycle:
         last_error: OSError | None = None
         for attempt in range(self._max_port_retries):
             candidate_port = self._port + attempt
+            if candidate_port > 65535:
+                break
             try:
                 self._server = await asyncio.start_server(
                     self._handle_client,
@@ -80,8 +84,7 @@ class BridgeServerLifecycle:
 
     def write_discovery_file(self, discovery_dir: str, pid: int) -> None:
         """Write a discovery file with the actual bound port."""
-        import os
-        os.makedirs(discovery_dir, exist_ok=True)
+        os.makedirs(discovery_dir, mode=0o700, exist_ok=True)
         filepath = os.path.join(discovery_dir, f"simul-mcp-{pid}.json")
         data = {
             "pid": pid,
@@ -89,13 +92,21 @@ class BridgeServerLifecycle:
             "port": self._actual_port,
             "configured_port": self._port,
         }
-        with open(filepath, "w") as f:
-            json.dump(data, f)
+        fd, tmp = tempfile.mkstemp(dir=discovery_dir, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f)
+            os.rename(tmp, filepath)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
         self._discovery_file = filepath
 
     def remove_discovery_file(self) -> None:
         """Remove the discovery file if it exists."""
-        import os
         if self._discovery_file:
             try:
                 os.remove(self._discovery_file)
@@ -108,9 +119,13 @@ class BridgeServerLifecycle:
     ) -> None:
         """Detect protocol and route to bridge or VS Code compat handler."""
         try:
-            peek = await asyncio.wait_for(reader.readexactly(4), timeout=30.0)
+            peek = await asyncio.wait_for(reader.readexactly(4), timeout=5.0)
         except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionError):
             writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
             return
 
         # Try to interpret as a bridge length prefix
@@ -132,7 +147,10 @@ class BridgeServerLifecycle:
         """Handle a bridge-protocol client (length-prefixed JSON)."""
         request_id = ""
         try:
-            request_bytes = await reader.readexactly(payload_size)
+            request_bytes = await asyncio.wait_for(
+                reader.readexactly(payload_size),
+                timeout=30.0,
+            )
             request = BridgeRequest.from_json(request_bytes)
             request_id = request.request_id
             response = await self._request_handler(request)
