@@ -1,15 +1,15 @@
 """
 Isaac Sim MCP tools for Simul MCP Server.
 
-This module provides granular Isaac Sim tools that execute specific
-Python scripts inside a running Isaac Sim instance via TCP socket.
-Each tool constructs a targeted script, sends it through the
-IsaacSocketClient, and returns typed, structured responses.
+This module provides granular Isaac Sim tools over the repo-owned typed bridge
+when available, falling back to raw script execution only when required by the
+current coverage. For legacy compatibility, raw script execution can still use
+the stock VS Code socket when bridge usage is disabled.
 """
 
 import json
 import textwrap
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from ...adapters import IsaacSocketClient, ScriptResult
 from ...config import Settings, get_settings
@@ -23,9 +23,9 @@ class IsaacTools(LoggerMixin):
     """
     Tools for Isaac Sim runtime operations via TCP socket.
 
-    Each public method constructs a Python script targeting Isaac Sim's
-    omni.*, pxr.*, and isaacsim.* APIs, sends it through the socket
-    client, and returns a parsed JSON response dict.
+    Each public method prefers a typed bridge action when one exists. If the
+    action is unavailable, the method can fall back to raw script execution
+    according to its routing policy.
     """
 
     def __init__(
@@ -43,7 +43,9 @@ class IsaacTools(LoggerMixin):
         self._client = client
         self.settings = settings or get_settings()
 
-    async def _execute_json_script(self, script: str) -> Dict[str, Any]:
+    async def _execute_json_script(
+        self, script: str, transport_mode: str = "default"
+    ) -> Dict[str, Any]:
         """
         Execute a Python script in Isaac Sim and parse JSON from stdout.
 
@@ -53,36 +55,28 @@ class IsaacTools(LoggerMixin):
 
         Args:
             script: Python source code that prints a JSON object to stdout.
+            transport_mode: Transport routing -- "default" uses client's preferred
+                transport, "bridge_only" forces the bridge, "vscode_only" forces
+                the VS Code socket.
 
         Returns:
             Parsed dict from stdout JSON, or an ErrorResponse dict.
         """
         try:
-            result: ScriptResult = await self._client.execute(script)
-        except ConnectionRefusedError:
-            logger.error(
-                "Isaac Sim unreachable at %s", self._client.address
-            )
+            if transport_mode == "bridge_only":
+                result = await self._client.execute_bridge_script_only(script)
+            elif transport_mode == "vscode_only":
+                result = await self._client.execute_vscode_only(script)
+            else:
+                result = await self._client.execute(script)
+        except ConnectionRefusedError as exc:
             return ErrorResponse(
-                error=(
-                    f"Isaac Sim is not reachable at {self._client.address}. "
-                    "Ensure Isaac Sim is running with the "
-                    "isaacsim.code_editor.vscode extension enabled."
-                ),
+                error=str(exc),
                 error_type="ConnectionError",
             ).model_dump()
-        except TimeoutError:
-            logger.error(
-                "Script timed out after %ss on %s",
-                self._client.timeout_seconds,
-                self._client.address,
-            )
+        except TimeoutError as exc:
             return ErrorResponse(
-                error=(
-                    f"Script execution timed out after "
-                    f"{self._client.timeout_seconds}s on "
-                    f"{self._client.address}."
-                ),
+                error=str(exc),
                 error_type="TimeoutError",
             ).model_dump()
         except Exception as exc:
@@ -120,6 +114,55 @@ class IsaacTools(LoggerMixin):
                 details={"raw_output": output[:2000]},
             ).model_dump()
 
+    async def _execute_bridge_action(
+        self, action: str, payload: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Execute a typed bridge action without falling back to VS Code.
+
+        Returns:
+            Parsed payload dict on success, an error dict on bridge-only
+            failure, or None when the action is unavailable and the caller
+            should try a bridge-script fallback.
+        """
+        if not self._client.bridge_enabled:
+            return None
+
+        try:
+            response = await self._client.bridge_request(action, payload or {})
+        except (ConnectionRefusedError, TimeoutError, OSError, ValueError) as exc:
+            return ErrorResponse(
+                error=str(exc),
+                error_type=type(exc).__name__,
+            ).model_dump()
+
+        if response.get("status") == "ok":
+            result_payload = response.get("payload", {})
+            if not isinstance(result_payload, dict):
+                return ErrorResponse(
+                    error="Bridge response payload must be an object.",
+                    error_type="BridgeProtocolError",
+                ).model_dump()
+            result_payload.setdefault("success", True)
+            return result_payload
+
+        error = response.get("error", {})
+        error_name = str(error.get("name", "BridgeError"))
+        if error_name == "UnknownAction":
+            return None
+        return ErrorResponse(
+            error=str(error.get("message", "Bridge request failed")),
+            error_type=error_name,
+            details={"traceback": error.get("traceback")} if error.get("traceback") else None,
+        ).model_dump()
+
+    @property
+    def _raw_script_transport_mode(self) -> str:
+        """Route raw-script fallbacks away from the typed bridge by default."""
+        if self._client.bridge_enabled:
+            return "vscode_only"
+        return "default"
+
     # ------------------------------------------------------------------
     # Phase 1: Scene Inspection (Read-only)
     # ------------------------------------------------------------------
@@ -132,6 +175,10 @@ class IsaacTools(LoggerMixin):
             Stage info dict with up_axis, meters_per_unit, total_prims,
             root_prims, layer_count, default_prim, etc.
         """
+        bridge_result = await self._execute_bridge_action("get_stage_info")
+        if bridge_result is not None:
+            return bridge_result
+
         script = textwrap.dedent("""\
             import json
             import omni.usd
@@ -170,7 +217,8 @@ class IsaacTools(LoggerMixin):
                     "default_prim": dp_path,
                 }))
         """)
-        return await self._execute_json_script(script)
+        mode = self._raw_script_transport_mode
+        return await self._execute_json_script(script, transport_mode=mode)
 
     async def list_isaac_prims(
         self,
@@ -192,6 +240,18 @@ class IsaacTools(LoggerMixin):
             Dict with list of prim entries (path, type, name, active).
         """
         max_items = max(1, min(max_items, 10000))
+        bridge_result = await self._execute_bridge_action(
+            "list_prims",
+            {
+                "root_path": root_path,
+                "prim_type": prim_type,
+                "max_depth": max_depth,
+                "max_items": max_items,
+            },
+        )
+        if bridge_result is not None:
+            return bridge_result
+
         _root_path = json.dumps(root_path)
         _prim_type = json.dumps(prim_type or "")
         script = textwrap.dedent(f"""\
@@ -237,7 +297,8 @@ class IsaacTools(LoggerMixin):
                         "prims": prims,
                     }}))
         """)
-        return await self._execute_json_script(script)
+        mode = self._raw_script_transport_mode
+        return await self._execute_json_script(script, transport_mode=mode)
 
     async def get_isaac_prim_info(self, prim_path: str) -> Dict[str, Any]:
         """
@@ -249,6 +310,13 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with prim type, attributes, transform, children, etc.
         """
+        bridge_result = await self._execute_bridge_action(
+            "get_prim_info",
+            {"prim_path": prim_path},
+        )
+        if bridge_result is not None:
+            return bridge_result
+
         _prim_path = json.dumps(prim_path)
         script = textwrap.dedent(f"""\
             import json
@@ -358,7 +426,8 @@ class IsaacTools(LoggerMixin):
                         "attributes": attrs,
                     }}))
         """)
-        return await self._execute_json_script(script)
+        mode = self._raw_script_transport_mode
+        return await self._execute_json_script(script, transport_mode=mode)
 
     async def get_isaac_prim_transform(
         self,
@@ -375,6 +444,13 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with translation, rotation (quaternion), and scale.
         """
+        bridge_result = await self._execute_bridge_action(
+            "get_prim_transform",
+            {"prim_path": prim_path, "world_space": world_space},
+        )
+        if bridge_result is not None:
+            return bridge_result
+
         _prim_path = json.dumps(prim_path)
         world_str = "True" if world_space else "False"
         script = textwrap.dedent(f"""\
@@ -418,7 +494,8 @@ class IsaacTools(LoggerMixin):
                         "scale": s,
                     }}))
         """)
-        return await self._execute_json_script(script)
+        mode = self._raw_script_transport_mode
+        return await self._execute_json_script(script, transport_mode=mode)
 
     async def search_isaac_prims(
         self,
@@ -440,6 +517,18 @@ class IsaacTools(LoggerMixin):
             Dict with matching prim paths and types.
         """
         max_results = max(1, min(max_results, 10000))
+        bridge_result = await self._execute_bridge_action(
+            "search_prims",
+            {
+                "search_type": search_type,
+                "query": query,
+                "root_path": root_path,
+                "max_results": max_results,
+            },
+        )
+        if bridge_result is not None:
+            return bridge_result
+
         _root_path = json.dumps(root_path)
         _search_type = json.dumps(search_type)
         _query = json.dumps(query)
@@ -478,7 +567,8 @@ class IsaacTools(LoggerMixin):
                         "matches": matches,
                     }}))
         """)
-        return await self._execute_json_script(script)
+        mode = self._raw_script_transport_mode
+        return await self._execute_json_script(script, transport_mode=mode)
 
     async def get_isaac_scene_summary(self) -> Dict[str, Any]:
         """
@@ -1728,6 +1818,10 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with simulation state, time, and step count.
         """
+        bridge_result = await self._execute_bridge_action("get_simulation_state")
+        if bridge_result is not None:
+            return bridge_result
+
         script = textwrap.dedent("""\
             import json
             try:
@@ -1753,7 +1847,8 @@ class IsaacTools(LoggerMixin):
             except Exception as e:
                 print(json.dumps({"error": f"Failed to get simulation state: {e}"}))
         """)
-        return await self._execute_json_script(script)
+        mode = self._raw_script_transport_mode
+        return await self._execute_json_script(script, transport_mode=mode)
 
     async def start_isaac_simulation(self) -> Dict[str, Any]:
         """
@@ -1762,6 +1857,13 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming simulation started.
         """
+        bridge_result = await self._execute_bridge_action(
+            "simulation_control",
+            {"command": "start"},
+        )
+        if bridge_result is not None:
+            return bridge_result
+
         script = textwrap.dedent("""\
             import json
             try:
@@ -1772,7 +1874,8 @@ class IsaacTools(LoggerMixin):
             except Exception as e:
                 print(json.dumps({"error": f"Failed to start simulation: {e}"}))
         """)
-        return await self._execute_json_script(script)
+        mode = self._raw_script_transport_mode
+        return await self._execute_json_script(script, transport_mode=mode)
 
     async def stop_isaac_simulation(self) -> Dict[str, Any]:
         """
@@ -1781,6 +1884,13 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming simulation stopped.
         """
+        bridge_result = await self._execute_bridge_action(
+            "simulation_control",
+            {"command": "stop"},
+        )
+        if bridge_result is not None:
+            return bridge_result
+
         script = textwrap.dedent("""\
             import json
             try:
@@ -1791,7 +1901,8 @@ class IsaacTools(LoggerMixin):
             except Exception as e:
                 print(json.dumps({"error": f"Failed to stop simulation: {e}"}))
         """)
-        return await self._execute_json_script(script)
+        mode = self._raw_script_transport_mode
+        return await self._execute_json_script(script, transport_mode=mode)
 
     async def pause_isaac_simulation(self) -> Dict[str, Any]:
         """
@@ -1800,6 +1911,13 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming simulation paused.
         """
+        bridge_result = await self._execute_bridge_action(
+            "simulation_control",
+            {"command": "pause"},
+        )
+        if bridge_result is not None:
+            return bridge_result
+
         script = textwrap.dedent("""\
             import json
             try:
@@ -1810,7 +1928,8 @@ class IsaacTools(LoggerMixin):
             except Exception as e:
                 print(json.dumps({"error": f"Failed to pause simulation: {e}"}))
         """)
-        return await self._execute_json_script(script)
+        mode = self._raw_script_transport_mode
+        return await self._execute_json_script(script, transport_mode=mode)
 
     async def step_isaac_simulation(
         self, num_steps: int = 1
@@ -1825,6 +1944,13 @@ class IsaacTools(LoggerMixin):
             Dict with current time after stepping.
         """
         num_steps = max(1, min(num_steps, 1000))
+        bridge_result = await self._execute_bridge_action(
+            "simulation_control",
+            {"command": "step", "num_steps": num_steps},
+        )
+        if bridge_result is not None:
+            return bridge_result
+
         script = textwrap.dedent(f"""\
             import json
             try:
@@ -1850,7 +1976,8 @@ class IsaacTools(LoggerMixin):
             except Exception as e:
                 print(json.dumps({{"error": f"Failed to step simulation: {{e}}"}}))
         """)
-        return await self._execute_json_script(script)
+        mode = self._raw_script_transport_mode
+        return await self._execute_json_script(script, transport_mode=mode)
 
     async def reset_isaac_simulation(self) -> Dict[str, Any]:
         """
@@ -1859,6 +1986,13 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming reset.
         """
+        bridge_result = await self._execute_bridge_action(
+            "simulation_control",
+            {"command": "reset"},
+        )
+        if bridge_result is not None:
+            return bridge_result
+
         script = textwrap.dedent("""\
             import json
             try:
@@ -1874,7 +2008,8 @@ class IsaacTools(LoggerMixin):
             except Exception as e:
                 print(json.dumps({"error": f"Failed to reset simulation: {e}"}))
         """)
-        return await self._execute_json_script(script)
+        mode = self._raw_script_transport_mode
+        return await self._execute_json_script(script, transport_mode=mode)
 
     async def get_isaac_simulation_time(self) -> Dict[str, Any]:
         """
@@ -4152,6 +4287,10 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with app, timeline, physics, renderer, and viewport sections.
         """
+        bridge_result = await self._execute_bridge_action("get_runtime_info")
+        if bridge_result is not None:
+            return bridge_result
+
         script = textwrap.dedent("""\
             import json
             import sys
@@ -4270,7 +4409,8 @@ class IsaacTools(LoggerMixin):
 
             print(json.dumps(info))
         """)
-        return await self._execute_json_script(script)
+        mode = self._raw_script_transport_mode
+        return await self._execute_json_script(script, transport_mode=mode)
 
     async def get_isaac_logs(
         self,
