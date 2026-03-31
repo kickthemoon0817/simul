@@ -44,8 +44,8 @@ cd simul
 # Install in development mode
 pip install -e .
 
-# Or install with all dependencies
-pip install -e ".[dev,test]"
+# Or install with development/test tooling
+pip install -e ".[dev]"
 ```
 
 ## Agent Integration
@@ -107,6 +107,8 @@ Add to `~/.config/opencode/config.json` under `mcpServers`:
 
 Isaac Sim tools prefer a running Isaac Sim instance with the repo-owned `khemoo.simul.mcp` bridge extension enabled on TCP port 8229. When that bridge is unavailable, the client falls back to `isaacsim.code_editor.vscode` on TCP port 8226. Use `ping_isaac` to verify connectivity.
 
+When Isaac Sim runs in Docker, Simul MCP connects to the host-published ports, not the container-internal ports. With the included Compose file, the host-facing ports are controlled by `ISAAC_BRIDGE_PORT` and `ISAAC_VSCODE_PORT`, so the MCP server and agents should target those host values.
+
 ## Quick Start
 
 ### 1. Start the MCP Server
@@ -159,6 +161,11 @@ This Compose file:
 - binds the VS Code fallback inside the container on `0.0.0.0:${ISAAC_VSCODE_PORT:-8226}`
 - publishes those ports back to the host on the same numbers
 - keeps the container stateless by default so validation runs start cleanly
+
+Port-forwarding note:
+- Simul MCP always talks to the host-visible ports.
+- If the container publishes `127.0.0.1:9229` and `127.0.0.1:9226`, the MCP server must use `9229` / `9226`.
+- Discovery files now include both the bridge port and the forwarded VS Code fallback port so multi-instance routing can distinguish local and containerized Isaac apps correctly.
 
 To stop it:
 
@@ -511,13 +518,13 @@ black src/ tests/ examples/
 
 ```bash
 # Install development dependencies
-pip install -e ".[dev,test]"
+pip install -e ".[dev]"
 
 # Run linting
 make lint
 
-# Run type checking
-make typecheck
+# Run lint + type checking
+make lint
 
 # Run all checks
 make check

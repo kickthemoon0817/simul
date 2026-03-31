@@ -6,10 +6,16 @@
 
 ## Execution Model
 
-Code is sent over TCP to the stock `isaacsim.code_editor.vscode` extension
-(port 8226). The executor runs your code with `compile() + eval()` inside
-Kit's Python process, with **full access to the global namespace** including
-`omni.*`, `pxr.*`, and `isaacsim.*`.
+Simul MCP prefers the repo-owned `khemoo.simul.mcp` bridge on port 8229 for
+typed tool traffic. Raw `execute_isaac_script` execution still uses the
+`isaacsim.code_editor.vscode` compatibility path on port 8226 when available.
+The executor runs your code with `compile() + eval()` inside Kit's Python
+process, with **full access to the global namespace** including `omni.*`,
+`pxr.*`, and `isaacsim.*`.
+
+If Isaac Sim is running in Docker, always use the host-published ports exposed
+by Compose or your container runtime. The agent should not assume the
+container-internal ports are directly reachable.
 
 **Rules:**
 - `stdout` is captured and returned — use `print()` for output
