@@ -95,7 +95,6 @@ class TestUnrealToolRegistration:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Unreal tools are present in FastMCP registration set."""
-        monkeypatch.setattr(server_module, "FASTMCP_AVAILABLE", True)
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
 
@@ -181,7 +180,6 @@ class TestUnrealToolRegistration:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Unreal tools are not registered when runtime is unavailable."""
-        monkeypatch.setattr(server_module, "FASTMCP_AVAILABLE", True)
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
 
