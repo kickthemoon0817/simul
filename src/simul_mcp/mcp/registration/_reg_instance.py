@@ -75,7 +75,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         return {
             "success": True,
             "instances": instances,
-            "active_instance": server._active_instance,
+            "active_instance": server._get_effective_instance_name(),
             "total_discovered": len(reachable),
         }
 
@@ -125,21 +125,33 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         if purpose:
             compat_info = server.session_manager.score_compatibility(purpose, port)
 
-        server._switch_active_instance(instance_name)
+        server._set_request_active_instance(instance_name)
         reachable = await client.ping()
 
         session_result: Dict[str, Any] = {}
+        binding_result: Dict[str, Any] = {}
         if purpose:
-            _agent_id = agent_id or f"agent-{id(server):x}"
+            _agent_id = server._resolve_agent_id(agent_id)
             inst_session = server.session_manager.get_instance_session(port)
             session_result = inst_session.register(_agent_id, purpose)
-            server._current_agent_id = _agent_id
-            server._current_port = port
+            binding = server._bind_request_session(
+                instance_name=instance_name,
+                port=port,
+                agent_id=_agent_id,
+                purpose=purpose,
+            )
+            binding_result = {
+                "binding_id": binding.binding_id,
+                "agent_id": binding.agent_id,
+                "session_id": binding.session_id,
+            }
 
         result: Dict[str, Any] = {
             "success": True,
             "active_instance": instance_name,
             "address": client.address,
+            "bridge_address": client.bridge_address,
+            "vscode_address": client.vscode_address,
             "reachable": reachable,
         }
         if compat_info:
@@ -149,6 +161,8 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             result["existing_sessions"] = compat_info.get("sessions", [])
         if session_result:
             result["session"] = session_result
+        if binding_result:
+            result["binding"] = binding_result
         return result
 
     @server.mcp.tool(
@@ -178,27 +192,36 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         Returns:
             Registration result with compatibility info.
         """
-        client = server._isaac_clients.get(server._active_instance)
+        instance_name = server._get_effective_instance_name()
+        client = server._isaac_clients.get(instance_name)
         if not client:
             return ErrorResponse(
                 error="No active instance", error_type="StateError"
             ).model_dump()
 
         port = client._port
-        _agent_id = agent_id or f"agent-{id(server):x}"
+        _agent_id = server._resolve_agent_id(agent_id)
         inst_session = server.session_manager.get_instance_session(port)
 
         compat = server.session_manager.score_compatibility(purpose, port)
         reg = inst_session.register(_agent_id, purpose)
-
-        server._current_agent_id = _agent_id
-        server._current_port = port
+        binding = server._bind_request_session(
+            instance_name=instance_name,
+            port=port,
+            agent_id=_agent_id,
+            purpose=purpose,
+        )
 
         return {
             "success": True,
-            "instance": server._active_instance,
+            "instance": instance_name,
             "port": port,
             "session": reg,
+            "binding": {
+                "binding_id": binding.binding_id,
+                "agent_id": binding.agent_id,
+                "session_id": binding.session_id,
+            },
             "compatibility": compat["compatibility"],
             "compatibility_score": compat["score"],
             "compatibility_reason": compat["reason"],
@@ -229,13 +252,18 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         Returns:
             Release confirmation.
         """
-        _agent_id = agent_id or getattr(server, "_current_agent_id", None)
-        _port = getattr(server, "_current_port", None)
+        instance_name = server._get_effective_instance_name()
+        binding = server._get_active_binding()
+        _agent_id = agent_id or (binding.agent_id if binding is not None else None)
+        _port = binding.port if binding is not None else None
         if not _agent_id or not _port:
             return {"success": False, "error": "No active session to release"}
 
         inst_session = server.session_manager.get_instance_session(_port)
         result = inst_session.release(_agent_id)
-        server._current_agent_id = None
-        server._current_port = None
-        return {"success": True, **result}
+        released = server._release_request_binding(instance_name, _agent_id)
+        return {
+            "success": True,
+            **result,
+            "binding_released": released.binding_id if released is not None else None,
+        }

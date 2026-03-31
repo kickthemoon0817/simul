@@ -73,90 +73,101 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         log_params: Dict[str, Any] = {
             "code_bytes": len(code),
         }
-        t0 = time.monotonic()
-        try:
-            if server.client.bridge_enabled:
-                result = await server.client.execute_vscode_only(code)
-            else:
-                result = await server.client.execute(code)
-            duration_ms = (time.monotonic() - t0) * 1000
-            if not result.success:
+        client = server._get_request_isaac_client()
+        instance_name = server._get_effective_instance_name()
+        lock = server._get_instance_lock(instance_name)
+        async with lock:
+            t0 = time.monotonic()
+            try:
+                if client.bridge_enabled:
+                    result = await client.execute_vscode_only(code)
+                else:
+                    result = await client.execute(code)
+                duration_ms = (time.monotonic() - t0) * 1000
+                if not result.success:
+                    server.usage_tracker.record(
+                        "execute_isaac_script", duration_ms, False,
+                        params=log_params,
+                        error=result.error_value or "Script execution failed",
+                    )
+                    return ErrorResponse(
+                        error=result.error_value or "Script execution failed",
+                        error_type=result.error_name or "RuntimeError",
+                        details={"traceback": result.traceback} if result.traceback else None,
+                    ).model_dump()
+
+                binding = server._get_active_binding()
+                if binding is not None:
+                    server.session_manager.get_instance_session(
+                        binding.port
+                    ).heartbeat(binding.agent_id, "execute_isaac_script")
+                    binding.last_heartbeat = time.time()
+
+                # If output is valid JSON, return it directly
+                output = result.output.strip()
+                if output:
+                    try:
+                        parsed = json.loads(output)
+                        server.usage_tracker.record(
+                            "execute_isaac_script", duration_ms, True,
+                            params=log_params,
+                        )
+                        if isinstance(parsed, dict):
+                            return parsed
+                        return {
+                            "success": True,
+                            "output": result.output,
+                            "parsed": parsed,
+                        }
+                    except json.JSONDecodeError:
+                        pass
+
+                server.usage_tracker.record(
+                    "execute_isaac_script", duration_ms, True,
+                    params=log_params,
+                )
+                return {"success": True, "output": result.output}
+
+            except ConnectionRefusedError:
+                duration_ms = (time.monotonic() - t0) * 1000
                 server.usage_tracker.record(
                     "execute_isaac_script", duration_ms, False,
                     params=log_params,
-                    error=result.error_value or "Script execution failed",
+                    error="ConnectionError",
                 )
                 return ErrorResponse(
-                    error=result.error_value or "Script execution failed",
-                    error_type=result.error_name or "RuntimeError",
-                    details={"traceback": result.traceback} if result.traceback else None,
+                    error=(
+                        f"Isaac Sim is not reachable at {client.address}. "
+                        "Ensure Isaac Sim is running with the "
+                        "isaacsim.code_editor.vscode extension enabled. "
+                        "Use ping_isaac to verify connectivity."
+                    ),
+                    error_type="ConnectionError",
                 ).model_dump()
-
-            # If output is valid JSON, return it directly
-            output = result.output.strip()
-            if output:
-                try:
-                    parsed = json.loads(output)
-                    server.usage_tracker.record(
-                        "execute_isaac_script", duration_ms, True,
-                        params=log_params,
-                    )
-                    if isinstance(parsed, dict):
-                        return parsed
-                    return {
-                        "success": True,
-                        "output": result.output,
-                        "parsed": parsed,
-                    }
-                except json.JSONDecodeError:
-                    pass
-
-            server.usage_tracker.record(
-                "execute_isaac_script", duration_ms, True,
-                params=log_params,
-            )
-            return {"success": True, "output": result.output}
-
-        except ConnectionRefusedError:
-            duration_ms = (time.monotonic() - t0) * 1000
-            server.usage_tracker.record(
-                "execute_isaac_script", duration_ms, False,
-                params=log_params,
-                error="ConnectionError",
-            )
-            return ErrorResponse(
-                error=(
-                    f"Isaac Sim is not reachable at {server.client.address}. "
-                    "Ensure Isaac Sim is running with the "
-                    "isaacsim.code_editor.vscode extension enabled. "
-                    "Use ping_isaac to verify connectivity."
-                ),
-                error_type="ConnectionError",
-            ).model_dump()
-        except TimeoutError:
-            duration_ms = (time.monotonic() - t0) * 1000
-            server.usage_tracker.record(
-                "execute_isaac_script", duration_ms, False,
-                params=log_params,
-                error="TimeoutError",
-            )
-            return ErrorResponse(
-                error=(
-                    f"Script execution timed out after "
-                    f"{server.client.timeout_seconds}s on {server.client.address}. "
-                    "The script may be too slow or Isaac Sim may be unresponsive. "
-                    "Use ping_isaac to check if Isaac Sim is still reachable."
-                ),
-                error_type="TimeoutError",
-            ).model_dump()
-        except Exception as exc:
-            duration_ms = (time.monotonic() - t0) * 1000
-            server.usage_tracker.record(
-                "execute_isaac_script", duration_ms, False,
-                params=log_params,
-                error=str(exc),
-            )
-            return ErrorResponse(error=str(exc), error_type="Exception").model_dump()
+            except TimeoutError:
+                duration_ms = (time.monotonic() - t0) * 1000
+                server.usage_tracker.record(
+                    "execute_isaac_script", duration_ms, False,
+                    params=log_params,
+                    error="TimeoutError",
+                )
+                return ErrorResponse(
+                    error=(
+                        f"Script execution timed out after "
+                        f"{client.timeout_seconds}s on {client.address}. "
+                        "The script may be too slow or Isaac Sim may be unresponsive. "
+                        "Use ping_isaac to check if Isaac Sim is still reachable."
+                    ),
+                    error_type="TimeoutError",
+                ).model_dump()
+            except Exception as exc:
+                duration_ms = (time.monotonic() - t0) * 1000
+                server.usage_tracker.record(
+                    "execute_isaac_script", duration_ms, False,
+                    params=log_params,
+                    error=str(exc),
+                )
+                return ErrorResponse(error=str(exc), error_type="Exception").model_dump()
 
     @server.mcp.tool(
         name="ping_isaac",
@@ -179,11 +190,14 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         rate_error = server._check_rate_limit("ping_isaac")
         if rate_error:
             return rate_error
-        reachable = await server.client.ping()
+        client = server._get_request_isaac_client()
+        reachable = await client.ping()
         return {
             "reachable": reachable,
-            "address": server.client.address,
-            "timeout_seconds": server.client.timeout_seconds,
+            "address": client.address,
+            "bridge_address": client.bridge_address,
+            "vscode_address": client.vscode_address,
+            "timeout_seconds": client.timeout_seconds,
         }
 
     # -- Scene Inspection tools -------------------------------------------

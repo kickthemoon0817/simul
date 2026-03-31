@@ -48,7 +48,6 @@ class FakeFastMCP:
 
 def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServer:
     """Instantiate SimulMCPServer with all adapters stubbed out."""
-    monkeypatch.setattr(server_module, "FASTMCP_AVAILABLE", True)
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
 
@@ -169,4 +168,3 @@ class TestMCPDiscoverability:
         assert tool is not None, "Tool 'ping_isaac' not registered"
         desc: str = tool.kwargs.get("description", "")
         assert "pre-flight" in desc.lower() or "verify" in desc.lower()
-

@@ -84,7 +84,6 @@ class TestBlenderToolRegistration:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Blender tools are present in FastMCP registration set."""
-        monkeypatch.setattr(server_module, "FASTMCP_AVAILABLE", True)
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
 
@@ -104,7 +103,6 @@ class TestBlenderToolRegistration:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Blender tools are not registered when runtime is unavailable."""
-        monkeypatch.setattr(server_module, "FASTMCP_AVAILABLE", True)
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
 

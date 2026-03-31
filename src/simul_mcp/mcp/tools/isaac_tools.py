@@ -9,7 +9,7 @@ the stock VS Code socket when bridge usage is disabled.
 
 import json
 import textwrap
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ...adapters import IsaacSocketClient, ScriptResult
 from ...config import Settings, get_settings
@@ -32,6 +32,7 @@ class IsaacTools(LoggerMixin):
         self,
         client: IsaacSocketClient,
         settings: Optional[Settings] = None,
+        client_resolver: Optional[Callable[[], IsaacSocketClient]] = None,
     ) -> None:
         """
         Initialize Isaac Sim tools.
@@ -39,9 +40,24 @@ class IsaacTools(LoggerMixin):
         Args:
             client: Pre-configured IsaacSocketClient for TCP communication.
             settings: Configuration settings.
+            client_resolver: Optional callable used to resolve the target client
+                dynamically per request/session.
         """
-        self._client = client
+        self._default_client = client
+        self._client_resolver = client_resolver
         self.settings = settings or get_settings()
+
+    @property
+    def _client(self) -> IsaacSocketClient:
+        """Resolve the target client for the current request."""
+        if self._client_resolver is not None:
+            return self._client_resolver()
+        return self._default_client
+
+    @_client.setter
+    def _client(self, client: IsaacSocketClient) -> None:
+        """Update the default client when using non-session-scoped routing."""
+        self._default_client = client
 
     async def _execute_json_script(
         self, script: str, transport_mode: str = "default"

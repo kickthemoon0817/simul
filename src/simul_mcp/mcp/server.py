@@ -10,32 +10,15 @@ import inspect
 import json
 import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Coroutine, Dict, List, Optional, Tuple, Type, Union
 
+from fastmcp import FastMCP
+from fastmcp.server.context import _current_context
+from fastmcp.server.tasks import TaskConfig
+from mcp.types import ToolAnnotations
 from pydantic import BaseModel
-
-try:
-    from fastmcp import FastMCP
-    from fastmcp.server.tasks import TaskConfig
-    from mcp.types import (
-        EmbeddedResource,
-        ImageContent,
-        TextContent,
-        Tool,
-        ToolAnnotations,
-    )
-
-    FASTMCP_AVAILABLE = True
-except ImportError:
-    FASTMCP_AVAILABLE = False
-    FastMCP = None
-    Tool = None
-    TextContent = None
-    ImageContent = None
-    EmbeddedResource = None
-    ToolAnnotations = None
-    TaskConfig = None
 
 from ..adapters import (
     BlenderRuntimeAdapter,
@@ -101,15 +84,38 @@ _MCP_INSTRUCTIONS: str = (
     "MULTI-INSTANCE — when multiple Isaac Sim applications are running:\n"
     "  1. Call list_isaac_instances to discover all running instances "
     "and see which stage each has loaded.\n"
-    "  2. Call set_active_isaac_instance to switch to the correct one.\n"
-    "  3. All subsequent isaac_* calls route to that instance."
+    "  2. Call set_active_isaac_instance to switch within the current MCP session.\n"
+    "  3. All subsequent isaac_* calls in that same session route to that instance.\n"
+    "  4. For containerized Isaac Sim, use the host-published bridge / VS Code ports, "
+    "not the container-internal ports."
 )
 
 _FASTMCP_SUPPORTS_INSTRUCTIONS: bool = (
     "instructions" in inspect.signature(FastMCP).parameters
-    if FASTMCP_AVAILABLE and FastMCP is not None
-    else False
 )
+
+
+@dataclass
+class IsaacSessionBinding:
+    """Per-session binding to one Isaac Sim instance."""
+
+    binding_id: str
+    session_id: str
+    instance_name: str
+    agent_id: str
+    port: int
+    purpose: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    last_heartbeat: float = field(default_factory=time.time)
+
+
+@dataclass
+class IsaacSessionRoute:
+    """Per-session routing and binding state for Isaac Sim access."""
+
+    session_id: str
+    active_instance: str
+    bindings: Dict[str, IsaacSessionBinding] = field(default_factory=dict)
 
 
 class SimulMCPServer(LoggerMixin):
@@ -128,17 +134,14 @@ class SimulMCPServer(LoggerMixin):
         Args:
             settings: Configuration settings
         """
-        if not FASTMCP_AVAILABLE:
-            raise ImportError("FastMCP not available. Please install fastmcp package.")
-
         self.settings = settings or get_settings()
         self._project_root = Path(__file__).resolve().parents[3]
         self._allowed_paths = self._resolve_allowed_paths()
 
         self.usage_tracker = ToolUsageTracker()
         self.session_manager = SessionManager()
-        self._current_agent_id: Optional[str] = None
-        self._current_port: Optional[int] = None
+        self._session_routes: Dict[str, IsaacSessionRoute] = {}
+        self._isaac_instance_locks: Dict[str, asyncio.Lock] = {}
         self._rate_limiters: Dict[str, RateLimiter] = {}
         self._rate_limit_enabled = self.settings.security.rate_limiting_enabled
         self._rate_limit_rate = self.settings.security.requests_per_minute / 60.0
@@ -176,15 +179,17 @@ class SimulMCPServer(LoggerMixin):
                 bridge_fallback_to_vscode=inst.bridge_fallback_to_vscode,
             )
         self.client = default_client
-        self._isaac_tools = IsaacTools(self.client, self.settings)
+        self._isaac_tools = IsaacTools(
+            self.client,
+            self.settings,
+            client_resolver=self._get_request_isaac_client,
+        )
 
         self.blender_adapter = (
             BlenderRuntimeAdapter(self.settings) if is_blender_available() else None
         )
 
         # Initialize FastMCP server
-        assert FastMCP is not None
-
         mcp_kwargs: Dict[str, Any] = {
             "name": "Simul – 3D Simulation & DCC Tools",
             "version": _PACKAGE_VERSION,
@@ -223,6 +228,128 @@ class SimulMCPServer(LoggerMixin):
             ).model_dump()
         return None
 
+    def _get_request_context(self) -> Any:
+        """Return the active FastMCP request context when available."""
+        if _current_context is None:
+            return None
+        try:
+            return _current_context.get()
+        except Exception:
+            return None
+
+    def _get_request_session_id(self) -> Optional[str]:
+        """Return the current FastMCP session id when available."""
+        ctx = self._get_request_context()
+        if ctx is None:
+            return None
+        try:
+            return ctx.session_id
+        except Exception:
+            return None
+
+    def _get_or_create_session_route(self, session_id: str) -> IsaacSessionRoute:
+        """Return the per-session Isaac routing state."""
+        route = self._session_routes.get(session_id)
+        if route is None:
+            route = IsaacSessionRoute(
+                session_id=session_id,
+                active_instance=self._active_instance,
+            )
+            self._session_routes[session_id] = route
+        return route
+
+    def _get_request_route(self) -> Optional[IsaacSessionRoute]:
+        """Return the Isaac routing state for the active MCP session."""
+        session_id = self._get_request_session_id()
+        if session_id is None:
+            return None
+        return self._get_or_create_session_route(session_id)
+
+    def _get_effective_instance_name(self) -> str:
+        """Resolve the Isaac instance targeted by the current request."""
+        route = self._get_request_route()
+        if route is not None:
+            return route.active_instance
+        return self._active_instance
+
+    def _get_request_isaac_client(self) -> IsaacSocketClient:
+        """Resolve the Isaac socket client for the current request."""
+        instance_name = self._get_effective_instance_name()
+        return self._isaac_clients.get(instance_name, self.client)
+
+    def _get_instance_lock(self, instance_name: str) -> asyncio.Lock:
+        """Return the per-instance execution lock."""
+        if instance_name not in self._isaac_instance_locks:
+            self._isaac_instance_locks[instance_name] = asyncio.Lock()
+        return self._isaac_instance_locks[instance_name]
+
+    def _set_request_active_instance(self, instance_name: str) -> None:
+        """Set the active Isaac instance for the current MCP session."""
+        route = self._get_request_route()
+        if route is not None:
+            route.active_instance = instance_name
+            return
+        self._switch_active_instance(instance_name)
+
+    def _resolve_agent_id(self, agent_id: Optional[str]) -> str:
+        """Resolve a stable per-session agent id."""
+        if agent_id:
+            return agent_id
+        session_id = self._get_request_session_id()
+        if session_id:
+            return session_id
+        return f"agent-{id(self):x}"
+
+    def _bind_request_session(
+        self,
+        instance_name: str,
+        port: int,
+        agent_id: str,
+        purpose: Optional[str] = None,
+    ) -> IsaacSessionBinding:
+        """Create or update the current session's binding for an instance."""
+        session_id = self._get_request_session_id()
+        binding_id = f"{agent_id}:{instance_name}"
+        binding = IsaacSessionBinding(
+            binding_id=binding_id,
+            session_id=session_id or agent_id,
+            instance_name=instance_name,
+            agent_id=agent_id,
+            port=port,
+            purpose=purpose,
+        )
+        route = self._get_request_route()
+        if route is not None:
+            route.bindings[instance_name] = binding
+            route.active_instance = instance_name
+        return binding
+
+    def _get_active_binding(self) -> Optional[IsaacSessionBinding]:
+        """Return the binding for the request's active Isaac instance."""
+        route = self._get_request_route()
+        if route is None:
+            return None
+        return route.bindings.get(route.active_instance)
+
+    def _release_request_binding(
+        self,
+        instance_name: str,
+        agent_id: Optional[str] = None,
+    ) -> Optional[IsaacSessionBinding]:
+        """Remove and return the current session's binding for an instance."""
+        route = self._get_request_route()
+        if route is None:
+            return None
+        binding = route.bindings.get(instance_name)
+        if binding is None:
+            return None
+        if agent_id is not None and binding.agent_id != agent_id:
+            return None
+        route.bindings.pop(instance_name, None)
+        if route.active_instance == instance_name and route.bindings:
+            route.active_instance = next(iter(route.bindings))
+        return binding
+
     async def _exec_isaac(
         self,
         tool_name: str,
@@ -247,29 +374,34 @@ class SimulMCPServer(LoggerMixin):
                 tool_name, 0.0, False, params=params, error="rate_limited",
             )
             return rate_error
-        t0 = time.monotonic()
-        try:
-            result = await coro
-            duration_ms = (time.monotonic() - t0) * 1000
-            success = not result.get("error")
-            self.usage_tracker.record(
-                tool_name, duration_ms, success, params=params,
-                error=result.get("error") if not success else None,
-            )
-            if self._current_agent_id and self._current_port:
-                self.session_manager.get_instance_session(
-                    self._current_port
-                ).heartbeat(self._current_agent_id, tool_name)
-            return result
-        except Exception as exc:
-            duration_ms = (time.monotonic() - t0) * 1000
-            self.usage_tracker.record(
-                tool_name, duration_ms, False, params=params, error=str(exc),
-            )
-            logger.error("Isaac tool %s failed: %s", tool_name, exc)
-            return ErrorResponse(
-                error=str(exc), error_type=type(exc).__name__
-            ).model_dump()
+        instance_name = self._get_effective_instance_name()
+        lock = self._get_instance_lock(instance_name)
+        async with lock:
+            t0 = time.monotonic()
+            try:
+                result = await coro
+                duration_ms = (time.monotonic() - t0) * 1000
+                success = not result.get("error")
+                self.usage_tracker.record(
+                    tool_name, duration_ms, success, params=params,
+                    error=result.get("error") if not success else None,
+                )
+                binding = self._get_active_binding()
+                if binding is not None:
+                    self.session_manager.get_instance_session(
+                        binding.port
+                    ).heartbeat(binding.agent_id, tool_name)
+                    binding.last_heartbeat = time.time()
+                return result
+            except Exception as exc:
+                duration_ms = (time.monotonic() - t0) * 1000
+                self.usage_tracker.record(
+                    tool_name, duration_ms, False, params=params, error=str(exc),
+                )
+                logger.error("Isaac tool %s failed: %s", tool_name, exc)
+                return ErrorResponse(
+                    error=str(exc), error_type=type(exc).__name__
+                ).model_dump()
 
     def _resolve_allowed_paths(self) -> List[Path]:
         allowed_paths: List[Path] = []
@@ -494,10 +626,9 @@ class SimulMCPServer(LoggerMixin):
 
     def _switch_active_instance(self, name: str) -> None:
         """
-        Switch the active Isaac Sim instance by name.
+        Switch the default Isaac Sim instance by name.
 
-        Updates both ``self.client`` (used by execute_isaac_script / ping)
-        and ``self._isaac_tools._client`` (used by all granular tools).
+        This only affects requests that do not have a session-scoped route.
 
         Args:
             name: Instance name key in ``_isaac_clients``.
@@ -505,13 +636,20 @@ class SimulMCPServer(LoggerMixin):
         client = self._isaac_clients[name]
         self._active_instance = name
         self.client = client
-        self._isaac_tools._client = client
 
     def _bridge_port_for_socket(self, socket_port: int) -> int:
         """Derive the bridge port for an Isaac instance from its socket port."""
         derived = (
             self.settings.isaac_sim.bridge_port
             + (socket_port - self.settings.isaac_sim.socket_port)
+        )
+        return max(1024, min(derived, 65535))
+
+    def _socket_port_for_bridge(self, bridge_port: int) -> int:
+        """Derive the VS Code socket port for an instance from its bridge port."""
+        derived = (
+            self.settings.isaac_sim.socket_port
+            + (bridge_port - self.settings.isaac_sim.bridge_port)
         )
         return max(1024, min(derived, 65535))
 
@@ -586,12 +724,15 @@ class SimulMCPServer(LoggerMixin):
             pid = data.get("pid")
             host = data.get("host", "127.0.0.1")
             port = data.get("port")
+            vscode_port = data.get("vscode_port")
 
             # Only trust loopback addresses from discovery files
             if host not in ("127.0.0.1", "::1", "localhost"):
                 continue
 
             if not isinstance(port, int) or port in existing_ports:
+                continue
+            if vscode_port is not None and not isinstance(vscode_port, int):
                 continue
 
             # Check if PID is still alive
@@ -610,7 +751,11 @@ class SimulMCPServer(LoggerMixin):
 
             client = self._build_isaac_client(
                 socket_host=host,
-                socket_port=port,
+                socket_port=(
+                    vscode_port
+                    if isinstance(vscode_port, int)
+                    else self._socket_port_for_bridge(port)
+                ),
                 socket_timeout=min(self.settings.isaac_sim.socket_timeout, 3.0),
                 bridge_enabled=True,
                 bridge_host=host,
@@ -694,12 +839,15 @@ class SimulMCPServer(LoggerMixin):
         Returns:
             Dict with instance info fields.
         """
+        active_instance = self._get_effective_instance_name()
         info: Dict[str, Any] = {
             "name": name,
             "host": client._host,
             "port": client._port,
+            "bridge_address": client.bridge_address,
+            "vscode_address": client.vscode_address,
             "reachable": False,
-            "active": name == self._active_instance,
+            "active": name == active_instance,
             "stage_url": None,
             "up_axis": None,
             "prim_count": None,
