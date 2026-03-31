@@ -82,7 +82,12 @@ class BridgeServerLifecycle:
         await self._server.wait_closed()
         self._server = None
 
-    def write_discovery_file(self, discovery_dir: str, pid: int) -> None:
+    def write_discovery_file(
+        self,
+        discovery_dir: str,
+        pid: int,
+        vscode_port: int | None = None,
+    ) -> None:
         """Write a discovery file with the actual bound port."""
         os.makedirs(discovery_dir, mode=0o700, exist_ok=True)
         filepath = os.path.join(discovery_dir, f"simul-mcp-{pid}.json")
@@ -92,6 +97,8 @@ class BridgeServerLifecycle:
             "port": self._actual_port,
             "configured_port": self._port,
         }
+        if vscode_port is not None:
+            data["vscode_port"] = vscode_port
         fd, tmp = tempfile.mkstemp(dir=discovery_dir, suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:

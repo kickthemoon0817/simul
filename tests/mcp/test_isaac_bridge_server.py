@@ -52,7 +52,6 @@ def _make_server(
     settings: Settings,
 ) -> server_module.SimulMCPServer:
     """Instantiate the server with runtime adapters stubbed out."""
-    monkeypatch.setattr(server_module, "FASTMCP_AVAILABLE", True)
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
     monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
