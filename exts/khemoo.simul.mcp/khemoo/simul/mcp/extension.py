@@ -42,6 +42,7 @@ class IsaacMCPServerExtension(OmniExtBase):
         self._request_lock: asyncio.Lock | None = None
         self._host = "127.0.0.1"
         self._port = 8229
+        self._vscode_port = 8226
         self._max_port_retries = 10
         self._discovery_dir = "/tmp/simul-mcp"
         self._ui_builder: BridgeUIBuilder | None = None
@@ -195,6 +196,9 @@ class IsaacMCPServerExtension(OmniExtBase):
         self._max_port_retries = int(
             settings.get("/exts/khemoo.simul.mcp/max_port_retries") or 10
         )
+        self._vscode_port = int(
+            settings.get("/exts/isaacsim.code_editor.vscode/port") or 8226
+        )
         self._discovery_dir = str(
             settings.get("/exts/khemoo.simul.mcp/discovery_dir") or "/tmp/simul-mcp"
         )
@@ -247,7 +251,11 @@ class IsaacMCPServerExtension(OmniExtBase):
             settings.set("/exts/khemoo.simul.mcp/port", actual_port)
             self._port = actual_port
         # Write discovery file
-        self._server.write_discovery_file(self._discovery_dir, os.getpid())
+        self._server.write_discovery_file(
+            self._discovery_dir,
+            os.getpid(),
+            vscode_port=self._vscode_port,
+        )
         carb.log_info(f"Simul MCP bridge serving at {self._server.address}")
         self._refresh_ui()
 
