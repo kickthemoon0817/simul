@@ -332,7 +332,7 @@ class LoggingConfig(BaseModel):
     level: str = Field(default="INFO", description="Log level")
     format: str = Field(default="detailed", description="Log format")
     file_enabled: bool = Field(default=True, description="Enable file logging")
-    file_path: str = Field(default="logs/simul_mcp.log", description="Log file path")
+    file_path: str = Field(default="~/.simul/logs/simul_mcp.log", description="Log file path")
     file_max_size: str = Field(default="10MB", description="Maximum log file size")
     file_backup_count: int = Field(default=5, description="Log file backup count", ge=1)
     console_enabled: bool = Field(default=True, description="Enable console logging")
@@ -932,7 +932,7 @@ def validate_settings(settings: Settings) -> List[str]:
 
     # Validate log file directory
     if settings.logging.file_enabled:
-        log_path = Path(settings.logging.file_path)
+        log_path = Path(settings.logging.file_path).expanduser()
         if not log_path.is_absolute():
             log_path = _PROJECT_ROOT / log_path
         log_dir = log_path.parent

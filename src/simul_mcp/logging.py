@@ -146,7 +146,7 @@ def _configure_file_handler_paths(
     handlers: Dict[str, Any], base_path: str
 ) -> None:
     """Update file handler paths to match Settings.file_path."""
-    target = Path(base_path)
+    target = Path(base_path).expanduser()
     suffix = target.suffix or ".log"
     stem = target.stem if target.suffix else target.name
     parent = target.parent
@@ -203,10 +203,10 @@ def _setup_fallback_logging(
         handlers.append(logging.StreamHandler(sys.stderr))
 
     if settings.logging.file_enabled:
-        log_path = Path(settings.logging.file_path)
+        log_path = Path(settings.logging.file_path).expanduser()
         log_dir = log_path.parent
         log_dir.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(settings.logging.file_path, encoding="utf-8"))
+        handlers.append(logging.FileHandler(str(log_path), encoding="utf-8"))
 
     if not handlers:
         handlers.append(logging.NullHandler())

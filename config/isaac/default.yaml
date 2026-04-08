@@ -139,7 +139,7 @@ logging:
   # File logging
   file:
     enabled: true
-    path: "logs/simul_mcp.log"
+    path: "~/.simul/logs/simul_mcp.log"
     max_size: "10MB"
     backup_count: 5
     rotation: "size"  # size, time
