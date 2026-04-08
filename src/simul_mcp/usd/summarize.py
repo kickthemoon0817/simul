@@ -11,14 +11,7 @@ from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 import json
 
-try:
-    from pxr import Usd, UsdGeom, Kind
-    PXR_AVAILABLE = True
-except ImportError:
-    PXR_AVAILABLE = False
-    Usd = None
-    UsdGeom = None
-    Kind = None
+from ._pxr import Usd, UsdGeom
 
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import monitor_performance
@@ -89,9 +82,6 @@ class SceneSummarizer(LoggerMixin):
     
     def __init__(self):
         """Initialize scene summarizer."""
-        if not PXR_AVAILABLE:
-            raise ImportError("pxr library not available. Please install USD Python bindings.")
-        
         self.usd_reader = USDReader()
         self.mesh_ops = MeshOperations()
         self.logger.info("Scene summarizer initialized")

@@ -10,28 +10,13 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Any, Tuple, Union
 import numpy as np
 
-try:
-    from pxr import Usd, UsdGeom, Gf
-    PXR_AVAILABLE = True
-except ImportError:
-    PXR_AVAILABLE = False
-    # Mock classes for development
-    Usd = None
-    UsdGeom = None
-    Gf = None
+from ._pxr import Gf, Usd, UsdGeom
 
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import monitor_performance
 from ..utils.math import BBox, bbox_union, bbox_from_points
 
 logger = get_logger(__name__)
-
-
-def _default_time_code() -> Any:
-    """Return a USD default time code only when pxr is available."""
-    if not PXR_AVAILABLE or Usd is None:
-        return None
-    return Usd.TimeCode.Default()
 
 
 class BBoxCache(LoggerMixin):
@@ -50,11 +35,8 @@ class BBoxCache(LoggerMixin):
             stage: USD Stage
             time_code: Time code for animated data
         """
-        if not PXR_AVAILABLE:
-            raise ImportError("pxr library not available. Please install USD Python bindings.")
-        
         self.stage = stage
-        self.time_code = _default_time_code() if time_code is None else time_code
+        self.time_code = self._default_time_code() if time_code is None else time_code
         self._world_bbox_cache: Dict[str, BBox] = {}
         self._local_bbox_cache: Dict[str, BBox] = {}
         self._usd_bbox_cache: Optional[UsdGeom.BBoxCache] = None
@@ -69,6 +51,11 @@ class BBoxCache(LoggerMixin):
             self.logger.warning(f"Could not initialize USD BBoxCache: {e}")
         
         self.logger.info(f"BBox cache initialized for stage at time {time_code}")
+
+    @staticmethod
+    def _default_time_code() -> Any:
+        """Return the USD default time code."""
+        return Usd.TimeCode.Default()
     
     def clear_cache(self) -> None:
         """Clear all cached bounding boxes."""
