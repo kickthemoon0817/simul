@@ -43,15 +43,17 @@ def _session(
     timeout: Optional[int] = None,
 ) -> UnrealRuntimeSession:
     """Build an UnrealRuntimeSession with optional overrides."""
-    from copy import deepcopy
-
-    settings = deepcopy(get_settings())
-    if host:
-        settings.unreal.host = host
-    if port:
-        settings.unreal.port = port
-    if timeout:
-        settings.unreal.timeout = timeout
+    settings = get_settings()
+    overrides: Dict[str, Any] = {}
+    if host is not None:
+        overrides["host"] = host
+    if port is not None:
+        overrides["port"] = port
+    if timeout is not None:
+        overrides["timeout"] = timeout
+    if overrides:
+        unreal_cfg = settings.unreal.model_copy(update=overrides)
+        settings = settings.model_copy(update={"unreal": unreal_cfg})
     return UnrealRuntimeSession(settings)
 
 

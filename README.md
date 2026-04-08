@@ -236,7 +236,6 @@ simul-mcp info
 # Test USD file loading and analysis
 simul-mcp usd info /path/to/scene.usd
 
-
 # Validate configuration file
 simul-mcp validate-config config/isaac/default.yaml
 
