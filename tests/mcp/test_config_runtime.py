@@ -44,7 +44,7 @@ def test_load_settings_supports_nested_repo_config_without_isaac_env(
     assert settings.isaac_sim.path is None
     assert settings.isaac_sim.headless is False
     assert settings.logging.file_enabled is True
-    assert settings.logging.file_path == "logs/simul_mcp.log"
+    assert settings.logging.file_path == "~/.simul/logs/simul_mcp.log"
     assert settings.logging.file_backup_count == 5
     assert settings.logging.console_colored is True
     assert settings.usd.cache_enabled is True
