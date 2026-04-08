@@ -24,32 +24,68 @@ Simul-MCP is designed for multi-engine workflows. Isaac Sim is the primary runti
 
 ## Requirements
 
-### Core Requirements
-- Python 3.10+
-- USD Python bindings (pxr)
-- FastMCP
-- Pydantic v2
-- PyYAML
-- NumPy
-
-### Isaac Sim Requirements (Optional)
-- NVIDIA Isaac Sim 5.1.0+
-- `khemoo.simul.mcp` bridge extension preferred on TCP port 8229
-- `isaacsim.code_editor.vscode` kept as compatibility fallback on TCP port 8226
+- Python 3.11, 3.12, or 3.13
+- USD Python bindings (`usd-core`) — installed automatically
+- NVIDIA Isaac Sim 5.1.0+ (optional — for live simulation control)
+- Unreal Engine 5.x with Remote Control plugin (optional)
+- Blender via `bpy` package (optional — Python 3.11 or 3.13 only)
 
 ## Installation
 
+**Requirements:** Python 3.11, 3.12, or 3.13
+
 ```bash
-# Clone the repository
 git clone https://github.com/kickthemoon0817/simul.git
 cd simul
-
-# Recommended: create/sync the project environment with uv
-uv sync --extra dev --extra usd
-
-# Or install with pip if you prefer a classic editable environment
-pip install -e ".[dev,usd]"
 ```
+
+### Choose Your Backends
+
+Install only what you need. USD support is included by default — pick the simulation engines you use:
+
+| I want to use... | Install command |
+|-------------------|----------------|
+| **USD only** (headless scene analysis) | `uv sync` |
+| **Isaac Sim** (NVIDIA Omniverse) | `uv sync` — then launch Isaac Sim with the bridge extension |
+| **Unreal Engine** (5.x) | `uv sync` — then enable Remote Control in your UE project |
+| **Blender** (Python 3.11 or 3.13) | `uv sync --extra blender` |
+| **All backends + dev tools** | `uv sync --extra dev --extra blender` |
+
+Or with pip:
+
+```bash
+# Core (USD + Isaac Sim + Unreal support)
+pip install -e .
+
+# With Blender
+pip install -e ".[blender]"
+
+# With dev tools
+pip install -e ".[dev]"
+```
+
+### Backend-Specific Setup
+
+**Isaac Sim** — No extra Python packages needed. Isaac Sim provides its own `pxr` and `omni` modules. Install the `khemoo.simul.mcp` bridge extension into Isaac Sim (see [Isaac Sim Extension](#isaac-sim-extension) below), or use the Docker Compose setup.
+
+**Unreal Engine** — No extra Python packages needed. Simul communicates via UE5's built-in Remote Control HTTP API. Enable the `RemoteControl` and `PythonScriptPlugin` plugins in your `.uproject` and configure `DefaultRemoteControl.ini` (see [Unreal Engine Setup](#unreal-engine-setup) below).
+
+**Blender** — Requires the `bpy` pip package which has strict Python version locks:
+- Python 3.11 → `bpy 4.2–5.0.x` (Blender 4.x)
+- Python 3.12 → Not supported by `bpy`
+- Python 3.13 → `bpy 5.1.0` (Blender 5.1)
+
+**Unity** — Planned for a future release. The architecture supports adding new backends via the adapter pattern.
+
+### Python Version Guide
+
+| Python | USD | Isaac Sim | Unreal | Blender |
+|--------|-----|-----------|--------|---------|
+| 3.11 | Yes | Yes (5.1) | Yes | Yes (bpy 4.x/5.0) |
+| 3.12 | Yes | Yes | Yes | **No** (no bpy wheels) |
+| 3.13 | Yes | TBD | Yes | Yes (bpy 5.1) |
+
+**Recommended:** Python 3.11 for maximum compatibility across all backends.
 
 ## Agent Integration
 
