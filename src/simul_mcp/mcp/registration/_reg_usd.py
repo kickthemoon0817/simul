@@ -7,7 +7,27 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from ..schemas import *
+from ..schemas.common import BoundingBox, ErrorResponse, Transform
+from ..schemas.usd import (
+    BBoxRequest,
+    BBoxResponse,
+    MeshInfo,
+    MeshInfoRequest,
+    PrimActionResponse,
+    PrimCreateRequest,
+    PrimDeleteRequest,
+    PrimInfo,
+    PrimInfoRequest,
+    PrimSearchRequest,
+    PrimSearchResponse,
+    PrimUpdateRequest,
+    SceneSummaryRequest,
+    SceneSummaryResponse,
+    StageInfo,
+    USDFileInfo,
+    USDFileRequest,
+    USDValidateRequest,
+)
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer

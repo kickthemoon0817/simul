@@ -6,7 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from ..schemas import *
+from ..schemas.common import ErrorResponse
+from ..schemas.unreal import *
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -2986,4 +2987,3 @@ def register_unreal_tools(server: "SimulMCPServer") -> None:
                 (UnrealComputeMeshUvResponse, ErrorResponse),
                 "compute_unreal_mesh_uv",
             )
-

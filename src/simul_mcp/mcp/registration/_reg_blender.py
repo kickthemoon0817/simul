@@ -6,7 +6,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from ..schemas import *
+from ..schemas.blender import *
+from ..schemas.common import ErrorResponse
+from ..schemas.simready import *
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -3040,4 +3042,3 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 ),
                 "setup_simready_hierarchy",
             )
-

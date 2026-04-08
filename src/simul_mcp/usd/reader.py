@@ -5,29 +5,15 @@ This module provides the main USD reading functionality using the pxr library
 for loading USD files, traversing scene graphs, and extracting prim information.
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union, Iterator, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
-try:
-    from pxr import Usd, UsdGeom, Sdf, Tf, Gf, Kind
-    PXR_AVAILABLE = True
-except ImportError:
-    PXR_AVAILABLE = False
-    # Create mock classes for development without USD
-    class MockUsd:
-        class Stage:
-            @staticmethod
-            def Open(path): return None
-        class Prim: pass
-    Usd = MockUsd
-    UsdGeom = None
-    Sdf = None
-    Tf = None
-    Gf = None
-    Kind = None
+from ._pxr import Usd, UsdGeom
 
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import Timer, monitor_performance
@@ -128,9 +114,6 @@ class USDReader(LoggerMixin):
         Args:
             enable_caching: Enable USD stage caching
         """
-        if not PXR_AVAILABLE:
-            raise ImportError("pxr library not available. Please install USD Python bindings.")
-        
         self.enable_caching = enable_caching
         self._stage_cache: Dict[str, Usd.Stage] = {}
         self.logger.info("USD Reader initialized")
@@ -195,6 +178,14 @@ class USDReader(LoggerMixin):
         """Clear all cached stages."""
         self._stage_cache.clear()
         self.logger.info("Cleared USD stage cache")
+
+    @staticmethod
+    def classify_prim_type(type_name: str) -> PrimType:
+        """Map a USD type name to the internal PrimType enum."""
+        try:
+            return PrimType(type_name)
+        except ValueError:
+            return PrimType.UNKNOWN
     
     @monitor_performance("usd_reader.get_stage_info")
     def get_stage_info(self, stage: Usd.Stage) -> USDStageInfo:
@@ -291,11 +282,7 @@ class USDReader(LoggerMixin):
             type_name = prim.GetTypeName()
             
             # Determine prim type enum
-            prim_type = PrimType.UNKNOWN
-            try:
-                prim_type = PrimType(type_name)
-            except ValueError:
-                pass
+            prim_type = self.classify_prim_type(type_name)
             
             # Prim state
             is_active = prim.IsActive()

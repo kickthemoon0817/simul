@@ -22,7 +22,7 @@ Simul-MCP is designed for multi-engine workflows. Isaac Sim is the primary runti
 ## Requirements
 
 ### Core Requirements
-- Python 3.8+
+- Python 3.10+
 - USD Python bindings (pxr)
 - FastMCP
 - Pydantic v2
@@ -41,16 +41,32 @@ Simul-MCP is designed for multi-engine workflows. Isaac Sim is the primary runti
 git clone https://github.com/kickthemoon0817/simul.git
 cd simul
 
-# Install in development mode
-pip install -e .
+# Recommended: create/sync the project environment with uv
+uv sync --extra dev --extra usd
 
-# Or install with development/test tooling
-pip install -e ".[dev]"
+# Or install with pip if you prefer a classic editable environment
+pip install -e ".[dev,usd]"
 ```
 
 ## Agent Integration
 
-Simul MCP works with any MCP-compatible AI coding agent. Configure your agent to use the `simul-mcp server` command as an MCP server.
+Simul MCP works with any MCP-compatible AI coding agent. The most reliable
+enrollment path from a local checkout is to point the agent at `uv run
+simul-mcp server` inside this repository, so it uses the project-managed
+virtual environment instead of assuming a global install.
+
+Recommended repo-local command:
+
+```bash
+uv --directory /abs/path/to/simul run simul-mcp server
+```
+
+If you prefer a globally installed entrypoint, `simul-mcp server` also works
+after installing the package into your environment.
+
+The `skills.md` file in this repo is exposed automatically by the MCP server as
+the `simul://isaac-sim/skills` resource. You do not need to install a separate
+agent-side skill package to use it.
 
 ### Claude Code
 
@@ -60,8 +76,8 @@ Add to `~/.claude/settings.json` under `mcpServers`:
 {
   "mcpServers": {
     "simul": {
-      "command": "simul-mcp",
-      "args": ["server"]
+      "command": "uv",
+      "args": ["--directory", "/abs/path/to/simul", "run", "simul-mcp", "server"]
     }
   }
 }
@@ -70,7 +86,7 @@ Add to `~/.claude/settings.json` under `mcpServers`:
 Or use the CLI:
 
 ```bash
-claude mcp add simul -- simul-mcp server
+claude mcp add simul -- uv --directory /abs/path/to/simul run simul-mcp server
 ```
 
 ### Codex (OpenAI)
@@ -81,8 +97,8 @@ Add to `~/.codex/config.json`:
 {
   "mcpServers": {
     "simul": {
-      "command": "simul-mcp",
-      "args": ["server"]
+      "command": "uv",
+      "args": ["--directory", "/abs/path/to/simul", "run", "simul-mcp", "server"]
     }
   }
 }
@@ -96,10 +112,24 @@ Add to `~/.config/opencode/config.json` under `mcpServers`:
 {
   "mcpServers": {
     "simul": {
-      "command": "simul-mcp",
-      "args": ["server"]
+      "command": "uv",
+      "args": ["--directory", "/abs/path/to/simul", "run", "simul-mcp", "server"]
     }
   }
+}
+```
+
+If you need a custom config file, append the extra server args after `server`,
+for example:
+
+```json
+{
+  "command": "uv",
+  "args": [
+    "--directory", "/abs/path/to/simul",
+    "run", "simul-mcp", "server",
+    "--config", "config/isaac/default.yaml"
+  ]
 }
 ```
 
@@ -115,10 +145,10 @@ When Isaac Sim runs in Docker, Simul MCP connects to the host-published ports, n
 
 ```bash
 # Basic startup
-simul-mcp server
+uv run simul-mcp server
 
 # With custom configuration
-simul-mcp server --config config/custom.yaml --verbose
+uv run simul-mcp server --config config/custom.yaml --verbose
 ```
 
 ### 2. Test USD Operations

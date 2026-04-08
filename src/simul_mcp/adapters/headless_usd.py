@@ -13,17 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Union
 from contextlib import contextmanager
 
-try:
-    from pxr import Usd, UsdGeom, UsdShade, Sdf, Tf, Gf
-    PXR_AVAILABLE = True
-except ImportError:
-    PXR_AVAILABLE = False
-    Usd = None
-    UsdGeom = None
-    UsdShade = None
-    Sdf = None
-    Tf = None
-    Gf = None
+from ..usd._pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import Timer, monitor_performance
@@ -50,9 +40,6 @@ class HeadlessUSDSession(LoggerMixin):
         Args:
             settings: Configuration settings
         """
-        if not PXR_AVAILABLE:
-            raise ImportError("pxr library not available. Please install USD Python bindings.")
-        
         self.settings = settings or get_settings()
         self.usd_reader = USDReader(enable_caching=self.settings.usd.cache_enabled)
         self.mesh_ops = MeshOperations()
@@ -221,9 +208,6 @@ class HeadlessUSDSession(LoggerMixin):
 
     def get_material_bindings(self, stage_id: str, prim_path: str) -> List[str]:
         """Get bound material paths for a prim."""
-        if not UsdShade:
-            return []
-
         stage = self.get_stage(stage_id)
         if not stage:
             return []
@@ -239,8 +223,6 @@ class HeadlessUSDSession(LoggerMixin):
         return []
 
     def _infer_value_type(self, value: Any):
-        if not Sdf:
-            return None
         if isinstance(value, bool):
             return Sdf.ValueTypeNames.Bool
         if isinstance(value, int) and not isinstance(value, bool):
@@ -559,9 +541,9 @@ class HeadlessUSDAdapter(LoggerMixin):
         Check if headless USD operations are available.
         
         Returns:
-            True if pxr library is available
+            True when the adapter module is importable
         """
-        return PXR_AVAILABLE
+        return True
     
     def get_capabilities(self) -> List[str]:
         """
@@ -579,9 +561,6 @@ class HeadlessUSDAdapter(LoggerMixin):
             "search_prims",
             "validate_topology"
         ]
-        
-        if not PXR_AVAILABLE:
-            capabilities = []
         
         return capabilities
 
@@ -602,4 +581,4 @@ def create_headless_session(settings: Optional[Settings] = None) -> HeadlessUSDS
 
 def is_headless_available() -> bool:
     """Check if headless USD operations are available."""
-    return PXR_AVAILABLE
+    return True

@@ -94,7 +94,7 @@ def _make_server(
     monkeypatch.setattr(server_module, "TaskConfig", None)
     monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
     monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "is_unreal_available", lambda: False)
+    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
     return server_module.SimulMCPServer(settings=settings)
 
 

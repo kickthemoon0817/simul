@@ -10,7 +10,7 @@ import json
 import time
 
 from ...adapters import ScriptResult
-from ..schemas import *
+from ..schemas.common import ErrorResponse
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer

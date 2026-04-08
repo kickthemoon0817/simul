@@ -12,34 +12,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
 
-try:
-    from pxr import Usd, UsdGeom, Gf, Vt
-    PXR_AVAILABLE = True
-except ImportError:
-    PXR_AVAILABLE = False
-    # Mock classes for development
-    Usd = None
-    UsdGeom = None
-    Gf = None
-    Vt = None
+from ._pxr import Usd, UsdGeom
 
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import monitor_performance
 from ..utils.math import Vector3, BBox, bbox_from_points
 
 logger = get_logger(__name__)
-
-
-def _default_time_code() -> Any:
-    """Return a USD default time code only when pxr is available."""
-    if not PXR_AVAILABLE or Usd is None:
-        return None
-    return Usd.TimeCode.Default()
-
-
-def _path_to_str(path_value: Any) -> str:
-    """Normalise real USD paths and mocked path objects to plain strings."""
-    return getattr(path_value, "pathString", str(path_value))
 
 
 @dataclass
@@ -75,10 +54,17 @@ class MeshOperations(LoggerMixin):
     
     def __init__(self):
         """Initialize mesh operations."""
-        if not PXR_AVAILABLE:
-            raise ImportError("pxr library not available. Please install USD Python bindings.")
-        
         self.logger.info("Mesh operations initialized")
+
+    @staticmethod
+    def _default_time_code() -> Any:
+        """Return the USD default time code."""
+        return Usd.TimeCode.Default()
+
+    @staticmethod
+    def _path_to_str(path_value: Any) -> str:
+        """Normalise real USD paths and mocked path objects to plain strings."""
+        return getattr(path_value, "pathString", str(path_value))
     
     @monitor_performance("mesh_ops.extract_mesh_data")
     def extract_mesh_data(
@@ -98,7 +84,7 @@ class MeshOperations(LoggerMixin):
             raise ValueError(f"Prim {mesh_prim.GetPath()} is not a mesh")
         
         mesh = UsdGeom.Mesh(mesh_prim)
-        time_code = _default_time_code() if time_code is None else time_code
+        time_code = self._default_time_code() if time_code is None else time_code
         
         try:
             # Get basic mesh data
@@ -146,7 +132,7 @@ class MeshOperations(LoggerMixin):
             interpolate_boundary = mesh.GetInterpolateBoundaryAttr().Get()
             
             mesh_data = {
-                'prim_path': _path_to_str(mesh_prim.GetPath()),
+                'prim_path': self._path_to_str(mesh_prim.GetPath()),
                 'points': points_array.tolist() if points_array.size > 0 else [],
                 'face_vertex_counts': face_counts_array.tolist() if face_counts_array.size > 0 else [],
                 'face_vertex_indices': face_indices_array.tolist() if face_indices_array.size > 0 else [],
@@ -187,7 +173,7 @@ class MeshOperations(LoggerMixin):
             raise ValueError(f"Prim {mesh_prim.GetPath()} is not a mesh")
         
         mesh = UsdGeom.Mesh(mesh_prim)
-        time_code = _default_time_code() if time_code is None else time_code
+        time_code = self._default_time_code() if time_code is None else time_code
         
         try:
             # Extract basic mesh data
@@ -227,7 +213,7 @@ class MeshOperations(LoggerMixin):
             subsets = self._get_geometry_subsets(mesh_prim)
             
             mesh_info = MeshInfo(
-                prim_path=_path_to_str(mesh_prim.GetPath()),
+                prim_path=self._path_to_str(mesh_prim.GetPath()),
                 vertex_count=vertex_count,
                 face_count=face_count,
                 point_count=point_count,
@@ -397,7 +383,7 @@ class MeshOperations(LoggerMixin):
                     subset = UsdGeom.Subset(child)
                     subset_info = {
                         'name': child.GetName(),
-                        'path': _path_to_str(child.GetPath()),
+                        'path': self._path_to_str(child.GetPath()),
                         'element_type': subset.GetElementTypeAttr().Get(),
                         'family_name': subset.GetFamilyNameAttr().Get(),
                         'indices': list(subset.GetIndicesAttr().Get() or [])

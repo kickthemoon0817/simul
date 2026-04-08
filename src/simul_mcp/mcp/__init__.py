@@ -6,7 +6,7 @@ connection management, and integration for Isaac Sim, Blender, Unreal Engine,
 and headless USD operations.
 """
 
-from .schemas import (
+from .schemas.blender import (
     BlenderAddConstraintResponse,
     BlenderAddForceFieldResponse,
     BlenderAddModifierResponse,
@@ -55,7 +55,9 @@ from .schemas import (
     BlenderSetTransformResponse,
     BlenderSetupRigidBodyResponse,
     BlenderViewportInfoResponse,
-    BoundingBox,
+)
+from .schemas.common import BoundingBox
+from .schemas.simready import (
     SimReadyApplyMetadataResponse,
     SimReadyExportResponse,
     SimReadyGetMetadataResponse,
@@ -64,6 +66,8 @@ from .schemas import (
     SimReadySetupHierarchyResponse,
     SimReadyValidateResponse,
     SimReadyValidationIssue,
+)
+from .schemas.usd import (
     MeshInfo,
     PrimInfo,
     SceneSummaryRequest,

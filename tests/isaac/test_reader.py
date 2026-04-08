@@ -16,17 +16,11 @@ import sys
 src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
-from simul_mcp.usd.reader import (
-    PXR_AVAILABLE as READER_PXR_AVAILABLE,
-    PrimType,
-    USDLayerInfo,
-    USDPrimInfo,
-    USDReader,
-    USDStageInfo,
-)
+pytest.importorskip("pxr", reason="pxr library not available")
+
+from simul_mcp.usd.reader import PrimType, USDLayerInfo, USDPrimInfo, USDReader, USDStageInfo
 
 
-@pytest.mark.skipif(not READER_PXR_AVAILABLE, reason="pxr library not available")
 class TestUSDReader:
     """Test cases for USDReader class."""
 
@@ -54,15 +48,29 @@ class TestUSDReader:
     def mock_usd_prim(self):
         """Create a mock USD prim for testing."""
         mock_prim = Mock()
-        mock_prim.GetPath.return_value.pathString = "/World/Cube"
+        mock_path = MagicMock()
+        mock_path.pathString = "/World/Cube"
+        mock_path.__str__.return_value = "/World/Cube"
+        mock_prim.GetPath.return_value = mock_path
         mock_prim.GetName.return_value = "Cube"
         mock_prim.GetTypeName.return_value = "Mesh"
         mock_prim.IsActive.return_value = True
         mock_prim.IsLoaded.return_value = True
         mock_prim.IsDefined.return_value = True
+        mock_prim.IsAbstract.return_value = False
         mock_prim.IsInstance.return_value = False
+        mock_prim.IsPrototype.return_value = False
+        mock_prim.HasAuthoredReferences.return_value = False
+        mock_prim.HasAuthoredPayloads.return_value = False
+        mock_prim.HasAuthoredInherits.return_value = False
+        mock_prim.HasAuthoredSpecializes.return_value = False
+        mock_prim.HasAuthoredMetadata.return_value = False
+        mock_prim.IsA.return_value = False
         mock_prim.GetChildren.return_value = []
         mock_prim.GetAttributes.return_value = []
+        mock_prim.GetRelationships.return_value = []
+        mock_prim.GetMetadataKeys.return_value = []
+        mock_prim.GetParent.return_value = None
         mock_prim.GetMetadata.return_value = {}
 
         return mock_prim
@@ -72,15 +80,14 @@ class TestUSDReader:
         """Create USDReader instance for testing."""
         return USDReader(enable_caching=False)
 
-    def test_init_without_pxr(self):
-        """Test USDReader initialization without pxr library."""
-        with patch("simul_mcp.usd.reader.PXR_AVAILABLE", False):
-            with pytest.raises(ImportError, match="pxr library not available"):
-                USDReader()
+    def test_init(self):
+        """Test USDReader initialization."""
+        reader = USDReader()
+        assert isinstance(reader, USDReader)
 
-    @patch("simul_mcp.usd.reader.PXR_AVAILABLE", True)
+    @patch("simul_mcp.usd.reader.os.path.exists", return_value=True)
     @patch("simul_mcp.usd.reader.Usd")
-    def test_open_stage_success(self, mock_usd, usd_reader, mock_usd_stage):
+    def test_open_stage_success(self, mock_usd, _mock_exists, usd_reader, mock_usd_stage):
         """Test successful stage opening."""
         mock_usd.Stage.Open.return_value = mock_usd_stage
 
@@ -89,7 +96,6 @@ class TestUSDReader:
         assert stage == mock_usd_stage
         mock_usd.Stage.Open.assert_called_once_with("/test/path.usd")
 
-    @patch("simul_mcp.usd.reader.PXR_AVAILABLE", True)
     @patch("simul_mcp.usd.reader.Usd")
     def test_open_stage_failure(self, mock_usd, usd_reader):
         """Test stage opening failure."""
@@ -99,8 +105,8 @@ class TestUSDReader:
 
         assert stage is None
 
-    @patch("simul_mcp.usd.reader.PXR_AVAILABLE", True)
-    def test_get_stage_info(self, usd_reader, mock_usd_stage):
+    @patch("simul_mcp.usd.reader.UsdGeom")
+    def test_get_stage_info(self, mock_usd_geom, usd_reader, mock_usd_stage):
         """Test stage information extraction."""
         # Mock prim traversal
         mock_prim1 = Mock()
@@ -112,6 +118,8 @@ class TestUSDReader:
         mock_usd_stage.GetPseudoRoot.return_value.GetChildren.return_value = [
             mock_prim1
         ]
+        mock_usd_geom.GetStageUpAxis.return_value = "Y"
+        mock_usd_geom.GetStageMetersPerUnit.return_value = 1.0
 
         stage_info = usd_reader.get_stage_info(mock_usd_stage)
 
@@ -126,7 +134,6 @@ class TestUSDReader:
         assert len(stage_info.root_prims) == 1
         assert len(stage_info.layers) == 1
 
-    @patch("simul_mcp.usd.reader.PXR_AVAILABLE", True)
     def test_get_prim_info(self, usd_reader, mock_usd_prim):
         """Test prim information extraction."""
         prim_info = usd_reader.get_prim_info(mock_usd_prim)
@@ -141,7 +148,6 @@ class TestUSDReader:
         assert prim_info.is_instance is False
         assert len(prim_info.children) == 0
 
-    @patch("simul_mcp.usd.reader.PXR_AVAILABLE", True)
     def test_find_prims_by_type(self, usd_reader, mock_usd_stage):
         """Test finding prims by type."""
         # Mock prims
@@ -158,7 +164,6 @@ class TestUSDReader:
         assert len(mesh_prims) == 1
         assert mesh_prims[0] == mesh_prim
 
-    @patch("simul_mcp.usd.reader.PXR_AVAILABLE", True)
     def test_find_prims_by_name_exact(self, usd_reader, mock_usd_stage):
         """Test finding prims by exact name match."""
         # Mock prims
@@ -177,7 +182,6 @@ class TestUSDReader:
         assert len(cube_prims) == 1
         assert cube_prims[0] == cube_prim
 
-    @patch("simul_mcp.usd.reader.PXR_AVAILABLE", True)
     def test_find_prims_by_name_pattern(self, usd_reader, mock_usd_stage):
         """Test finding prims by name pattern."""
         # Mock prims
@@ -326,7 +330,6 @@ class TestUSDPrimInfo:
 
 
 # Integration tests (require actual USD files)
-@pytest.mark.skipif(not READER_PXR_AVAILABLE, reason="pxr library not available")
 class TestUSDReaderIntegration:
     """Integration tests for USDReader with real USD files."""
 
