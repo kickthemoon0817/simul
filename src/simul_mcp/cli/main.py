@@ -44,6 +44,7 @@ from simul_mcp.adapters import (
 # Import sub-apps
 from simul_mcp.cli.isaac import app as isaac_app
 from simul_mcp.cli.usd_cli import app as usd_app
+from simul_mcp.cli.unreal_cli import app as unreal_app
 
 
 def _is_isaac_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -89,6 +90,7 @@ console = Console(stderr=True)
 # Register sub-apps
 app.add_typer(isaac_app, name="isaac", help="Isaac Sim commands")
 app.add_typer(usd_app, name="usd", help="USD file commands (headless)")
+app.add_typer(unreal_app, name="unreal", help="Unreal Engine commands (Remote Control API)")
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +109,12 @@ def server(
     ),
     transport: str = typer.Option(
         "stdio", "--transport", "-t", help="Transport type (stdio, sse)"
+    ),
+    backends: Optional[str] = typer.Option(
+        None,
+        "--backends",
+        "-b",
+        help="Comma-separated backends to enable (isaac,unreal,usd,blender). Default: all available.",
     ),
     log_level: Optional[str] = typer.Option(
         None, "--log-level", "-l", help="Log level (DEBUG, INFO, WARNING, ERROR)"
@@ -127,6 +135,18 @@ def server(
         if verbose:
             settings.logging.level = "DEBUG"
 
+        # Parse --backends into a set
+        backend_set = None
+        if backends:
+            backend_set = {b.strip().lower() for b in backends.split(",")}
+            unknown = backend_set - SimulMCPServer.ALL_BACKENDS
+            if unknown:
+                console.print(
+                    f"[red]Unknown backends: {', '.join(sorted(unknown))}. "
+                    f"Valid: {', '.join(sorted(SimulMCPServer.ALL_BACKENDS))}[/red]"
+                )
+                raise typer.Exit(1)
+
         setup_logging(settings)
         logger = get_logger(__name__)
 
@@ -136,10 +156,12 @@ def server(
         blender_available = is_blender_available()
         usd_available = is_headless_available()
 
+        backends_label = ", ".join(sorted(backend_set)) if backend_set else "all available"
         console.print(
             Panel.fit(
                 f"[bold blue]Simul -- 3D Simulation & DCC Tools[/bold blue]\n"
                 f"Transport: {transport}\n"
+                f"Backends: {backends_label}\n"
                 f"Isaac Sim (TCP :{isaac_port}): {'reachable' if isaac_reachable else 'not reachable (tools will retry at call time)'}\n"
                 f"Blender: {'available' if blender_available else 'unavailable'}\n"
                 f"USD Headless: {'available' if usd_available else 'unavailable'}\n"
@@ -150,7 +172,7 @@ def server(
         )
 
         logger.info(f"Starting Simul 3D MCP Server with {transport} transport")
-        asyncio.run(start_mcp_server(settings, transport))
+        asyncio.run(start_mcp_server(settings, transport, backends=backend_set))
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Server stopped by user[/yellow]")

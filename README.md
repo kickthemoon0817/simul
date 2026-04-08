@@ -15,7 +15,10 @@ Simul-MCP is designed for multi-engine workflows. Isaac Sim is the primary runti
 - **Bounding Box Computation**: Calculate world and local space bounding boxes
 - **Mesh Operations**: Analyze mesh topology, materials, and geometry
 - **Isaac Sim Integration**: Viewport capture, simulation control, camera management
-- **Flexible Architecture**: Works in both headless and Isaac Sim runtime environments
+- **Unreal Engine Integration**: Scene control, actor manipulation, viewport capture, Python execution via Remote Control HTTP API
+- **Blender Integration**: Scene and object manipulation via bpy
+- **Backend Selection**: `--backends` flag to register only the engines you need, minimizing AI agent context overhead
+- **Flexible Architecture**: Works in both headless and runtime environments
 - **Comprehensive Logging**: Structured logging with multiple output formats
 - **Configuration Management**: YAML-based configuration with environment variable support
 
@@ -214,8 +217,12 @@ ISAAC_BRIDGE_PORT=8829 ISAAC_VSCODE_PORT=8826 docker compose -f compose.isaac-si
 ### Command Line Interface
 
 ```bash
-# Start the MCP server
+# Start the MCP server (all backends)
 simul-mcp server
+
+# Start with only specific backends (reduces agent context)
+simul-mcp server --backends unreal
+simul-mcp server --backends isaac,usd
 
 # Start with custom configuration
 simul-mcp server --config config/isaac/default.yaml
@@ -234,6 +241,24 @@ simul-mcp validate-config config/isaac/default.yaml
 
 # Show version information
 simul-mcp version
+
+# Isaac Sim commands
+simul-mcp isaac ping
+simul-mcp isaac status
+simul-mcp isaac scene
+simul-mcp isaac exec "print('hello')"
+
+# Unreal Engine commands
+simul-mcp unreal health
+simul-mcp unreal list-actors --class StaticMeshActor
+simul-mcp unreal spawn StaticMeshActor --location 0,0,100
+simul-mcp unreal exec "print(unreal.EditorLevelLibrary.get_all_level_actors())"
+simul-mcp unreal capture viewport.png --width 1920
+
+# USD commands
+simul-mcp usd info scene.usd
+simul-mcp usd validate scene.usd
+simul-mcp usd summary scene.usd
 ```
 
 ### Isaac Sim Extension
@@ -405,9 +430,76 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 52 tools for scene objects, materials, rigid bodies, constraints, modifiers, mesh operations, animation, physics baking, viewport capture, and SimReady compliance.
 
-### Unreal Engine (when runtime connected)
+### Unreal Engine Operations
 
-55 tools for actors, physics, materials, mesh operations, viewport, asset import/export, and procedural generation.
+Unreal Engine integration uses the built-in Remote Control HTTP API. The MCP server registers a thin tool set (3 tools) to minimize context overhead for AI agents; the full operation set is available via CLI.
+
+**MCP Tools (always available):**
+- `unreal_health_check`: Check connectivity to Unreal Engine
+- `capture_unreal_viewport`: Capture viewport screenshot (returns image data)
+- `execute_unreal_script`: Execute arbitrary Python inside the UE5 editor
+
+**CLI Commands (`simul-mcp unreal ...`):**
+- `health`, `info`, `scene`, `map` — inspection
+- `list-actors`, `actor-info`, `search`, `scene-graph` — scene queries
+- `spawn`, `delete`, `set-transform`, `set-property`, `set-visibility` — manipulation
+- `sim`, `sim-status` — Play-In-Editor control
+- `capture`, `exec`, `materials` — viewport, scripting, materials
+
+#### Unreal Engine Setup
+
+**Prerequisites:** Unreal Engine 5.x with a project open in the editor.
+
+**Step 1 — Enable plugins** in your `.uproject` file:
+
+```json
+{
+  "Plugins": [
+    {"Name": "RemoteControl", "Enabled": true},
+    {"Name": "PythonScriptPlugin", "Enabled": true}
+  ]
+}
+```
+
+**Step 2 — Configure Remote Control** in `Config/DefaultRemoteControl.ini`:
+
+```ini
+[/Script/RemoteControlCommon.RemoteControlSettings]
+bAutoStartWebServer=True
+bAutoStartWebSocketServer=True
+RemoteControlHttpServerPort=30010
+RemoteControlWebSocketServerPort=30020
+bRestrictServerAccess=True
+bEnableRemotePythonExecution=True
+bAllowConsoleCommandRemoteExecution=True
+```
+
+> **Important:** `bRestrictServerAccess=True` is required — the Python execution and
+> console command settings are gated behind it. Without it, those features silently
+> remain disabled even if set to `True`.
+
+**Step 3 — Restart the Unreal Editor** to load the plugins and apply the config.
+
+**Step 4 — Verify** the connection:
+
+```bash
+# Quick check
+curl http://localhost:30010/remote/info
+
+# Or via simul CLI
+simul-mcp unreal health
+```
+
+#### Claude Code MCP Configuration
+
+To use simul with Unreal Engine in Claude Code, add to your project's MCP config:
+
+```bash
+claude mcp add simul -- /path/to/.venv/bin/simul-mcp server --backends unreal
+```
+
+The `--backends unreal` flag registers only Unreal tools (3 MCP tools + 2 instance tools),
+keeping agent context minimal. All other operations are available via `simul-mcp unreal <command>`.
 
 ## Examples
 

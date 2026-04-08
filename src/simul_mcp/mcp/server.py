@@ -12,7 +12,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Coroutine, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple, Type, Union
 
 from fastmcp import FastMCP
 from fastmcp.server.context import _current_context
@@ -27,6 +27,7 @@ from ..adapters import (
     UnrealRuntimeAdapter,
     is_blender_available,
     is_headless_available,
+    is_unreal_available,
 )
 from .. import __version__ as _source_version
 from ..config import Settings, get_settings
@@ -126,14 +127,25 @@ class SimulMCPServer(LoggerMixin):
     Supports multi-instance Isaac Sim discovery and active instance routing.
     """
 
-    def __init__(self, settings: Optional[Settings] = None):
+    # All recognised backend names for --backends validation.
+    ALL_BACKENDS: Set[str] = {"isaac", "unreal", "usd", "blender"}
+
+    def __init__(
+        self,
+        settings: Optional[Settings] = None,
+        backends: Optional[Set[str]] = None,
+    ):
         """
         Initialize Simul 3D MCP Server.
 
         Args:
             settings: Configuration settings
+            backends: Set of backend names to register MCP tools for.
+                      ``None`` (default) registers all available backends.
+                      Valid names: ``isaac``, ``unreal``, ``usd``, ``blender``.
         """
         self.settings = settings or get_settings()
+        self._backends = backends  # None means "all available"
         self._project_root = Path(__file__).resolve().parents[3]
         self._allowed_paths = self._resolve_allowed_paths()
 
@@ -904,8 +916,12 @@ class SimulMCPServer(LoggerMixin):
         return info
 
 
+    def _backend_enabled(self, name: str) -> bool:
+        """Return True if *name* is in the selected backends (or all when None)."""
+        return self._backends is None or name in self._backends
+
     def _register_tools(self) -> None:
-        """Register all MCP tools."""
+        """Register MCP tools for enabled backends only."""
         from .registration import (
             register_instance_tools,
             register_usd_tools,
@@ -915,22 +931,27 @@ class SimulMCPServer(LoggerMixin):
             register_stats_tools,
         )
 
-        # Instance discovery and routing (must be first)
+        # Instance discovery and routing (always registered)
         register_instance_tools(self)
 
         # USD file operations (headless, local files only)
-        register_usd_tools(self)
+        if self._backend_enabled("usd"):
+            register_usd_tools(self)
 
         # Isaac Sim tools (TCP socket to running instance)
-        register_isaac_tools(self)
+        if self._backend_enabled("isaac"):
+            register_isaac_tools(self)
 
         # Blender tools (if runtime available)
-        if self.blender_adapter and self.blender_adapter.is_available():
-            register_blender_tools(self)
+        if self._backend_enabled("blender"):
+            if self.blender_adapter and self.blender_adapter.is_available():
+                register_blender_tools(self)
 
-        # Unreal tools (independent of Blender availability)
-        if self.unreal_adapter and self.unreal_adapter.is_available():
-            register_unreal_tools(self)
+        # Unreal tools — thin MCP set (health, capture, exec script).
+        # Full operations available via CLI: simul unreal --help
+        if self._backend_enabled("unreal"):
+            if self.unreal_adapter and self.unreal_adapter.is_available():
+                register_unreal_tools(self, thin=True)
 
         # Usage statistics (always available)
         register_stats_tools(self)
@@ -994,21 +1015,27 @@ class SimulMCPServer(LoggerMixin):
 
 
 # Convenience functions
-def create_server_instance(settings: Optional[Settings] = None) -> SimulMCPServer:
+def create_server_instance(
+    settings: Optional[Settings] = None,
+    backends: Optional[Set[str]] = None,
+) -> SimulMCPServer:
     """
     Create a Simul 3D MCP Server instance.
 
     Args:
         settings: Configuration settings
+        backends: Backend names to enable (None = all available)
 
     Returns:
         SimulMCPServer instance
     """
-    return SimulMCPServer(settings)
+    return SimulMCPServer(settings, backends=backends)
 
 
 async def start_mcp_server(
-    settings: Optional[Settings] = None, transport: str = "stdio"
+    settings: Optional[Settings] = None,
+    transport: str = "stdio",
+    backends: Optional[Set[str]] = None,
 ) -> None:
     """
     Start the Simul 3D MCP Server.
@@ -1016,6 +1043,7 @@ async def start_mcp_server(
     Args:
         settings: Configuration settings
         transport: Transport type
+        backends: Backend names to enable (None = all available)
     """
-    server = create_server_instance(settings)
+    server = create_server_instance(settings, backends=backends)
     await server.run(transport)

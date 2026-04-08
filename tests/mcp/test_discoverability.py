@@ -45,6 +45,12 @@ class FakeFastMCP:
         """Mirror FastMCP get_tools API."""
         return self.tools
 
+    def resource(self, *args, **kwargs):
+        """Stub for resource registration."""
+        def decorator(func):
+            return func
+        return decorator
+
 
 def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServer:
     """Instantiate SimulMCPServer with all adapters stubbed out."""
@@ -53,6 +59,7 @@ def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServe
 
     monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
     monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(server_module, "is_unreal_available", lambda: False)
 
     return server_module.SimulMCPServer(settings=Settings())
 
