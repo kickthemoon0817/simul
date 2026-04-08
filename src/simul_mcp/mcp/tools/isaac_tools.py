@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ...adapters import IsaacSocketClient, ScriptResult
 from ...config import Settings, get_settings
 from ...logging import LoggerMixin, get_logger
-from ..schemas import ErrorResponse
+from ..schemas.common import ErrorResponse
 
 logger = get_logger(__name__)
 

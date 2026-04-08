@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from ..schemas import *
+from ..schemas.common import ErrorResponse
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer

@@ -27,13 +27,12 @@ from ..adapters import (
     UnrealRuntimeAdapter,
     is_blender_available,
     is_headless_available,
-    is_unreal_available,
 )
 from .. import __version__ as _source_version
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
 from ..utils.timing import RateLimiter
-from .schemas import *
+from .schemas.common import ErrorResponse
 from .tools.isaac_tools import IsaacTools
 from .session_manager import SessionManager
 from .usage_tracker import ToolUsageTracker
@@ -187,6 +186,9 @@ class SimulMCPServer(LoggerMixin):
 
         self.blender_adapter = (
             BlenderRuntimeAdapter(self.settings) if is_blender_available() else None
+        )
+        self.unreal_adapter = (
+            UnrealRuntimeAdapter(self.settings) if UnrealRuntimeAdapter is not None else None
         )
 
         # Initialize FastMCP server
@@ -927,7 +929,7 @@ class SimulMCPServer(LoggerMixin):
             register_blender_tools(self)
 
         # Unreal tools (independent of Blender availability)
-        if is_unreal_available():
+        if self.unreal_adapter and self.unreal_adapter.is_available():
             register_unreal_tools(self)
 
         # Usage statistics (always available)
