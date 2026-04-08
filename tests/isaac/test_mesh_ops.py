@@ -16,6 +16,8 @@ from pathlib import Path
 src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
+pytest.importorskip("pxr", reason="pxr library not available")
+
 from simul_mcp.usd.mesh_ops import MeshOperations, MeshInfo
 from simul_mcp.utils.math import BBox
 
@@ -112,16 +114,12 @@ class TestMeshOperations:
     @pytest.fixture
     def mesh_ops(self):
         """Create MeshOperations instance for testing."""
-        with patch("simul_mcp.usd.mesh_ops.PXR_AVAILABLE", True):
-            return MeshOperations()
+        return MeshOperations()
 
-    def test_init_without_pxr(self):
-        """Test MeshOperations initialization without pxr library."""
-        with patch("simul_mcp.usd.mesh_ops.PXR_AVAILABLE", False):
-            with pytest.raises(ImportError, match="pxr library not available"):
-                MeshOperations()
+    def test_init(self):
+        """Test MeshOperations initialization."""
+        assert isinstance(MeshOperations(), MeshOperations)
 
-    @patch("simul_mcp.usd.mesh_ops.PXR_AVAILABLE", True)
     @patch("simul_mcp.usd.mesh_ops.UsdGeom")
     def test_extract_mesh_data_success(self, mock_usd_geom, mesh_ops, mock_mesh_prim):
         """Test successful mesh data extraction."""
@@ -139,7 +137,6 @@ class TestMeshOperations:
         assert len(mesh_data["face_vertex_indices"]) == 24
         assert mesh_data["subdivision_scheme"] == "none"
 
-    @patch("simul_mcp.usd.mesh_ops.PXR_AVAILABLE", True)
     @patch("simul_mcp.usd.mesh_ops.UsdGeom")
     def test_extract_mesh_data_not_mesh(self, mock_usd_geom, mesh_ops):
         """Test mesh data extraction on non-mesh prim."""
@@ -150,7 +147,6 @@ class TestMeshOperations:
         with pytest.raises(ValueError, match="is not a mesh"):
             mesh_ops.extract_mesh_data(mock_prim)
 
-    @patch("simul_mcp.usd.mesh_ops.PXR_AVAILABLE", True)
     @patch("simul_mcp.usd.mesh_ops.UsdGeom")
     def test_get_mesh_statistics(self, mock_usd_geom, mesh_ops, mock_mesh_prim):
         """Test mesh statistics computation."""

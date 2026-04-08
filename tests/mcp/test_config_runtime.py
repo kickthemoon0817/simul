@@ -1,12 +1,14 @@
-"""Regression tests for config, logging, and pxr-optional imports."""
+"""Regression tests for config, logging, and pxr-dependent imports."""
 
 from __future__ import annotations
 
 import json
 import logging
 import sys
+import importlib
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 src_path = Path(__file__).resolve().parents[2] / "src"
@@ -17,12 +19,18 @@ from simul_mcp.config import Settings, get_settings, load_settings
 from simul_mcp.logging import setup_logging
 
 
-def test_usd_package_imports_without_pxr() -> None:
-    """The USD package must remain importable even when pxr is absent."""
-    import simul_mcp.usd as usd_module
-
-    assert hasattr(usd_module, "extract_mesh_data")
-    assert hasattr(usd_module, "BBoxCache")
+def test_usd_package_import_requires_pxr() -> None:
+    """The USD package should reflect whether pxr is installed."""
+    sys.modules.pop("simul_mcp.usd", None)
+    try:
+        import pxr  # noqa: F401
+    except ImportError:
+        with pytest.raises(ImportError, match="pxr"):
+            importlib.import_module("simul_mcp.usd")
+    else:
+        usd_module = importlib.import_module("simul_mcp.usd")
+        assert hasattr(usd_module, "extract_mesh_data")
+        assert hasattr(usd_module, "BBoxCache")
 
 
 def test_load_settings_supports_nested_repo_config_without_isaac_env(
