@@ -2,6 +2,7 @@
   "name": "simul",
   "version": "0.0.18",
   "description": "3D simulation and DCC skills — scene setup, physics, materials, camera, scripting, and guided installation for Isaac Sim, Unreal Engine, Blender, and USD",
+  "skills": "./skills/",
   "author": {
     "name": "khemoo",
     "url": "https://github.com/kickthemoon0817"
