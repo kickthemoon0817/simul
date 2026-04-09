@@ -157,7 +157,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             open_world=True,
             destructive=True,
         ),
-        output_schema=server._tool_output_schema(ErrorResponse),
         task=server._task_optional(),
     )
     async def execute_unreal_script(
@@ -180,7 +179,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             return ErrorResponse(
                 error=f"Invalid mode '{mode}'. Must be one of {sorted(_VALID_EXEC_MODES)}",
                 error_type="ValidationError",
-            ).dict()
+            ).model_dump()
 
         rate_error = server._check_rate_limit("execute_unreal_script")
         if rate_error:
@@ -191,7 +190,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 raw = await session._execute_python(code, mode=mode)
@@ -201,7 +200,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
         except Exception as e:
             server.logger.error("Error executing Unreal script: %s", e)
-            return ErrorResponse(error=str(e), error_type="Exception").dict()
+            return ErrorResponse(error=str(e), error_type="Exception").model_dump()
 
     # -- Thin mode: only health_check, capture_viewport, execute_script.
     #    Full operations available via CLI: simul unreal --help
