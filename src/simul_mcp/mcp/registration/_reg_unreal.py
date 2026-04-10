@@ -195,7 +195,12 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             with server.unreal_adapter.create_session() as session:
                 raw = await session._execute_python(code, mode=mode)
                 parsed = session._parse_python_json(raw)
-                parsed["success"] = not parsed.get("error")
+                if parsed.get("error"):
+                    return ErrorResponse(
+                        error=parsed["error"],
+                        error_type="ScriptError",
+                    ).model_dump()
+                parsed["success"] = True
                 return parsed
 
         except Exception as e:

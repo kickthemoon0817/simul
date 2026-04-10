@@ -650,8 +650,9 @@ class UnrealRuntimeSession(LoggerMixin):
             log_lines = py_result.get("LogOutput", [])
             image_data = ""
             for entry in log_lines:
-                if entry.get("Type") == "Info":
-                    image_data = entry.get("Output", "").strip()
+                output = entry.get("Output", "").strip()
+                if output:
+                    image_data = output
                     break
         except Exception:
             image_data = ""
