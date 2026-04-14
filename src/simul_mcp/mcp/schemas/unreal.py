@@ -10,6 +10,43 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 
+class UnrealPingResponse(BaseModel):
+    """Response for a lightweight Unreal Engine reachability probe."""
+
+    success: bool = Field(..., description="Whether request was successful")
+    reachable: bool = Field(..., description="Whether the Remote Control API responded")
+    address: str = Field(..., description="host:port that was probed")
+    latency_ms: Optional[float] = Field(None, description="Round-trip time in milliseconds")
+    error: Optional[str] = Field(None, description="Error message if unreachable")
+
+
+class UnrealInstanceInfo(BaseModel):
+    """Information about a single discovered Unreal Engine instance."""
+
+    name: str = Field(..., description="Instance identifier")
+    host: str = Field(..., description="Remote Control API host")
+    port: int = Field(..., description="Remote Control API port")
+    reachable: bool = Field(..., description="Whether the instance responded to ping")
+    active: bool = Field(False, description="Whether this is the currently active instance")
+    engine_version: Optional[str] = Field(None, description="Unreal Engine version")
+    project_name: Optional[str] = Field(None, description="Active project name")
+    loaded_map: Optional[str] = Field(None, description="Currently loaded level path")
+    latency_ms: Optional[float] = Field(None, description="Ping latency in milliseconds")
+
+
+class UnrealListInstancesResponse(BaseModel):
+    """Response listing all discovered Unreal Engine instances."""
+
+    success: bool = Field(..., description="Whether request was successful")
+    instances: List[UnrealInstanceInfo] = Field(
+        default_factory=list, description="Discovered instances"
+    )
+    active_instance: Optional[str] = Field(
+        None, description="Name of the currently active instance"
+    )
+    total_discovered: int = Field(0, description="Total instances found via port scan")
+
+
 class UnrealHealthCheckResponse(BaseModel):
     """Response for Unreal Engine Remote Control API health check."""
 
@@ -1292,6 +1329,9 @@ class UnrealComputeMeshUvResponse(BaseModel):
 
 
 __all__ = [
+    "UnrealPingResponse",
+    "UnrealInstanceInfo",
+    "UnrealListInstancesResponse",
     "UnrealHealthCheckResponse",
     "UnrealEngineInfoResponse",
     "UnrealLoadedMapResponse",

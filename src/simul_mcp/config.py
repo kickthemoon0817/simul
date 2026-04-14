@@ -242,6 +242,50 @@ class UnrealConfig(BaseModel):
         le=5000,
     )
 
+    # Retry / resilience
+    max_retries: int = Field(
+        default=3,
+        description="Maximum HTTP request retries on transient failures",
+        ge=0,
+        le=10,
+    )
+    retry_base_delay: float = Field(
+        default=0.5,
+        description="Base delay in seconds for exponential backoff between retries",
+        gt=0.0,
+        le=10.0,
+    )
+    ping_timeout: float = Field(
+        default=3.0,
+        description="Short timeout in seconds used for ping / discovery probes",
+        gt=0.0,
+        le=30.0,
+    )
+
+    # Multi-instance discovery
+    scan_port_start: int = Field(
+        default=30010,
+        description="Start port for auto-discovery scan of Unreal instances",
+        ge=1024,
+        le=65535,
+    )
+    scan_port_end: int = Field(
+        default=30020,
+        description="End port (exclusive) for auto-discovery scan",
+        ge=1024,
+        le=65535,
+    )
+
+    @model_validator(mode="after")
+    def _validate_port_range(self) -> "UnrealConfig":
+        """Ensure scan_port_start < scan_port_end to avoid empty scan ranges."""
+        if self.scan_port_start >= self.scan_port_end:
+            raise ValueError(
+                f"scan_port_start ({self.scan_port_start}) must be less than "
+                f"scan_port_end ({self.scan_port_end})"
+            )
+        return self
+
 
 class USDConfig(BaseModel):
     """USD configuration."""

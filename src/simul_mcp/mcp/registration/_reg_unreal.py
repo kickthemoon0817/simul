@@ -73,6 +73,185 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 "unreal_health_check",
             )
 
+    # ------------------------------------------------------------------
+    # Ping / multi-instance discovery
+    # ------------------------------------------------------------------
+
+    @server.mcp.tool(
+        name="ping_unreal",
+        description=(
+            "Pre-flight check: verify that a running Unreal Engine instance is "
+            "reachable on the configured Remote Control API port. Call this before "
+            "other Unreal tools to confirm connectivity and measure latency."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True,
+            idempotent=True,
+            open_world=True,
+        ),
+        output_schema=server._tool_output_schema(
+            UnrealPingResponse, ErrorResponse
+        ),
+        task=server._task_optional(),
+    )
+    async def ping_unreal() -> Dict[str, Any]:
+        """
+        Lightweight reachability probe for the Unreal Remote Control API.
+
+        Returns:
+            Ping result with reachable status and latency, or error response.
+        """
+        rate_error = server._check_rate_limit("ping_unreal")
+        if rate_error:
+            return rate_error
+
+        try:
+            if not server.unreal_adapter or not server.unreal_adapter.is_available():
+                return ErrorResponse(
+                    error="Unreal runtime not available",
+                    error_type="RuntimeError",
+                ).model_dump()
+
+            with server.unreal_adapter.create_session() as session:
+                payload = await session.ping()
+                payload["success"] = True
+                result = UnrealPingResponse(**payload).model_dump()
+                return server._validate_output(
+                    result,
+                    (UnrealPingResponse, ErrorResponse),
+                    "ping_unreal",
+                )
+
+        except Exception as e:
+            server.logger.error("Error in Unreal ping: %s", e)
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
+            return server._validate_output(
+                result,
+                (UnrealPingResponse, ErrorResponse),
+                "ping_unreal",
+            )
+
+    @server.mcp.tool(
+        name="list_unreal_instances",
+        description=(
+            "Discover all running Unreal Engine instances by scanning the configured "
+            "port range for Remote Control API endpoints. Returns each instance's "
+            "reachability, engine version, project name, and latency."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True,
+            idempotent=True,
+            open_world=True,
+        ),
+        output_schema=server._tool_output_schema(
+            UnrealListInstancesResponse, ErrorResponse
+        ),
+        task=server._task_optional(),
+    )
+    async def list_unreal_instances(
+        scan: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Scan configured port range for running Unreal Engine instances.
+
+        Args:
+            scan: When True, probe ports in the configured range concurrently.
+
+        Returns:
+            List of discovered instances or error response.
+        """
+        import asyncio as _asyncio
+
+        rate_error = server._check_rate_limit("list_unreal_instances")
+        if rate_error:
+            return rate_error
+
+        try:
+            if not server.unreal_adapter or not server.unreal_adapter.is_available():
+                return ErrorResponse(
+                    error="Unreal runtime not available",
+                    error_type="RuntimeError",
+                ).model_dump()
+
+            from ...adapters.unreal_runtime import UnrealRuntimeSession
+
+            cfg = server.settings.unreal
+            host = cfg.host
+            active_port = cfg.port
+            instances: List[Any] = []
+
+            if scan:
+                probe_tasks = []
+                ports = list(range(cfg.scan_port_start, cfg.scan_port_end))
+                # Always include the active port even if outside scan range
+                if active_port not in ports:
+                    ports.insert(0, active_port)
+                for port in ports:
+                    probe_tasks.append(
+                        UnrealRuntimeSession.probe_port(host, port, timeout=cfg.ping_timeout)
+                    )
+                results = await _asyncio.gather(*probe_tasks, return_exceptions=True)
+
+                for port, probe_result in zip(ports, results):
+                    if isinstance(probe_result, Exception):
+                        continue
+                    name = "default" if port == active_port else f"unreal-{port}"
+                    instances.append(
+                        UnrealInstanceInfo(
+                            name=name,
+                            host=host,
+                            port=port,
+                            reachable=probe_result.get("reachable", False),
+                            active=port == active_port,
+                            engine_version=probe_result.get("engine_version"),
+                            project_name=probe_result.get("project_name"),
+                            loaded_map=None,
+                            latency_ms=probe_result.get("latency_ms"),
+                        )
+                    )
+            else:
+                with server.unreal_adapter.create_session() as session:
+                    payload = await session.ping()
+                    instances.append(
+                        UnrealInstanceInfo(
+                            name="default",
+                            host=host,
+                            port=active_port,
+                            reachable=payload.get("reachable", False),
+                            active=True,
+                            latency_ms=payload.get("latency_ms"),
+                        )
+                    )
+
+            reachable = [i for i in instances if i.reachable]
+            active_name = next(
+                (i.name for i in instances if i.active), None
+            )
+            result = UnrealListInstancesResponse(
+                success=True,
+                instances=instances,
+                active_instance=active_name,
+                total_discovered=len(reachable),
+            ).model_dump()
+            return server._validate_output(
+                result,
+                (UnrealListInstancesResponse, ErrorResponse),
+                "list_unreal_instances",
+            )
+
+        except Exception as e:
+            server.logger.error("Error listing Unreal instances: %s", e)
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
+            return server._validate_output(
+                result,
+                (UnrealListInstancesResponse, ErrorResponse),
+                "list_unreal_instances",
+            )
+
+    # ------------------------------------------------------------------
+    # Viewport capture
+    # ------------------------------------------------------------------
+
     @server.mcp.tool(
         name="capture_unreal_viewport",
         description="Capture a viewport screenshot via HighResScreenshot.",

@@ -8,6 +8,7 @@ Remote Control API (HTTP on port 30010) or the embedded ``unreal`` Python module
 import asyncio
 import json
 import math
+import time
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -65,6 +66,9 @@ class UnrealRuntimeSession(LoggerMixin):
         self.timeout: int = cfg.timeout
         self.embedded: bool = cfg.embedded_mode or UNREAL_EMBEDDED_AVAILABLE
         self.max_actors: int = cfg.max_actors
+        self.max_retries: int = cfg.max_retries
+        self.retry_base_delay: float = cfg.retry_base_delay
+        self.ping_timeout: float = cfg.ping_timeout
 
         self._base_url: str = f"http://{self.host}:{self.port}"
         self._session: Optional[Any] = None  # aiohttp.ClientSession, lazily created
@@ -79,19 +83,33 @@ class UnrealRuntimeSession(LoggerMixin):
     # HTTP helpers
     # ------------------------------------------------------------------
 
-    async def _ensure_http_session(self) -> Any:
+    async def _ensure_http_session(self, timeout_override: Optional[float] = None) -> Any:
         """
         Return the shared ``aiohttp.ClientSession``, creating it on first use.
+
+        When *timeout_override* differs from the current session's timeout the
+        existing session is recycled so a fresh one with the correct timeout is
+        created.
+
+        Args:
+            timeout_override: Optional per-call timeout in seconds.
 
         Returns:
             An ``aiohttp.ClientSession`` instance.
         """
+        desired_timeout = timeout_override if timeout_override is not None else self.timeout
+        if self._session is not None and not self._session.closed:
+            timeout_obj = getattr(self._session, "timeout", None)
+            current_total = getattr(timeout_obj, "total", None) if timeout_obj is not None else None
+            if current_total is not None and not math.isclose(current_total, desired_timeout, rel_tol=1e-3):
+                await self._recycle_session()
+
         if self._session is None or self._session.closed:
             if not AIOHTTP_AVAILABLE:
                 raise RuntimeError(
                     "aiohttp is required for HTTP mode but is not installed"
                 )
-            timeout_cfg = aiohttp.ClientTimeout(total=self.timeout)
+            timeout_cfg = aiohttp.ClientTimeout(total=desired_timeout)
             self._session = aiohttp.ClientSession(
                 base_url=self._base_url,
                 timeout=timeout_cfg,
@@ -99,55 +117,295 @@ class UnrealRuntimeSession(LoggerMixin):
             )
         return self._session
 
-    async def _http_get(self, path: str) -> Dict[str, Any]:
+    async def _recycle_session(self) -> None:
+        """Close the current HTTP session so the next call creates a fresh one.
+
+        This drains stale CLOSE-WAIT sockets and resets the connection pool,
+        which is the primary recovery mechanism when the Remote Control API
+        becomes unresponsive after editor restarts or duplicate-process conflicts.
+        """
+        if self._session is not None and not self._session.closed:
+            try:
+                await self._session.close()
+            except Exception as exc:
+                self.logger.debug("Session close failed during recycle: %s", exc)
+        self._session = None
+        self.logger.debug("HTTP session recycled")
+
+    async def _http_request(
+        self,
+        method: str,
+        path: str,
+        body: Optional[Dict[str, Any]] = None,
+        timeout_override: Optional[float] = None,
+        max_retries: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Perform an HTTP request with retry and exponential backoff.
+
+        On transient failures (connection errors, timeouts, 5xx) the session
+        is recycled and the request is retried up to *max_retries* times with
+        exponential backoff (base delay * 2^attempt, capped at 8 s).
+
+        Args:
+            method: HTTP method (``GET``, ``PUT``, ``POST``).
+            path: URL path.
+            body: Optional JSON-serializable request body.
+            timeout_override: Per-call timeout in seconds.
+            max_retries: Override for ``self.max_retries``.
+
+        Returns:
+            Parsed JSON response as a dictionary.
+        """
+        retries = max_retries if max_retries is not None else self.max_retries
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(retries + 1):
+            try:
+                session = await self._ensure_http_session(timeout_override)
+                kwargs: Dict[str, Any] = {}
+                if body is not None:
+                    kwargs["json"] = body
+
+                async with getattr(session, method.lower())(path, **kwargs) as resp:
+                    if resp.status >= 500 and attempt < retries:
+                        self.logger.warning(
+                            "HTTP %s %s returned %d, retrying (%d/%d)",
+                            method, path, resp.status, attempt + 1, retries,
+                        )
+                        # Don't recycle session on 5xx — the connection is
+                        # fine, the server just errored.  Only sleep + retry.
+                        await asyncio.sleep(
+                            min(self.retry_base_delay * (2 ** attempt), 8.0)
+                        )
+                        continue
+                    # 4xx errors are client bugs — never retry them
+                    resp.raise_for_status()
+                    data: Dict[str, Any] = await resp.json()
+                    return data
+
+            except Exception as exc:
+                last_exc = exc
+                is_transient = isinstance(
+                    exc,
+                    (
+                        asyncio.TimeoutError,
+                        ConnectionError,
+                        OSError,
+                    ),
+                )
+                if aiohttp is not None and isinstance(exc, aiohttp.ClientError):
+                    # ClientResponseError with 4xx status is a client bug, not transient
+                    if hasattr(exc, "status") and isinstance(exc.status, int) and exc.status < 500:
+                        is_transient = False
+                    else:
+                        is_transient = True
+
+                if is_transient and attempt < retries:
+                    delay = min(self.retry_base_delay * (2 ** attempt), 8.0)
+                    self.logger.warning(
+                        "HTTP %s %s failed (%s), recycling session and retrying "
+                        "in %.1fs (%d/%d)",
+                        method, path, exc, delay, attempt + 1, retries,
+                    )
+                    await self._recycle_session()
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+
+        raise last_exc  # type: ignore[misc]
+
+    async def _http_get(
+        self,
+        path: str,
+        timeout_override: Optional[float] = None,
+        max_retries: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Perform an HTTP GET against the Remote Control API.
 
         Args:
             path: URL path (e.g. ``/remote/info``).
+            timeout_override: Per-call timeout in seconds.
+            max_retries: Override for ``self.max_retries``.
 
         Returns:
             Parsed JSON response as a dictionary.
         """
-        session = await self._ensure_http_session()
-        async with session.get(path) as resp:
-            resp.raise_for_status()
-            data: Dict[str, Any] = await resp.json()
-            return data
+        return await self._http_request(
+            "GET", path, timeout_override=timeout_override, max_retries=max_retries,
+        )
 
-    async def _http_put(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    async def _http_put(
+        self,
+        path: str,
+        body: Dict[str, Any],
+        timeout_override: Optional[float] = None,
+        max_retries: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Perform an HTTP PUT against the Remote Control API.
 
         Args:
             path: URL path (e.g. ``/remote/object/call``).
             body: JSON-serializable request body.
+            timeout_override: Per-call timeout in seconds.
+            max_retries: Override for ``self.max_retries``.
 
         Returns:
             Parsed JSON response as a dictionary.
         """
-        session = await self._ensure_http_session()
-        async with session.put(path, json=body) as resp:
-            resp.raise_for_status()
-            data: Dict[str, Any] = await resp.json()
-            return data
+        return await self._http_request(
+            "PUT", path, body=body,
+            timeout_override=timeout_override, max_retries=max_retries,
+        )
 
-    async def _http_post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    async def _http_post(
+        self,
+        path: str,
+        body: Dict[str, Any],
+        timeout_override: Optional[float] = None,
+        max_retries: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Perform an HTTP POST against the Remote Control API.
 
         Args:
             path: URL path.
             body: JSON-serializable request body.
+            timeout_override: Per-call timeout in seconds.
+            max_retries: Override for ``self.max_retries``.
 
         Returns:
             Parsed JSON response as a dictionary.
         """
-        session = await self._ensure_http_session()
-        async with session.post(path, json=body) as resp:
-            resp.raise_for_status()
-            data: Dict[str, Any] = await resp.json()
-            return data
+        return await self._http_request(
+            "POST", path, body=body,
+            timeout_override=timeout_override, max_retries=max_retries,
+        )
+
+    # ------------------------------------------------------------------
+    # Ping / discovery
+    # ------------------------------------------------------------------
+
+    async def ping(self) -> Dict[str, Any]:
+        """
+        Lightweight reachability probe — short timeout, no retries.
+
+        Returns:
+            Dictionary with ``reachable``, ``address``, ``latency_ms``, and
+            optional ``error`` keys.
+        """
+        address = f"{self.host}:{self.port}"
+        t0 = time.monotonic()
+        try:
+            await self._http_get(
+                "/remote/info",
+                timeout_override=self.ping_timeout,
+                max_retries=0,
+            )
+            latency_ms = round((time.monotonic() - t0) * 1000, 1)
+            return {
+                "reachable": True,
+                "address": address,
+                "latency_ms": latency_ms,
+            }
+        except Exception as exc:
+            return {
+                "reachable": False,
+                "address": address,
+                "latency_ms": None,
+                "error": str(exc),
+            }
+
+    @staticmethod
+    async def probe_port(
+        host: str,
+        port: int,
+        timeout: float = 3.0,
+    ) -> Dict[str, Any]:
+        """
+        Probe a single host:port for a running Remote Control API.
+
+        Creates an ephemeral aiohttp session so the caller does not need
+        a fully configured ``UnrealRuntimeSession``.
+
+        Args:
+            host: Target hostname or IP.
+            port: Target port.
+            timeout: Connection timeout in seconds.
+
+        Returns:
+            Dictionary with ``reachable``, ``host``, ``port``, ``latency_ms``,
+            and optional ``engine_version`` / ``project_name``.
+        """
+        if not AIOHTTP_AVAILABLE:
+            return {"reachable": False, "host": host, "port": port, "error": "aiohttp not available"}
+
+        base_url = f"http://{host}:{port}"
+        t0 = time.monotonic()
+        try:
+            timeout_cfg = aiohttp.ClientTimeout(total=timeout)
+            async with aiohttp.ClientSession(
+                base_url=base_url,
+                timeout=timeout_cfg,
+                headers={"Content-Type": "application/json"},
+            ) as session:
+                async with session.get("/remote/info") as resp:
+                    resp.raise_for_status()
+                    latency_ms = round((time.monotonic() - t0) * 1000, 1)
+
+                engine_version: Optional[str] = None
+                project_name: Optional[str] = None
+                try:
+                    async with session.put(
+                        "/remote/object/call",
+                        json={
+                            "objectPath": "/Script/Engine.Default__KismetSystemLibrary",
+                            "functionName": "GetEngineVersion",
+                        },
+                    ) as ver_resp:
+                        if ver_resp.status == 200:
+                            ver_data = await ver_resp.json()
+                            engine_version = ver_data.get("ReturnValue")
+                except Exception:
+                    pass
+
+                try:
+                    async with session.put(
+                        "/remote/object/call",
+                        json={
+                            "objectPath": "/Script/PythonScriptPlugin.Default__PythonScriptLibrary",
+                            "functionName": "ExecutePythonCommandEx",
+                            "parameters": {
+                                "PythonCommand": "unreal.SystemLibrary.get_game_name()",
+                                "ExecutionMode": "EvaluateStatement",
+                                "FileExecutionScope": "Public",
+                            },
+                        },
+                    ) as proj_resp:
+                        if proj_resp.status == 200:
+                            proj_data = await proj_resp.json()
+                            project_name = proj_data.get("CommandResult", "").strip("'\"")
+                except Exception:
+                    pass
+
+                return {
+                    "reachable": True,
+                    "host": host,
+                    "port": port,
+                    "latency_ms": latency_ms,
+                    "engine_version": engine_version,
+                    "project_name": project_name,
+                }
+        except Exception as exc:
+            return {
+                "reachable": False,
+                "host": host,
+                "port": port,
+                "latency_ms": None,
+                "error": str(exc),
+            }
 
 
     # ------------------------------------------------------------------
