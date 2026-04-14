@@ -253,11 +253,13 @@ class UnrealConfig(BaseModel):
         default=0.5,
         description="Base delay in seconds for exponential backoff between retries",
         gt=0.0,
+        le=10.0,
     )
     ping_timeout: float = Field(
         default=3.0,
         description="Short timeout in seconds used for ping / discovery probes",
         gt=0.0,
+        le=30.0,
     )
 
     # Multi-instance discovery

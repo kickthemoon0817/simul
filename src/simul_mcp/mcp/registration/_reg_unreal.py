@@ -162,8 +162,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         """
         import asyncio as _asyncio
 
-        from ..schemas.unreal import UnrealInstanceInfo
-
         rate_error = server._check_rate_limit("list_unreal_instances")
         if rate_error:
             return rate_error
@@ -180,11 +178,14 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             cfg = server.settings.unreal
             host = cfg.host
             active_port = cfg.port
-            instances: List[Dict[str, Any]] = []
+            instances: List[Any] = []
 
             if scan:
                 probe_tasks = []
                 ports = list(range(cfg.scan_port_start, cfg.scan_port_end))
+                # Always include the active port even if outside scan range
+                if active_port not in ports:
+                    ports.insert(0, active_port)
                 for port in ports:
                     probe_tasks.append(
                         UnrealRuntimeSession.probe_port(host, port, timeout=cfg.ping_timeout)
@@ -206,7 +207,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                             project_name=probe_result.get("project_name"),
                             loaded_map=None,
                             latency_ms=probe_result.get("latency_ms"),
-                        ).model_dump()
+                        )
                     )
             else:
                 with server.unreal_adapter.create_session() as session:
@@ -219,12 +220,12 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                             reachable=payload.get("reachable", False),
                             active=True,
                             latency_ms=payload.get("latency_ms"),
-                        ).model_dump()
+                        )
                     )
 
-            reachable = [i for i in instances if i.get("reachable")]
+            reachable = [i for i in instances if i.reachable]
             active_name = next(
-                (i["name"] for i in instances if i.get("active")), None
+                (i.name for i in instances if i.active), None
             )
             result = UnrealListInstancesResponse(
                 success=True,

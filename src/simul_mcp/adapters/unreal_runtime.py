@@ -97,11 +97,11 @@ class UnrealRuntimeSession(LoggerMixin):
         Returns:
             An ``aiohttp.ClientSession`` instance.
         """
-        desired_timeout = timeout_override or self.timeout
+        desired_timeout = timeout_override if timeout_override is not None else self.timeout
         if self._session is not None and not self._session.closed:
             timeout_obj = getattr(self._session, "timeout", None)
             current_total = getattr(timeout_obj, "total", None) if timeout_obj is not None else None
-            if current_total is not None and current_total != desired_timeout:
+            if current_total is not None and not math.isclose(current_total, desired_timeout, rel_tol=1e-3):
                 await self._recycle_session()
 
         if self._session is None or self._session.closed:
@@ -127,8 +127,8 @@ class UnrealRuntimeSession(LoggerMixin):
         if self._session is not None and not self._session.closed:
             try:
                 await self._session.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                self.logger.debug("Session close failed during recycle: %s", exc)
         self._session = None
         self.logger.debug("HTTP session recycled")
 
@@ -236,31 +236,53 @@ class UnrealRuntimeSession(LoggerMixin):
             "GET", path, timeout_override=timeout_override, max_retries=max_retries,
         )
 
-    async def _http_put(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    async def _http_put(
+        self,
+        path: str,
+        body: Dict[str, Any],
+        timeout_override: Optional[float] = None,
+        max_retries: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Perform an HTTP PUT against the Remote Control API.
 
         Args:
             path: URL path (e.g. ``/remote/object/call``).
             body: JSON-serializable request body.
+            timeout_override: Per-call timeout in seconds.
+            max_retries: Override for ``self.max_retries``.
 
         Returns:
             Parsed JSON response as a dictionary.
         """
-        return await self._http_request("PUT", path, body=body)
+        return await self._http_request(
+            "PUT", path, body=body,
+            timeout_override=timeout_override, max_retries=max_retries,
+        )
 
-    async def _http_post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    async def _http_post(
+        self,
+        path: str,
+        body: Dict[str, Any],
+        timeout_override: Optional[float] = None,
+        max_retries: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Perform an HTTP POST against the Remote Control API.
 
         Args:
             path: URL path.
             body: JSON-serializable request body.
+            timeout_override: Per-call timeout in seconds.
+            max_retries: Override for ``self.max_retries``.
 
         Returns:
             Parsed JSON response as a dictionary.
         """
-        return await self._http_request("POST", path, body=body)
+        return await self._http_request(
+            "POST", path, body=body,
+            timeout_override=timeout_override, max_retries=max_retries,
+        )
 
     # ------------------------------------------------------------------
     # Ping / discovery
