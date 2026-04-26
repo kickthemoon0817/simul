@@ -412,6 +412,14 @@ class LoggingConfig(BaseModel):
         default="~/.simul/logs/audit.jsonl",
         description="Destination of the per-tool-call audit JSONL stream.",
     )
+    structured_enabled: bool = Field(
+        default=False,
+        description=(
+            "Also write the structured JSON file (simul_mcp.json) for every "
+            "log record. Off by default because the audit JSONL covers most "
+            "tooling needs and double-formatting on the hot path is wasteful."
+        ),
+    )
 
     @field_validator("level")
     @classmethod

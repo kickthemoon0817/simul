@@ -12,7 +12,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple, Type, Union
 
 from fastmcp import FastMCP
 from fastmcp.server.context import _current_context
@@ -215,10 +215,12 @@ class SimulMCPServer(LoggerMixin):
             **mcp_kwargs,
         )
 
-        # Install the request-context wrapper before tool registration so every
-        # @mcp.tool() decorator picks it up. This is what gives every tool a
-        # fresh request_id, structured audit row, and ContextVar-tagged logs.
-        self._install_tool_context_wrapper()
+        # Tag every CallTool request with a fresh correlation id and emit an
+        # audit row. Done as FastMCP middleware (vs. wrapping each tool) so it
+        # composes with all decorator overloads, sync + async tool bodies, and
+        # any future tools without per-registration changes.
+        from ..logging import build_request_context_middleware
+        self.mcp.add_middleware(build_request_context_middleware())
 
         # Register tools and resources
         self._register_tools()
@@ -924,32 +926,6 @@ class SimulMCPServer(LoggerMixin):
     def _backend_enabled(self, name: str) -> bool:
         """Return True if *name* is in the selected backends (or all when None)."""
         return self._backends is None or name in self._backends
-
-    def _install_tool_context_wrapper(self) -> None:
-        """Patch ``self.mcp.tool`` so every registered tool receives a wrapper.
-
-        The wrapper (``logging.wrap_tool_with_context``) sets the request_id /
-        tool_name ContextVars for the duration of the call and emits an audit
-        record on completion. Patching at the decorator level keeps the change
-        zero-touch for the ~100 individual ``@server.mcp.tool`` registrations.
-        """
-        from ..logging import wrap_tool_with_context
-
-        original_tool = self.mcp.tool
-
-        def tool_decorator(*dec_args: Any, **dec_kwargs: Any) -> Any:
-            inner = original_tool(*dec_args, **dec_kwargs)
-
-            def adapter(fn: Callable[..., Any]) -> Any:
-                tool_name = dec_kwargs.get("name") or getattr(fn, "__name__", "tool")
-                wrapped = wrap_tool_with_context(fn, tool_name)
-                return inner(wrapped)
-
-            return adapter
-
-        # Mypy-friendly assignment; FastMCP's ``tool`` is a method we replace
-        # on the instance only, leaving the class untouched.
-        self.mcp.tool = tool_decorator  # type: ignore[method-assign]
 
     def _register_tools(self) -> None:
         """Register MCP tools for enabled backends only."""

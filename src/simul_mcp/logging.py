@@ -14,19 +14,23 @@ It also wires four observability features that compose with the YAML config:
 """
 
 import asyncio
+import atexit
 import contextvars
 import functools
 import importlib.util
+import inspect
 import json
 import logging
 import logging.config
+import logging.handlers
 import os
+import queue
 import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar, Union
+from typing import Any, Callable, Dict, Optional, TypeVar, Union
 
 import yaml
 
@@ -243,17 +247,89 @@ def _apply_retention_to_timed_handlers(
             cfg["backupCount"] = retention_days
 
 
-def _setup_audit_handler(config: Dict[str, Any], settings: Settings) -> None:
-    """Inject the ``audit_file`` handler and ``simul_mcp.audit`` logger.
+# Module-level state for the audit queue + listener pair. Created lazily by
+# _start_audit_listener() and torn down via atexit.
+_audit_queue: Optional["queue.Queue[Any]"] = None
+_audit_listener: Optional[logging.handlers.QueueListener] = None
 
-    Idempotent: if the YAML already declares them they are reused; otherwise we
-    synthesise both so audit always works regardless of YAML completeness.
+
+def _audit_filename_for(settings: Settings) -> Path:
+    """Resolve the audit log path with ``per_instance`` PID interleaving applied."""
+    target = Path(settings.logging.audit_path).expanduser()
+    if not settings.logging.per_instance:
+        return target
+    suffix = target.suffix or ".jsonl"
+    stem = target.stem if target.suffix else target.name
+    return target.parent / f"{stem}.{os.getpid()}{suffix}"
+
+
+def _start_audit_listener(audit_path: Path, retention_days: int) -> None:
+    """Run the audit ``TimedRotatingFileHandler`` on a background thread.
+
+    Producers (``emit_audit``) write to a queue via ``QueueHandler``; the
+    ``QueueListener`` drains it on its own thread, so synchronous file I/O
+    (and any midnight rollover stall) never blocks the asyncio event loop
+    that handles MCP tool calls.
+
+    Re-entrant: if a listener is already running we tear it down and start a
+    new one (handles ``setup_logging()`` being called more than once).
+    """
+    global _audit_queue, _audit_listener
+
+    if _audit_listener is not None:
+        try:
+            _audit_listener.stop()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        _audit_listener = None
+    _audit_queue = queue.Queue(-1)
+
+    file_handler = logging.handlers.TimedRotatingFileHandler(
+        filename=str(audit_path),
+        when="midnight",
+        backupCount=retention_days,
+        encoding="utf8",
+    )
+    file_handler.setFormatter(AuditFormatter())
+    file_handler.setLevel(logging.INFO)
+
+    _audit_listener = logging.handlers.QueueListener(
+        _audit_queue, file_handler, respect_handler_level=True
+    )
+    _audit_listener.start()
+    atexit.register(_stop_audit_listener)
+
+
+def _stop_audit_listener() -> None:
+    """Stop the audit listener thread; safe to call multiple times."""
+    global _audit_listener
+    if _audit_listener is None:
+        return
+    try:
+        _audit_listener.stop()
+    except Exception:  # pragma: no cover - defensive
+        pass
+    _audit_listener = None
+
+
+def _setup_audit_handler(config: Dict[str, Any], settings: Settings) -> None:
+    """Wire the ``simul_mcp.audit`` logger through a non-blocking queue.
+
+    The actual file I/O happens on a background ``QueueListener`` thread (see
+    ``_start_audit_listener``); the logger sees only a ``QueueHandler``,
+    keeping the producer side free of blocking writes.
+
+    Idempotent: re-running ``setup_logging`` rebuilds the listener and replaces
+    the handler entry without leaving duplicates behind.
     """
     if not settings.logging.audit_enabled:
         return
 
-    audit_path = Path(settings.logging.audit_path).expanduser()
+    audit_path = _audit_filename_for(settings)
     audit_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _start_audit_listener(audit_path, settings.logging.retention_days)
+    assert _audit_queue is not None  # set by _start_audit_listener
 
     formatters = config.setdefault("formatters", {})
     formatters.setdefault(
@@ -262,26 +338,18 @@ def _setup_audit_handler(config: Dict[str, Any], settings: Settings) -> None:
     )
 
     handlers = config.setdefault("handlers", {})
-    handler = handlers.setdefault(
-        "audit_file",
-        {
-            "class": "logging.handlers.TimedRotatingFileHandler",
-            "level": "INFO",
-            "formatter": "audit_json",
-            "filename": str(audit_path),
-            "when": "midnight",
-            "backupCount": settings.logging.retention_days,
-            "encoding": "utf8",
-        },
-    )
-    handler["filename"] = str(audit_path)
-    handler["backupCount"] = settings.logging.retention_days
+    handlers["audit_file"] = {
+        "class": "logging.handlers.QueueHandler",
+        "queue": _audit_queue,
+        "level": "INFO",
+    }
 
     loggers = config.setdefault("loggers", {})
-    loggers.setdefault(
-        _AUDIT_LOGGER_NAME,
-        {"level": "INFO", "handlers": ["audit_file"], "propagate": False},
-    )
+    loggers["simul_mcp.audit"] = {
+        "level": "INFO",
+        "handlers": ["audit_file"],
+        "propagate": False,
+    }
 
 
 def _apply_settings_to_dictconfig(
@@ -301,11 +369,22 @@ def _apply_settings_to_dictconfig(
             settings.logging.file_path,
             per_instance=settings.logging.per_instance,
         )
+
+    # Synthesise the audit handler before applying retention so the audit
+    # backupCount goes through the same uniform code path as the other
+    # TimedRotatingFileHandlers.
+    _setup_audit_handler(config, settings)
+
+    if settings.logging.file_enabled:
         _apply_retention_to_timed_handlers(
             handlers, settings.logging.retention_days
         )
 
-    _setup_audit_handler(config, settings)
+    if not settings.logging.structured_enabled:
+        # Default: only the audit JSONL is structured. Removing ``file_json``
+        # from every logger's handler list keeps per-record formatting cost at
+        # one ``json.dumps`` (audit only) rather than two on the root path.
+        disabled_handlers.add("file_json")
 
     if disabled_handlers:
         _remove_handlers(config, disabled_handlers)
@@ -674,8 +753,15 @@ def wrap_tool_with_context(fn: _F, tool_name: str) -> _F:
 
     Both async and sync callables are supported. ``functools.wraps`` is used
     so FastMCP's signature introspection still resolves the original
-    annotations through ``__wrapped__``.
+    annotations through ``__wrapped__``. Async-generator tools are explicitly
+    rejected with ``TypeError`` so callers cannot silently lose audit rows on
+    a streaming path.
     """
+    if inspect.isasyncgenfunction(fn):
+        raise TypeError(
+            f"wrap_tool_with_context does not support async-generator tools "
+            f"(got {tool_name!r}); use a streaming-aware wrapper instead."
+        )
 
     if asyncio.iscoroutinefunction(fn):
 
@@ -734,6 +820,55 @@ def wrap_tool_with_context(fn: _F, tool_name: str) -> _F:
                 _TOOL_NAME_VAR.reset(tn_token)
 
     return sync_wrapper  # type: ignore[return-value]
+
+
+def build_request_context_middleware() -> Any:
+    """Construct a FastMCP middleware that owns request-context + audit emission.
+
+    Implemented as a factory (rather than a top-level class) so the import of
+    ``fastmcp`` stays optional: this function is only called from the MCP
+    server bootstrap, where ``fastmcp`` is guaranteed to be importable.
+
+    The middleware mirrors ``wrap_tool_with_context`` semantics but lives at
+    the FastMCP dispatch boundary, which means:
+        * every ``@server.mcp.tool(...)`` decorator pattern works (including
+          the bare-fn overload that decorator-monkey-patching missed)
+        * audit emission happens once per ``CallTool`` request, not once per
+          internal tool invocation
+        * sync and async tools both flow through ``call_next`` uniformly
+    """
+    from fastmcp.server.middleware import Middleware
+
+    class RequestContextMiddleware(Middleware):
+        """Tag every ``CallTool`` request with a fresh correlation id + audit row."""
+
+        async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+            tool_name = getattr(context.message, "name", "tool")
+            request_id = uuid.uuid4().hex[:12]
+            rid_token = _REQUEST_ID_VAR.set(request_id)
+            tn_token = _TOOL_NAME_VAR.set(tool_name)
+            start = time.monotonic()
+            error_class: Optional[str] = None
+            try:
+                return await call_next(context)
+            except BaseException as exc:
+                error_class = type(exc).__name__
+                raise
+            finally:
+                duration_ms = (time.monotonic() - start) * 1000.0
+                try:
+                    emit_audit(
+                        tool=tool_name,
+                        request_id=request_id,
+                        duration_ms=duration_ms,
+                        status="error" if error_class else "ok",
+                        error_class=error_class,
+                    )
+                finally:
+                    _REQUEST_ID_VAR.reset(rid_token)
+                    _TOOL_NAME_VAR.reset(tn_token)
+
+    return RequestContextMiddleware()
 
 
 # Module-level logger for this module
