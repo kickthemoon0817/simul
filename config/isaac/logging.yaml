@@ -1,5 +1,9 @@
 # Logging Configuration for Isaac Sim MCP Server
-# This file defines the logging configuration using Python's dictConfig format
+# This file defines the logging configuration using Python's dictConfig format.
+#
+# Filenames use ~ which is expanded by setup_logging() before dictConfig.
+# Settings.logging.file_path / audit_path / per_instance / retention_days
+# override these values at runtime.
 
 version: 1
 disable_existing_loggers: false
@@ -8,18 +12,20 @@ disable_existing_loggers: false
 formatters:
   simple:
     format: '%(levelname)s - %(name)s - %(message)s'
-    
+
   detailed:
-    format: '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(funcName)s() - %(message)s'
+    format: '%(asctime)s [%(request_id)s %(tool_name)s] %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(funcName)s() - %(message)s'
     datefmt: '%Y-%m-%d %H:%M:%S'
-    
+
   json:
-    format: '{"timestamp": "%(asctime)s", "logger": "%(name)s", "level": "%(levelname)s", "file": "%(filename)s", "line": %(lineno)d, "function": "%(funcName)s", "message": "%(message)s"}'
-    datefmt: '%Y-%m-%dT%H:%M:%S'
-    
+    (): 'simul_mcp.logging.JsonFormatter'
+
+  audit_json:
+    (): 'simul_mcp.logging.AuditFormatter'
+
   colored:
     (): 'colorlog.ColoredFormatter'
-    format: '%(log_color)s%(asctime)s - %(name)s - %(levelname)s%(reset)s - %(message)s'
+    format: '%(log_color)s%(asctime)s [%(request_id)s %(tool_name)s] %(name)s - %(levelname)s%(reset)s - %(message)s'
     datefmt: '%Y-%m-%d %H:%M:%S'
     log_colors:
       DEBUG: cyan
@@ -35,140 +41,167 @@ handlers:
     level: INFO
     formatter: colored
     stream: ext://sys.stderr
-    
+
   console_simple:
     class: logging.StreamHandler
     level: INFO
     formatter: simple
     stream: ext://sys.stderr
-    
+
+  # Daily rotation. backupCount is overridden by Settings.logging.retention_days.
   file:
-    class: logging.handlers.RotatingFileHandler
+    class: logging.handlers.TimedRotatingFileHandler
     level: DEBUG
     formatter: detailed
-    filename: logs/simul_mcp.log
-    maxBytes: 10485760  # 10MB
-    backupCount: 5
+    filename: ~/.simul/logs/simul_mcp.log
+    when: midnight
+    backupCount: 14
     encoding: utf8
-    
+
   file_json:
-    class: logging.handlers.RotatingFileHandler
+    class: logging.handlers.TimedRotatingFileHandler
     level: DEBUG
     formatter: json
-    filename: logs/simul_mcp.json
-    maxBytes: 10485760  # 10MB
-    backupCount: 5
+    filename: ~/.simul/logs/simul_mcp.json
+    when: midnight
+    backupCount: 14
     encoding: utf8
-    
+
   error_file:
-    class: logging.handlers.RotatingFileHandler
+    class: logging.handlers.TimedRotatingFileHandler
     level: ERROR
     formatter: detailed
-    filename: logs/simul_mcp_errors.log
-    maxBytes: 5242880  # 5MB
-    backupCount: 3
+    filename: ~/.simul/logs/simul_mcp_errors.log
+    when: midnight
+    backupCount: 14
     encoding: utf8
-    
+
   debug_file:
-    class: logging.handlers.RotatingFileHandler
+    class: logging.handlers.TimedRotatingFileHandler
     level: DEBUG
     formatter: detailed
-    filename: logs/simul_mcp_debug.log
-    maxBytes: 20971520  # 20MB
-    backupCount: 2
+    filename: ~/.simul/logs/simul_mcp_debug.log
+    when: midnight
+    backupCount: 14
+    encoding: utf8
+
+  # Audit handler is also injected at runtime by _setup_audit_handler() so the
+  # configuration works even if this YAML is replaced. We declare it here too
+  # so a YAML-only consumer still gets the audit stream.
+  audit_file:
+    class: logging.handlers.TimedRotatingFileHandler
+    level: INFO
+    formatter: audit_json
+    filename: ~/.simul/logs/audit.jsonl
+    when: midnight
+    backupCount: 30
     encoding: utf8
 
 # Loggers define the logging hierarchy and configuration
 loggers:
-  # Root logger configuration
+  # Root logger configuration. Default fans into the human-readable file plus
+  # the structured JSON file so downstream tooling can pick whichever format.
   '':
     level: INFO
-    handlers: [console, file, error_file]
+    handlers: [console, file, file_json, error_file]
     propagate: false
-    
+
   # Isaac Sim MCP specific loggers
   simul_mcp:
     level: INFO
-    handlers: [console, file]
+    handlers: [console, file, file_json]
     propagate: false
-    
+
   simul_mcp.server:
     level: INFO
-    handlers: [console, file]
+    handlers: [console, file, file_json]
     propagate: false
-    
+
   simul_mcp.usd:
     level: INFO
-    handlers: [console, file]
+    handlers: [console, file, file_json]
     propagate: false
-    
+
   simul_mcp.usd.reader:
     level: INFO
-    handlers: [console, file]
+    handlers: [console, file, file_json]
     propagate: false
-    
+
   simul_mcp.mesh:
     level: INFO
-    handlers: [console, file]
+    handlers: [console, file, file_json]
     propagate: false
-    
+
   simul_mcp.adapters:
     level: INFO
-    handlers: [console, file]
+    handlers: [console, file, file_json]
     propagate: false
-    
+
   simul_mcp.adapters.isaac_runtime:
     level: INFO
-    handlers: [console, file]
+    handlers: [console, file, file_json]
     propagate: false
-    
+
   simul_mcp.mcp:
     level: INFO
-    handlers: [console, file]
+    handlers: [console, file, file_json]
     propagate: false
-    
+
   simul_mcp.mcp.server:
     level: INFO
-    handlers: [console, file]
+    handlers: [console, file, file_json]
     propagate: false
-    
+
   simul_mcp.mcp.tools:
     level: INFO
-    handlers: [console, file]
+    handlers: [console, file, file_json]
     propagate: false
-    
+
   simul_mcp.cli:
     level: INFO
-    handlers: [console, file]
+    handlers: [console, file, file_json]
     propagate: false
-    
-  # External library loggers
+
+  # Dedicated audit logger; one JSON line per tool-call boundary.
+  simul_mcp.audit:
+    level: INFO
+    handlers: [audit_file]
+    propagate: false
+
+  # External library loggers. error_file ensures Pydantic ValidationError
+  # records (raised inside fastmcp.server.server.call_tool) land in
+  # simul_mcp_errors.log alongside our own exceptions.
   fastmcp:
     level: WARNING
-    handlers: [console, file]
+    handlers: [console, file, error_file]
     propagate: false
-    
+
+  mcp:
+    level: WARNING
+    handlers: [console, file, error_file]
+    propagate: false
+
   asyncio:
     level: WARNING
     handlers: [file]
     propagate: false
-    
+
   urllib3:
     level: WARNING
     handlers: [file]
     propagate: false
-    
+
   # Isaac Sim / Omniverse loggers (when available)
   omni:
     level: WARNING
     handlers: [file]
     propagate: false
-    
+
   carb:
     level: WARNING
     handlers: [file]
     propagate: false
-    
+
   pxr:
     level: WARNING
     handlers: [file]
@@ -177,7 +210,7 @@ loggers:
 # Root logger fallback
 root:
   level: INFO
-  handlers: [console, file]
+  handlers: [console, file, file_json]
 
 # Development profiles
 profiles:
@@ -185,22 +218,22 @@ profiles:
     loggers:
       simul_mcp:
         level: DEBUG
-        handlers: [console, file, debug_file]
+        handlers: [console, file, file_json, debug_file]
       simul_mcp.usd:
         level: DEBUG
       simul_mcp.mesh:
         level: DEBUG
       simul_mcp.adapters:
         level: DEBUG
-        
+
   production:
     loggers:
       simul_mcp:
         level: INFO
-        handlers: [file, error_file]
+        handlers: [file, file_json, error_file]
       '':
-        handlers: [file, error_file]
-        
+        handlers: [file, file_json, error_file]
+
   testing:
     loggers:
       simul_mcp:
@@ -209,7 +242,7 @@ profiles:
       '':
         level: WARNING
         handlers: [console_simple]
-        
+
   json_logging:
     loggers:
       simul_mcp:

@@ -388,6 +388,31 @@ class LoggingConfig(BaseModel):
         description="Component-specific logging levels",
     )
 
+    # --- structured / observability extensions -----------------------------
+    per_instance: bool = Field(
+        default=False,
+        description=(
+            "Suffix log filenames with the process PID so concurrent server "
+            "instances do not interleave into the same file."
+        ),
+    )
+    retention_days: int = Field(
+        default=14,
+        ge=1,
+        description=(
+            "Number of daily log rotations to keep "
+            "(applies to TimedRotatingFileHandler.backupCount)."
+        ),
+    )
+    audit_enabled: bool = Field(
+        default=True,
+        description="Write a per-tool-call audit JSONL file alongside main logs.",
+    )
+    audit_path: str = Field(
+        default="~/.simul/logs/audit.jsonl",
+        description="Destination of the per-tool-call audit JSONL stream.",
+    )
+
     @field_validator("level")
     @classmethod
     def validate_log_level(cls, v: str) -> str:
