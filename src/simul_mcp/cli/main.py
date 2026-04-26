@@ -24,6 +24,7 @@ commands.  When stdout is not a TTY the CLI auto-detects JSON mode.
 import asyncio
 import json
 import socket
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -242,9 +243,7 @@ def logs_tail(
             while True:
                 line = fp.readline()
                 if not line:
-                    import time as _time
-
-                    _time.sleep(0.25)
+                    time.sleep(0.25)
                     continue
                 rendered = _format_jsonl_line(line, tool)
                 if rendered is None:
