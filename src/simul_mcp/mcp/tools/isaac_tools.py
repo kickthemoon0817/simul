@@ -9,7 +9,9 @@ the stock VS Code socket when bridge usage is disabled.
 
 import json
 import textwrap
-from typing import Any, Callable, Dict, List, Optional
+from typing import Annotated, Any, Callable, Dict, List, Optional
+
+from pydantic import BeforeValidator
 
 from ...adapters import IsaacSocketClient, ScriptResult
 from ...config import Settings, get_settings
@@ -17,6 +19,27 @@ from ...logging import LoggerMixin, get_logger
 from ..schemas.common import ErrorResponse
 
 logger = get_logger(__name__)
+
+
+def _coerce_str_to_float_list(value: Any) -> Any:
+    """Pydantic ``BeforeValidator``: accept ``'[1, 2, 3]'`` as a list of floats.
+
+    Some MCP clients serialise list arguments as JSON-encoded strings. Pydantic
+    2.12 dropped the implicit ``str`` -> ``list`` coercion that earlier versions
+    accepted, so we normalise here before validation runs.
+    """
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return value
+        if isinstance(parsed, list):
+            return parsed
+    return value
+
+
+# List of floats that tolerates JSON-string inputs from forgiving MCP clients.
+FloatList = Annotated[List[float], BeforeValidator(_coerce_str_to_float_list)]
 
 
 class IsaacTools(LoggerMixin):
@@ -747,8 +770,8 @@ class IsaacTools(LoggerMixin):
 
     async def set_isaac_camera(
         self,
-        position: Optional[List[float]] = None,
-        target: Optional[List[float]] = None,
+        position: Optional[FloatList] = None,
+        target: Optional[FloatList] = None,
         camera_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -997,9 +1020,9 @@ class IsaacTools(LoggerMixin):
     async def set_isaac_prim_transform(
         self,
         prim_path: str,
-        translation: Optional[List[float]] = None,
-        rotation_euler: Optional[List[float]] = None,
-        scale: Optional[List[float]] = None,
+        translation: Optional[FloatList] = None,
+        rotation_euler: Optional[FloatList] = None,
+        scale: Optional[FloatList] = None,
     ) -> Dict[str, Any]:
         """
         Set the transform of a prim (translation, rotation, scale).
@@ -1670,7 +1693,7 @@ class IsaacTools(LoggerMixin):
         prim_path: str,
         mass: Optional[float] = None,
         density: Optional[float] = None,
-        center_of_mass: Optional[List[float]] = None,
+        center_of_mass: Optional[FloatList] = None,
     ) -> Dict[str, Any]:
         """
         Set mass properties on a prim (applies MassAPI if not present).
@@ -1773,7 +1796,7 @@ class IsaacTools(LoggerMixin):
     async def create_isaac_physics_scene(
         self,
         prim_path: str = "/World/PhysicsScene",
-        gravity_direction: Optional[List[float]] = None,
+        gravity_direction: Optional[FloatList] = None,
         gravity_magnitude: float = 9.81,
     ) -> Dict[str, Any]:
         """
@@ -2291,7 +2314,7 @@ class IsaacTools(LoggerMixin):
         self,
         material_path: str,
         shader_type: str = "UsdPreviewSurface",
-        diffuse_color: Optional[List[float]] = None,
+        diffuse_color: Optional[FloatList] = None,
         roughness: float = 0.5,
         metallic: float = 0.0,
         opacity: float = 1.0,
@@ -2781,7 +2804,7 @@ class IsaacTools(LoggerMixin):
         prim_path: str,
         light_type: str = "DomeLight",
         intensity: float = 1000.0,
-        color: Optional[List[float]] = None,
+        color: Optional[FloatList] = None,
         color_temperature: Optional[float] = None,
         angle: Optional[float] = None,
         texture_file: Optional[str] = None,
@@ -3384,8 +3407,8 @@ class IsaacTools(LoggerMixin):
 
     async def raycast_isaac_scene(
         self,
-        origin: List[float],
-        direction: List[float],
+        origin: FloatList,
+        direction: FloatList,
         max_distance: float = 10000.0,
     ) -> Dict[str, Any]:
         """
@@ -3437,7 +3460,7 @@ class IsaacTools(LoggerMixin):
 
     async def find_isaac_prims_in_area(
         self,
-        center: List[float],
+        center: FloatList,
         radius: float,
         prim_type: Optional[str] = None,
         root_path: str = "/",

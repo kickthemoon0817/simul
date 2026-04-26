@@ -388,6 +388,39 @@ class LoggingConfig(BaseModel):
         description="Component-specific logging levels",
     )
 
+    # --- structured / observability extensions -----------------------------
+    per_instance: bool = Field(
+        default=False,
+        description=(
+            "Suffix log filenames with the process PID so concurrent server "
+            "instances do not interleave into the same file."
+        ),
+    )
+    retention_days: int = Field(
+        default=14,
+        ge=1,
+        description=(
+            "Number of daily log rotations to keep "
+            "(applies to TimedRotatingFileHandler.backupCount)."
+        ),
+    )
+    audit_enabled: bool = Field(
+        default=True,
+        description="Write a per-tool-call audit JSONL file alongside main logs.",
+    )
+    audit_path: str = Field(
+        default="~/.simul/logs/audit.jsonl",
+        description="Destination of the per-tool-call audit JSONL stream.",
+    )
+    structured_enabled: bool = Field(
+        default=False,
+        description=(
+            "Also write the structured JSON file (simul_mcp.json) for every "
+            "log record. Off by default because the audit JSONL covers most "
+            "tooling needs and double-formatting on the hot path is wasteful."
+        ),
+    )
+
     @field_validator("level")
     @classmethod
     def validate_log_level(cls, v: str) -> str:

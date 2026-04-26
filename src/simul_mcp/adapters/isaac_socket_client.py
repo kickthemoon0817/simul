@@ -111,6 +111,9 @@ class IsaacSocketClient:
         self._max_request_bytes = max_request_bytes
         self._max_response_bytes = max_response_bytes
         self.__lock: Optional[asyncio.Lock] = None
+        # Tracks "{bridge}->{vscode}" pairs that have already produced a
+        # WARNING-level fallback log so subsequent failures stay at DEBUG.
+        self._logged_bridge_failures: set[str] = set()
 
     @property
     def _lock(self) -> asyncio.Lock:
@@ -182,7 +185,19 @@ class IsaacSocketClient:
                 try:
                     return await self._execute_bridge_script(code)
                 except (ConnectionRefusedError, ConnectionError, OSError, TimeoutError, ValueError) as exc:
-                    logger.warning(
+                    # Log the first failure per (bridge, vscode) pair at WARNING.
+                    # Subsequent failures with the same destinations drop to DEBUG
+                    # so a long-lived process running without the bridge does not
+                    # spam the log on every tool call.
+                    fallback_key = f"{self.bridge_address}->{self.vscode_address}"
+                    level = (
+                        logging.WARNING
+                        if fallback_key not in self._logged_bridge_failures
+                        else logging.DEBUG
+                    )
+                    self._logged_bridge_failures.add(fallback_key)
+                    logger.log(
+                        level,
                         "Bridge transport failed at %s, falling back to VS Code socket %s: %s",
                         self.bridge_address,
                         self.vscode_address,

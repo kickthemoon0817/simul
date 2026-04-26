@@ -215,6 +215,13 @@ class SimulMCPServer(LoggerMixin):
             **mcp_kwargs,
         )
 
+        # Tag every CallTool request with a fresh correlation id and emit an
+        # audit row. Done as FastMCP middleware (vs. wrapping each tool) so it
+        # composes with all decorator overloads, sync + async tool bodies, and
+        # any future tools without per-registration changes.
+        from ..logging import build_request_context_middleware
+        self.mcp.add_middleware(build_request_context_middleware())
+
         # Register tools and resources
         self._register_tools()
         self._register_resources()

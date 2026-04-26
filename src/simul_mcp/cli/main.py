@@ -24,6 +24,7 @@ commands.  When stdout is not a TTY the CLI auto-detects JSON mode.
 import asyncio
 import json
 import socket
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -91,6 +92,165 @@ console = Console(stderr=True)
 app.add_typer(isaac_app, name="isaac", help="Isaac Sim commands")
 app.add_typer(usd_app, name="usd", help="USD file commands (headless)")
 app.add_typer(unreal_app, name="unreal", help="Unreal Engine commands (Remote Control API)")
+
+
+# ---------------------------------------------------------------------------
+# logs sub-app: pretty-print structured / audit log streams
+# ---------------------------------------------------------------------------
+logs_app = typer.Typer(name="logs", help="Inspect simul-mcp log files")
+app.add_typer(logs_app, name="logs")
+
+
+def _resolve_log_path(
+    explicit: Optional[Path], audit: bool, structured: bool
+) -> Path:
+    """Pick the right default log path when the user did not pass one.
+
+    ``audit`` -> ~/.simul/logs/audit.jsonl
+    ``structured`` -> the structured JSON file (newest matching basename)
+    otherwise -> human-readable simul_mcp.log (newest matching basename)
+    """
+    if explicit is not None:
+        return explicit.expanduser()
+
+    settings = get_settings()
+    if audit:
+        return Path(settings.logging.audit_path).expanduser()
+
+    base = Path(settings.logging.file_path).expanduser()
+    suffix = ".json" if structured else (base.suffix or ".log")
+    parent = base.parent
+    stem = base.stem if base.suffix else base.name
+
+    # Newest matching file (per_instance produces ``<stem>.<pid><suffix>``).
+    candidates = sorted(
+        parent.glob(f"{stem}*{suffix}"),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+        reverse=True,
+    )
+    return candidates[0] if candidates else parent / f"{stem}{suffix}"
+
+
+def _format_jsonl_line(raw: str, tool_filter: Optional[str]) -> Optional[str]:
+    """Render one JSONL line as a coloured human-readable string.
+
+    Returns ``None`` when the row is filtered out or the line is not JSON
+    (in which case the caller should print the raw line as-is).
+    """
+    raw = raw.rstrip("\n")
+    if not raw:
+        return ""
+    try:
+        record = json.loads(raw)
+    except (ValueError, TypeError):
+        return raw  # Plain text line — already human readable.
+
+    tool = record.get("tool") or record.get("tool_name") or "-"
+    if tool_filter and tool != tool_filter:
+        return None
+
+    ts = record.get("ts") or record.get("timestamp") or "-"
+    level = record.get("level") or ("AUDIT" if "duration_ms" in record else "INFO")
+    request_id = record.get("request_id") or "-"
+
+    # Audit row shape: tool + duration + status
+    if "duration_ms" in record:
+        status = record.get("status", "?")
+        ms = record["duration_ms"]
+        err = record.get("error_class")
+        colour = "red" if status == "error" else "green"
+        msg = f"[{colour}]{status:5s}[/{colour}] {ms:>8.2f}ms"
+        if err:
+            msg += f"  [red]{err}[/red]"
+        return f"[dim]{ts}[/dim] [bold]{request_id}[/bold] [cyan]{tool}[/cyan]  {msg}"
+
+    # General log row
+    level_colour = {
+        "ERROR": "red",
+        "CRITICAL": "red",
+        "WARNING": "yellow",
+        "INFO": "green",
+        "DEBUG": "blue",
+    }.get(level, "white")
+    msg = record.get("msg") or record.get("message") or ""
+    return (
+        f"[dim]{ts}[/dim] [{level_colour}]{level:<7}[/{level_colour}] "
+        f"[bold]{request_id}[/bold] [cyan]{tool}[/cyan] {msg}"
+    )
+
+
+@logs_app.command("paths")
+def logs_paths() -> None:
+    """Print the resolved log file paths for the current settings."""
+    settings = get_settings()
+    paths = {
+        "main": _resolve_log_path(None, audit=False, structured=False),
+        "structured_json": _resolve_log_path(None, audit=False, structured=True),
+        "audit": _resolve_log_path(None, audit=True, structured=False),
+        "errors": Path(settings.logging.file_path).expanduser().with_name(
+            Path(settings.logging.file_path).stem + "_errors.log"
+        ),
+    }
+    if is_json_mode():
+        emit({k: str(v) for k, v in paths.items()})
+        return
+    for label, path in paths.items():
+        exists = "[green]exists[/green]" if path.exists() else "[dim]missing[/dim]"
+        console.print(f"[bold]{label:16s}[/bold] {path}  {exists}")
+
+
+@logs_app.command("tail")
+def logs_tail(
+    file: Optional[Path] = typer.Option(
+        None, "--file", "-f", help="Log file path (default: latest matching log)"
+    ),
+    lines: int = typer.Option(
+        50, "--lines", "-n", help="Number of trailing lines to show"
+    ),
+    follow: bool = typer.Option(
+        False, "--follow", help="Stream new lines as they arrive (Ctrl-C to stop)"
+    ),
+    audit: bool = typer.Option(
+        False, "--audit", help="Tail the audit JSONL stream"
+    ),
+    structured: bool = typer.Option(
+        False, "--json-log", help="Tail the structured JSON file (vs. text log)"
+    ),
+    tool: Optional[str] = typer.Option(
+        None, "--tool", help="Only show rows for this tool name"
+    ),
+) -> None:
+    """Pretty-print the trailing portion of a simul-mcp log file."""
+    path = _resolve_log_path(file, audit=audit, structured=structured or audit)
+    if not path.exists():
+        emit_error(f"Log file not found: {path}", error_type="LogFileNotFound")
+        return
+
+    # Show the last N lines first (efficient for typical log sizes).
+    with path.open("r", encoding="utf-8", errors="replace") as fp:
+        tail = fp.readlines()[-lines:]
+        for raw in tail:
+            rendered = _format_jsonl_line(raw, tool)
+            if rendered is None:
+                continue
+            console.print(rendered)
+
+        if not follow:
+            return
+
+        # Streaming mode: keep reading appended bytes.
+        try:
+            while True:
+                line = fp.readline()
+                if not line:
+                    time.sleep(0.25)
+                    continue
+                rendered = _format_jsonl_line(line, tool)
+                if rendered is None:
+                    continue
+                console.print(rendered)
+        except KeyboardInterrupt:
+            return
 
 
 # ---------------------------------------------------------------------------
