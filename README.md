@@ -32,11 +32,11 @@ Simul-MCP is designed for multi-engine workflows. Isaac Sim is the primary runti
 
 ## Install via Claude Code Marketplace
 
-If you only want simul's Claude Code skills + MCP tools (no source checkout):
+simul ships through the `khemoo` Claude Code marketplace, which also hosts other khemoo plugins (e.g. `khemoo-skills` for the `khemoo-vc` version-control workflow):
 
 ```text
-/plugin marketplace add kickthemoon0817/simul
-/plugin install simul@simul
+/plugin marketplace add kickthemoon0817/khemoo-skills
+/plugin install simul@khemoo
 ```
 
 The plugin bundles the 9 simulation skills (camera, materials, physics, scripting, etc.) and registers the simul MCP server via `.mcp.json`. The MCP server itself is the Python `simul-mcp` package — install it once before enabling the plugin so the `simul-mcp` command resolves on your `PATH`:
