@@ -873,74 +873,86 @@ class UnrealRuntimeSession(LoggerMixin):
         Returns:
             Dictionary with image_base64, resolution_x, resolution_y, format.
         """
-        # Drive the whole capture from a single Python ExecuteFile call so the
-        # console command runs with a real editor WorldContextObject (passing
-        # "" silently no-ops in UE 5.7+) and so we can baseline-delta the
-        # output directory instead of guessing the "newest" file.
+        # The trigger goes through Remote Control's ExecuteConsoleCommand
+        # RPC (NOT through Python's unreal.SystemLibrary.execute_console_command
+        # — empirically that path doesn't fire HighResShot in the editor).
+        # The read is a separate ExecutePythonCommandEx call so UE's main
+        # thread stays free between trigger and read; the adapter, not the
+        # embedded script, owns the wait via asyncio.sleep.
         marker = "@@SIMUL_SCREENSHOT@@"
-        python_code = f"""
-import unreal, os, glob, base64, time
+        candidates_repr = (
+            "['MacEditor', 'WindowsEditor', 'LinuxEditor', 'Mac', 'Windows', 'Linux']"
+        )
+        threshold = time.time()
+        try:
+            await self._call_function(
+                "/Script/Engine.Default__KismetSystemLibrary",
+                "ExecuteConsoleCommand",
+                {
+                    "WorldContextObject": "",
+                    "Command": f"HighResShot {resolution_x}x{resolution_y}",
+                },
+            )
+        except Exception:
+            return {
+                "image_base64": "",
+                "resolution_x": resolution_x,
+                "resolution_y": resolution_y,
+                "format": format,
+            }
+
+        read_code = f"""
+import os, glob, base64, unreal
 saved = unreal.Paths.project_saved_dir()
 ss_root = os.path.join(saved, 'Screenshots')
-# UE 5.7 on macOS writes to MacEditor/; older docs reference Mac/.
-candidates = ['MacEditor', 'WindowsEditor', 'LinuxEditor', 'Mac', 'Windows', 'Linux']
-ss_dir = ss_root
-for subdir in candidates:
-    trial = os.path.join(ss_root, subdir)
-    if os.path.isdir(trial):
-        ss_dir = trial
-        break
-pattern = os.path.join(ss_dir, '*.{format}')
-baseline = set(glob.glob(pattern))
-world = unreal.EditorLevelLibrary.get_editor_world()
-unreal.SystemLibrary.execute_console_command(world, 'HighResShot {resolution_x}x{resolution_y}')
-deadline = time.time() + 10.0
+candidates = {candidates_repr}
+threshold = {threshold!r}
 target = None
-while time.time() < deadline:
-    time.sleep(0.25)
-    # Re-probe candidates since the directory may be created on first capture.
-    for subdir in candidates:
-        trial = os.path.join(ss_root, subdir)
-        if os.path.isdir(trial):
-            ss_dir = trial
-            break
-    pattern = os.path.join(ss_dir, '*.{format}')
-    new_files = set(glob.glob(pattern)) - baseline
-    if new_files:
-        target = max(new_files, key=os.path.getmtime)
+for subdir in candidates:
+    d = os.path.join(ss_root, subdir)
+    if not os.path.isdir(d):
+        continue
+    for f in glob.glob(os.path.join(d, '*.{format}')):
+        try:
+            if os.path.getmtime(f) >= threshold:
+                target = f
+                break
+        except OSError:
+            pass
+    if target:
         break
 data = ''
 if target:
-    # Wait for the file to finish writing (stable size for two consecutive checks).
-    last = -1
-    for _ in range(20):
-        try:
-            cur = os.path.getsize(target)
-        except OSError:
-            cur = -1
-        if cur == last and cur > 0:
-            break
-        last = cur
-        time.sleep(0.1)
     try:
+        size = os.path.getsize(target)
+    except OSError:
+        size = 0
+    if size > 0:
         with open(target, 'rb') as f:
             data = base64.b64encode(f.read()).decode()
-    except OSError:
-        data = ''
 print('{marker}' + data)
 """
-        try:
-            py_result = await self._execute_python(python_code, mode="ExecuteFile")
-            log_lines = py_result.get("LogOutput", [])
-            image_data = ""
-            for entry in log_lines:
+
+        image_data = ""
+        # Initial render budget so UE's frame loop runs HighResShot.
+        await asyncio.sleep(0.5)
+        deadline = asyncio.get_event_loop().time() + 15.0
+        while True:
+            try:
+                py_result = await self._execute_python(read_code, mode="ExecuteFile")
+            except Exception:
+                py_result = {}
+            for entry in py_result.get("LogOutput", []):
                 output = entry.get("Output", "")
                 idx = output.find(marker)
                 if idx >= 0:
                     image_data = output[idx + len(marker):].strip()
                     break
-        except Exception:
-            image_data = ""
+            if image_data:
+                break
+            if asyncio.get_event_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.5)
 
         return {
             "image_base64": image_data,

@@ -217,22 +217,66 @@ class LauncherNotFound(RuntimeError):
     """Raised when no Unreal Editor executable can be located."""
 
 
-def _macos_launch_argv(uproject: Path, engine_path: Optional[Path]) -> List[str]:
+# Flags that put UE into a no-window-but-still-rendering mode. ``-RenderOffScreen``
+# keeps the render pipeline live (so HighResShot, scene capture, replicator etc.
+# all work) but creates no visible window — and so no focus dependency, no
+# OS-level focus stealing, and no GUI flicker.  The companion flags suppress
+# splash, sound, prompts, and route logs to stdout for container/CI capture.
+HEADLESS_FLAGS: Tuple[str, ...] = (
+    "-RenderOffScreen",
+    "-unattended",
+    "-nopause",
+    "-nosplash",
+    "-nosound",
+    "-stdout",
+    "-FullStdOutLogOutput",
+)
+
+
+def _macos_macos_binary(engine_path: Optional[Path]) -> Optional[Path]:
+    """Return the UnrealEditor binary path on macOS, or None if not found."""
+    if engine_path is not None:
+        binary = (
+            engine_path
+            / "Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor"
+        )
+        return binary if binary.is_file() else None
+    for root in (
+        Path("/Users/Shared/Epic Games"),  # Epic Launcher default on macOS
+        Path("/Applications/Epic Games"),
+        Path.home() / "Applications/Epic Games",
+    ):
+        if not root.is_dir():
+            continue
+        for entry in sorted(root.glob("UE_*"), reverse=True):
+            binary = (
+                entry
+                / "Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor"
+            )
+            if binary.is_file():
+                return binary
+    return None
+
+
+def _macos_launch_argv(
+    uproject: Path,
+    engine_path: Optional[Path],
+    headless: bool = False,
+) -> List[str]:
     """Return argv for launching UE on macOS.
 
-    Preference order:
-      1. Explicit ``engine_path`` → ``<engine>/Engine/Binaries/Mac/UnrealEditor.app``
-      2. ``open -a "Unreal Editor"`` if the app is registered with LaunchServices
-      3. Common install location ``/Applications/Epic Games/UE_*/...``
+    For interactive (GUI) launches, prefer LaunchServices ``open -a`` when
+    available. For headless launches, always go through the binary directly —
+    LaunchServices may apply window-management policy that fights the
+    ``-RenderOffScreen`` flag, so we bypass it.
     """
     if engine_path is not None:
-        app = engine_path / "Engine" / "Binaries" / "Mac" / "UnrealEditor.app"
-        binary = app / "Contents" / "MacOS" / "UnrealEditor"
-        if binary.is_file():
-            return [str(binary), str(uproject)]
-        raise LauncherNotFound(f"UnrealEditor not found under {engine_path}")
+        binary = _macos_macos_binary(engine_path)
+        if binary is None:
+            raise LauncherNotFound(f"UnrealEditor not found under {engine_path}")
+        return [str(binary), str(uproject), *(HEADLESS_FLAGS if headless else ())]
 
-    if shutil.which("open"):
+    if not headless and shutil.which("open"):
         # open -a is best-effort: if the app isn't registered, the command
         # fails fast and we fall through to the filesystem search below.
         for app_name in ("Unreal Editor", "UnrealEditor"):
@@ -245,27 +289,21 @@ def _macos_launch_argv(uproject: Path, engine_path: Optional[Path]) -> List[str]
             if probe.returncode == 0:
                 return ["open", "-a", app_name, "--args", str(uproject)]
 
-    for root in (
-        Path("/Users/Shared/Epic Games"),  # Epic Launcher default on macOS
-        Path("/Applications/Epic Games"),
-        Path.home() / "Applications/Epic Games",
-    ):
-        if not root.is_dir():
-            continue
-        for entry in sorted(root.glob("UE_*")):
-            binary = (
-                entry / "Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor"
-            )
-            if binary.is_file():
-                return [str(binary), str(uproject)]
+    binary = _macos_macos_binary(None)
+    if binary is not None:
+        return [str(binary), str(uproject), *(HEADLESS_FLAGS if headless else ())]
 
     raise LauncherNotFound(
         "Could not find UnrealEditor on macOS. Pass --engine-path pointing at "
-        "your UE install (e.g. /Users/Shared/Epic\\ Games/UE_5.4)."
+        "your UE install (e.g. /Users/Shared/Epic\\ Games/UE_5.7)."
     )
 
 
-def _linux_launch_argv(uproject: Path, engine_path: Optional[Path]) -> List[str]:
+def _linux_launch_argv(
+    uproject: Path,
+    engine_path: Optional[Path],
+    headless: bool = False,
+) -> List[str]:
     """Return argv for launching UE on Linux (Ubuntu)."""
     candidates: List[Path] = []
     if engine_path is not None:
@@ -280,7 +318,7 @@ def _linux_launch_argv(uproject: Path, engine_path: Optional[Path]) -> List[str]
 
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
-            return [str(candidate), str(uproject)]
+            return [str(candidate), str(uproject), *(HEADLESS_FLAGS if headless else ())]
 
     raise LauncherNotFound(
         "Could not find UnrealEditor on Linux. Pass --engine-path pointing at "
@@ -288,17 +326,27 @@ def _linux_launch_argv(uproject: Path, engine_path: Optional[Path]) -> List[str]
     )
 
 
-def resolve_launch_argv(uproject: Path, engine_path: Optional[Path] = None) -> List[str]:
-    """Return argv to launch Unreal Editor with ``uproject`` on the current OS."""
+def resolve_launch_argv(
+    uproject: Path,
+    engine_path: Optional[Path] = None,
+    headless: bool = False,
+) -> List[str]:
+    """Return argv to launch Unreal Editor with ``uproject`` on the current OS.
+
+    When ``headless`` is True, append ``-RenderOffScreen`` and friends so UE
+    runs without creating a visible window. The render pipeline still runs,
+    so viewport capture / scene capture / replicator workflows continue to
+    work — they just don't depend on the editor having OS-level focus.
+    """
     uproject = Path(uproject)
     if not uproject.is_file():
         raise FileNotFoundError(f".uproject not found: {uproject}")
 
     system = platform.system()
     if system == "Darwin":
-        return _macos_launch_argv(uproject, engine_path)
+        return _macos_launch_argv(uproject, engine_path, headless=headless)
     if system == "Linux":
-        return _linux_launch_argv(uproject, engine_path)
+        return _linux_launch_argv(uproject, engine_path, headless=headless)
     raise LauncherNotFound(
         f"Unsupported platform for automated launch: {system}. "
         "Start the Unreal Editor manually and re-run `simul unreal setup --no-launch`."
@@ -308,9 +356,10 @@ def resolve_launch_argv(uproject: Path, engine_path: Optional[Path] = None) -> L
 def launch_editor(
     uproject: Path,
     engine_path: Optional[Path] = None,
+    headless: bool = False,
 ) -> subprocess.Popen:
     """Spawn the Unreal Editor detached from the current process group."""
-    argv = resolve_launch_argv(uproject, engine_path)
+    argv = resolve_launch_argv(uproject, engine_path, headless=headless)
     # start_new_session detaches from the CLI's session so Ctrl-C on the CLI
     # does not kill the editor, and so the editor keeps running after the
     # CLI process exits.
