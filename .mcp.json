@@ -1,6 +1,0 @@
-{
-  "simul": {
-    "command": "simul-mcp",
-    "args": ["server"]
-  }
-}

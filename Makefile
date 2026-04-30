@@ -34,7 +34,6 @@ install:
 
 install-dev:
 	pip install -e ".[dev]"
-	pre-commit install
 
 setup-isaac:
 	@echo "Setting up Isaac Sim environment..."

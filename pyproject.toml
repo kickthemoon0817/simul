@@ -48,7 +48,6 @@ dev = [
     "isort>=6.0",
     "flake8>=7.0",
     "mypy>=1.15",
-    "pre-commit>=4.0",
 ]
 blender = [
     "bpy>=4.2; python_version == '3.11.*'",
