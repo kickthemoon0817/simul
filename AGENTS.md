@@ -18,7 +18,7 @@ repo-specific build commands, project layout, and runtime notes only.
 
 ```sh
 make install          # Install package
-make install-dev      # Install dev deps + pre-commit
+make install-dev      # Install dev deps
 make build            # python -m build
 make run-server       # MCP server (dev)
 make run-headless     # MCP server (headless USD only)

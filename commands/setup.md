@@ -5,18 +5,25 @@ description: Bootstrap the simul MCP server (clone source + global install) and 
 
 # /simul:setup
 
-End-to-end bootstrap for the simul plugin. Installs the `simul-mcp` Python
-package globally so the plugin's `.mcp.json` can spawn it, then walks the
-user through backend selection.
+End-to-end bootstrap for the simul plugin. Clones the source, installs the
+`simul-mcp` Python package globally, registers it under
+`~/.claude.json → mcpServers.simul`, and walks the user through backend
+selection.
 
 ## Why this command exists
 
 The simul plugin ships a Claude Code skills + commands surface, but the
 heavy lifting (HTTP adapters for Isaac Sim / Unreal / Blender, USD
 operations, viewport capture) lives in the `simul-mcp` Python package.
-The plugin's `.mcp.json` calls `simul-mcp server` — that command needs
-to exist on the user's `PATH`, which it doesn't until this command
-clones the repo and installs it.
+The plugin does not auto-register that MCP server — this command does
+the full bootstrap: clone the source, install `simul-mcp` globally,
+write the MCP server entry into `~/.claude.json`, and verify.
+
+Doing it from `/simul:setup` (rather than auto-registering via a
+plugin-shipped `.mcp.json`) keeps Claude Code from logging "failed to
+spawn simul" warnings before `simul-mcp` is on `PATH`, and gives the
+user a single source of truth for which `simul-mcp` binary their
+Claude Code is talking to.
 
 This is the only manual bootstrap step. Everything else (per-backend
 config, project-specific `.uproject` patching for Unreal, etc.) is
@@ -85,9 +92,50 @@ simul-mcp --version || simul-mcp --help | head -5
 ```
 
 Anything other than a clean exit means the install is broken; do not
-proceed to Step 6.
+proceed past this step.
 
-### Step 6 — Backend configuration
+### Step 6 — Register the MCP server in `~/.claude.json`
+
+Edit the user's Claude Code config so the next session spawns the
+just-installed binary. Resolve the absolute path first
+(`which simul-mcp` from Step 4) and write it explicitly — relying on
+`PATH` at MCP-spawn time is fragile because Claude Code's spawn
+environment may not include shell rc additions.
+
+Patch JSON in place; preserve everything else in the file:
+
+```python
+# Run via: python3 -c "<this script>"
+import json
+import shutil
+from pathlib import Path
+
+cfg_path = Path.home() / ".claude.json"
+binary = shutil.which("simul-mcp")
+assert binary, "simul-mcp not on PATH after Step 4"
+
+cfg = json.loads(cfg_path.read_text())
+servers = cfg.setdefault("mcpServers", {})
+
+# Default to all backends; let the user pin in Step 7 if they want fewer.
+servers["simul"] = {
+    "type": "stdio",
+    "command": binary,
+    "args": ["server"],
+}
+cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
+print(f"registered simul -> {binary}")
+```
+
+Always make a backup of `~/.claude.json` first
+(`cp ~/.claude.json ~/.claude.json.bak.$(date +%Y%m%d-%H%M%S)`) so the
+user can roll back if the JSON edit corrupts anything.
+
+If the user previously had a `simul` entry under `projects.<path>`,
+leave it alone — the user-level `mcpServers.simul` takes precedence
+for the global install case.
+
+### Step 7 — Backend configuration
 
 Delegate to the existing `simul-setup` skill workflow at
 `skills/simul-setup/SKILL.md`. Ask the user which simulation engines
@@ -104,14 +152,13 @@ flow:
   `src/simul_mcp/adapters/blender_runtime.py`.
 - USD-only → no runtime needed; nothing further.
 
-### Step 7 — Restart Claude Code
+### Step 8 — Restart Claude Code
 
-The plugin's `.mcp.json` was already loaded when the plugin was
-installed; until Claude Code restarts, the failed-to-spawn `simul`
-MCP server stays in its broken state. Tell the user to:
+`~/.claude.json` is read at session start; the `simul` entry written
+in Step 6 is not picked up by the current session. Tell the user to:
 
-> Quit Claude Code and reopen — the simul MCP server will spawn
-> successfully on the next start now that `simul-mcp` is on `PATH`.
+> Quit Claude Code and reopen — the simul MCP server will spawn on
+> the next start.
 
 After restart, sanity-check:
 - `mcp__simul__unreal_health_check` (or any `mcp__simul__*` tool) is
@@ -122,15 +169,19 @@ After restart, sanity-check:
 
 - **Always confirm before cloning** — do not silently create
   `~/.simul/source/` without telling the user.
+- **Always back up `~/.claude.json`** before the Step 6 edit
+  (`cp ~/.claude.json ~/.claude.json.bak.<timestamp>`).
 - **Never skip Step 5.** If verification fails, surface the underlying
-  install error rather than continuing to Step 6.
+  install error rather than writing a broken entry into
+  `~/.claude.json`.
 - **Don't use `pip install simul-mcp`** as a global step. The package
   is not on PyPI yet; that command will pull a name-squatted package
   if anything resolves at all.
-- **Don't write to `~/.claude.json` directly.** The plugin's own
-  `.mcp.json` registers the simul MCP server when the plugin is
-  enabled — stacking another `simul` server in user config double-
-  registers and breaks the tools.
+- **Write the absolute path** of the resolved `simul-mcp` binary into
+  `~/.claude.json`, not the bare name. Claude Code's MCP spawn
+  environment may not include the user's shell rc, so a `PATH`-
+  relative `command: "simul-mcp"` can fail at spawn time even when
+  the binary works in their terminal.
 
 ## When to use this command
 
