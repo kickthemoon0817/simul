@@ -26,6 +26,12 @@ from simul_mcp.adapters.unreal_runtime import (
     UnrealRuntimeSession,
     is_unreal_available,
 )
+from simul_mcp.adapters.unreal_setup import (
+    LauncherNotFound,
+    ensure_remote_control_config,
+    launch_editor,
+    resolve_launch_argv,
+)
 from simul_mcp.cli.output import emit, emit_error, is_json_mode
 from simul_mcp.config import get_settings
 
@@ -600,3 +606,166 @@ def set_visibility(
         return
     state = "visible" if visible else "hidden"
     console.print(f"[green]{state}[/green] {actor_path}")
+
+
+# ---------------------------------------------------------------------------
+# setup -- auto-configure Remote Control, optionally launch the editor,
+#          then poll until Remote Control accepts connections.
+# ---------------------------------------------------------------------------
+async def _poll_health(session: UnrealRuntimeSession, timeout: float, interval: float) -> Dict[str, Any]:
+    """Call health_check repeatedly until connected or timeout elapses."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    last: Dict[str, Any] = {}
+    while loop.time() < deadline:
+        last = await session.health_check()
+        if last.get("connected"):
+            return last
+        await asyncio.sleep(interval)
+    return last
+
+
+@app.command("setup")
+def setup(
+    uproject: Path = typer.Argument(..., help="Path to the .uproject file"),
+    port: int = typer.Option(30010, "--port", "-p", help="Remote Control HTTP port to configure"),
+    engine_path: Optional[Path] = typer.Option(
+        None,
+        "--engine-path",
+        help="Unreal install root (contains Engine/). Usually auto-detected.",
+    ),
+    launch: bool = typer.Option(True, "--launch/--no-launch", help="Launch the editor after configuring"),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the interactive confirmation prompt",
+    ),
+    wait_timeout: float = typer.Option(
+        90.0,
+        "--wait-timeout",
+        help="Seconds to wait for Remote Control to accept connections",
+    ),
+    poll_interval: float = typer.Option(
+        2.0,
+        "--poll-interval",
+        help="Seconds between health-check polls",
+    ),
+) -> None:
+    """Auto-configure Remote Control + Python in a UE project and launch the editor.
+
+    This is the one-call path that replaces the manual checklist of enabling
+    ``RemoteControl`` / ``PythonScriptPlugin`` in the .uproject and editing
+    ``Config/DefaultRemoteControl.ini`` before every simul session.
+    """
+    uproject = uproject.expanduser().resolve()
+    if not uproject.is_file() or uproject.suffix != ".uproject":
+        msg = f"Not a .uproject file: {uproject}"
+        if is_json_mode():
+            emit_error(msg, "InvalidArgument")
+            return
+        console.print(f"[red]{msg}[/red]")
+        raise typer.Exit(2)
+
+    # Preview-only launch resolution so we can tell the user what WOULD happen.
+    launch_plan: Optional[List[str]] = None
+    launch_plan_error: Optional[str] = None
+    if launch:
+        try:
+            launch_plan = resolve_launch_argv(uproject, engine_path)
+        except (LauncherNotFound, FileNotFoundError) as exc:
+            launch_plan_error = str(exc)
+
+    if not yes and not is_json_mode():
+        console.print(Panel.fit(
+            f"[bold]simul unreal setup[/bold]\n"
+            f"  project:    {uproject}\n"
+            f"  port:       {port}\n"
+            f"  launch:     {'yes' if launch else 'no'}\n"
+            + (f"  launch cmd: {' '.join(launch_plan)}\n" if launch_plan else "")
+            + (f"  [yellow]launch issue:[/yellow] {launch_plan_error}\n" if launch_plan_error else ""),
+            title="Plan",
+        ))
+        console.print(
+            "This will edit the .uproject and DefaultRemoteControl.ini in place. "
+            "Re-run with [bold]--yes[/bold] to skip this prompt."
+        )
+        if not typer.confirm("Proceed?", default=True):
+            console.print("[yellow]Aborted by user.[/yellow]")
+            raise typer.Exit(1)
+
+    # Patch config files.
+    try:
+        patch = ensure_remote_control_config(uproject, port=port)
+    except Exception as exc:
+        if is_json_mode():
+            emit_error(str(exc), type(exc).__name__)
+            return
+        console.print(f"[red]config patch failed: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if not is_json_mode():
+        console.print(patch.uproject.summary())
+        console.print(patch.ini.summary())
+
+    # Launch if requested.
+    launched = False
+    pid: Optional[int] = None
+    if launch and launch_plan_error is None:
+        try:
+            proc = launch_editor(uproject, engine_path)
+            launched = True
+            pid = proc.pid
+            if not is_json_mode():
+                console.print(
+                    f"[green]Launched[/green] editor (pid {pid}): {' '.join(launch_plan or [])}"
+                )
+        except (LauncherNotFound, FileNotFoundError) as exc:
+            launch_plan_error = str(exc)
+
+    # Poll Remote Control. If we didn't launch, the user is expected to
+    # already have the editor running.
+    session = _session(port=port)
+    if not is_json_mode():
+        console.print(f"Waiting for Remote Control @ {session.settings.unreal.host}:{port} ...")
+    health = asyncio.run(_poll_health(session, wait_timeout, poll_interval))
+
+    payload: Dict[str, Any] = {
+        "uproject": str(uproject),
+        "port": port,
+        "patched": {
+            "uproject": {
+                "changed": patch.uproject.changed,
+                "added": patch.uproject.added,
+                "updated": patch.uproject.updated,
+            },
+            "ini": {
+                "changed": patch.ini.changed,
+                "added": patch.ini.added,
+                "updated": patch.ini.updated,
+            },
+        },
+        "launched": launched,
+        "launch_pid": pid,
+        "launch_error": launch_plan_error,
+        "health": health,
+        "connected": bool(health.get("connected")),
+    }
+
+    if is_json_mode():
+        emit(payload)
+        if not payload["connected"]:
+            raise typer.Exit(1)
+        return
+
+    if payload["connected"]:
+        console.print(
+            f"[green]Remote Control is up[/green] — simul can now talk to this editor."
+        )
+        return
+    console.print(
+        "[red]Remote Control did not respond in time.[/red] "
+        "Check that the editor finished loading, that plugins are enabled, "
+        "and that the port is not already in use."
+    )
+    raise typer.Exit(1)
