@@ -873,44 +873,71 @@ class UnrealRuntimeSession(LoggerMixin):
         Returns:
             Dictionary with image_base64, resolution_x, resolution_y, format.
         """
-        # Trigger HighResShot via KismetSystemLibrary.ExecuteConsoleCommand
-        cmd = f"HighResShot {resolution_x}x{resolution_y}"
-        await self._call_function(
-            "/Script/Engine.Default__KismetSystemLibrary",
-            "ExecuteConsoleCommand",
-            {"WorldContextObject": "", "Command": cmd},
-        )
-
-        # Read the latest screenshot via Python inside UE5, encode as base64.
-        # The HighResShot command writes to <Project>/Saved/Screenshots/.
-        python_code = (
-            "import unreal, os, glob, base64, time, sys\n"
-            "time.sleep(1)  # brief wait for screenshot to be written\n"
-            "saved = unreal.Paths.project_saved_dir()\n"
-            "candidates = ['LinuxEditor', 'Linux', 'WindowsEditor', 'Windows', 'Mac']\n"
-            "ss_dir = os.path.join(saved, 'Screenshots')\n"
-            "for subdir in candidates:\n"
-            "    trial = os.path.join(saved, 'Screenshots', subdir)\n"
-            "    if os.path.isdir(trial):\n"
-            "        ss_dir = trial\n"
-            "        break\n"
-            f"pattern = os.path.join(ss_dir, '*.{format}')\n"
-            "files = sorted(glob.glob(pattern), key=os.path.getmtime)\n"
-            "if files:\n"
-            "    with open(files[-1], 'rb') as f:\n"
-            "        data = base64.b64encode(f.read()).decode()\n"
-            "    print(data)\n"
-            "else:\n"
-            "    print('')\n"
-        )
+        # Drive the whole capture from a single Python ExecuteFile call so the
+        # console command runs with a real editor WorldContextObject (passing
+        # "" silently no-ops in UE 5.7+) and so we can baseline-delta the
+        # output directory instead of guessing the "newest" file.
+        marker = "@@SIMUL_SCREENSHOT@@"
+        python_code = f"""
+import unreal, os, glob, base64, time
+saved = unreal.Paths.project_saved_dir()
+ss_root = os.path.join(saved, 'Screenshots')
+# UE 5.7 on macOS writes to MacEditor/; older docs reference Mac/.
+candidates = ['MacEditor', 'WindowsEditor', 'LinuxEditor', 'Mac', 'Windows', 'Linux']
+ss_dir = ss_root
+for subdir in candidates:
+    trial = os.path.join(ss_root, subdir)
+    if os.path.isdir(trial):
+        ss_dir = trial
+        break
+pattern = os.path.join(ss_dir, '*.{format}')
+baseline = set(glob.glob(pattern))
+world = unreal.EditorLevelLibrary.get_editor_world()
+unreal.SystemLibrary.execute_console_command(world, 'HighResShot {resolution_x}x{resolution_y}')
+deadline = time.time() + 10.0
+target = None
+while time.time() < deadline:
+    time.sleep(0.25)
+    # Re-probe candidates since the directory may be created on first capture.
+    for subdir in candidates:
+        trial = os.path.join(ss_root, subdir)
+        if os.path.isdir(trial):
+            ss_dir = trial
+            break
+    pattern = os.path.join(ss_dir, '*.{format}')
+    new_files = set(glob.glob(pattern)) - baseline
+    if new_files:
+        target = max(new_files, key=os.path.getmtime)
+        break
+data = ''
+if target:
+    # Wait for the file to finish writing (stable size for two consecutive checks).
+    last = -1
+    for _ in range(20):
+        try:
+            cur = os.path.getsize(target)
+        except OSError:
+            cur = -1
+        if cur == last and cur > 0:
+            break
+        last = cur
+        time.sleep(0.1)
+    try:
+        with open(target, 'rb') as f:
+            data = base64.b64encode(f.read()).decode()
+    except OSError:
+        data = ''
+print('{marker}' + data)
+"""
         try:
             py_result = await self._execute_python(python_code, mode="ExecuteFile")
             log_lines = py_result.get("LogOutput", [])
             image_data = ""
             for entry in log_lines:
-                output = entry.get("Output", "").strip()
-                if output:
-                    image_data = output
+                output = entry.get("Output", "")
+                idx = output.find(marker)
+                if idx >= 0:
+                    image_data = output[idx + len(marker):].strip()
                     break
         except Exception:
             image_data = ""

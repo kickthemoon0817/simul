@@ -549,17 +549,20 @@ class TestUnrealRuntimeSessionPhase2:
     # -- capture_viewport --
 
     def test_capture_viewport_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """capture_viewport triggers HighResShot and returns capture metadata."""
+        """capture_viewport drives capture from a single Python call and parses
+        the marker-prefixed base64 payload out of LogOutput."""
         session = self._make_session(monkeypatch)
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
             fn = (json or {}).get("functionName", "")
-            if fn == "ExecuteConsoleCommand":
-                return FakeResponse({})
             if fn == "ExecutePythonCommandEx":
                 return FakeResponse({
                     "ReturnValue": True,
-                    "LogOutput": [{"Type": "Info", "Output": "iVBOR=="}],
+                    "LogOutput": [
+                        # A leading info line should be ignored; the marker line wins.
+                        {"Type": "Info", "Output": "LogPython: capture starting"},
+                        {"Type": "Info", "Output": "@@SIMUL_SCREENSHOT@@iVBOR=="},
+                    ],
                 })
             return FakeResponse({}, 404)
 
