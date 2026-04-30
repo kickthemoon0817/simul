@@ -16,20 +16,21 @@ shape so pass/fail is unambiguous.
 
 The live tier mirrors the C1–C5 probes below as `@pytest.mark.unreal_live`
 tests. They auto-skip when the configured UE port doesn't answer, so
-``make test`` runs cleanly on machines without UE installed.
+the default `pytest tests/` run is clean on machines without UE
+installed.
 
 Run modes:
 
 ```sh
-.venv/bin/python -m pytest tests/unreal/         # all 96 tests; live skips if UE down
-make test-unreal                                  # only the @unreal_live tier (6 tests)
-.venv/bin/python -m pytest tests/unreal/test_live.py -v   # live, with UE running
+pytest tests/unreal/                              # all 96 tests; live skips if UE down
+pytest tests/ -v -m unreal_live                   # only the @unreal_live tier (6 tests)
+pytest tests/unreal/test_live.py -v               # same set, by file
 ```
 
 Per-OS coverage: the live tests are OS-agnostic at the Python level
 (Remote Control is HTTP). Validate on each platform by running
-`make test-unreal` against a UE editor on that platform — no test is
-gated on `platform.system()`.
+`pytest tests/ -v -m unreal_live` against a UE editor on that platform
+— no test is gated on `platform.system()`.
 
 ## Prerequisites (do these once per session)
 
@@ -257,7 +258,7 @@ the summary is what matters to the parent conversation.
 
 ## Follow-ups (not in scope today)
 
-- Wire `make test-unreal` into a CI pipeline that has a UE installation
+- Wire `pytest tests/ -v -m unreal_live` into a CI pipeline that has a UE installation
   available (today the marker exists and runs locally; CI doesn't ship
   UE, so the live tier currently lives outside CI).
 - Extend `tests/unreal/test_live.py` to cover the full ~50-tool
