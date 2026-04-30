@@ -21,12 +21,12 @@ Phrases like "use unreal", "open my UE project", "run simul on unreal",
    Ask for `--engine-path` only if auto-detection is likely to fail (custom UE
    build, non-standard install, Linux where `UnrealEditor` isn't on `PATH`).
 
-2. **Run `simul unreal setup <.uproject> --headless --yes`** (from the repo
-   root or wherever the `simul` entrypoint is installed). **Default to
-   headless** — it's faster, has no focus dependency, and screenshots /
-   scene captures still work because the render pipeline is live. Only
-   drop `--headless` if the user explicitly wants the GUI editor open
-   (e.g. for hand-editing a scene at the same time as running simul).
+2. **Run `simul unreal setup <.uproject> --yes`** (from the repo root or
+   wherever the `simul` entrypoint is installed). The CLI launches UE
+   **headless by default** — no window opens, no focus dependency, and
+   screenshots / scene captures still work because the render pipeline
+   is live. Pass `--no-headless` only when the user explicitly wants the
+   GUI editor open (e.g. to hand-edit a scene while simul is running).
 
    The CLI handles everything:
 
@@ -40,9 +40,10 @@ Phrases like "use unreal", "open my UE project", "run simul on unreal",
      when headless or `--engine-path` given, else LaunchServices `open -a`;
      Linux: `Engine/Binaries/Linux/UnrealEditor`). Picks the highest
      installed UE version when multiple are present (UE_5.7 over UE_5.6).
-   - With `--headless`, appends `-RenderOffScreen -unattended -nopause
-     -nosplash -nosound -stdout -FullStdOutLogOutput` so no window opens
-     and the editor doesn't need OS-level focus to render screenshots.
+   - When headless (the default), appends `-RenderOffScreen -unattended
+     -nopause -nosplash -nosound -stdout -FullStdOutLogOutput` so no
+     window opens and the editor doesn't need OS-level focus to render
+     screenshots.
    - Spawns the editor detached, then polls `unreal_health_check` up to
      `--wait-timeout` (default 90 s).
 
