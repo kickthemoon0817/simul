@@ -635,6 +635,16 @@ def setup(
         help="Unreal install root (contains Engine/). Usually auto-detected.",
     ),
     launch: bool = typer.Option(True, "--launch/--no-launch", help="Launch the editor after configuring"),
+    headless: bool = typer.Option(
+        False,
+        "--headless",
+        help=(
+            "Launch UE with -RenderOffScreen so no window opens. The render "
+            "pipeline still runs so viewport capture, scene capture, and "
+            "replicator workflows work — they just don't depend on the "
+            "editor having OS-level focus. Recommended for simul use."
+        ),
+    ),
     yes: bool = typer.Option(
         False,
         "--yes",
@@ -672,7 +682,7 @@ def setup(
     launch_plan_error: Optional[str] = None
     if launch:
         try:
-            launch_plan = resolve_launch_argv(uproject, engine_path)
+            launch_plan = resolve_launch_argv(uproject, engine_path, headless=headless)
         except (LauncherNotFound, FileNotFoundError) as exc:
             launch_plan_error = str(exc)
 
@@ -713,7 +723,7 @@ def setup(
     pid: Optional[int] = None
     if launch and launch_plan_error is None:
         try:
-            proc = launch_editor(uproject, engine_path)
+            proc = launch_editor(uproject, engine_path, headless=headless)
             launched = True
             pid = proc.pid
             if not is_json_mode():

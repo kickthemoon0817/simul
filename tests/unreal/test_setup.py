@@ -12,6 +12,7 @@ src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
 from simul_mcp.adapters.unreal_setup import (  # noqa: E402
+    HEADLESS_FLAGS,
     REMOTE_CONTROL_SECTION,
     ensure_remote_control_config,
     patch_remote_control_ini,
@@ -163,6 +164,47 @@ def test_patch_ini_noop_when_already_correct(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # ensure_remote_control_config (aggregate)
 # ---------------------------------------------------------------------------
+
+
+def test_headless_flags_cover_window_focus_and_logging() -> None:
+    """The HEADLESS_FLAGS tuple is what makes UE skip the GUI but keep
+    rendering. Lock in the exact set so a refactor can't drop the
+    -RenderOffScreen flag (the one that decouples capture from focus)."""
+    expected = {
+        "-RenderOffScreen",
+        "-unattended",
+        "-nopause",
+        "-nosplash",
+        "-nosound",
+        "-stdout",
+        "-FullStdOutLogOutput",
+    }
+    assert set(HEADLESS_FLAGS) == expected
+
+
+def test_resolve_launch_argv_appends_headless_flags(tmp_path: Path, monkeypatch) -> None:
+    """`--headless` must propagate all the way through to argv."""
+    from simul_mcp.adapters import unreal_setup as us
+
+    uproject = _write_uproject(tmp_path, {"FileVersion": 3})
+
+    # Stub platform.system → 'Linux' and force a fake engine_path so neither
+    # the host's actual UE install nor LaunchServices is consulted.
+    monkeypatch.setattr(us.platform, "system", lambda: "Linux")
+    fake_engine = tmp_path / "engine"
+    binary = fake_engine / "Engine" / "Binaries" / "Linux" / "UnrealEditor"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+
+    gui_argv = us.resolve_launch_argv(uproject, engine_path=fake_engine, headless=False)
+    headless_argv = us.resolve_launch_argv(uproject, engine_path=fake_engine, headless=True)
+
+    assert gui_argv == [str(binary), str(uproject)]
+    assert headless_argv == [str(binary), str(uproject), *HEADLESS_FLAGS]
+    # Default keeps GUI behavior — explicit opt-in is required.
+    default_argv = us.resolve_launch_argv(uproject, engine_path=fake_engine)
+    assert default_argv == gui_argv
 
 
 def test_ensure_remote_control_config_runs_both_patches(tmp_path: Path) -> None:

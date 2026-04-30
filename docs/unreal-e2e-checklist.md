@@ -12,20 +12,24 @@ shape so pass/fail is unambiguous.
 | Adapter unit tests | `tests/unreal/test_unreal_runtime.py` | 79 | No (aiohttp mocked) |
 | MCP registration | `tests/unreal/test_server_unreal_registration.py` | 2 | No |
 | Setup patcher | `tests/unreal/test_setup.py` | 9 | No |
-| **Live E2E** | — | **0** | — |
+| **Live E2E (C1–C5)** | `tests/unreal/test_live.py` | 6 | Yes — auto-skip when down |
 
-Gaps (follow-ups, not blockers):
+The live tier mirrors the C1–C5 probes below as `@pytest.mark.unreal_live`
+tests. They auto-skip when the configured UE port doesn't answer, so
+``make test`` runs cleanly on machines without UE installed.
 
-- No `@pytest.mark.unreal` marker analogous to `@pytest.mark.isaac`.
-- No `make test-unreal` target (Makefile has `test-isaac` only).
-- No automated runner for the checklist below. Today it's run by hand or
-  by a dispatched subagent — see the "Running this as a subagent" section.
-
-Run the existing suite:
+Run modes:
 
 ```sh
-.venv/bin/python -m pytest tests/unreal/ -v --no-cov  # 90 tests, ~5 s
+.venv/bin/python -m pytest tests/unreal/         # all 96 tests; live skips if UE down
+make test-unreal                                  # only the @unreal_live tier (6 tests)
+.venv/bin/python -m pytest tests/unreal/test_live.py -v   # live, with UE running
 ```
+
+Per-OS coverage: the live tests are OS-agnostic at the Python level
+(Remote Control is HTTP). Validate on each platform by running
+`make test-unreal` against a UE editor on that platform — no test is
+gated on `platform.system()`.
 
 ## Prerequisites (do these once per session)
 
@@ -253,9 +257,10 @@ the summary is what matters to the parent conversation.
 
 ## Follow-ups (not in scope today)
 
-- Add `@pytest.mark.unreal` marker and a `make test-unreal` Makefile
-  target for live-UE integration tests.
-- Convert this checklist into an automated pytest suite gated by the new
-  marker, so CI can run it against an ephemeral UE instance.
-- Extend `examples/unreal/EXAMPLES.md` cross-link to this doc so readers
+- Wire `make test-unreal` into a CI pipeline that has a UE installation
+  available (today the marker exists and runs locally; CI doesn't ship
+  UE, so the live tier currently lives outside CI).
+- Extend `tests/unreal/test_live.py` to cover the full ~50-tool
+  registration mode beyond the thin 5-tool surface.
+- Cross-link `examples/unreal/EXAMPLES.md` to this doc so readers
   starting from the example have a clear path to verification.

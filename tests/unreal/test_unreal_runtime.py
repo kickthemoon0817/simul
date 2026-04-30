@@ -549,17 +549,24 @@ class TestUnrealRuntimeSessionPhase2:
     # -- capture_viewport --
 
     def test_capture_viewport_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """capture_viewport triggers HighResShot and returns capture metadata."""
+        """capture_viewport fires HighResShot via RC's ExecuteConsoleCommand
+        and reads the result from a follow-up ExecutePythonCommandEx call,
+        parsing the marker-prefixed base64 payload out of LogOutput."""
         session = self._make_session(monkeypatch)
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
             fn = (json or {}).get("functionName", "")
             if fn == "ExecuteConsoleCommand":
+                # RC ack — fire-and-forget for HighResShot.
                 return FakeResponse({})
             if fn == "ExecutePythonCommandEx":
                 return FakeResponse({
                     "ReturnValue": True,
-                    "LogOutput": [{"Type": "Info", "Output": "iVBOR=="}],
+                    "LogOutput": [
+                        # A leading info line should be ignored; the marker line wins.
+                        {"Type": "Info", "Output": "LogPython: capture starting"},
+                        {"Type": "Info", "Output": "@@SIMUL_SCREENSHOT@@iVBOR=="},
+                    ],
                 })
             return FakeResponse({}, 404)
 
@@ -577,17 +584,43 @@ class TestUnrealRuntimeSessionPhase2:
     def test_capture_viewport_no_screenshot_data(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """capture_viewport returns empty base64 when no screenshot data available."""
+        """capture_viewport returns empty base64 when no screenshot data
+        available. The adapter retries the read script with asyncio.sleep
+        between attempts; we patch sleep here so the test doesn't burn
+        15 s waiting for the deadline to elapse."""
         session = self._make_session(monkeypatch)
+
+        async def _instant_sleep(_seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr(unreal_runtime.asyncio, "sleep", _instant_sleep)
+
+        # Drive the time clock forward fast so the adapter's deadline check
+        # exits quickly even with sleep stubbed to 0.
+        loop_time = [0.0]
+
+        class _FakeLoop:
+            def time(self) -> float:
+                loop_time[0] += 1.0
+                return loop_time[0]
+
+        monkeypatch.setattr(
+            unreal_runtime.asyncio, "get_event_loop", lambda: _FakeLoop()
+        )
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
             fn = (json or {}).get("functionName", "")
             if fn == "ExecuteConsoleCommand":
                 return FakeResponse({})
             if fn == "ExecutePythonCommandEx":
+                # Marker present but with an empty payload: the read script
+                # ran but the screenshot wasn't written. Adapter should keep
+                # retrying until the deadline.
                 return FakeResponse({
                     "ReturnValue": True,
-                    "LogOutput": [{"Type": "Info", "Output": ""}],
+                    "LogOutput": [
+                        {"Type": "Info", "Output": "@@SIMUL_SCREENSHOT@@"},
+                    ],
                 })
             return FakeResponse({}, 404)
 
