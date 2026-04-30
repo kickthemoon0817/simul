@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "simul",
+  "description": "3D simulation and DCC skills for Claude Code — scene setup, physics, materials, camera, scripting, and headless workflows for Isaac Sim, Unreal Engine, Blender, and USD",
+  "owner": {
+    "name": "khemoo",
+    "url": "https://github.com/kickthemoon0817"
+  },
+  "plugins": [
+    {
+      "name": "simul",
+      "description": "Skills + MCP server for controlling 3D simulation engines from Claude Code. Includes auto-setup for Unreal Remote Control with headless launch, Isaac Sim scripting workflows, Blender adapters, and headless USD inspection.",
+      "category": "simulation",
+      "source": {
+        "source": "github",
+        "repo": "kickthemoon0817/simul"
+      },
+      "homepage": "https://github.com/kickthemoon0817/simul"
+    }
+  ]
+}
