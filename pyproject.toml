@@ -139,6 +139,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "isaac: marks tests that require Isaac Sim environment",
+    "unreal_live: marks tests that require a running Unreal Engine editor (Remote Control reachable on the configured host:port)",
 ]
 
 [tool.coverage.run]

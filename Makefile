@@ -68,6 +68,9 @@ test-cov:
 test-isaac:
 	pytest tests/ -v -m isaac
 
+test-unreal:
+	pytest tests/ -v -m unreal_live
+
 # Cleaning
 clean:
 	rm -rf build/
