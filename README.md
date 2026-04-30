@@ -30,6 +30,23 @@ Simul-MCP is designed for multi-engine workflows. Isaac Sim is the primary runti
 - Unreal Engine 5.x with Remote Control plugin (optional)
 - Blender via `bpy` package (optional — Python 3.11 or 3.13 only)
 
+## Install via Claude Code Marketplace
+
+If you only want simul's Claude Code skills + MCP tools (no source checkout):
+
+```text
+/plugin marketplace add kickthemoon0817/simul
+/plugin install simul@simul
+```
+
+The plugin bundles the 9 simulation skills (camera, materials, physics, scripting, etc.) and registers the simul MCP server via `.mcp.json`. The MCP server itself is the Python `simul-mcp` package — install it once before enabling the plugin so the `simul-mcp` command resolves on your `PATH`:
+
+```bash
+pip install simul-mcp        # or: uv tool install simul-mcp
+```
+
+For a hacking-on-simul setup, use the source install below.
+
 ## Installation
 
 **Requirements:** Python 3.11, 3.12, or 3.13

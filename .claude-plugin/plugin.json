@@ -1,12 +1,22 @@
 {
   "name": "simul",
   "version": "0.0.19",
-  "description": "3D simulation and DCC skills — scene setup, physics, materials, camera, scripting, and guided installation for Isaac Sim, Unreal Engine, Blender, and USD",
-  "skills": "./skills/",
+  "description": "3D simulation and DCC skills — scene setup, physics, materials, camera, scripting, and headless workflows for Isaac Sim, Unreal Engine, Blender, and USD",
   "author": {
     "name": "khemoo",
     "url": "https://github.com/kickthemoon0817"
   },
+  "homepage": "https://github.com/kickthemoon0817/simul",
   "repository": "https://github.com/kickthemoon0817/simul",
-  "license": "MIT"
+  "license": "MIT",
+  "keywords": [
+    "simulation",
+    "isaac-sim",
+    "unreal-engine",
+    "blender",
+    "usd",
+    "robotics",
+    "3d",
+    "mcp"
+  ]
 }
