@@ -37,17 +37,14 @@ simul ships through the `khemoo` Claude Code marketplace at <https://github.com/
 ```text
 /plugin marketplace add kickthemoon0817/khemoo-claude-plugins
 /plugin install simul@khemoo
+/simul:setup
 ```
 
-After install, run `/simul:setup` to configure the MCP server and pick which simulation backends to enable.
+That's the whole install. `/simul:setup` clones this repo to `~/.simul/source/`, installs the `simul-mcp` Python package globally (via `uv tool install`, with `pipx` / `pip --user` fallbacks), walks you through backend selection (Isaac Sim / Unreal / Blender / USD-only), and tells you when to restart Claude Code so the plugin's bundled MCP server can spawn cleanly.
 
-The plugin bundles the 9 simulation skills (camera, materials, physics, scripting, etc.) and registers the simul MCP server via `.mcp.json`. The MCP server itself is the Python `simul-mcp` package — install it once before enabling the plugin so the `simul-mcp` command resolves on your `PATH`:
+No `pip install` needed — `simul-mcp` is not on PyPI yet, and `/simul:setup` handles the from-source install for you.
 
-```bash
-pip install simul-mcp        # or: uv tool install simul-mcp
-```
-
-For a hacking-on-simul setup, use the source install below.
+For a hacking-on-simul setup (you're working on the plugin itself, not just using it), use the source install below.
 
 ## Installation
 
