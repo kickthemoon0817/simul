@@ -137,20 +137,73 @@ for the global install case.
 
 ### Step 7 — Backend configuration
 
-Delegate to the existing `simul-setup` skill workflow at
-`skills/simul-setup/SKILL.md`. Ask the user which simulation engines
-they run (Isaac Sim / Unreal / Blender / USD-only) and only register
-those backends so the agent's tool list stays small.
+Ask the user which simulation engines they run (Isaac Sim / Unreal /
+Blender / USD-only). For each picked backend, walk the env-var setup
+**now** rather than letting the user discover the requirement at
+runtime. simul's templates expand env vars at server start, and a
+missing `ISAAC_SIM_PATH` or `UE_ENGINE_PATH` produces a "warn-and-
+continue with degraded behavior" path that's hard to debug after the
+fact.
 
-For each picked backend, point the user at the matching follow-up
-flow:
-- Unreal → `simul unreal setup <.uproject> --yes` (headless by default,
-  cf. CLAUDE.md).
-- Isaac → verify the bridge socket on port 8226 is reachable; reference
-  `config/isaac/default.yaml` if they need to adjust ports.
-- Blender → register the runtime adapter; reference
-  `src/simul_mcp/adapters/blender_runtime.py`.
-- USD-only → no runtime needed; nothing further.
+Detailed flow per backend:
+
+#### Isaac Sim (selected)
+
+1. Probe: `echo $ISAAC_SIM_PATH`. If non-empty and the directory
+   exists, confirm and skip to step 4.
+2. If unset or invalid, ask: "Where is your Isaac Sim install?"
+   Common locations: `/opt/isaac-sim/<ver>` (Linux),
+   `/Applications/IsaacSim` (mac via NVIDIA Launcher), or wherever
+   `isaac-sim.sh` / `isaac-sim.bat` lives. Confirm the path exists
+   and contains an `isaac-sim.sh` (or `isaac-sim.bat` on Windows).
+3. Persist:
+   - Detect shell from `$SHELL` (bash → `~/.bashrc`,
+     zsh → `~/.zshrc`, fish → `~/.config/fish/config.fish`).
+   - Append `export ISAAC_SIM_PATH="<path>"` (or `set -gx` for fish)
+     to the shell rc, only if not already present.
+   - `export ISAAC_SIM_PATH=...` in the current process so the rest
+     of this command can use it.
+4. Verify: `ls "$ISAAC_SIM_PATH/python.sh"` exists.
+5. Tell the user the bridge socket is `localhost:8226`; if they
+   need to change ports, point them at `config/isaac/default.yaml`.
+
+#### Unreal Engine (selected)
+
+1. Probe: `echo $UE_ENGINE_PATH` (and `$UNREAL_ENGINE_PATH` as a
+   fallback name). If unset, also probe LaunchServices on macOS
+   (`open -Ra UnrealEditor`) and the Linux/Mac default install
+   locations (`/Users/Shared/Epic Games/UE_*`,
+   `/opt/unreal-engine`, `~/UnrealEngine`).
+2. If neither the env var nor a default location resolves, ask:
+   "Where is your Unreal Engine install root (the directory that
+   contains `Engine/`)?" Confirm `Engine/Binaries/{Mac,Linux}/UnrealEditor[.app]`
+   exists under it.
+3. Persist `UE_ENGINE_PATH` to the shell rc the same way as Isaac
+   above. (Skip if LaunchServices on macOS resolves UnrealEditor —
+   `simul unreal setup` will use that path automatically and an env
+   var isn't required.)
+4. Tell the user: project-level setup is `simul unreal setup
+   <.uproject> --yes` (headless by default; cf. CLAUDE.md). They
+   can run that against a `.uproject` whenever they want to bring
+   simul up against a specific UE project.
+
+#### Blender (selected)
+
+1. Probe: `echo $BLENDER_PATH`. If unset, ask for the Blender app /
+   binary location (e.g. `/Applications/Blender.app` on macOS,
+   `/usr/bin/blender` on Linux). Persist to shell rc.
+2. Reference `src/simul_mcp/adapters/blender_runtime.py` for the
+   runtime adapter; the user does not need to manually register
+   anything beyond the env var.
+
+#### USD-only (selected)
+
+No env vars or runtimes required. Nothing further.
+
+Always tell the user the persisted env vars only take effect in
+**new** shell sessions — current Claude Code session needs to
+quit/reopen (Step 8) AND any new terminals they open need to source
+the rc again.
 
 ### Step 8 — Restart Claude Code
 

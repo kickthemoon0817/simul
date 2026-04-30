@@ -3,14 +3,14 @@
 These mirror the C1–C5 sanity probes documented in
 ``docs/unreal-e2e-checklist.md``. They run against a real UE editor
 reachable at the configured host:port and skip cleanly when no editor
-is up — ``make test`` happily runs them on a dev box without UE
-installed.
+is up — the default ``pytest tests/`` run is clean on a dev box
+without UE installed.
 
 To run only this suite::
 
-    make test-unreal
-    # or:
-    pytest tests/unreal/test_live.py -m unreal_live -v
+    pytest tests/ -v -m unreal_live
+    # or, by file:
+    pytest tests/unreal/test_live.py -v
 
 These tests are intentionally OS-agnostic at the Python level: the
 Remote Control API is HTTP, so the same code paths exercise UE on

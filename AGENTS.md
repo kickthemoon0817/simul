@@ -17,23 +17,27 @@ repo-specific build commands, project layout, and runtime notes only.
 ## Build / Run
 
 ```sh
-make install          # Install package
-make install-dev      # Install dev deps
-make build            # python -m build
-make run-server       # MCP server (dev)
-make run-headless     # MCP server (headless USD only)
-make run-isaac        # MCP server via Isaac Sim python.sh
+pip install -e .                              # install package (editable)
+pip install -e ".[dev]"                       # + dev deps
+python -m build                               # build sdist + wheel
+simul-mcp server                              # MCP server (dev)
+simul-mcp server --backends usd               # MCP server (headless USD only)
+$ISAAC_SIM_PATH/python.sh -m simul_mcp.cli.main server   # MCP server via Isaac Sim python.sh
 ```
+
+Set `ISAAC_SIM_PATH` to your Isaac Sim install root before running the
+Isaac variant (export it from your shell rc; the simul MCP server warns
+at startup if it's expected but not set).
 
 ## Format / Lint / Test
 
 ```sh
-make format           # black + isort
-make lint             # flake8 + mypy
-make test             # pytest tests/ -v
-make test-cov         # pytest with coverage
-make test-isaac       # pytest -m isaac (requires runtime)
-make check            # format + lint + test
+black src/ tests/ examples/ && isort src/ tests/ examples/   # format
+flake8 src/ tests/ && mypy src/                              # lint + types
+pytest tests/ -v                                              # unit + live (live skips if engine down)
+pytest tests/ -v --cov=simul_mcp                              # with coverage
+pytest tests/ -v -m isaac                                     # Isaac live (requires runtime)
+pytest tests/ -v -m unreal_live                               # Unreal live (requires running editor)
 ```
 
 ## MCP Error Handling

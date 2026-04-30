@@ -680,10 +680,7 @@ pytest -v tests/
 # Format code using the provided script
 ./scripts/isaac/dev_isort_black.sh
 
-# Or use make
-make format
-
-# Or manually
+# Or directly
 isort src/ tests/ examples/
 black src/ tests/ examples/
 ```
@@ -694,17 +691,15 @@ black src/ tests/ examples/
 # Install development dependencies
 pip install -e ".[dev]"
 
-# Run linting
-make lint
+# Run linting + type checking
+flake8 src/ tests/ && mypy src/
 
-# Run lint + type checking
-make lint
-
-# Run all checks
-make check
+# Run tests
+pytest tests/ -v
 
 # Clean build artifacts
-make clean
+rm -rf build/ dist/ *.egg-info/ .pytest_cache/ .coverage htmlcov/ .mypy_cache/
+find . -type d -name __pycache__ -exec rm -rf {} +
 ```
 
 ## Architecture
@@ -739,7 +734,7 @@ The project follows a modular architecture with clear separation of concerns:
 3. Make your changes
 4. Add tests for new functionality
 5. Run the test suite (`pytest`)
-6. Run code formatting (`make format`)
+6. Run code formatting (`black src/ tests/ examples/ && isort src/ tests/ examples/`)
 7. Commit your changes (`git commit -m 'Add amazing feature'`)
 8. Push to the branch (`git push origin feature/amazing-feature`)
 9. Open a Pull Request
