@@ -636,13 +636,15 @@ def setup(
     ),
     launch: bool = typer.Option(True, "--launch/--no-launch", help="Launch the editor after configuring"),
     headless: bool = typer.Option(
-        False,
-        "--headless",
+        True,
+        "--headless/--no-headless",
         help=(
-            "Launch UE with -RenderOffScreen so no window opens. The render "
-            "pipeline still runs so viewport capture, scene capture, and "
-            "replicator workflows work — they just don't depend on the "
-            "editor having OS-level focus. Recommended for simul use."
+            "Default: headless. UE launches with -RenderOffScreen so no "
+            "window opens. The render pipeline still runs so viewport "
+            "capture, scene capture, and replicator workflows work — they "
+            "just don't depend on the editor having OS-level focus. Pass "
+            "--no-headless when you want the GUI editor open (e.g. to "
+            "hand-edit a scene at the same time)."
         ),
     ),
     yes: bool = typer.Option(
