@@ -45,6 +45,17 @@ class FakeFastMCP:
             return func
         return decorator
 
+    def add_middleware(self, middleware: Any) -> None:
+        """Stub for FastMCP middleware registration.
+
+        SimulMCPServer adds a request-context middleware (PR #23) before any
+        tools register. The double records the middleware so a future test
+        can assert ordering, but registration tests only need it to not raise.
+        """
+        if not hasattr(self, "middlewares"):
+            self.middlewares = []
+        self.middlewares.append(middleware)
+
 
 class FakeUnrealAdapter:
     """Minimal Unreal adapter stub for registration tests."""
