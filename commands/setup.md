@@ -137,62 +137,200 @@ for the global install case.
 
 ### Step 7 — Backend configuration
 
-Ask the user which simulation engines they run (Isaac Sim / Unreal /
-Blender / USD-only). For each picked backend, walk the env-var setup
-**now** rather than letting the user discover the requirement at
-runtime. simul's templates expand env vars at server start, and a
-missing `ISAAC_SIM_PATH` or `UE_ENGINE_PATH` produces a "warn-and-
-continue with degraded behavior" path that's hard to debug after the
-fact.
+#### 7.0 — Compatibility check
+
+Before showing the backend menu, detect what the user's machine can
+actually run. Don't let them pick a backend their hardware or OS
+won't support — surface the limitation up front rather than letting
+runtime warnings explain it later.
+
+```bash
+uname -s                        # Darwin / Linux / (use $OS / wmic on Windows via WSL)
+uname -m                        # arm64 / x86_64 / aarch64
+nvidia-smi 2>&1 | head -3       # check for NVIDIA driver / GPU
+nvidia-smi -L 2>/dev/null       # GPU model — Isaac needs RTX (Turing+)
+```
+
+Build a per-backend availability matrix and present only the
+supported choices in the menu:
+
+| Backend | Linux | macOS | Windows | Hard requirement |
+|---|---|---|---|---|
+| **Isaac Sim** | ✅ | ❌ | ✅ | NVIDIA RTX GPU (Turing 20xx or newer) |
+| **Unreal Engine** | ✅ | ✅ | ✅ | none beyond the engine install |
+| **Blender** | ✅ | ✅ | ✅ | none |
+| **USD-only** | ✅ | ✅ | ✅ | none (pure CPU pxr) |
+
+Specifically:
+
+- **macOS** → Isaac is **not** an option. Don't even offer it. If
+  the user explicitly asks for Isaac, explain that NVIDIA does not
+  ship Isaac Sim for macOS and recommend the Unreal/Blender/USD
+  paths instead.
+- **No NVIDIA GPU** (nvidia-smi missing or non-zero exit) → Isaac
+  is not an option, regardless of OS. Same explanation.
+- **NVIDIA GPU but pre-Turing** (e.g. GTX 10-series, P-series) →
+  warn that Isaac requires RTX-class hardware for the RTX renderer
+  to function and ask the user to confirm before proceeding.
+- **Apple Silicon macOS** → Unreal works (UE 5.5+ ships native
+  arm64), Blender works (universal binary), USD-only works.
+- **All OS / GPU combos** → USD-only is always available.
+
+Print the resolved menu so the user sees what's filtered and why,
+then proceed.
+
+#### 7.1 — Per-backend setup
+
+For each picked backend, walk the env-var setup **now** rather than
+letting the user discover the requirement at runtime. simul's
+templates expand env vars at server start, and a missing
+`ISAAC_SIM_PATH` or `UE_ENGINE_PATH` produces a "warn-and-continue
+with degraded behavior" path that's hard to debug after the fact.
 
 Detailed flow per backend:
 
 #### Isaac Sim (selected)
 
-1. Probe: `echo $ISAAC_SIM_PATH`. If non-empty and the directory
-   exists, confirm and skip to step 4.
-2. If unset or invalid, ask: "Where is your Isaac Sim install?"
-   Common locations: `/opt/isaac-sim/<ver>` (Linux),
-   `/Applications/IsaacSim` (mac via NVIDIA Launcher), or wherever
-   `isaac-sim.sh` / `isaac-sim.bat` lives. Confirm the path exists
-   and contains an `isaac-sim.sh` (or `isaac-sim.bat` on Windows).
-3. Persist:
+Pre-req: passed the compatibility check in 7.0 (Linux or Windows
+with NVIDIA RTX GPU).
+
+1. Probe: `echo $ISAAC_SIM_PATH`. If non-empty and
+   `python.sh` (Linux) / `python.bat` (Windows) exists under it,
+   confirm and skip to step 4.
+
+2. **Auto-detect** by globbing the official install locations
+   before asking. Stop at the first match that contains
+   `python.sh` / `python.bat`:
+
+   **Linux** (NVIDIA Omniverse Launcher default + manual installs):
+   ```bash
+   ls -d ~/.local/share/ov/pkg/isaac-sim-*/    \
+         /opt/isaac-sim/*/                      \
+         /opt/nvidia/isaac-sim/                 \
+         ~/isaac-sim/                           \
+         /workspace/isaac-sim/ 2>/dev/null
+   ```
+
+   **Windows** (PowerShell / WSL paths):
+   ```bash
+   ls -d "$LOCALAPPDATA/ov/pkg/isaac-sim-*/"                \
+         "/mnt/c/Users/$USER/AppData/Local/ov/pkg/isaac-sim-*/" \
+         "/c/Program Files/NVIDIA/IsaacSim/*/" 2>/dev/null
+   ```
+
+   Prefer the highest-versioned match (sort descending).
+
+3. If auto-detection finds nothing, ask: "Where is your Isaac Sim
+   install? (the directory that contains `python.sh` /
+   `python.bat`)". Confirm the path exists and the launcher
+   script is present.
+
+4. Persist:
    - Detect shell from `$SHELL` (bash → `~/.bashrc`,
      zsh → `~/.zshrc`, fish → `~/.config/fish/config.fish`).
    - Append `export ISAAC_SIM_PATH="<path>"` (or `set -gx` for fish)
      to the shell rc, only if not already present.
    - `export ISAAC_SIM_PATH=...` in the current process so the rest
      of this command can use it.
-4. Verify: `ls "$ISAAC_SIM_PATH/python.sh"` exists.
-5. Tell the user the bridge socket is `localhost:8226`; if they
+
+5. Verify: `ls "$ISAAC_SIM_PATH/python.sh"` (or `.bat`) succeeds.
+
+6. Tell the user the bridge socket is `localhost:8226`; if they
    need to change ports, point them at `config/isaac/default.yaml`.
 
 #### Unreal Engine (selected)
 
 1. Probe: `echo $UE_ENGINE_PATH` (and `$UNREAL_ENGINE_PATH` as a
-   fallback name). If unset, also probe LaunchServices on macOS
-   (`open -Ra UnrealEditor`) and the Linux/Mac default install
-   locations (`/Users/Shared/Epic Games/UE_*`,
-   `/opt/unreal-engine`, `~/UnrealEngine`).
-2. If neither the env var nor a default location resolves, ask:
+   fallback name). If set and `Engine/Binaries/{Mac,Linux,Win64}/`
+   exists under it, confirm and skip to step 4.
+
+2. **Auto-detect** at the official install locations per OS.
+   Prefer the highest version when multiple are installed.
+
+   **macOS** (Epic Games Launcher default + alternates):
+   ```bash
+   ls -d "/Users/Shared/Epic Games/UE_"*/            \
+         "/Applications/Epic Games/UE_"*/            \
+         "$HOME/Applications/Epic Games/UE_"*/ 2>/dev/null
+   ```
+   Also probe LaunchServices: `open -Ra UnrealEditor`. If it
+   succeeds, `simul unreal setup` will route through `open -a` at
+   runtime — env var is optional. Skip the persist step in that
+   case.
+
+   **Linux** (Epic's binary release defaults + common manual
+   install paths):
+   ```bash
+   ls -d ~/UnrealEngine/                         \
+         "/opt/unreal-engine/UE_"*/              \
+         /opt/UnrealEngine/                       \
+         "$HOME/Epic Games/UE_"*/                 \
+         /usr/local/UnrealEngine/ 2>/dev/null
+   which UnrealEditor   # Epic ships a launcher script in some installs
+   ```
+
+   **Windows** (Epic Games Launcher + manual installs):
+   ```bash
+   ls -d "/c/Program Files/Epic Games/UE_"*/    \
+         "/c/Epic Games/UE_"*/                  \
+         "/d/Epic Games/UE_"*/                  \
+         "$HOME/Epic Games/UE_"*/ 2>/dev/null
+   ```
+
+   Validate each candidate by checking
+   `Engine/Binaries/Mac/UnrealEditor.app` (mac) /
+   `Engine/Binaries/Linux/UnrealEditor` (linux) /
+   `Engine/Binaries/Win64/UnrealEditor.exe` (win) actually exists.
+
+3. If neither the env var nor any default location resolves, ask:
    "Where is your Unreal Engine install root (the directory that
-   contains `Engine/`)?" Confirm `Engine/Binaries/{Mac,Linux}/UnrealEditor[.app]`
-   exists under it.
-3. Persist `UE_ENGINE_PATH` to the shell rc the same way as Isaac
-   above. (Skip if LaunchServices on macOS resolves UnrealEditor —
-   `simul unreal setup` will use that path automatically and an env
-   var isn't required.)
-4. Tell the user: project-level setup is `simul unreal setup
+   contains `Engine/`)?". Validate the binary file under that root.
+
+4. Persist `UE_ENGINE_PATH` to the shell rc as in the Isaac flow.
+   Skip if LaunchServices on macOS already resolves UnrealEditor —
+   the env var is optional in that case.
+
+5. Tell the user: project-level setup is `simul unreal setup
    <.uproject> --yes` (headless by default; cf. CLAUDE.md). They
    can run that against a `.uproject` whenever they want to bring
    simul up against a specific UE project.
 
 #### Blender (selected)
 
-1. Probe: `echo $BLENDER_PATH`. If unset, ask for the Blender app /
-   binary location (e.g. `/Applications/Blender.app` on macOS,
-   `/usr/bin/blender` on Linux). Persist to shell rc.
-2. Reference `src/simul_mcp/adapters/blender_runtime.py` for the
+1. Probe: `echo $BLENDER_PATH`. If set and the binary exists,
+   confirm and skip to step 3.
+
+2. **Auto-detect** at default install locations. Prefer the
+   highest-versioned match.
+
+   **macOS** (Blender Foundation `.app` + Steam variant):
+   ```bash
+   ls -d "/Applications/Blender.app/Contents/MacOS/Blender" \
+         "/Applications/Blender "*"/Blender.app/Contents/MacOS/Blender" \
+         "$HOME/Applications/Blender.app/Contents/MacOS/Blender" 2>/dev/null
+   ```
+
+   **Linux** (apt / snap / Flatpak / manual tarball):
+   ```bash
+   which blender                                      # /usr/bin/blender etc.
+   ls -d /usr/local/bin/blender                       \
+         /snap/bin/blender                            \
+         /var/lib/flatpak/app/org.blender.Blender/*   \
+         "$HOME/blender-"*"/blender" 2>/dev/null
+   ```
+
+   **Windows** (Blender Foundation default + Steam):
+   ```bash
+   ls -d "/c/Program Files/Blender Foundation/Blender "*"/blender.exe" \
+         "/c/Program Files (x86)/Steam/steamapps/common/Blender/blender.exe" 2>/dev/null
+   ```
+
+3. If auto-detection finds nothing, ask for the Blender binary
+   path and validate it's executable.
+
+4. Persist `BLENDER_PATH` to the shell rc as in the Isaac flow.
+
+5. Reference `src/simul_mcp/adapters/blender_runtime.py` for the
    runtime adapter; the user does not need to manually register
    anything beyond the env var.
 
