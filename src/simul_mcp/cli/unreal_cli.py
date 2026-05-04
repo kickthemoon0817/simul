@@ -49,8 +49,17 @@ def _session(
     host: Optional[str] = None,
     port: Optional[int] = None,
     timeout: Optional[int] = None,
+    *,
+    passphrase: Optional[str] = None,
 ) -> UnrealRuntimeSession:
-    """Build an UnrealRuntimeSession with optional overrides."""
+    """Build an UnrealRuntimeSession with optional overrides.
+
+    ``passphrase`` accepts either plaintext or a pre-computed MD5 hex
+    digest — UnrealRuntimeSession's __init__ normalises via
+    ``_passphrase_to_md5``. Used by the setup CLI so its polling
+    loop can authenticate when --passphrase enabled enforcement on
+    the editor.
+    """
     settings = get_settings()
     overrides: Dict[str, Any] = {}
     if host is not None:
@@ -59,6 +68,8 @@ def _session(
         overrides["port"] = port
     if timeout is not None:
         overrides["timeout"] = timeout
+    if passphrase is not None:
+        overrides["passphrase"] = passphrase
     if overrides:
         unreal_cfg = settings.unreal.model_copy(update=overrides)
         settings = settings.model_copy(update={"unreal": unreal_cfg})
@@ -947,8 +958,11 @@ def setup(
             launch_plan_error = str(exc)
 
     # Poll Remote Control. If we didn't launch, the user is expected to
-    # already have the editor running.
-    session = _session(port=port)
+    # already have the editor running. When --passphrase is set the
+    # editor enforces auth on /remote/info, so the polling session must
+    # also carry the Passphrase header — otherwise the editor is healthy
+    # but the poller hits 401 and times out at --wait-timeout.
+    session = _session(port=port, passphrase=passphrase)
     if not is_json_mode():
         console.print(f"Waiting for Remote Control @ {session.settings.unreal.host}:{port} ...")
     health = asyncio.run(_poll_health(session, wait_timeout, poll_interval))
