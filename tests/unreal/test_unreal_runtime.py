@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import contextmanager
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -2002,3 +2003,199 @@ class TestUnrealRuntimeSessionPhase8:
 
         assert result["method"] == "auto_uv"
         assert result["triangle_count"] == 100
+
+
+# ---------------------------------------------------------------------------
+# Passphrase header support — closes the iter3 deferred work where simul-mcp
+# itself couldn't talk to a passphrase-enforcing UE editor.
+# ---------------------------------------------------------------------------
+
+
+class TestPassphraseHeader:
+    """`_passphrase_to_md5` + UnrealRuntimeSession._default_headers wiring."""
+
+    def test_md5_helper_returns_none_when_unset(self) -> None:
+        assert unreal_runtime._passphrase_to_md5(None) is None
+
+    def test_md5_helper_hashes_plaintext(self) -> None:
+        # md5("password") = 5f4dcc3b5aa765d61d8327deb882cf99 (well-known).
+        assert (
+            unreal_runtime._passphrase_to_md5("password")
+            == "5f4dcc3b5aa765d61d8327deb882cf99"
+        )
+
+    def test_md5_helper_passes_through_lowercase_hex(self) -> None:
+        h = "5f4dcc3b5aa765d61d8327deb882cf99"
+        assert unreal_runtime._passphrase_to_md5(h) == h
+
+    def test_md5_helper_normalizes_uppercase_hex_to_lowercase(self) -> None:
+        # Operator might paste a hash from a tool that uses uppercase hex
+        # (e.g. md5sum on some platforms). UE's FMD5 output is lowercase
+        # so we normalize to match.
+        assert (
+            unreal_runtime._passphrase_to_md5("5F4DCC3B5AA765D61D8327DEB882CF99")
+            == "5f4dcc3b5aa765d61d8327deb882cf99"
+        )
+
+    def test_md5_helper_rejects_non_ascii(self) -> None:
+        # UE's FMD5::HashAnsiString narrows wide chars before hashing,
+        # so a non-ASCII plaintext would silently produce a different
+        # hash on UE's side. Better to raise here than mismatch silently.
+        with pytest.raises(UnicodeEncodeError):
+            unreal_runtime._passphrase_to_md5("café")
+
+    def _make_session_with_passphrase(
+        self, monkeypatch: pytest.MonkeyPatch, passphrase: "str | None"
+    ) -> Any:
+        monkeypatch.setattr(unreal_runtime, "UNREAL_AVAILABLE", True)
+        monkeypatch.setattr(unreal_runtime, "AIOHTTP_AVAILABLE", True)
+        # UnrealConfig is a frozen pydantic BaseModel; build a fresh
+        # Settings with a tweaked unreal section.
+        from simul_mcp.config import UnrealConfig
+        settings = Settings(unreal=UnrealConfig(passphrase=passphrase))
+        return unreal_runtime.UnrealRuntimeSession(settings=settings)
+
+    def test_default_headers_omit_passphrase_when_unconfigured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = self._make_session_with_passphrase(monkeypatch, None)
+        headers = session._default_headers()
+        assert headers == {"Content-Type": "application/json"}
+
+    def test_default_headers_include_passphrase_md5_from_plaintext(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = self._make_session_with_passphrase(monkeypatch, "password")
+        headers = session._default_headers()
+        assert headers["Passphrase"] == "5f4dcc3b5aa765d61d8327deb882cf99"
+        assert headers["Content-Type"] == "application/json"
+
+    def test_default_headers_pass_through_prehashed_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Operator pre-computed the hash and stored that in env; client
+        # must not double-hash.
+        prehashed = "98264f6f4d06848183632e6a314112ed"  # md5("iter3-secret")
+        session = self._make_session_with_passphrase(monkeypatch, prehashed)
+        assert session._default_headers()["Passphrase"] == prehashed
+
+    @pytest.mark.parametrize(
+        "near_hex",
+        [
+            "5f4dcc3b5aa765d61d8327deb882cf9",   # 31 chars
+            "5f4dcc3b5aa765d61d8327deb882cf999",  # 33 chars
+            "5f4dcc3b5aa765d61d8327deb882cf9z",  # 32 chars but non-hex
+        ],
+    )
+    def test_md5_helper_hashes_near_hex_strings_not_passthrough(
+        self, near_hex: str
+    ) -> None:
+        """Boundary: only EXACTLY-32-char hex strings pass through. Off-by-one
+        or non-hex 32-char strings get treated as plaintext and hashed.
+        Pin the boundary so a future refactor can't drop the regex's hex
+        constraint and silently double-hash a 32-char password."""
+        result = unreal_runtime._passphrase_to_md5(near_hex)
+        # If passthrough fired, result == near_hex (case-folded). If hashing
+        # fired, result is the MD5 hex of near_hex.
+        assert result == hashlib.md5(near_hex.encode("ascii")).hexdigest()
+        assert result != near_hex.lower()
+
+    def test_md5_helper_empty_string_hashes_to_md5_of_empty(self) -> None:
+        """Documented behavior: empty string is plaintext (regex doesn't
+        match), so it MD5-hashes to the well-known empty-string digest.
+        A user who sets SIMUL_UNREAL__PASSPHRASE='' would inject that hash.
+        Pin so the behavior is explicit, not accidental."""
+        assert (
+            unreal_runtime._passphrase_to_md5("")
+            == "d41d8cd98f00b204e9800998ecf8427e"
+        )
+
+    def test_default_headers_reach_clientsession_via_ensure_http_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Integration guard: confirm _default_headers() is what
+        _ensure_http_session passes to aiohttp.ClientSession. Catches a
+        revert of the headers= kwarg to a hardcoded literal."""
+        session = self._make_session_with_passphrase(monkeypatch, "password")
+        captured: Dict[str, Any] = {}
+
+        class _CaptureSession:
+            closed = False
+
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr(
+            unreal_runtime.aiohttp, "ClientSession", _CaptureSession, raising=True
+        )
+
+        asyncio.run(session._ensure_http_session())
+
+        assert "headers" in captured
+        assert captured["headers"]["Content-Type"] == "application/json"
+        assert (
+            captured["headers"]["Passphrase"]
+            == "5f4dcc3b5aa765d61d8327deb882cf99"
+        )
+
+    def test_probe_port_omits_passphrase_header_by_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Backward compat: probe_port() with no passphrase_md5 must NOT
+        inject the header — preserves discovery behavior for editors
+        without passphrase enforcement."""
+        monkeypatch.setattr(unreal_runtime, "AIOHTTP_AVAILABLE", True)
+        captured: Dict[str, Any] = {}
+
+        class _CaptureSession:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            async def __aenter__(self):
+                raise RuntimeError("stop here — only the constructor matters")
+
+            async def __aexit__(self, *args):
+                pass
+
+        monkeypatch.setattr(
+            unreal_runtime.aiohttp, "ClientSession", _CaptureSession, raising=True
+        )
+
+        asyncio.run(
+            unreal_runtime.UnrealRuntimeSession.probe_port(
+                "127.0.0.1", 30010, timeout=1.0
+            )
+        )
+
+        assert "Passphrase" not in captured["headers"]
+
+    def test_probe_port_injects_passphrase_when_supplied(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Closes the iter4 code-review HIGH: discovery against a
+        passphrase-enforcing editor must carry the header."""
+        monkeypatch.setattr(unreal_runtime, "AIOHTTP_AVAILABLE", True)
+        captured: Dict[str, Any] = {}
+        md5_hash = "5f4dcc3b5aa765d61d8327deb882cf99"
+
+        class _CaptureSession:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            async def __aenter__(self):
+                raise RuntimeError("stop here — only the constructor matters")
+
+            async def __aexit__(self, *args):
+                pass
+
+        monkeypatch.setattr(
+            unreal_runtime.aiohttp, "ClientSession", _CaptureSession, raising=True
+        )
+
+        asyncio.run(
+            unreal_runtime.UnrealRuntimeSession.probe_port(
+                "127.0.0.1", 30010, timeout=1.0, passphrase_md5=md5_hash
+            )
+        )
+
+        assert captured["headers"]["Passphrase"] == md5_hash
