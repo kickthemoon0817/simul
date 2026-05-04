@@ -30,6 +30,8 @@ and comments in the file are preserved verbatim.
 | `bEnableRemotePythonExecution` | `True` | Allows the Python script endpoint |
 | `RemoteControlHttpServerHostname` | `--bind` (only when set) | Cross-host access; default loopback |
 | `RemoteControlWebSocketServerPort` | `--websocket-port` (only when set) | Multi-instance disambiguation; default 30020 |
+| `bEnforcePassphraseForRemoteClients` | `--passphrase` (only when set) | Pins to `True`. UE's C++ default is `True` but writing it explicitly makes the operator's intent visible. |
+| `+Passphrases=(Identifier="simul",Passphrase="<md5>")` | `--passphrase <plaintext>` | Appends a UE config-array entry. simul hashes the plaintext with MD5 (UE 5.x's `FMD5::HashAnsiString`); the line is appended idempotently — re-running with the same passphrase does not duplicate it. The CLI refuses `--passphrase` without a non-loopback `--bind`. **Note**: enabling this blocks every Remote Control client until they send the `Passphrase: <md5_hex>` HTTP header on each request, including simul-mcp itself today. |
 
 ## What is NOT installed and is NOT required
 

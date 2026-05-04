@@ -50,8 +50,9 @@ Phrases like "use unreal", "open my UE project", "run simul on unreal",
    Useful flags: `--port` (HTTP port, default 30010), `--engine-path`,
    `--no-launch` (config only — user already has the editor running),
    `--wait-timeout`, `--poll-interval`, `--bind`, `--websocket-port`,
-   `--allow-public` (the last three are for cross-host scenarios — see
-   below; ignore them for the common single-machine case).
+   `--allow-public`, `--passphrase` (the last four are for cross-host
+   scenarios — see below; ignore them for the common single-machine
+   case).
 
 3. **If the editor was already running**, call `simul unreal setup <.uproject>
    --no-launch --yes` — this still patches config on disk (harmless when keys
@@ -91,6 +92,20 @@ widen the trust radius.
   enable `bEnableRemotePythonExecution=True`, so a public bind exposes
   arbitrary Python execution to anything on the network. The CLI refuses
   a non-loopback `--bind` without this flag.
+- `--passphrase <plaintext>` — layer-2 hardening on top of the IP
+  allowlist when `--bind` is non-loopback. simul MD5-hashes the
+  plaintext (UE 5.x's `FMD5::HashAnsiString`) and writes the entry to
+  the ini's `+Passphrases` array, plus pins
+  `bEnforcePassphraseForRemoteClients=True`. The CLI refuses
+  `--passphrase` without a non-loopback `--bind` because over loopback
+  the IP allowlist already blocks remote access — turning passphrase on
+  there would only break clients with no security gain. **CRITICAL:
+  enabling `--passphrase` blocks every Remote Control client — including
+  simul-mcp itself, which does not yet send the `Passphrase` HTTP
+  header — until they're updated to send `Passphrase: <md5_hex>` on
+  every request. Treat as opt-in for users running their own non-simul
+  clients (curl scripts, custom tooling) until simul-mcp client-side
+  passphrase support lands.**
 
 When the user asks for cross-host UE control, ask first: *"Is the
 network behind a firewall, or are you OK exposing arbitrary Python

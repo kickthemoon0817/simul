@@ -149,6 +149,124 @@ def test_setup_loopback_bind_does_not_require_allow_public(
 
 
 # ---------------------------------------------------------------------------
+# --passphrase: setup writes the MD5 hash to ini; CLI gates loopback abuse.
+# ---------------------------------------------------------------------------
+
+
+def test_setup_refuses_passphrase_with_loopback_bind(tmp_path: Path) -> None:
+    """--passphrase only adds value with a non-loopback bind. The default
+    loopback bind already blocks remote access via the IP allowlist, so
+    enabling the passphrase would only break clients (no security gain).
+    The CLI refuses this combination before any IO."""
+    uproject = _write_uproject(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "unreal",
+            "setup",
+            str(uproject),
+            "--passphrase",
+            "secret",
+            "--no-launch",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code != 0, result.stdout
+    assert "passphrase" in result.stdout.lower()
+    assert "loopback" in result.stdout.lower() or "bind" in result.stdout.lower()
+    # Gate fires before IO — no ini patch.
+    assert not (tmp_path / "Config" / "DefaultRemoteControl.ini").exists()
+
+
+def test_setup_passphrase_with_public_bind_writes_md5_hash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """--passphrase plus --bind 0.0.0.0 plus --allow-public writes the MD5
+    hash and bEnforcePassphraseForRemoteClients=True to the ini.
+
+    UE 5.x's FMD5::HashAnsiString hashes the ASCII bytes; lowercase hex.
+    For the literal 'password', the hash is the well-known
+    5f4dcc3b5aa765d61d8327deb882cf99.
+    """
+    uproject = _write_uproject(tmp_path)
+
+    async def _fake_poll(session, timeout, interval):
+        del session, timeout, interval
+        return {"connected": False}
+
+    monkeypatch.setattr(unreal_cli, "_poll_health", _fake_poll)
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "unreal",
+            "setup",
+            str(uproject),
+            "--bind",
+            "0.0.0.0",
+            "--allow-public",
+            "--passphrase",
+            "password",
+            "--no-launch",
+            "--yes",
+        ],
+    )
+
+    # exit 1 is from the not-connected health stub; the gate did NOT fire,
+    # so the ini patch reached disk.
+    assert result.exit_code == 1, result.stdout
+    ini = tmp_path / "Config" / "DefaultRemoteControl.ini"
+    assert ini.is_file()
+    text = ini.read_text()
+    assert "bEnforcePassphraseForRemoteClients=True" in text
+    assert (
+        '+Passphrases=(Identifier="simul",Passphrase='
+        '"5f4dcc3b5aa765d61d8327deb882cf99")'
+    ) in text
+    # The JSON payload signals passphrase enablement (without leaking the
+    # hash itself — it lives in the ini, not the response).
+    payload = json.loads(result.stdout)
+    assert payload["passphrase_enabled"] is True
+
+
+def test_setup_rejects_non_ascii_passphrase_with_actionable_message(
+    tmp_path: Path,
+) -> None:
+    """UE's FMD5::HashAnsiString narrows wide chars before hashing, so a
+    non-ASCII passphrase would silently mismatch on UE's side. The CLI
+    must catch this at the encode step and refuse with a user-facing
+    message — not raise a raw UnicodeEncodeError stack trace."""
+    uproject = _write_uproject(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "unreal",
+            "setup",
+            str(uproject),
+            "--bind",
+            "0.0.0.0",
+            "--allow-public",
+            "--passphrase",
+            "café",  # non-ASCII
+            "--no-launch",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code != 0, result.stdout
+    assert "ascii" in result.stdout.lower()
+    # Should NOT be a raw exception traceback.
+    assert "Traceback" not in result.stdout
+    assert not (tmp_path / "Config" / "DefaultRemoteControl.ini").exists()
+
+
+# ---------------------------------------------------------------------------
 # `simul unreal exec` — trust UE's ReturnValue, render LogOutput as text.
 # Regression for the bug surfaced during the issue #44 live test, where a
 # plain `print("hello")` script returned exit 1 with the misleading message

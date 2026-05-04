@@ -30,18 +30,30 @@ REMOTE_CONTROL_SECTION = "/Script/RemoteControlCommon.RemoteControlSettings"
 
 REQUIRED_PLUGINS: Tuple[str, ...] = ("RemoteControl", "PythonScriptPlugin")
 
+# Identifier we stamp on simul-managed passphrase entries. UE doesn't use
+# this for matching (only the hashed Passphrase field is compared) — it's
+# purely for human bookkeeping in the project settings UI and lets us
+# write the same +Passphrases line on re-runs without duplicating.
+PASSPHRASE_IDENTIFIER = "simul"
+
 
 def _required_ini_values(
     port: int,
     *,
     bind: Optional[str] = None,
     websocket_port: Optional[int] = None,
+    passphrase_md5: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build the section-keyed values for ``DefaultRemoteControl.ini``.
 
     ``bind`` and ``websocket_port`` are written only when the caller supplies
     them — passing ``None`` leaves the corresponding setting untouched so we
     keep UE's default (loopback HTTP host, 30020 WebSocket port).
+
+    When ``passphrase_md5`` is supplied, also pin
+    ``bEnforcePassphraseForRemoteClients=True`` so the gate is explicitly
+    on (UE's C++ default is True too, but writing it makes the operator's
+    intent visible in the ini).
     """
     values = {
         "bAutoStartWebServer": "True",
@@ -54,7 +66,23 @@ def _required_ini_values(
         values["RemoteControlHttpServerHostname"] = bind
     if websocket_port is not None:
         values["RemoteControlWebSocketServerPort"] = str(websocket_port)
+    if passphrase_md5 is not None:
+        values["bEnforcePassphraseForRemoteClients"] = "True"
     return values
+
+
+def _passphrase_array_line(passphrase_md5: str) -> str:
+    """Build the UE config-array entry for the simul-managed passphrase.
+
+    UE's TArray<FRCPassphrase> Passphrases takes one ``+Passphrases=...``
+    line per element. The Identifier is for human bookkeeping; only the
+    Passphrase hash is checked at request time
+    (WebRemoteControlInternalUtils::CheckPassphrase).
+    """
+    return (
+        f'+Passphrases=(Identifier="{PASSPHRASE_IDENTIFIER}",'
+        f'Passphrase="{passphrase_md5}")'
+    )
 
 
 @dataclass
@@ -142,6 +170,7 @@ def patch_remote_control_ini(
     *,
     bind: Optional[str] = None,
     websocket_port: Optional[int] = None,
+    passphrase_md5: Optional[str] = None,
 ) -> PatchResult:
     """Ensure ``Config/DefaultRemoteControl.ini`` has the required settings.
 
@@ -153,6 +182,13 @@ def patch_remote_control_ini(
     enable cross-host access). ``websocket_port`` writes
     ``RemoteControlWebSocketServerPort``. Either left as ``None`` means the
     setting is not touched, preserving UE's default.
+
+    ``passphrase_md5`` (when set) appends a single ``+Passphrases=(...)``
+    array entry under the same section AND pins
+    ``bEnforcePassphraseForRemoteClients=True``. Idempotent — re-running
+    with the same hash does not duplicate the line. ENABLING THIS BLOCKS
+    EVERY CLIENT (including simul-mcp itself) UNTIL THEY SEND THE
+    ``Passphrase: <md5>`` HTTP HEADER on every Remote Control request.
     """
     project_dir = Path(project_dir)
     config_dir = project_dir / "Config"
@@ -160,7 +196,10 @@ def patch_remote_control_ini(
     ini_path = config_dir / "DefaultRemoteControl.ini"
 
     required = _required_ini_values(
-        port, bind=bind, websocket_port=websocket_port
+        port,
+        bind=bind,
+        websocket_port=websocket_port,
+        passphrase_md5=passphrase_md5,
     )
     result = PatchResult(path=ini_path)
 
@@ -184,6 +223,20 @@ def patch_remote_control_ini(
         for key in missing:
             out_lines.append(f"{key}={required[key]}")
             result.added.append(key)
+
+    # +Passphrases is a UE config-array entry, not a key=value setting, so
+    # the standard rewriter doesn't touch it. Append idempotently — same hash
+    # on re-run is a no-op; a different hash adds an additional entry (UE
+    # accepts any matching passphrase, so this is non-destructive).
+    if passphrase_md5 is not None:
+        passphrase_line = _passphrase_array_line(passphrase_md5)
+        if passphrase_line not in (line.strip() for line in out_lines):
+            if not any(line.strip() == f"[{REMOTE_CONTROL_SECTION}]" for line in out_lines):
+                if out_lines and out_lines[-1].strip() != "":
+                    out_lines.append("")
+                out_lines.append(f"[{REMOTE_CONTROL_SECTION}]")
+            out_lines.append(passphrase_line)
+            result.added.append("Passphrases")
 
     if result.added or result.updated:
         result.changed = True
@@ -235,11 +288,13 @@ def ensure_remote_control_config(
     *,
     bind: Optional[str] = None,
     websocket_port: Optional[int] = None,
+    passphrase_md5: Optional[str] = None,
 ) -> SetupResult:
     """Run both patches; caller decides what to do with the result.
 
-    See :func:`patch_remote_control_ini` for the meaning of ``bind`` and
-    ``websocket_port`` — both default to ``None`` (untouched).
+    See :func:`patch_remote_control_ini` for the meaning of ``bind``,
+    ``websocket_port``, and ``passphrase_md5`` — all default to ``None``
+    (untouched).
     """
     uproject_path = Path(uproject_path)
     u = patch_uproject(uproject_path)
@@ -248,6 +303,7 @@ def ensure_remote_control_config(
         port=port,
         bind=bind,
         websocket_port=websocket_port,
+        passphrase_md5=passphrase_md5,
     )
     return SetupResult(uproject=u, ini=i)
 
