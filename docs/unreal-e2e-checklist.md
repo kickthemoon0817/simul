@@ -247,11 +247,15 @@ the summary is what matters to the parent conversation.
 - **Linux** requires `--engine-path` on `simul unreal setup` unless
   `UnrealEditor` is on `$PATH` or `$UE_ENGINE_PATH` / `$UNREAL_ENGINE_PATH`
   points at the engine root. The CLI refuses to guess.
-- **Coexisting ini sections.** `DefaultRemoteControl.ini` may contain both
-  `[/Script/RemoteControlCommon.RemoteControlSettings]` (from older
-  Epic docs) and `[/Script/RemoteControl.RemoteControlSettings]` (what
-  the patcher writes). This is safe — each binds to a different UE
-  settings class and coexistence is idempotent.
+- **Section name in `DefaultRemoteControl.ini`.** Only
+  `[/Script/RemoteControlCommon.RemoteControlSettings]` is honored at
+  runtime — `URemoteControlSettings` lives in the `RemoteControlCommon`
+  module, and UE looks the section up by exact module-path match.
+  `[/Script/RemoteControl.RemoteControlSettings]` (the path the patcher
+  used in versions prior to the issue #44 fix) is silently ignored, so
+  `bEnableRemotePythonExecution=True` written there has no effect even
+  though the file contains it. The other historical keys appeared to
+  work only because their C++ defaults already matched what we wanted.
 - **First viewport capture after editor start** can stall 3–5 s waiting
   for shaders; if `image_base64` comes back empty, retry once before
   declaring failure.

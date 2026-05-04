@@ -13,12 +13,12 @@ different.
 
 | Plugin name (`.uproject` key) | Ships with UE | Why simul needs it |
 |---|---|---|
-| `RemoteControl` | Yes — `Engine/Plugins/Runtime/RemoteControl/` since UE 4.27 | Hosts the HTTP server (default port 30010) and WebSocket server (default 30020) that simul talks to. Settings live under `[/Script/RemoteControl.RemoteControlSettings]`. |
+| `RemoteControl` | Yes — `Engine/Plugins/Runtime/RemoteControl/` since UE 4.27 | Hosts the HTTP server (default port 30010) and WebSocket server (default 30020) that simul talks to. Settings live under `[/Script/RemoteControlCommon.RemoteControlSettings]` — the class is in the `RemoteControlCommon` module, and UE looks the section up by exact module-path match. |
 | `PythonScriptPlugin` | Yes — `Engine/Plugins/Experimental/PythonScriptPlugin/` | Provides the embedded Python interpreter that the `exec` endpoint dispatches to when `bEnableRemotePythonExecution=True`. Without it, `mcp__simul__execute_unreal_script` (and the entire scripting layer) cannot run. |
 
 ## What gets written into `Config/DefaultRemoteControl.ini`
 
-Section: `[/Script/RemoteControl.RemoteControlSettings]`. Other sections
+Section: `[/Script/RemoteControlCommon.RemoteControlSettings]`. Other sections
 and comments in the file are preserved verbatim.
 
 | Key | Value | Purpose |

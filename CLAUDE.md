@@ -33,7 +33,7 @@ Phrases like "use unreal", "open my UE project", "run simul on unreal",
    - Patches the `.uproject` to enable `RemoteControl` and `PythonScriptPlugin`
      (idempotent — only writes when something is missing or different).
    - Patches `Config/DefaultRemoteControl.ini` under
-     `[/Script/RemoteControl.RemoteControlSettings]` with `bAutoStartWebServer`,
+     `[/Script/RemoteControlCommon.RemoteControlSettings]` with `bAutoStartWebServer`,
      `bAutoStartWebSocketServer`, `RemoteControlHttpServerPort`,
      `bRestrictServerAccess=True`, `bEnableRemotePythonExecution=True`.
    - Resolves the launcher per-OS (macOS: direct `UnrealEditor.app` binary
