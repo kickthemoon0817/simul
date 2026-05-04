@@ -173,7 +173,10 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     error_type="RuntimeError",
                 ).model_dump()
 
-            from ...adapters.unreal_runtime import UnrealRuntimeSession
+            from ...adapters.unreal_runtime import (
+                UnrealRuntimeSession,
+                _passphrase_to_md5,
+            )
 
             cfg = server.settings.unreal
             host = cfg.host
@@ -186,9 +189,18 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 # Always include the active port even if outside scan range
                 if active_port not in ports:
                     ports.insert(0, active_port)
+                # If a passphrase is configured, every probe must carry the
+                # header — otherwise a passphrase-enforcing editor returns
+                # 401 and discovery silently reports it as unreachable.
+                discovery_md5 = _passphrase_to_md5(cfg.passphrase)
                 for port in ports:
                     probe_tasks.append(
-                        UnrealRuntimeSession.probe_port(host, port, timeout=cfg.ping_timeout)
+                        UnrealRuntimeSession.probe_port(
+                            host,
+                            port,
+                            timeout=cfg.ping_timeout,
+                            passphrase_md5=discovery_md5,
+                        )
                     )
                 results = await _asyncio.gather(*probe_tasks, return_exceptions=True)
 

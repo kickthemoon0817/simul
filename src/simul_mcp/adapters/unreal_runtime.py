@@ -365,6 +365,8 @@ class UnrealRuntimeSession(LoggerMixin):
         host: str,
         port: int,
         timeout: float = 3.0,
+        *,
+        passphrase_md5: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Probe a single host:port for a running Remote Control API.
@@ -376,6 +378,11 @@ class UnrealRuntimeSession(LoggerMixin):
             host: Target hostname or IP.
             port: Target port.
             timeout: Connection timeout in seconds.
+            passphrase_md5: Optional MD5 hex; when set, injects
+                ``Passphrase: <md5>`` so discovery against a
+                passphrase-enforcing editor still succeeds. Pass
+                ``self._passphrase_md5`` from a configured session,
+                or compute via ``_passphrase_to_md5(plaintext)``.
 
         Returns:
             Dictionary with ``reachable``, ``host``, ``port``, ``latency_ms``,
@@ -384,6 +391,10 @@ class UnrealRuntimeSession(LoggerMixin):
         if not AIOHTTP_AVAILABLE:
             return {"reachable": False, "host": host, "port": port, "error": "aiohttp not available"}
 
+        headers = {"Content-Type": "application/json"}
+        if passphrase_md5:
+            headers["Passphrase"] = passphrase_md5
+
         base_url = f"http://{host}:{port}"
         t0 = time.monotonic()
         try:
@@ -391,7 +402,7 @@ class UnrealRuntimeSession(LoggerMixin):
             async with aiohttp.ClientSession(
                 base_url=base_url,
                 timeout=timeout_cfg,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
             ) as session:
                 async with session.get("/remote/info") as resp:
                     resp.raise_for_status()
