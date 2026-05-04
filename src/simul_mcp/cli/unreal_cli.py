@@ -741,13 +741,14 @@ def setup(
             "Plaintext passphrase to require on every Remote Control "
             "request. Hashed with MD5 (UE 5.x's FMD5::HashAnsiString) and "
             "written to the ini's +Passphrases array, plus pins "
-            "bEnforcePassphraseForRemoteClients=True. CRITICAL: enabling "
-            "this BLOCKS every Remote Control client — including simul-mcp "
-            "itself, which does not yet send the Passphrase HTTP header — "
-            "until they're updated to send 'Passphrase: <md5>' on each "
-            "request. Most useful with --bind <non-loopback> as a layer-2 "
-            "hardening on top of the IP allowlist; --bind alone is enough "
-            "for trusted-LAN setups."
+            "bEnforcePassphraseForRemoteClients=True. To let simul-mcp "
+            "itself talk to the resulting editor, set the matching "
+            "plaintext (or MD5 hex) on the client side via the "
+            "SIMUL_UNREAL__PASSPHRASE env var or .env — simul-mcp will "
+            "then attach 'Passphrase: <md5>' to every request. Most "
+            "useful with --bind <non-loopback> as a layer-2 hardening on "
+            "top of the IP allowlist; --bind alone is enough for trusted-"
+            "LAN setups."
         ),
     ),
     launch: bool = typer.Option(True, "--launch/--no-launch", help="Launch the editor after configuring"),

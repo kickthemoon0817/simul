@@ -99,13 +99,12 @@ widen the trust radius.
   `bEnforcePassphraseForRemoteClients=True`. The CLI refuses
   `--passphrase` without a non-loopback `--bind` because over loopback
   the IP allowlist already blocks remote access — turning passphrase on
-  there would only break clients with no security gain. **CRITICAL:
-  enabling `--passphrase` blocks every Remote Control client — including
-  simul-mcp itself, which does not yet send the `Passphrase` HTTP
-  header — until they're updated to send `Passphrase: <md5_hex>` on
-  every request. Treat as opt-in for users running their own non-simul
-  clients (curl scripts, custom tooling) until simul-mcp client-side
-  passphrase support lands.**
+  there would only break clients with no security gain. To make
+  simul-mcp's own Remote Control calls work against a passphrase-enabled
+  editor, set the matching plaintext (or pre-computed MD5 hex) on the
+  client side via the `SIMUL_UNREAL__PASSPHRASE` environment variable
+  (or in `.env`). simul-mcp's `UnrealRuntimeSession` then attaches
+  `Passphrase: <md5>` to every Remote Control request automatically.
 
 When the user asks for cross-host UE control, ask first: *"Is the
 network behind a firewall, or are you OK exposing arbitrary Python
