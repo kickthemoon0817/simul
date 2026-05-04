@@ -404,6 +404,33 @@ def test_patch_default_engine_ini_updates_in_place(tmp_path: Path) -> None:
     assert text.count("DefaultBindAddress=") == 1
 
 
+def test_patch_default_engine_ini_section_exists_key_absent(
+    tmp_path: Path,
+) -> None:
+    """Realistic operator scenario: DefaultEngine.ini already has the
+    [HTTPServer.Listeners] section with other keys (e.g. listener-port
+    overrides set by another tool), but DefaultBindAddress is absent.
+    The patcher must add the key inside the existing section, NOT
+    duplicate the header."""
+    config_dir = tmp_path / "Config"
+    config_dir.mkdir()
+    (config_dir / "DefaultEngine.ini").write_text(
+        "[HTTPServer.Listeners]\n"
+        "ListenerPort=8080\n",
+        encoding="utf-8",
+    )
+
+    result = patch_default_engine_ini(tmp_path, bind="0.0.0.0")
+
+    text = (config_dir / "DefaultEngine.ini").read_text()
+    # Existing key preserved, new key added.
+    assert "ListenerPort=8080" in text
+    assert "DefaultBindAddress=0.0.0.0" in text
+    # Section header appears exactly once — no duplication.
+    assert text.count("[HTTPServer.Listeners]") == 1
+    assert "DefaultBindAddress" in result.added
+
+
 def test_patch_default_engine_ini_preserves_unrelated_sections(
     tmp_path: Path,
 ) -> None:

@@ -719,10 +719,15 @@ def setup(
         None,
         "--bind",
         help=(
-            "Override RemoteControlHttpServerHostname. Leave unset to keep "
-            "UE's default (typically loopback). Pass an interface IP or "
-            "0.0.0.0 to enable cross-host access — combine with --allow-public "
-            "for non-loopback binds."
+            "Set the HTTP listener bind address. Writes "
+            "[HTTPServer.Listeners] DefaultBindAddress in "
+            "Config/DefaultEngine.ini (UE reads HTTP bind from there, "
+            "not from URemoteControlSettings) and the matching "
+            "RemoteControlWebsocketServerBindAddress in "
+            "Config/DefaultRemoteControl.ini. Leave unset to keep UE's "
+            "default (typically loopback for HTTP). Pass an interface IP "
+            "or 0.0.0.0 to enable cross-host access — combine with "
+            "--allow-public for non-loopback binds."
         ),
     ),
     websocket_port: Optional[int] = typer.Option(
