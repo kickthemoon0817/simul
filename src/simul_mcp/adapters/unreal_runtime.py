@@ -499,36 +499,61 @@ class UnrealRuntimeSession(LoggerMixin):
         """
         Check connectivity to the Remote Control API.
 
+        ``connected`` reflects only that ``GET /remote/info`` returned
+        successfully. Engine version and project name are best-effort
+        metadata — they may be empty on UE versions that gate CDO function
+        calls (e.g. UE 5.3 rejects ``Default__KismetSystemLibrary`` and
+        ``Default__PythonScriptLibrary`` access via Remote Control with
+        "cannot be accessed remotely, check remote control project
+        settings"). Such failures must NOT flip ``connected`` to False —
+        the setup polling loop depends on this method to know when Remote
+        Control is up.
+
         Returns:
-            Dictionary with ``connected`` boolean and server info fields.
+            Dictionary with ``connected`` boolean. When connected, also
+            includes best-effort ``engine_version``, ``project_name``,
+            ``is_editor``, and per-probe ``warnings`` (any non-fatal
+            metadata-fetch errors).
         """
         try:
-            # /remote/info only returns HttpRoutes + ActivePreset in UE 5.7,
-            # so we use it purely as a connectivity check and fetch engine
-            # metadata via dedicated function calls.
             await self._http_get("/remote/info")
-            version_data = await self._call_function(
-                "/Script/Engine.Default__KismetSystemLibrary",
-                "GetEngineVersion",
-            )
-            project_result = await self._execute_python(
-                "unreal.SystemLibrary.get_game_name()",
-                mode="EvaluateStatement",
-            )
-            engine_version = version_data.get("ReturnValue", "")
-            project_name = project_result.get("CommandResult", "").strip("'\"")
-            return {
-                "connected": True,
-                "engine_version": engine_version,
-                "project_name": project_name,
-                "is_editor": True,
-            }
         except Exception as exc:
-            self.logger.warning("Health check failed: %s", exc)
+            self.logger.warning("Health check connectivity failed: %s", exc)
             return {
                 "connected": False,
                 "error": str(exc),
             }
+
+        warnings: List[str] = []
+        engine_version = ""
+        project_name = ""
+        try:
+            version_data = await self._call_function(
+                "/Script/Engine.Default__KismetSystemLibrary",
+                "GetEngineVersion",
+            )
+            engine_version = version_data.get("ReturnValue", "")
+        except Exception as exc:
+            warnings.append(f"engine_version unavailable: {exc}")
+
+        try:
+            project_result = await self._execute_python(
+                "unreal.SystemLibrary.get_game_name()",
+                mode="EvaluateStatement",
+            )
+            project_name = project_result.get("CommandResult", "").strip("'\"")
+        except Exception as exc:
+            warnings.append(f"project_name unavailable: {exc}")
+
+        result: Dict[str, Any] = {
+            "connected": True,
+            "engine_version": engine_version,
+            "project_name": project_name,
+            "is_editor": True,
+        }
+        if warnings:
+            result["warnings"] = warnings
+        return result
 
     async def get_engine_info(self) -> Dict[str, Any]:
         """
