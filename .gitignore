@@ -68,3 +68,6 @@ PROJECT_STRUCTURE_DETAILED.md
 # Logging
 logs/
 .codex/
+
+# Personal Claude Code notes — per-machine, never committed
+.claude.local.md
