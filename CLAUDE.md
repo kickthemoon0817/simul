@@ -102,7 +102,7 @@ widen the trust radius.
   there would only break clients with no security gain. To make
   simul-mcp's own Remote Control calls work against a passphrase-enabled
   editor, set the matching plaintext (or pre-computed MD5 hex) on the
-  client side via the `SIMUL_UNREAL__PASSPHRASE` environment variable
+  client side via the `UNREAL__PASSPHRASE` environment variable
   (or in `.env`). simul-mcp's `UnrealRuntimeSession` then attaches
   `Passphrase: <md5>` to every Remote Control request automatically.
 

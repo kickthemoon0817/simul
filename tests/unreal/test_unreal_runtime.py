@@ -2169,6 +2169,24 @@ class TestPassphraseHeader:
 
         assert "Passphrase" not in captured["headers"]
 
+    def test_unreal_config_reads_passphrase_from_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pinning regression for an iter4 doc-vs-loader bug that the live
+        verifier caught: docs claimed `SIMUL_UNREAL__PASSPHRASE` but
+        Settings has no env_prefix, so pydantic-settings actually reads
+        `UNREAL__PASSPHRASE` (matching the rest of the project's
+        `.env.example` convention). Lock the loader's behavior so the
+        documented env var name stays correct.
+
+        Settings() is instantiated directly (bypassing the get_settings
+        lru cache), so no cache management is needed.
+        """
+        monkeypatch.setenv("UNREAL__PASSPHRASE", "from-env")
+        from simul_mcp.config import Settings as _Settings
+        settings = _Settings()
+        assert settings.unreal.passphrase == "from-env"
+
     def test_probe_port_injects_passphrase_when_supplied(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

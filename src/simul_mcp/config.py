@@ -268,13 +268,13 @@ class UnrealConfig(BaseModel):
     # a pre-computed 32-character hex digest (we pass it through). Required
     # whenever the editor was started with --passphrase enabled —
     # without it the editor returns 401 "Given Passphrase is not correct!"
-    # Read from env var SIMUL_UNREAL__PASSPHRASE (or .env file).
+    # Read from env var UNREAL__PASSPHRASE (or .env file).
     passphrase: Optional[str] = Field(
         default=None,
         description=(
             "Plaintext passphrase or pre-hashed MD5 hex for UE Remote "
             "Control auth. None = client sends no Passphrase header. "
-            "Env: SIMUL_UNREAL__PASSPHRASE."
+            "Env: UNREAL__PASSPHRASE."
         ),
     )
 

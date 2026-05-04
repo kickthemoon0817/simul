@@ -744,7 +744,7 @@ def setup(
             "bEnforcePassphraseForRemoteClients=True. To let simul-mcp "
             "itself talk to the resulting editor, set the matching "
             "plaintext (or MD5 hex) on the client side via the "
-            "SIMUL_UNREAL__PASSPHRASE env var or .env — simul-mcp will "
+            "UNREAL__PASSPHRASE env var or .env — simul-mcp will "
             "then attach 'Passphrase: <md5>' to every request. Most "
             "useful with --bind <non-loopback> as a layer-2 hardening on "
             "top of the IP allowlist; --bind alone is enough for trusted-"
