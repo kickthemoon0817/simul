@@ -6,11 +6,34 @@ Remote Control API (HTTP on port 30010) or the embedded ``unreal`` Python module
 """
 
 import asyncio
+import hashlib
 import json
 import math
+import re
 import time
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
+
+# UE's FMD5 hex output is lowercase. Accept either case from configured
+# input and normalize. Anything that isn't a clean 32-char hex digest is
+# treated as plaintext and MD5-hashed (UE's FMD5::HashAnsiString).
+_HEX32_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+def _passphrase_to_md5(value: Optional[str]) -> Optional[str]:
+    """Return the lowercase MD5 hex UE expects in the Passphrase header.
+
+    Pass-through for already-hashed inputs (case-folded), MD5-hash for
+    plaintext. None in → None out (no header injection). Non-ASCII
+    plaintext raises UnicodeEncodeError to mirror UE's
+    FMD5::HashAnsiString narrowing — silently mismatching hashes are a
+    worse failure mode than a clean error.
+    """
+    if value is None:
+        return None
+    if _HEX32_RE.match(value):
+        return value.lower()
+    return hashlib.md5(value.encode("ascii", errors="strict")).hexdigest()
 
 try:
     import aiohttp
@@ -70,6 +93,11 @@ class UnrealRuntimeSession(LoggerMixin):
         self.retry_base_delay: float = cfg.retry_base_delay
         self.ping_timeout: float = cfg.ping_timeout
 
+        # Hash the configured passphrase once at construction. None means no
+        # header is injected — preserves the no-auth status quo for users
+        # who haven't enabled passphrase enforcement on the editor side.
+        self._passphrase_md5: Optional[str] = _passphrase_to_md5(cfg.passphrase)
+
         self._base_url: str = f"http://{self.host}:{self.port}"
         self._session: Optional[Any] = None  # aiohttp.ClientSession, lazily created
 
@@ -82,6 +110,20 @@ class UnrealRuntimeSession(LoggerMixin):
     # ------------------------------------------------------------------
     # HTTP helpers
     # ------------------------------------------------------------------
+
+    def _default_headers(self) -> Dict[str, str]:
+        """Build the static headers attached to every Remote Control request.
+
+        Always includes the JSON content-type. When a passphrase is
+        configured, also injects ``Passphrase: <md5>`` — UE 5.x's
+        ``WebRemoteControlInternalUtils::CheckPassphrase`` compares this
+        header verbatim against the hashes in
+        ``URemoteControlSettings::Passphrases``.
+        """
+        headers = {"Content-Type": "application/json"}
+        if self._passphrase_md5:
+            headers["Passphrase"] = self._passphrase_md5
+        return headers
 
     async def _ensure_http_session(self, timeout_override: Optional[float] = None) -> Any:
         """
@@ -113,7 +155,7 @@ class UnrealRuntimeSession(LoggerMixin):
             self._session = aiohttp.ClientSession(
                 base_url=self._base_url,
                 timeout=timeout_cfg,
-                headers={"Content-Type": "application/json"},
+                headers=self._default_headers(),
             )
         return self._session
 

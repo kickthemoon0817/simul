@@ -262,6 +262,22 @@ class UnrealConfig(BaseModel):
         le=30.0,
     )
 
+    # Auth (matches simul-mcp unreal setup --passphrase). When set, the
+    # Remote Control client sends a `Passphrase: <md5>` HTTP header on every
+    # request. Accepts either the raw plaintext (we MD5-hash it on send) or
+    # a pre-computed 32-character hex digest (we pass it through). Required
+    # whenever the editor was started with --passphrase enabled —
+    # without it the editor returns 401 "Given Passphrase is not correct!"
+    # Read from env var SIMUL_UNREAL__PASSPHRASE (or .env file).
+    passphrase: Optional[str] = Field(
+        default=None,
+        description=(
+            "Plaintext passphrase or pre-hashed MD5 hex for UE Remote "
+            "Control auth. None = client sends no Passphrase header. "
+            "Env: SIMUL_UNREAL__PASSPHRASE."
+        ),
+    )
+
     # Multi-instance discovery
     scan_port_start: int = Field(
         default=30010,

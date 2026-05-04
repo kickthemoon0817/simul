@@ -2002,3 +2002,78 @@ class TestUnrealRuntimeSessionPhase8:
 
         assert result["method"] == "auto_uv"
         assert result["triangle_count"] == 100
+
+
+# ---------------------------------------------------------------------------
+# Passphrase header support — closes the iter3 deferred work where simul-mcp
+# itself couldn't talk to a passphrase-enforcing UE editor.
+# ---------------------------------------------------------------------------
+
+
+class TestPassphraseHeader:
+    """`_passphrase_to_md5` + UnrealRuntimeSession._default_headers wiring."""
+
+    def test_md5_helper_returns_none_when_unset(self) -> None:
+        assert unreal_runtime._passphrase_to_md5(None) is None
+
+    def test_md5_helper_hashes_plaintext(self) -> None:
+        # md5("password") = 5f4dcc3b5aa765d61d8327deb882cf99 (well-known).
+        assert (
+            unreal_runtime._passphrase_to_md5("password")
+            == "5f4dcc3b5aa765d61d8327deb882cf99"
+        )
+
+    def test_md5_helper_passes_through_lowercase_hex(self) -> None:
+        h = "5f4dcc3b5aa765d61d8327deb882cf99"
+        assert unreal_runtime._passphrase_to_md5(h) == h
+
+    def test_md5_helper_normalizes_uppercase_hex_to_lowercase(self) -> None:
+        # Operator might paste a hash from a tool that uses uppercase hex
+        # (e.g. md5sum on some platforms). UE's FMD5 output is lowercase
+        # so we normalize to match.
+        assert (
+            unreal_runtime._passphrase_to_md5("5F4DCC3B5AA765D61D8327DEB882CF99")
+            == "5f4dcc3b5aa765d61d8327deb882cf99"
+        )
+
+    def test_md5_helper_rejects_non_ascii(self) -> None:
+        # UE's FMD5::HashAnsiString narrows wide chars before hashing,
+        # so a non-ASCII plaintext would silently produce a different
+        # hash on UE's side. Better to raise here than mismatch silently.
+        with pytest.raises(UnicodeEncodeError):
+            unreal_runtime._passphrase_to_md5("café")
+
+    def _make_session_with_passphrase(
+        self, monkeypatch: pytest.MonkeyPatch, passphrase: "str | None"
+    ) -> Any:
+        monkeypatch.setattr(unreal_runtime, "UNREAL_AVAILABLE", True)
+        monkeypatch.setattr(unreal_runtime, "AIOHTTP_AVAILABLE", True)
+        # UnrealConfig is a frozen pydantic BaseModel; build a fresh
+        # Settings with a tweaked unreal section.
+        from simul_mcp.config import UnrealConfig
+        settings = Settings(unreal=UnrealConfig(passphrase=passphrase))
+        return unreal_runtime.UnrealRuntimeSession(settings=settings)
+
+    def test_default_headers_omit_passphrase_when_unconfigured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = self._make_session_with_passphrase(monkeypatch, None)
+        headers = session._default_headers()
+        assert headers == {"Content-Type": "application/json"}
+
+    def test_default_headers_include_passphrase_md5_from_plaintext(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = self._make_session_with_passphrase(monkeypatch, "password")
+        headers = session._default_headers()
+        assert headers["Passphrase"] == "5f4dcc3b5aa765d61d8327deb882cf99"
+        assert headers["Content-Type"] == "application/json"
+
+    def test_default_headers_pass_through_prehashed_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Operator pre-computed the hash and stored that in env; client
+        # must not double-hash.
+        prehashed = "98264f6f4d06848183632e6a314112ed"  # md5("iter3-secret")
+        session = self._make_session_with_passphrase(monkeypatch, prehashed)
+        assert session._default_headers()["Passphrase"] == prehashed
