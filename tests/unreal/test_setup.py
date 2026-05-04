@@ -13,8 +13,10 @@ sys.path.insert(0, str(src_path))
 
 from simul_mcp.adapters.unreal_setup import (  # noqa: E402
     HEADLESS_FLAGS,
+    HTTP_LISTENERS_SECTION,
     REMOTE_CONTROL_SECTION,
     ensure_remote_control_config,
+    patch_default_engine_ini,
     patch_remote_control_ini,
     patch_uproject,
 )
@@ -163,12 +165,18 @@ def test_patch_ini_omits_bind_and_websocket_when_unset(tmp_path: Path) -> None:
     assert "RemoteControlWebSocketServerPort" not in text
 
 
-def test_patch_ini_writes_bind_when_set(tmp_path: Path) -> None:
-    """Cross-host enable: --bind writes RemoteControlHttpServerHostname."""
+def test_patch_ini_writes_bind_to_websocket_address_when_set(tmp_path: Path) -> None:
+    """--bind routes to RemoteControlWebsocketServerBindAddress (a real
+    URemoteControlSettings field). HTTP bind is NOT in this ini — UE
+    reads it from DefaultEngine.ini[HTTPServer.Listeners] instead, see
+    test_patch_default_engine_ini_writes_default_bind_address. The earlier
+    `RemoteControlHttpServerHostname` write was a silent no-op (field
+    doesn't exist on the CDO) and was removed in iter6."""
     result = patch_remote_control_ini(tmp_path, port=30010, bind="0.0.0.0")
     text = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
-    assert "RemoteControlHttpServerHostname=0.0.0.0" in text
-    assert "RemoteControlHttpServerHostname" in result.added
+    assert "RemoteControlWebsocketServerBindAddress=0.0.0.0" in text
+    assert "RemoteControlHttpServerHostname" not in text
+    assert "RemoteControlWebsocketServerBindAddress" in result.added
 
 
 def test_patch_ini_writes_websocket_port_when_set(tmp_path: Path) -> None:
@@ -259,15 +267,16 @@ def test_patch_ini_appends_second_passphrase_when_hash_differs(
 
 
 def test_patch_ini_updates_bind_when_value_differs(tmp_path: Path) -> None:
-    """Changing --bind updates the in-place value, doesn't duplicate it."""
+    """Changing --bind updates the in-place WS bind value (the real key
+    that lives on URemoteControlSettings)."""
     patch_remote_control_ini(tmp_path, port=30010, bind="127.0.0.1")
     result = patch_remote_control_ini(tmp_path, port=30010, bind="0.0.0.0")
     text = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
-    assert "RemoteControlHttpServerHostname=0.0.0.0" in text
-    assert "RemoteControlHttpServerHostname=127.0.0.1" not in text
-    assert "RemoteControlHttpServerHostname" in result.updated
+    assert "RemoteControlWebsocketServerBindAddress=0.0.0.0" in text
+    assert "RemoteControlWebsocketServerBindAddress=127.0.0.1" not in text
+    assert "RemoteControlWebsocketServerBindAddress" in result.updated
     # Exactly one occurrence — no duplicate keys appended.
-    assert text.count("RemoteControlHttpServerHostname=") == 1
+    assert text.count("RemoteControlWebsocketServerBindAddress=") == 1
 
 
 def test_patch_ini_noop_when_already_correct(tmp_path: Path) -> None:
@@ -346,3 +355,96 @@ def test_ensure_remote_control_config_runs_both_patches(tmp_path: Path) -> None:
     assert result.uproject.changed is True
     assert result.ini.changed is True
     assert (tmp_path / "Config" / "DefaultRemoteControl.ini").is_file()
+    # No --bind → engine_ini patch is not applied; DefaultEngine.ini stays
+    # untouched and the SetupResult reflects that.
+    assert result.engine_ini is None
+    assert not (tmp_path / "Config" / "DefaultEngine.ini").exists()
+
+
+# ---------------------------------------------------------------------------
+# patch_default_engine_ini — UE's HTTP listener reads the bind address from
+# DefaultEngine.ini[HTTPServer.Listeners] DefaultBindAddress, NOT from any
+# field on URemoteControlSettings (iter6 traced this through UE 5.x source
+# at HttpServerConfig.cpp:11-17 and HttpListener.cpp:62-92).
+# ---------------------------------------------------------------------------
+
+
+def test_patch_default_engine_ini_writes_default_bind_address(tmp_path: Path) -> None:
+    """Fresh-file write: creates Config/DefaultEngine.ini with the section
+    and DefaultBindAddress key."""
+    result = patch_default_engine_ini(tmp_path, bind="0.0.0.0")
+
+    text = (tmp_path / "Config" / "DefaultEngine.ini").read_text()
+    assert f"[{HTTP_LISTENERS_SECTION}]" in text
+    assert "DefaultBindAddress=0.0.0.0" in text
+    assert result.changed is True
+    assert "DefaultBindAddress" in result.added
+
+
+def test_patch_default_engine_ini_idempotent(tmp_path: Path) -> None:
+    """Re-running with the same bind value is a no-op."""
+    patch_default_engine_ini(tmp_path, bind="0.0.0.0")
+    before = (tmp_path / "Config" / "DefaultEngine.ini").read_text()
+
+    result = patch_default_engine_ini(tmp_path, bind="0.0.0.0")
+
+    assert result.changed is False
+    assert (tmp_path / "Config" / "DefaultEngine.ini").read_text() == before
+
+
+def test_patch_default_engine_ini_updates_in_place(tmp_path: Path) -> None:
+    """Changing bind updates the value, doesn't append a duplicate."""
+    patch_default_engine_ini(tmp_path, bind="127.0.0.1")
+    result = patch_default_engine_ini(tmp_path, bind="0.0.0.0")
+
+    text = (tmp_path / "Config" / "DefaultEngine.ini").read_text()
+    assert "DefaultBindAddress=0.0.0.0" in text
+    assert "DefaultBindAddress=127.0.0.1" not in text
+    assert "DefaultBindAddress" in result.updated
+    assert text.count("DefaultBindAddress=") == 1
+
+
+def test_patch_default_engine_ini_preserves_unrelated_sections(
+    tmp_path: Path,
+) -> None:
+    """Existing DefaultEngine.ini content is preserved verbatim — UE
+    projects routinely have many sections in this file (CoreRedirects,
+    Renderer, etc.) and we must not nuke them."""
+    config_dir = tmp_path / "Config"
+    config_dir.mkdir()
+    (config_dir / "DefaultEngine.ini").write_text(
+        "[CoreRedirects]\n+ClassRedirects=(OldName=\"X\",NewName=\"Y\")\n\n"
+        "[/Script/Engine.RendererSettings]\nr.Foo=42\n",
+        encoding="utf-8",
+    )
+
+    patch_default_engine_ini(tmp_path, bind="0.0.0.0")
+
+    text = (config_dir / "DefaultEngine.ini").read_text()
+    assert "[CoreRedirects]" in text
+    assert "+ClassRedirects=(OldName=\"X\",NewName=\"Y\")" in text
+    assert "[/Script/Engine.RendererSettings]" in text
+    assert "r.Foo=42" in text
+    assert f"[{HTTP_LISTENERS_SECTION}]" in text
+    assert "DefaultBindAddress=0.0.0.0" in text
+
+
+def test_ensure_remote_control_config_writes_engine_ini_when_bind_supplied(
+    tmp_path: Path,
+) -> None:
+    """ensure_remote_control_config wires the engine-ini patcher into the
+    aggregate result whenever --bind is supplied."""
+    uproject = _write_uproject(tmp_path, {"FileVersion": 3})
+
+    result = ensure_remote_control_config(uproject, port=30010, bind="0.0.0.0")
+
+    assert result.engine_ini is not None
+    assert result.engine_ini.changed is True
+    engine_text = (tmp_path / "Config" / "DefaultEngine.ini").read_text()
+    assert "DefaultBindAddress=0.0.0.0" in engine_text
+    # WS bind also routed through RC ini for symmetry.
+    rc_text = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
+    assert "RemoteControlWebsocketServerBindAddress=0.0.0.0" in rc_text
+    # The bogus iter1 key must not appear — it doesn't exist on UE's
+    # URemoteControlSettings CDO.
+    assert "RemoteControlHttpServerHostname" not in rc_text

@@ -114,7 +114,14 @@ def test_setup_public_bind_with_allow_public_proceeds(
     assert result.exit_code == 1, result.stdout
     ini = tmp_path / "Config" / "DefaultRemoteControl.ini"
     assert ini.is_file()
-    assert "RemoteControlHttpServerHostname=0.0.0.0" in ini.read_text()
+    # WS bind in RC ini (real URemoteControlSettings field).
+    assert "RemoteControlWebsocketServerBindAddress=0.0.0.0" in ini.read_text()
+    # HTTP bind in DefaultEngine.ini (per UE 5.x source — see iter6).
+    engine_ini = tmp_path / "Config" / "DefaultEngine.ini"
+    assert engine_ini.is_file()
+    text = engine_ini.read_text()
+    assert "[HTTPServer.Listeners]" in text
+    assert "DefaultBindAddress=0.0.0.0" in text
 
 
 def test_setup_loopback_bind_does_not_require_allow_public(
@@ -146,7 +153,10 @@ def test_setup_loopback_bind_does_not_require_allow_public(
     assert result.exit_code == 1, result.stdout
     ini = tmp_path / "Config" / "DefaultRemoteControl.ini"
     assert ini.is_file()
-    assert "RemoteControlHttpServerHostname=127.0.0.1" in ini.read_text()
+    assert "RemoteControlWebsocketServerBindAddress=127.0.0.1" in ini.read_text()
+    engine_ini = tmp_path / "Config" / "DefaultEngine.ini"
+    assert engine_ini.is_file()
+    assert "DefaultBindAddress=127.0.0.1" in engine_ini.read_text()
 
 
 # ---------------------------------------------------------------------------
