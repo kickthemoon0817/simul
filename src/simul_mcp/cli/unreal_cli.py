@@ -715,6 +715,21 @@ def setup(
     This is the one-call path that replaces the manual checklist of enabling
     ``RemoteControl`` / ``PythonScriptPlugin`` in the .uproject and editing
     ``Config/DefaultRemoteControl.ini`` before every simul session.
+
+    What gets enabled (the only two plugins required by simul):
+
+      * ``RemoteControl``       — UE's HTTP/WebSocket API server (the thing
+                                  simul talks to). Not the Marketplace
+                                  ``RemoteControlWebInterface`` browser UI,
+                                  which simul does NOT need.
+      * ``PythonScriptPlugin``  — embedded Python interpreter for the
+                                  remote ``exec`` endpoint. Required because
+                                  ``bEnableRemotePythonExecution=True``.
+
+    See ``docs/unreal-setup.md`` for the full disambiguation, including which
+    similarly-named plugins (PixelStreaming, Concert, Remote Control Presets,
+    Web Remote Control, Movie Render Queue Remote) are explicitly NOT
+    required and should not be enabled just because you're running simul.
     """
     uproject = uproject.expanduser().resolve()
     if not uproject.is_file() or uproject.suffix != ".uproject":

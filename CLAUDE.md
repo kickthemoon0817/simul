@@ -213,3 +213,40 @@ Implications:
 - The `simul-mcp` CLI exits non-zero when the parsed result has
   `success: false`. That's not an infrastructure failure — read the JSON
   payload.
+
+## Live-driven testing — when the machine has the runtime, use it
+
+simul has unit tests *and* a live tier (`@pytest.mark.isaac`,
+`@pytest.mark.unreal_live`, the Blender adapter, headless USD). The unit
+tier runs everywhere; the live tier is the only thing that actually
+proves the wire. **Whenever the machine has the corresponding runtime
+available, run the live tier — don't stop at unit-tests-passed.**
+
+How to detect "the machine has it":
+
+- **Isaac Sim** — local install at `~/isaac-sim-5.1.0/` (or
+  `$ISAAC_SIM_PATH`). Launcher is `isaac-sim.sh`. Live socket on 8226
+  (VS Code transport) and optional 8229 (bridge). If the binary exists
+  but isn't running, **start it in the background, poll until the port
+  listens, then run the live test**. Don't claim a fix works without it.
+- **Unreal Engine** — installed engines under `~/apps/unreal-*/` or
+  `~/UnrealEngine/`, with `Engine/Binaries/<OS>/UnrealEditor`. For
+  per-OS detection, also check `which UnrealEditor`. The live test
+  pattern is `simul unreal setup <copy of a template>.uproject --yes`
+  followed by the C1–C5 probes in `docs/unreal-e2e-checklist.md`.
+- **Blender** — `which blender` plus a connected runtime, otherwise
+  fall back to the headless USD path.
+
+Hard rules:
+
+- If the runtime is up (or can be brought up) and the change touches the
+  corresponding adapter or tools layer, the live test is mandatory before
+  reporting the change as working. Code-trace verification is a fallback
+  for "runtime not available", not a substitute.
+- For test targets that mutate project files (e.g. `simul unreal setup`
+  patches a `.uproject`), copy the project to `/tmp/<scratch>` first and
+  test against the copy. Never mutate user work as a side effect of
+  verification.
+- Always shut down anything you started: kill background Isaac Sim and
+  UE editors at the end of the session unless the user asked you to
+  leave them running.
