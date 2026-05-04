@@ -250,3 +250,47 @@ Hard rules:
 - Always shut down anything you started: kill background Isaac Sim and
   UE editors at the end of the session unless the user asked you to
   leave them running.
+
+## When simul MCP misbehaves — propose filing an issue
+
+When you're using simul (`mcp__simul__*` tools or the `simul-mcp` CLI)
+and hit something that looks like a real defect — wrong result,
+unhelpful error, missing capability, behavior that contradicts the docs
+or tool description, undocumented gotcha that cost the user time —
+**don't silently route around it**. Surface it.
+
+The right move:
+
+1. Diagnose enough to be confident it's a defect, not a misuse on your
+   end. Read the relevant code in `~/pt/simul/src/simul_mcp/` and write
+   down what you observed vs. what the docs / tool description claim.
+2. Tell the user: *"This looks like a bug in simul. Want me to file an
+   issue at https://github.com/kickthemoon0817/simul/issues?"* Wait for
+   explicit permission. Don't bundle the question with anything else.
+3. Only after the user says yes, file via `gh api repos/kickthemoon0817/simul/issues`
+   (because `gh issue create` and `gh issue view` error on this repo
+   with the Projects-classic deprecation). Use this body shape:
+   - **What** — one-sentence description, neutral wording
+   - **Reproduction** — the exact command or tool call with full inputs,
+     copy-pasteable
+   - **Expected** — what should have happened, citing the doc/tool
+     description if applicable
+   - **Observed** — what actually happened, including the verbatim error
+     payload
+   - **Environment** — `simul-mcp` version, backend (Isaac Sim/UE/Blender)
+     version, OS, anything that scopes the regression
+   - **What works** — bullets of related-but-functioning behavior so the
+     maintainer can localize the defect
+4. Reference the issue number in any subsequent workaround so the user
+   knows it's a tracked compromise, not a silent one.
+
+Hard rules:
+
+- Never file an issue without explicit user permission for *that* issue.
+  A blanket "yes file issues when you find them" earlier in the session
+  doesn't carry forward — re-ask each time.
+- Don't file for something you only suspect. Verify by reading the code
+  or running a minimal reproduction first.
+- Don't file for questions. Questions go directly to the user.
+- Never close, edit, or comment on an existing issue without permission
+  either — same rule, same reasoning.
