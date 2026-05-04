@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -528,8 +529,6 @@ def exec_script(
     # Don't use _parse_python_json here — that helper is for internal
     # callers whose scripts print exactly one JSON object; using it on
     # user `exec` would reject any plain print("hello").
-    from rich.markup import escape as rich_escape
-
     success = bool(raw_result.get("ReturnValue", False))
     log_output = raw_result.get("LogOutput") or []
     output_text = ""
