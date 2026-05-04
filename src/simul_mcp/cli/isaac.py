@@ -970,11 +970,14 @@ def list_extensions(
 # ---------------------------------------------------------------------------
 @app.command("enable-extension")
 def enable_extension(
-    extension_id: str = typer.Argument(..., help="Extension ID to enable (e.g. omni.physx)"),
+    extension_id: str = typer.Argument(
+        ...,
+        help="Extension name or fully qualified ID (e.g. 'omni.physx' or 'worv.env.sun-0.3.0')",
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """Enable an extension by ID in the running Isaac Sim instance."""
+    """Enable an extension by name/ID in the running Isaac Sim instance."""
     result = _run(_tools(host, port).enable_isaac_extension(extension_id=extension_id))
     if is_json_mode():
         emit(result)
@@ -990,11 +993,14 @@ def enable_extension(
 # ---------------------------------------------------------------------------
 @app.command("disable-extension")
 def disable_extension(
-    extension_id: str = typer.Argument(..., help="Extension ID to disable (e.g. omni.physx)"),
+    extension_id: str = typer.Argument(
+        ...,
+        help="Extension name or fully qualified ID (e.g. 'omni.physx' or 'worv.env.sun-0.3.0')",
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """Disable an extension by ID in the running Isaac Sim instance."""
+    """Disable an extension by name/ID in the running Isaac Sim instance."""
     result = _run(_tools(host, port).disable_isaac_extension(extension_id=extension_id))
     if is_json_mode():
         emit(result)
