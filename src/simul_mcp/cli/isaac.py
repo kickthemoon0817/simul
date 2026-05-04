@@ -216,7 +216,19 @@ def bridge_up(
         console.print(f"[red]{msg}[/red]")
         raise typer.Exit(1)
 
-    bridge_ok = asyncio.run(_probe_bridge())
+    # Code-reviewer HIGH from iter10: the bridge needs a frame or two
+    # to bind its TCP socket after the extension is enabled. A single
+    # immediate re-probe was flaky on the very happy path this command
+    # exists for. Poll up to ~3 s in 0.5 s steps.
+    async def _probe_bridge_with_retry(attempts: int = 6, delay: float = 0.5) -> bool:
+        for i in range(attempts):
+            if await _probe_bridge():
+                return True
+            if i < attempts - 1:
+                await asyncio.sleep(delay)
+        return False
+
+    bridge_ok = asyncio.run(_probe_bridge_with_retry())
     payload = {
         "action": "auto-enabled",
         "bridge_address": bridge_addr,
