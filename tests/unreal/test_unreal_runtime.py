@@ -234,6 +234,39 @@ class TestUnrealRuntimeSession:
         assert result["project_name"] == ""
         assert result["is_editor"] is True
 
+    def test_health_check_connected_when_metadata_calls_400(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: UE 5.3 gates Default__KismetSystemLibrary and
+        Default__PythonScriptLibrary access via Remote Control with 400.
+        Connectivity (`/remote/info`) still returns 200 — `connected` must
+        stay True so `simul unreal setup` can declare success. Metadata
+        fields go empty and warnings list the failures."""
+        session = self._make_session(monkeypatch)
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            # UE 5.3 default behavior: any CDO call via /remote/object/call
+            # returns 400 with "cannot be accessed remotely".
+            return FakeResponse(
+                {"errorMessage": "Object cannot be accessed remotely"},
+                status=400,
+            )
+
+        session._session = SmartFakeClientSession(
+            get_responses={"/remote/info": FakeResponse(REMOTE_INFO_PAYLOAD)},
+            put_fn=put_fn,
+        )
+
+        result = asyncio.run(session.health_check())
+
+        assert result["connected"] is True
+        assert result["engine_version"] == ""
+        assert result["project_name"] == ""
+        assert result["is_editor"] is True
+        assert "warnings" in result and len(result["warnings"]) == 2
+        assert any("engine_version" in w for w in result["warnings"])
+        assert any("project_name" in w for w in result["warnings"])
+
 
 # ---------------------------------------------------------------------------
 # Phase 1 session method tests
