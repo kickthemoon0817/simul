@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any, Dict
 
 import pytest
 from typer.testing import CliRunner
@@ -231,6 +232,64 @@ def test_setup_passphrase_with_public_bind_writes_md5_hash(
     # hash itself — it lives in the ini, not the response).
     payload = json.loads(result.stdout)
     assert payload["passphrase_enabled"] is True
+
+
+def test_session_factory_default_does_not_inject_passphrase(monkeypatch) -> None:
+    """Backward compat: every other `_session()` caller passes no
+    passphrase. The factory's `if passphrase is not None` guard must keep
+    those sessions header-free regardless of any env var leaking from the
+    test runner. Locks the guard so a refactor can't silently include
+    Passphrase in headers for callers that don't ask for it."""
+    monkeypatch.delenv("UNREAL__PASSPHRASE", raising=False)
+    session = unreal_cli._session(host="127.0.0.1", port=30010)
+    assert "Passphrase" not in session._default_headers()
+    assert session._passphrase_md5 is None
+
+
+def test_setup_polling_session_carries_passphrase_header(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Pinning regression for the iter4b finding: the setup poller used to
+    build its own UnrealRuntimeSession without forwarding --passphrase, so
+    a passphrase-enabled editor returned 401 on /remote/info and the
+    setup CLI timed out at --wait-timeout despite the editor being
+    healthy. Confirm the polling session now has the configured passphrase
+    so its _default_headers() includes the Passphrase header."""
+    uproject = _write_uproject(tmp_path)
+    captured_session: Dict[str, Any] = {}
+
+    async def _fake_poll(session, timeout, interval):
+        del timeout, interval
+        captured_session["session"] = session
+        return {"connected": True, "engine_version": "5.3.2", "project_name": ""}
+
+    monkeypatch.setattr(unreal_cli, "_poll_health", _fake_poll)
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "unreal",
+            "setup",
+            str(uproject),
+            "--bind",
+            "0.0.0.0",
+            "--allow-public",
+            "--passphrase",
+            "secret",
+            "--no-launch",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    session = captured_session["session"]
+    # The polling session must carry the MD5 of "secret" so its outgoing
+    # /remote/info request authenticates against a passphrase-enabled
+    # editor.
+    expected = "5ebe2294ecd0e0f08eab7690d2a6ee69"  # md5("secret")
+    assert session._passphrase_md5 == expected
+    assert session._default_headers().get("Passphrase") == expected
 
 
 def test_setup_rejects_non_ascii_passphrase_with_actionable_message(
