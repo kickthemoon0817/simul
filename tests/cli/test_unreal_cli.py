@@ -234,6 +234,18 @@ def test_setup_passphrase_with_public_bind_writes_md5_hash(
     assert payload["passphrase_enabled"] is True
 
 
+def test_session_factory_default_does_not_inject_passphrase(monkeypatch) -> None:
+    """Backward compat: every other `_session()` caller passes no
+    passphrase. The factory's `if passphrase is not None` guard must keep
+    those sessions header-free regardless of any env var leaking from the
+    test runner. Locks the guard so a refactor can't silently include
+    Passphrase in headers for callers that don't ask for it."""
+    monkeypatch.delenv("UNREAL__PASSPHRASE", raising=False)
+    session = unreal_cli._session(host="127.0.0.1", port=30010)
+    assert "Passphrase" not in session._default_headers()
+    assert session._passphrase_md5 is None
+
+
 def test_setup_polling_session_carries_passphrase_header(
     tmp_path: Path, monkeypatch
 ) -> None:
