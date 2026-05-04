@@ -233,6 +233,39 @@ def test_setup_passphrase_with_public_bind_writes_md5_hash(
     assert payload["passphrase_enabled"] is True
 
 
+def test_setup_rejects_non_ascii_passphrase_with_actionable_message(
+    tmp_path: Path,
+) -> None:
+    """UE's FMD5::HashAnsiString narrows wide chars before hashing, so a
+    non-ASCII passphrase would silently mismatch on UE's side. The CLI
+    must catch this at the encode step and refuse with a user-facing
+    message — not raise a raw UnicodeEncodeError stack trace."""
+    uproject = _write_uproject(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "unreal",
+            "setup",
+            str(uproject),
+            "--bind",
+            "0.0.0.0",
+            "--allow-public",
+            "--passphrase",
+            "café",  # non-ASCII
+            "--no-launch",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code != 0, result.stdout
+    assert "ascii" in result.stdout.lower()
+    # Should NOT be a raw exception traceback.
+    assert "Traceback" not in result.stdout
+    assert not (tmp_path / "Config" / "DefaultRemoteControl.ini").exists()
+
+
 # ---------------------------------------------------------------------------
 # `simul unreal exec` — trust UE's ReturnValue, render LogOutput as text.
 # Regression for the bug surfaced during the issue #44 live test, where a

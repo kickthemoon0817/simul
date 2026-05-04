@@ -240,6 +240,24 @@ def test_patch_ini_passphrase_omitted_does_not_touch_passphrase_keys(
     assert "bEnforcePassphraseForRemoteClients" not in text
 
 
+def test_patch_ini_appends_second_passphrase_when_hash_differs(
+    tmp_path: Path,
+) -> None:
+    """Documented behavior: a different passphrase hash on a subsequent
+    run appends an additional +Passphrases entry rather than overwriting.
+    UE accepts any matching entry per WebRemoteControlInternalUtils.cpp's
+    CheckPassphrase, so this is non-destructive multi-tenancy. Pin the
+    invariant so a future refactor can't silently break it."""
+    first = "5f4dcc3b5aa765d61d8327deb882cf99"   # md5("password")
+    second = "21232f297a57a5a743894a0e4a801fc3"  # md5("admin")
+    patch_remote_control_ini(tmp_path, port=30010, passphrase_md5=first)
+    patch_remote_control_ini(tmp_path, port=30010, passphrase_md5=second)
+    text = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
+    assert text.count("+Passphrases=") == 2
+    assert f'Passphrase="{first}"' in text
+    assert f'Passphrase="{second}"' in text
+
+
 def test_patch_ini_updates_bind_when_value_differs(tmp_path: Path) -> None:
     """Changing --bind updates the in-place value, doesn't duplicate it."""
     patch_remote_control_ini(tmp_path, port=30010, bind="127.0.0.1")

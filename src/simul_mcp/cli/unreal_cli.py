@@ -850,9 +850,25 @@ def setup(
                 raise typer.Exit(2)
             console.print(f"[red]{msg}[/red]")
             raise typer.Exit(2)
-        passphrase_md5 = hashlib.md5(
-            passphrase.encode("ascii", errors="strict")
-        ).hexdigest()
+        # UE's FMD5::HashAnsiString operates on the narrowed ANSI byte
+        # representation. A non-ASCII passphrase would silently produce a
+        # different hash on UE's side from what we compute here. Reject
+        # explicitly with an actionable message rather than leaking a
+        # raw UnicodeEncodeError stack trace.
+        try:
+            ascii_bytes = passphrase.encode("ascii", errors="strict")
+        except UnicodeEncodeError as exc:
+            msg = (
+                "--passphrase must be ASCII-only. UE's "
+                "FMD5::HashAnsiString narrows wide characters before "
+                f"hashing, so non-ASCII bytes silently mismatch. ({exc})"
+            )
+            if is_json_mode():
+                emit_error(msg, "InvalidArgument")
+                raise typer.Exit(2)
+            console.print(f"[red]{msg}[/red]")
+            raise typer.Exit(2)
+        passphrase_md5 = hashlib.md5(ascii_bytes).hexdigest()
 
     # Preview-only launch resolution so we can tell the user what WOULD happen.
     launch_plan: Optional[List[str]] = None
@@ -872,7 +888,12 @@ def setup(
             + (f"  ws port:    {websocket_port}\n" if websocket_port is not None else "")
             + (f"  [yellow]allow-public:[/yellow] yes\n" if allow_public else "")
             + (
-                f"  [yellow]passphrase:[/yellow] enabled (md5={passphrase_md5})\n"
+                # Don't echo the MD5 hash to the terminal — it's a credential
+                # equivalent (UE's CheckPassphrase compares the header verbatim
+                # against the stored hash). The hash necessarily lives in the
+                # project ini on disk; that's unavoidable. Leaking it to
+                # scrollback/CI logs is not.
+                "  [yellow]passphrase:[/yellow] enabled\n"
                 if passphrase_md5
                 else ""
             )
