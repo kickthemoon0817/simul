@@ -517,13 +517,37 @@ def exec_script(
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
 
-    parsed = session._parse_python_json(raw_result)
-    success = not parsed.get("error")
+    # UE's PythonScriptLibrary.ExecutePythonCommandEx returns:
+    #   ReturnValue: bool  — true iff the Python script ran without raising
+    #   CommandResult: str — error message when ReturnValue is False
+    #   LogOutput: [{Type, Output}, ...] — every print/log line from the script
+    # Trust ReturnValue for success. Render LogOutput's Info lines as the
+    # user-visible output. Don't use _parse_python_json here — that helper
+    # is for internal callers whose scripts print exactly one JSON object;
+    # using it on user `exec` would reject any plain print("hello").
+    success = bool(raw_result.get("ReturnValue", False))
+    log_output = raw_result.get("LogOutput") or []
+    output_text = "".join(
+        entry.get("Output", "")
+        for entry in log_output
+        if isinstance(entry, dict) and entry.get("Type") == "Info"
+    )
+    error_text = (
+        ""
+        if success
+        else str(raw_result.get("CommandResult") or "Python execution failed")
+    )
 
     if is_json_mode() and not raw:
-        parsed["success"] = success
-        parsed["raw"] = raw_result
-        print(json.dumps(parsed, default=str))
+        payload: Dict[str, Any] = {
+            "success": success,
+            "return_value": success,
+            "output": output_text,
+            "raw": raw_result,
+        }
+        if not success:
+            payload["error"] = error_text
+        print(json.dumps(payload, default=str))
         if not success:
             raise typer.Exit(1)
         return
@@ -535,13 +559,16 @@ def exec_script(
         return
 
     if success:
-        try:
-            formatted = json.dumps(parsed, indent=2, default=str)
-            console.print(Syntax(formatted, "json", theme="monokai"))
-        except Exception:
-            console.print(str(parsed))
+        if output_text:
+            # Strip a single trailing newline only (UE always appends one);
+            # preserve internal newlines so multiline scripts render cleanly.
+            if output_text.endswith("\n"):
+                output_text = output_text[:-1]
+            console.print(output_text)
+        else:
+            console.print("[dim]ok (no output)[/dim]")
     else:
-        console.print(f"[red]Error:[/red] {parsed.get('error', 'Unknown')}")
+        console.print(f"[red]Error:[/red] {error_text}")
         raise typer.Exit(1)
 
 

@@ -146,3 +146,132 @@ def test_setup_loopback_bind_does_not_require_allow_public(
     ini = tmp_path / "Config" / "DefaultRemoteControl.ini"
     assert ini.is_file()
     assert "RemoteControlHttpServerHostname=127.0.0.1" in ini.read_text()
+
+
+# ---------------------------------------------------------------------------
+# `simul unreal exec` — trust UE's ReturnValue, render LogOutput as text.
+# Regression for the bug surfaced during the issue #44 live test, where a
+# plain `print("hello")` script returned exit 1 with the misleading message
+# "No JSON output from Python execution" even though UE actually ran the
+# code successfully.
+# ---------------------------------------------------------------------------
+
+
+def _stub_session_factory(monkeypatch, raw_result):
+    """Replace unreal_cli._session with a stub returning the given raw_result.
+
+    The stub's _execute_python is an async function so the CLI's
+    asyncio.run(...) call works unchanged.
+    """
+
+    class _StubSession:
+        async def _execute_python(self, code, mode):  # noqa: D401
+            del code, mode
+            return raw_result
+
+    monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: _StubSession())
+
+
+def test_exec_plain_print_succeeds_and_renders_output(monkeypatch) -> None:
+    """`exec "print('hello')"` must report success and show 'hello'.
+
+    The script returns no JSON object — pre-fix this returned exit 1 with
+    "No JSON output from Python execution" because the CLI ran the result
+    through _parse_python_json (which is for internal callers).
+    """
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": True,
+            "LogOutput": [{"Type": "Info", "Output": "hello\n"}],
+            "CommandResult": "",
+        },
+    )
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "print('hello')"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert payload["return_value"] is True
+    assert payload["output"] == "hello\n"
+    assert "error" not in payload
+
+
+def test_exec_failed_python_reports_error_with_command_result(monkeypatch) -> None:
+    """A Python error path: ReturnValue=False, CommandResult holds the message."""
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": False,
+            "LogOutput": [],
+            "CommandResult": "NameError: name 'undef' is not defined",
+        },
+    )
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "undef"])
+
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["success"] is False
+    assert "NameError" in payload["error"]
+
+
+def test_exec_json_printing_script_still_works(monkeypatch) -> None:
+    """A script that prints a JSON literal must NOT be specially extracted —
+    the JSON object goes into `output` as plain text, not parsed-and-replaced.
+    Future-proofs against re-introducing the _parse_python_json regression.
+    """
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": True,
+            "LogOutput": [{"Type": "Info", "Output": '{"x": 1}\n'}],
+            "CommandResult": "",
+        },
+    )
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "print('{...}')"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert payload["output"] == '{"x": 1}\n'
+
+
+def test_exec_concatenates_multi_line_log_output(monkeypatch) -> None:
+    """Multiple Info log lines join in order; non-Info entries are ignored."""
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": True,
+            "LogOutput": [
+                {"Type": "Info", "Output": "line 1\n"},
+                {"Type": "Warning", "Output": "should be skipped\n"},
+                {"Type": "Info", "Output": "line 2\n"},
+            ],
+            "CommandResult": "",
+        },
+    )
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "print('multiline')"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["output"] == "line 1\nline 2\n"
+
+
+def test_exec_no_output_treated_as_success(monkeypatch) -> None:
+    """A script with no print/log lines but ReturnValue=True is success
+    with empty output (e.g. `x = 1` as a one-liner)."""
+    _stub_session_factory(
+        monkeypatch,
+        {"ReturnValue": True, "LogOutput": [], "CommandResult": ""},
+    )
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "x = 1"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert payload["output"] == ""
