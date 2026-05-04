@@ -31,14 +31,30 @@ REMOTE_CONTROL_SECTION = "/Script/RemoteControl.RemoteControlSettings"
 REQUIRED_PLUGINS: Tuple[str, ...] = ("RemoteControl", "PythonScriptPlugin")
 
 
-def _required_ini_values(port: int) -> Dict[str, str]:
-    return {
+def _required_ini_values(
+    port: int,
+    *,
+    bind: Optional[str] = None,
+    websocket_port: Optional[int] = None,
+) -> Dict[str, str]:
+    """Build the section-keyed values for ``DefaultRemoteControl.ini``.
+
+    ``bind`` and ``websocket_port`` are written only when the caller supplies
+    them — passing ``None`` leaves the corresponding setting untouched so we
+    keep UE's default (loopback HTTP host, 30020 WebSocket port).
+    """
+    values = {
         "bAutoStartWebServer": "True",
         "bAutoStartWebSocketServer": "True",
         "RemoteControlHttpServerPort": str(port),
         "bRestrictServerAccess": "True",
         "bEnableRemotePythonExecution": "True",
     }
+    if bind is not None:
+        values["RemoteControlHttpServerHostname"] = bind
+    if websocket_port is not None:
+        values["RemoteControlWebSocketServerPort"] = str(websocket_port)
+    return values
 
 
 @dataclass
@@ -120,19 +136,32 @@ def patch_uproject(uproject_path: Path) -> PatchResult:
     return result
 
 
-def patch_remote_control_ini(project_dir: Path, port: int = 30010) -> PatchResult:
+def patch_remote_control_ini(
+    project_dir: Path,
+    port: int = 30010,
+    *,
+    bind: Optional[str] = None,
+    websocket_port: Optional[int] = None,
+) -> PatchResult:
     """Ensure ``Config/DefaultRemoteControl.ini`` has the required settings.
 
     Idempotent: only rewrites when values are missing or different. Touches
     only keys inside the ``[/Script/RemoteControl.RemoteControlSettings]``
     section; other sections and comments are preserved verbatim.
+
+    ``bind`` writes ``RemoteControlHttpServerHostname`` (e.g. ``"0.0.0.0"`` to
+    enable cross-host access). ``websocket_port`` writes
+    ``RemoteControlWebSocketServerPort``. Either left as ``None`` means the
+    setting is not touched, preserving UE's default.
     """
     project_dir = Path(project_dir)
     config_dir = project_dir / "Config"
     config_dir.mkdir(parents=True, exist_ok=True)
     ini_path = config_dir / "DefaultRemoteControl.ini"
 
-    required = _required_ini_values(port)
+    required = _required_ini_values(
+        port, bind=bind, websocket_port=websocket_port
+    )
     result = PatchResult(path=ini_path)
 
     original_lines: List[str] = (
@@ -200,11 +229,26 @@ def _rewrite_ini_section(
     return out, touched
 
 
-def ensure_remote_control_config(uproject_path: Path, port: int = 30010) -> SetupResult:
-    """Run both patches; caller decides what to do with the result."""
+def ensure_remote_control_config(
+    uproject_path: Path,
+    port: int = 30010,
+    *,
+    bind: Optional[str] = None,
+    websocket_port: Optional[int] = None,
+) -> SetupResult:
+    """Run both patches; caller decides what to do with the result.
+
+    See :func:`patch_remote_control_ini` for the meaning of ``bind`` and
+    ``websocket_port`` — both default to ``None`` (untouched).
+    """
     uproject_path = Path(uproject_path)
     u = patch_uproject(uproject_path)
-    i = patch_remote_control_ini(uproject_path.parent, port=port)
+    i = patch_remote_control_ini(
+        uproject_path.parent,
+        port=port,
+        bind=bind,
+        websocket_port=websocket_port,
+    )
     return SetupResult(uproject=u, ini=i)
 
 
