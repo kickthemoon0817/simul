@@ -2782,7 +2782,10 @@ print('{marker}' + data)
                 f" {inner}, {outer}, {seg}, {seg}, origin)"
             )
         else:
-            return {"error": f"Unsupported primitive type: {primitive_type}"}
+            return {
+                "success": False,
+                "error": f"Unsupported primitive type: {primitive_type}",
+            }
 
         lx, ly, lz = location[0], location[1], location[2]
         code = (
@@ -3065,7 +3068,10 @@ print('{marker}' + data)
                 "mesh, ins_opts, sel)\n"
             )
         else:
-            return {"error": f"Unsupported topology operation: {operation}"}
+            return {
+                "success": False,
+                "error": f"Unsupported topology operation: {operation}",
+            }
 
         code = (
             "import unreal, json\n"
@@ -3463,7 +3469,10 @@ print('{marker}' + data)
                 "}))\n"
             )
         else:
-            return {"error": f"Unsupported target format: {target_format}"}
+            return {
+                "success": False,
+                "error": f"Unsupported target format: {target_format}",
+            }
 
         result = await self._execute_python(code)
         return self._parse_python_json(result)

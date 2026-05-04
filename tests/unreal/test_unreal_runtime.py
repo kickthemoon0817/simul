@@ -1960,6 +1960,54 @@ class TestUnrealRuntimeSessionPhase8:
         assert result["target_format"] == "dynamic_mesh"
         assert result["triangle_count"] == 200
 
+    # iter9: input-validation guards in three Unreal tools used to return
+    # only `{"error": "..."}` — no `success` key at all, which let MCP
+    # clients fall through `result.get("success", True)` and treat the
+    # error as success. Add `success: False` so error-checking is
+    # symmetric with the iter8 Isaac wrapper fix.
+
+    def test_generate_mesh_primitive_unsupported_type_returns_success_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bad primitive_type → success=False with descriptive error.
+        Input guard fires before any RC call, so no session mocking
+        needed."""
+        session = self._make_session(monkeypatch)
+        result = asyncio.run(
+            session.generate_mesh_primitive(primitive_type="not_a_real_type")
+        )
+        assert result["success"] is False
+        assert "Unsupported primitive type" in result["error"]
+        assert "not_a_real_type" in result["error"]
+
+    def test_edit_mesh_topology_unsupported_operation_returns_success_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bad operation → success=False with descriptive error."""
+        session = self._make_session(monkeypatch)
+        result = asyncio.run(
+            session.edit_mesh_topology(
+                mesh_path="/Game/Meshes/SM_X",
+                operation="bogus_op",
+            )
+        )
+        assert result["success"] is False
+        assert "Unsupported topology operation" in result["error"]
+        assert "bogus_op" in result["error"]
+
+    def test_convert_mesh_format_unsupported_target_returns_success_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bad target_format → success=False with descriptive error."""
+        session = self._make_session(monkeypatch)
+        result = asyncio.run(session.convert_mesh_format(
+            mesh_path="/Game/Meshes/SM_Body",
+            target_format="invalid_format",
+        ))
+        assert result["success"] is False
+        assert "Unsupported target format" in result["error"]
+        assert "invalid_format" in result["error"]
+
     def test_remesh_mesh_uniform(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """remesh_mesh returns new triangle counts."""
         session = self._make_session(monkeypatch)
