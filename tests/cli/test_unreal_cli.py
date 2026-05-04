@@ -240,15 +240,17 @@ def test_exec_json_printing_script_still_works(monkeypatch) -> None:
 
 
 def test_exec_concatenates_multi_line_log_output(monkeypatch) -> None:
-    """Multiple Info log lines join in order; non-Info entries are ignored."""
+    """Multiple Info log lines join in order; Warning/Error entries route
+    to their own streams instead of being silently dropped."""
     _stub_session_factory(
         monkeypatch,
         {
             "ReturnValue": True,
             "LogOutput": [
                 {"Type": "Info", "Output": "line 1\n"},
-                {"Type": "Warning", "Output": "should be skipped\n"},
+                {"Type": "Warning", "Output": "deprecated path\n"},
                 {"Type": "Info", "Output": "line 2\n"},
+                {"Type": "Error", "Output": "non-fatal err\n"},
             ],
             "CommandResult": "",
         },
@@ -259,6 +261,178 @@ def test_exec_concatenates_multi_line_log_output(monkeypatch) -> None:
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["output"] == "line 1\nline 2\n"
+    assert payload["warnings"] == "deprecated path\n"
+    assert payload["errors"] == "non-fatal err\n"
+
+
+def test_exec_warnings_and_errors_surface_separately(monkeypatch) -> None:
+    """unreal.log_warning and unreal.log_error must not be silently swallowed."""
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": True,
+            "LogOutput": [
+                {"Type": "Warning", "Output": "watch out\n"},
+                {"Type": "Error", "Output": "but kept going\n"},
+            ],
+            "CommandResult": "",
+        },
+    )
+
+    result = runner.invoke(
+        app, ["--json", "unreal", "exec", "unreal.log_warning('w'); unreal.log_error('e')"]
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert payload["output"] == ""
+    assert payload["warnings"] == "watch out\n"
+    assert payload["errors"] == "but kept going\n"
+
+
+def test_exec_returnvalue_missing_treated_as_failure(monkeypatch) -> None:
+    """Defensive: if UE returns a payload without ReturnValue, fail safely
+    rather than silently reporting success."""
+    _stub_session_factory(
+        monkeypatch,
+        {"LogOutput": [], "CommandResult": "weird payload"},
+    )
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "print('x')"])
+
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["success"] is False
+    assert payload["error"] == "weird payload"
+
+
+def test_exec_command_result_falls_back_when_empty(monkeypatch) -> None:
+    """A failure with no CommandResult must surface a default error message
+    rather than an empty string the user can't act on."""
+    _stub_session_factory(
+        monkeypatch,
+        {"ReturnValue": False, "LogOutput": [], "CommandResult": ""},
+    )
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "broken"])
+
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "Python execution failed"
+
+
+def test_exec_raw_mode_dumps_raw_result_unchanged(monkeypatch) -> None:
+    """--raw bypasses the new payload construction and dumps raw_result.
+    Pin this so the raw-flag branch can't silently regress."""
+    raw_result = {
+        "ReturnValue": True,
+        "LogOutput": [{"Type": "Info", "Output": "hi\n"}],
+        "CommandResult": "",
+        "extra_passthrough_field": 42,
+    }
+    _stub_session_factory(monkeypatch, raw_result)
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "--raw", "print('hi')"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload == raw_result
+
+
+def test_exec_human_mode_strips_single_trailing_newline(monkeypatch) -> None:
+    """Non-JSON mode: a single trailing newline appended by UE is stripped
+    so the output renders without a blank line. Internal newlines preserved.
+
+    CliRunner captures sys.stdout, but Rich's Console was bound to the
+    original sys.stdout at module-import time and bypasses the capture.
+    Stub console.print to a recorder so we can assert against what got
+    rendered.
+    """
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": True,
+            "LogOutput": [{"Type": "Info", "Output": "first\nsecond\n"}],
+            "CommandResult": "",
+        },
+    )
+    monkeypatch.setattr(unreal_cli, "is_json_mode", lambda: False)
+    captured: list[str] = []
+    monkeypatch.setattr(
+        unreal_cli.console,
+        "print",
+        lambda *args, **kwargs: captured.append(str(args[0]) if args else ""),
+    )
+
+    result = runner.invoke(app, ["unreal", "exec", "print('first\\nsecond')"])
+
+    assert result.exit_code == 0, result.output
+    # Exactly one call, with the trailing newline stripped from UE's output.
+    assert captured == ["first\nsecond"]
+
+
+def test_exec_human_mode_renders_warnings_and_errors_with_prefixes(
+    monkeypatch,
+) -> None:
+    """Non-JSON mode: Warning and Error log entries get visible prefixes so
+    a script that calls unreal.log_warning(...) doesn't lose them."""
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": True,
+            "LogOutput": [
+                {"Type": "Info", "Output": "ok\n"},
+                {"Type": "Warning", "Output": "deprecated\n"},
+                {"Type": "Error", "Output": "non-fatal\n"},
+            ],
+            "CommandResult": "",
+        },
+    )
+    monkeypatch.setattr(unreal_cli, "is_json_mode", lambda: False)
+    captured: list[str] = []
+    monkeypatch.setattr(
+        unreal_cli.console,
+        "print",
+        lambda *args, **kwargs: captured.append(str(args[0]) if args else ""),
+    )
+
+    result = runner.invoke(app, ["unreal", "exec", "print('ok')"])
+
+    assert result.exit_code == 0, result.output
+    # Three rendered lines: output, warnings block, errors block.
+    assert len(captured) == 3
+    assert captured[0] == "ok"
+    assert "warnings" in captured[1] and "deprecated" in captured[1]
+    assert "errors" in captured[2] and "non-fatal" in captured[2]
+
+
+def test_exec_human_mode_escapes_rich_markup_from_log_output(
+    monkeypatch,
+) -> None:
+    """A LogOutput Info entry containing Rich markup (e.g. literal '[red]')
+    must NOT be interpreted by Rich as styling — escape it."""
+    _stub_session_factory(
+        monkeypatch,
+        {
+            "ReturnValue": True,
+            "LogOutput": [{"Type": "Info", "Output": "[red]not red[/red]\n"}],
+            "CommandResult": "",
+        },
+    )
+    monkeypatch.setattr(unreal_cli, "is_json_mode", lambda: False)
+    captured: list[str] = []
+    monkeypatch.setattr(
+        unreal_cli.console,
+        "print",
+        lambda *args, **kwargs: captured.append(str(args[0]) if args else ""),
+    )
+
+    result = runner.invoke(app, ["unreal", "exec", "print('[red]not red[/red]')"])
+
+    assert result.exit_code == 0, result.output
+    # Brackets must be escaped so Rich renders them as literal text.
+    assert captured[0] == r"\[red]not red\[/red]"
 
 
 def test_exec_no_output_treated_as_success(monkeypatch) -> None:

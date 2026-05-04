@@ -520,18 +520,32 @@ def exec_script(
     # UE's PythonScriptLibrary.ExecutePythonCommandEx returns:
     #   ReturnValue: bool  — true iff the Python script ran without raising
     #   CommandResult: str — error message when ReturnValue is False
-    #   LogOutput: [{Type, Output}, ...] — every print/log line from the script
-    # Trust ReturnValue for success. Render LogOutput's Info lines as the
-    # user-visible output. Don't use _parse_python_json here — that helper
-    # is for internal callers whose scripts print exactly one JSON object;
-    # using it on user `exec` would reject any plain print("hello").
+    #   LogOutput: [{Type, Output}, ...] — every print/log line, where Type
+    #              is one of "Info" / "Warning" / "Error".
+    # Trust ReturnValue for success. Render Info / Warning / Error log
+    # entries separately so a script that calls unreal.log_warning(...)
+    # or unreal.log_error(...) doesn't silently lose its diagnostic output.
+    # Don't use _parse_python_json here — that helper is for internal
+    # callers whose scripts print exactly one JSON object; using it on
+    # user `exec` would reject any plain print("hello").
+    from rich.markup import escape as rich_escape
+
     success = bool(raw_result.get("ReturnValue", False))
     log_output = raw_result.get("LogOutput") or []
-    output_text = "".join(
-        entry.get("Output", "")
-        for entry in log_output
-        if isinstance(entry, dict) and entry.get("Type") == "Info"
-    )
+    output_text = ""
+    warnings_text = ""
+    errors_text = ""
+    for entry in log_output:
+        if not isinstance(entry, dict):
+            continue
+        t = entry.get("Type")
+        o = entry.get("Output", "")
+        if t == "Info":
+            output_text += o
+        elif t == "Warning":
+            warnings_text += o
+        elif t == "Error":
+            errors_text += o
     error_text = (
         ""
         if success
@@ -543,6 +557,8 @@ def exec_script(
             "success": success,
             "return_value": success,
             "output": output_text,
+            "warnings": warnings_text,
+            "errors": errors_text,
             "raw": raw_result,
         }
         if not success:
@@ -558,18 +574,29 @@ def exec_script(
             raise typer.Exit(1)
         return
 
-    if success:
-        if output_text:
-            # Strip a single trailing newline only (UE always appends one);
-            # preserve internal newlines so multiline scripts render cleanly.
-            if output_text.endswith("\n"):
-                output_text = output_text[:-1]
-            console.print(output_text)
-        else:
-            console.print("[dim]ok (no output)[/dim]")
-    else:
-        console.print(f"[red]Error:[/red] {error_text}")
+    # Human mode: render each stream prefixed and color-coded. Escape any
+    # Rich markup the script might have printed (e.g. a literal "[red]")
+    # so a malicious or accidental UE LogOutput entry can't inject styling
+    # into the user's terminal.
+    rendered_anything = False
+    if output_text:
+        text = output_text[:-1] if output_text.endswith("\n") else output_text
+        console.print(rich_escape(text))
+        rendered_anything = True
+    if warnings_text:
+        text = warnings_text[:-1] if warnings_text.endswith("\n") else warnings_text
+        console.print(f"[yellow]warnings:[/yellow]\n{rich_escape(text)}")
+        rendered_anything = True
+    if errors_text:
+        text = errors_text[:-1] if errors_text.endswith("\n") else errors_text
+        console.print(f"[red]errors:[/red]\n{rich_escape(text)}")
+        rendered_anything = True
+
+    if not success:
+        console.print(f"[red]Error:[/red] {rich_escape(error_text)}")
         raise typer.Exit(1)
+    if not rendered_anything:
+        console.print("[dim]ok (no output)[/dim]")
 
 
 # ---------------------------------------------------------------------------
