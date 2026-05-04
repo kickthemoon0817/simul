@@ -1439,10 +1439,15 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="list_isaac_extensions",
         description=(
-            "List all extensions registered in the running Isaac Sim instance. "
-            "Returns each extension's ID, version, and enabled status. "
-            "Use enabled_only=true to filter to active extensions, or search to "
-            "filter by extension ID substring."
+            "List extensions registered in the running Isaac Sim instance. "
+            "Returns each extension's ID (version-suffixed, e.g. "
+            "'worv.env.sun-0.3.0'), version, and enabled status. "
+            "IMPORTANT for LLM clients: the unfiltered list is large (tens of "
+            "thousands of characters) and will exceed typical per-tool-result "
+            "token caps. Always pass enabled_only=true (small, current state) "
+            "or search='<substring>' (e.g. search='worv') to scope the result. "
+            "Only call without filters when you have explicit reason to enumerate "
+            "every registered extension."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -1463,9 +1468,13 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="enable_isaac_extension",
         description=(
-            "Enable an extension by its ID in the running Isaac Sim instance. "
-            "The extension is enabled immediately. Use list_isaac_extensions "
-            "first to discover available extension IDs."
+            "Enable an extension immediately in the running Isaac Sim instance. "
+            "Accepts EITHER the bare canonical Kit extension name (e.g. "
+            "'worv.env.sun', 'omni.physx') OR the version-suffixed ID returned "
+            "by list_isaac_extensions (e.g. 'worv.env.sun-0.3.0'). The bare "
+            "name is preferred — it is what the underlying Kit "
+            "set_extension_enabled_immediate API takes and keeps callers "
+            "decoupled from the installed version."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=True
@@ -1482,9 +1491,12 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="disable_isaac_extension",
         description=(
-            "Disable an extension by its ID in the running Isaac Sim instance. "
-            "The extension is disabled immediately. Use list_isaac_extensions "
-            "first to check which extensions are currently enabled."
+            "Disable an extension immediately in the running Isaac Sim instance. "
+            "Accepts EITHER the bare canonical Kit extension name (e.g. "
+            "'worv.env.sun', 'omni.physx') OR the version-suffixed ID returned "
+            "by list_isaac_extensions (e.g. 'worv.env.sun-0.3.0'). The bare "
+            "name is preferred — it keeps callers decoupled from the installed "
+            "version."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=True,

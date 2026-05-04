@@ -144,7 +144,11 @@ class IsaacTools(LoggerMixin):
 
         try:
             data: Dict[str, Any] = json.loads(output)
-            data["success"] = True
+            # Default to success=True only if the script did not express its
+            # own domain-level success flag. This lets scripts surface
+            # domain failures (e.g. "not found") without the wrapper
+            # masking them as success.
+            data.setdefault("success", True)
             return data
         except json.JSONDecodeError as exc:
             return ErrorResponse(
@@ -3593,8 +3597,14 @@ class IsaacTools(LoggerMixin):
         """
         Enable an extension by its ID in the running Isaac Sim instance.
 
+        Accepts either the bare canonical extension name (e.g. "worv.env.sun")
+        — which is what ``omni.kit.app.IExtensionManager.set_extension_enabled_immediate``
+        natively takes — or the fully version-suffixed ID returned by
+        ``list_isaac_extensions`` (e.g. "worv.env.sun-0.3.0").
+
         Args:
-            extension_id: The extension name (e.g. "isaacsim.core.utils", "omni.physx").
+            extension_id: The extension name or fully qualified ID
+                (e.g. "isaacsim.core.utils", "omni.physx", "worv.env.sun-0.3.0").
 
         Returns:
             Dict with success status and extension info after enabling.
@@ -3608,21 +3618,29 @@ class IsaacTools(LoggerMixin):
             ext_manager = omni.kit.app.get_app().get_extension_manager()
             ext_manager.set_extension_enabled_immediate(ext_id, True)
 
-            # Verify the extension is now enabled
+            # Verify by matching on bare name or fully qualified ID — both are
+            # accepted by the Kit extension manager, but get_extensions() always
+            # returns the version-suffixed form in 'id' and the bare form in 'name'.
+            bare_query = ext_id.rsplit("-", 1)[0] if "-" in ext_id else ext_id
             found = False
             for ext in ext_manager.get_extensions():
-                eid = ext.get("id", "") or ext.get("name", "")
-                if eid == ext_id:
+                eid = ext.get("id", "")
+                ename = ext.get("name", "")
+                if ext_id in (eid, ename) or bare_query == ename:
                     found = True
                     print(json.dumps({{
-                        "extension_id": ext_id,
+                        "extension_id": eid or ename,
+                        "name": ename,
                         "enabled": ext.get("enabled", False),
                         "version": ext.get("version", ""),
                     }}))
                     break
 
             if not found:
-                print(json.dumps({{"error": "Extension not found: " + ext_id}}))
+                print(json.dumps({{
+                    "success": False,
+                    "error": "Extension not found: " + ext_id,
+                }}))
         """)
         return await self._execute_json_script(script)
 
@@ -4603,8 +4621,14 @@ class IsaacTools(LoggerMixin):
         """
         Disable an extension by its ID in the running Isaac Sim instance.
 
+        Accepts either the bare canonical extension name (e.g. "worv.env.sun")
+        — which is what ``omni.kit.app.IExtensionManager.set_extension_enabled_immediate``
+        natively takes — or the fully version-suffixed ID returned by
+        ``list_isaac_extensions`` (e.g. "worv.env.sun-0.3.0").
+
         Args:
-            extension_id: The extension name (e.g. "isaacsim.core.utils", "omni.physx").
+            extension_id: The extension name or fully qualified ID
+                (e.g. "isaacsim.core.utils", "omni.physx", "worv.env.sun-0.3.0").
 
         Returns:
             Dict with success status and extension info after disabling.
@@ -4618,20 +4642,28 @@ class IsaacTools(LoggerMixin):
             ext_manager = omni.kit.app.get_app().get_extension_manager()
             ext_manager.set_extension_enabled_immediate(ext_id, False)
 
-            # Verify the extension is now disabled
+            # Verify by matching on bare name or fully qualified ID — both are
+            # accepted by the Kit extension manager, but get_extensions() always
+            # returns the version-suffixed form in 'id' and the bare form in 'name'.
+            bare_query = ext_id.rsplit("-", 1)[0] if "-" in ext_id else ext_id
             found = False
             for ext in ext_manager.get_extensions():
-                eid = ext.get("id", "") or ext.get("name", "")
-                if eid == ext_id:
+                eid = ext.get("id", "")
+                ename = ext.get("name", "")
+                if ext_id in (eid, ename) or bare_query == ename:
                     found = True
                     print(json.dumps({{
-                        "extension_id": ext_id,
+                        "extension_id": eid or ename,
+                        "name": ename,
                         "enabled": ext.get("enabled", False),
                         "version": ext.get("version", ""),
                     }}))
                     break
 
             if not found:
-                print(json.dumps({{"error": "Extension not found: " + ext_id}}))
+                print(json.dumps({{
+                    "success": False,
+                    "error": "Extension not found: " + ext_id,
+                }}))
         """)
         return await self._execute_json_script(script)
