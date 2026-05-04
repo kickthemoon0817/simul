@@ -990,6 +990,21 @@ def setup(
                 "added": patch.ini.added,
                 "updated": patch.ini.updated,
             },
+            # engine_ini is populated by ensure_remote_control_config
+            # only when --bind was supplied (HTTP bind lives in
+            # Config/DefaultEngine.ini, separate from the RC ini).
+            # Emit it as None when not patched so callers can tell the
+            # difference between "we touched DefaultEngine.ini" and
+            # "we did not".
+            "engine_ini": (
+                {
+                    "changed": patch.engine_ini.changed,
+                    "added": patch.engine_ini.added,
+                    "updated": patch.engine_ini.updated,
+                }
+                if patch.engine_ini is not None
+                else None
+            ),
         },
         "launched": launched,
         "launch_pid": pid,
