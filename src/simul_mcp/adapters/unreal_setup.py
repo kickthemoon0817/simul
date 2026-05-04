@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-REMOTE_CONTROL_SECTION = "/Script/RemoteControl.RemoteControlSettings"
+REMOTE_CONTROL_SECTION = "/Script/RemoteControlCommon.RemoteControlSettings"
 
 REQUIRED_PLUGINS: Tuple[str, ...] = ("RemoteControl", "PythonScriptPlugin")
 
@@ -146,7 +146,7 @@ def patch_remote_control_ini(
     """Ensure ``Config/DefaultRemoteControl.ini`` has the required settings.
 
     Idempotent: only rewrites when values are missing or different. Touches
-    only keys inside the ``[/Script/RemoteControl.RemoteControlSettings]``
+    only keys inside the ``[/Script/RemoteControlCommon.RemoteControlSettings]``
     section; other sections and comments are preserved verbatim.
 
     ``bind`` writes ``RemoteControlHttpServerHostname`` (e.g. ``"0.0.0.0"`` to
