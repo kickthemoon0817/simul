@@ -151,3 +151,27 @@ Implications:
   when changing this plugin's marketplace metadata (description, keywords,
   category, source repo, or owner). Such changes go through that repo's
   own PR flow.
+
+## Workflow gotchas
+
+- `main` is branch-protected — direct push is rejected. All changes go
+  through PRs (`gh pr create … && gh pr merge <N> --merge --delete-branch`).
+- `gh issue view <N>` errors on this repo with the Projects-classic
+  deprecation; use `gh api repos/kickthemoon0817/simul/issues/<N>` instead.
+- `pytest tests/ -m "not isaac and not unreal_live"` has 16 pre-existing
+  failures on `main`, all `'FakeFastMCP' object has no attribute
+  'add_middleware'`. Re-run on `main` to confirm new failures aren't part
+  of that set before debugging.
+- The simul MCP server in a running Claude Code session does **not**
+  hot-reload — Python loads source at process start, edits don't
+  propagate. To live-verify a `simul_mcp` source change, run the
+  editable-installed `simul-mcp` CLI as a fresh subprocess (it picks up
+  edits via `pip install -e .`).
+- `_execute_json_script` in `src/simul_mcp/mcp/tools/isaac_tools.py` wraps
+  script JSON with `data.setdefault("success", True)`. To surface a domain
+  failure, the inner script must explicitly emit
+  `{"success": false, "error": "..."}` — otherwise the wrapper marks it
+  true.
+- The `simul-mcp` CLI exits non-zero when the parsed result has
+  `success: false`. That's not an infrastructure failure — read the JSON
+  payload.
