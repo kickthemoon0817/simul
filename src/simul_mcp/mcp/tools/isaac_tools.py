@@ -144,7 +144,11 @@ class IsaacTools(LoggerMixin):
 
         try:
             data: Dict[str, Any] = json.loads(output)
-            data["success"] = True
+            # Default to success=True only if the script did not express its
+            # own domain-level success flag. This lets scripts surface
+            # domain failures (e.g. "not found") without the wrapper
+            # masking them as success.
+            data.setdefault("success", True)
             return data
         except json.JSONDecodeError as exc:
             return ErrorResponse(
@@ -3633,7 +3637,10 @@ class IsaacTools(LoggerMixin):
                     break
 
             if not found:
-                print(json.dumps({{"error": "Extension not found: " + ext_id}}))
+                print(json.dumps({{
+                    "success": False,
+                    "error": "Extension not found: " + ext_id,
+                }}))
         """)
         return await self._execute_json_script(script)
 
@@ -4654,6 +4661,9 @@ class IsaacTools(LoggerMixin):
                     break
 
             if not found:
-                print(json.dumps({{"error": "Extension not found: " + ext_id}}))
+                print(json.dumps({{
+                    "success": False,
+                    "error": "Extension not found: " + ext_id,
+                }}))
         """)
         return await self._execute_json_script(script)
