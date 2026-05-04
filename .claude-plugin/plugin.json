@@ -1,6 +1,6 @@
 {
   "name": "simul",
-  "version": "0.0.21",
+  "version": "0.0.22",
   "description": "3D simulation and DCC skills — scene setup, physics, materials, camera, scripting, and headless workflows for Isaac Sim, Unreal Engine, Blender, and USD",
   "author": {
     "name": "khemoo",
