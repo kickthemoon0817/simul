@@ -62,13 +62,79 @@ def _required_ini_values(
         "bRestrictServerAccess": "True",
         "bEnableRemotePythonExecution": "True",
     }
+    # NOTE: HTTP bind hostname does NOT live on URemoteControlSettings —
+    # iter6 traced it to FHttpListenerConfig.BindAddress, populated from
+    # GEngineIni's [HTTPServer.Listeners] DefaultBindAddress. The
+    # `RemoteControlHttpServerHostname` key earlier patches wrote here was
+    # a silent no-op (the field doesn't exist on the URemoteControlSettings
+    # CDO). HTTP bind is now patched via `patch_default_engine_ini` below.
+    # WebSocket bind, however, IS a real RemoteControlSettings field, so
+    # we route the same `bind` value through it here for symmetry — users
+    # who pass --bind 127.0.0.1 get loopback on both HTTP and WS.
     if bind is not None:
-        values["RemoteControlHttpServerHostname"] = bind
+        values["RemoteControlWebsocketServerBindAddress"] = bind
     if websocket_port is not None:
         values["RemoteControlWebSocketServerPort"] = str(websocket_port)
     if passphrase_md5 is not None:
         values["bEnforcePassphraseForRemoteClients"] = "True"
     return values
+
+
+HTTP_LISTENERS_SECTION = "HTTPServer.Listeners"
+
+
+def patch_default_engine_ini(
+    project_dir: Path,
+    *,
+    bind: str,
+) -> "PatchResult":
+    """Patch ``Config/DefaultEngine.ini`` so UE's HTTP server actually binds
+    to ``bind``.
+
+    UE's RemoteControl HTTP server delegates to ``FHttpServerModule``,
+    whose listener reads ``[HTTPServer.Listeners] DefaultBindAddress``
+    from the engine ini (``GEngineIni`` → ``DefaultEngine.ini``). The
+    bind is *not* configurable via ``URemoteControlSettings``; iter6
+    traced this directly to UE 5.3 source at
+    ``HttpServerConfig.cpp:11-17`` and ``HttpListener.cpp:62-92``.
+
+    Idempotent: only rewrites when the value differs. Touches only the
+    ``[HTTPServer.Listeners]`` section; other sections preserved verbatim.
+    """
+    project_dir = Path(project_dir)
+    config_dir = project_dir / "Config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    ini_path = config_dir / "DefaultEngine.ini"
+
+    required = {"DefaultBindAddress": bind}
+    result = PatchResult(path=ini_path)
+
+    original_lines: List[str] = (
+        ini_path.read_text(encoding="utf-8").splitlines()
+        if ini_path.is_file()
+        else []
+    )
+
+    out_lines, touched = _rewrite_ini_section(
+        original_lines, HTTP_LISTENERS_SECTION, required, result
+    )
+
+    missing = [k for k in required if k not in touched]
+    if missing:
+        if not any(
+            line.strip() == f"[{HTTP_LISTENERS_SECTION}]" for line in out_lines
+        ):
+            if out_lines and out_lines[-1].strip() != "":
+                out_lines.append("")
+            out_lines.append(f"[{HTTP_LISTENERS_SECTION}]")
+        for key in missing:
+            out_lines.append(f"{key}={required[key]}")
+            result.added.append(key)
+
+    if result.added or result.updated:
+        result.changed = True
+        ini_path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    return result
 
 
 def _passphrase_array_line(passphrase_md5: str) -> str:
@@ -112,10 +178,18 @@ class SetupResult:
 
     uproject: PatchResult
     ini: PatchResult
+    # ``engine_ini`` is None when --bind was not supplied (we don't touch
+    # DefaultEngine.ini in that case). When --bind is set, this is the
+    # PatchResult for [HTTPServer.Listeners]'s DefaultBindAddress.
+    engine_ini: Optional[PatchResult] = None
 
     @property
     def changed(self) -> bool:
-        return self.uproject.changed or self.ini.changed
+        return (
+            self.uproject.changed
+            or self.ini.changed
+            or (self.engine_ini is not None and self.engine_ini.changed)
+        )
 
 
 def patch_uproject(uproject_path: Path) -> PatchResult:
@@ -178,10 +252,13 @@ def patch_remote_control_ini(
     only keys inside the ``[/Script/RemoteControlCommon.RemoteControlSettings]``
     section; other sections and comments are preserved verbatim.
 
-    ``bind`` writes ``RemoteControlHttpServerHostname`` (e.g. ``"0.0.0.0"`` to
-    enable cross-host access). ``websocket_port`` writes
-    ``RemoteControlWebSocketServerPort``. Either left as ``None`` means the
-    setting is not touched, preserving UE's default.
+    ``bind`` writes ``RemoteControlWebsocketServerBindAddress`` (real
+    UE field, controls WebSocket bind). The HTTP-side bind is NOT
+    configured here — it lives in ``Config/DefaultEngine.ini`` under
+    ``[HTTPServer.Listeners] DefaultBindAddress`` and is patched by
+    :func:`patch_default_engine_ini`. ``websocket_port`` writes
+    ``RemoteControlWebSocketServerPort``. Either left as ``None`` means
+    the setting is not touched, preserving UE's default.
 
     ``passphrase_md5`` (when set) appends a single ``+Passphrases=(...)``
     array entry under the same section AND pins
@@ -305,7 +382,15 @@ def ensure_remote_control_config(
         websocket_port=websocket_port,
         passphrase_md5=passphrase_md5,
     )
-    return SetupResult(uproject=u, ini=i)
+    # HTTP bind address lives in DefaultEngine.ini, not RemoteControl —
+    # see patch_default_engine_ini's docstring for the UE 5.x source
+    # trace. We only touch this file when --bind is supplied; otherwise
+    # UE's default (loopback) stays in effect and Engine.ini is left
+    # alone.
+    e: Optional[PatchResult] = None
+    if bind is not None:
+        e = patch_default_engine_ini(uproject_path.parent, bind=bind)
+    return SetupResult(uproject=u, ini=i, engine_ini=e)
 
 
 # ---------------------------------------------------------------------------

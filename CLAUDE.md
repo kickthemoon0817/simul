@@ -80,7 +80,14 @@ the editor and `simul-mcp` run on the same machine. Three opt-in flags
 exist for cross-host workflows; **don't use them speculatively** — they
 widen the trust radius.
 
-- `--bind <host>` — overrides `RemoteControlHttpServerHostname`. Pass
+- `--bind <host>` — sets the HTTP listener bind address in
+  `Config/DefaultEngine.ini` under `[HTTPServer.Listeners]` as
+  `DefaultBindAddress=<host>`, and the WebSocket bind address in
+  `Config/DefaultRemoteControl.ini` as
+  `RemoteControlWebsocketServerBindAddress=<host>`. (UE's HTTP bind
+  is NOT a `URemoteControlSettings` field — earlier versions wrote
+  the bogus `RemoteControlHttpServerHostname` key, which UE silently
+  ignored.) Pass
   `0.0.0.0` to accept connections from anywhere, or a specific interface
   IP to bind to one network. Omit for the safe loopback default.
 - `--websocket-port <int>` — overrides `RemoteControlWebSocketServerPort`
