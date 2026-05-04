@@ -47,9 +47,11 @@ Phrases like "use unreal", "open my UE project", "run simul on unreal",
    - Spawns the editor detached, then polls `unreal_health_check` up to
      `--wait-timeout` (default 90 s).
 
-   Useful flags: `--port` (default 30010), `--engine-path`, `--no-launch`
-   (config only — user already has the editor running), `--wait-timeout`,
-   `--poll-interval`.
+   Useful flags: `--port` (HTTP port, default 30010), `--engine-path`,
+   `--no-launch` (config only — user already has the editor running),
+   `--wait-timeout`, `--poll-interval`, `--bind`, `--websocket-port`,
+   `--allow-public` (the last three are for cross-host scenarios — see
+   below; ignore them for the common single-machine case).
 
 3. **If the editor was already running**, call `simul unreal setup <.uproject>
    --no-launch --yes` — this still patches config on disk (harmless when keys
@@ -68,6 +70,42 @@ Phrases like "use unreal", "open my UE project", "run simul on unreal",
 - If `simul unreal setup` exits non-zero, surface the actual error (plugins
   not enabled, Python execution disabled, port conflict, editor crashed).
   Don't pretend it worked.
+
+### Cross-host / remote access — only when the user actually needs it
+
+The default `simul unreal setup` configures Remote Control to bind to UE's
+default hostname (typically loopback), which is what you want when both
+the editor and `simul-mcp` run on the same machine. Three opt-in flags
+exist for cross-host workflows; **don't use them speculatively** — they
+widen the trust radius.
+
+- `--bind <host>` — overrides `RemoteControlHttpServerHostname`. Pass
+  `0.0.0.0` to accept connections from anywhere, or a specific interface
+  IP to bind to one network. Omit for the safe loopback default.
+- `--websocket-port <int>` — overrides `RemoteControlWebSocketServerPort`
+  (UE default 30020). Use only when running multiple UE editors on the
+  same host so their WebSocket endpoints don't collide. The HTTP-side
+  collision is already solved by `--port`.
+- `--allow-public` — required acknowledgment whenever `--bind` is
+  non-loopback. UE Remote Control runs **without authentication** and we
+  enable `bEnableRemotePythonExecution=True`, so a public bind exposes
+  arbitrary Python execution to anything on the network. The CLI refuses
+  a non-loopback `--bind` without this flag.
+
+When the user asks for cross-host UE control, ask first: *"Is the
+network behind a firewall, or are you OK exposing arbitrary Python
+execution to it?"* Only pass `--allow-public` after they confirm.
+Suggested invocation for trusted-LAN remote access:
+
+```
+simul unreal setup <.uproject> --bind 0.0.0.0 --allow-public --yes
+```
+
+For multi-instance on one host (no remote exposure), separate the ports:
+
+```
+simul unreal setup <.uproject> --port 30011 --websocket-port 30021 --yes
+```
 
 ## Project scope
 

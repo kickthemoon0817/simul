@@ -140,6 +140,57 @@ def test_patch_ini_preserves_unrelated_sections(tmp_path: Path) -> None:
     assert "bEnableRemotePythonExecution=True" in text
 
 
+def test_patch_ini_omits_bind_and_websocket_when_unset(tmp_path: Path) -> None:
+    """Default behavior: leave UE's defaults alone for hostname + WS port."""
+    patch_remote_control_ini(tmp_path, port=30010)
+    text = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
+    assert "RemoteControlHttpServerHostname" not in text
+    assert "RemoteControlWebSocketServerPort" not in text
+
+
+def test_patch_ini_writes_bind_when_set(tmp_path: Path) -> None:
+    """Cross-host enable: --bind writes RemoteControlHttpServerHostname."""
+    result = patch_remote_control_ini(tmp_path, port=30010, bind="0.0.0.0")
+    text = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
+    assert "RemoteControlHttpServerHostname=0.0.0.0" in text
+    assert "RemoteControlHttpServerHostname" in result.added
+
+
+def test_patch_ini_writes_websocket_port_when_set(tmp_path: Path) -> None:
+    """Multi-instance enable: --websocket-port writes the WS port override."""
+    result = patch_remote_control_ini(tmp_path, port=30010, websocket_port=30022)
+    text = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
+    assert "RemoteControlWebSocketServerPort=30022" in text
+    assert "RemoteControlWebSocketServerPort" in result.added
+
+
+def test_patch_ini_idempotent_with_bind_and_websocket_port(tmp_path: Path) -> None:
+    """Re-running with the same overrides is a no-op."""
+    patch_remote_control_ini(
+        tmp_path, port=30010, bind="0.0.0.0", websocket_port=30022
+    )
+    before = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
+
+    result = patch_remote_control_ini(
+        tmp_path, port=30010, bind="0.0.0.0", websocket_port=30022
+    )
+
+    assert result.changed is False
+    assert (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text() == before
+
+
+def test_patch_ini_updates_bind_when_value_differs(tmp_path: Path) -> None:
+    """Changing --bind updates the in-place value, doesn't duplicate it."""
+    patch_remote_control_ini(tmp_path, port=30010, bind="127.0.0.1")
+    result = patch_remote_control_ini(tmp_path, port=30010, bind="0.0.0.0")
+    text = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
+    assert "RemoteControlHttpServerHostname=0.0.0.0" in text
+    assert "RemoteControlHttpServerHostname=127.0.0.1" not in text
+    assert "RemoteControlHttpServerHostname" in result.updated
+    # Exactly one occurrence — no duplicate keys appended.
+    assert text.count("RemoteControlHttpServerHostname=") == 1
+
+
 def test_patch_ini_noop_when_already_correct(tmp_path: Path) -> None:
     config_dir = tmp_path / "Config"
     config_dir.mkdir()

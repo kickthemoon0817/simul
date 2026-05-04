@@ -625,6 +625,22 @@ async def _poll_health(session: UnrealRuntimeSession, timeout: float, interval: 
     return last
 
 
+def _is_loopback_bind(host: str) -> bool:
+    """Return True when ``host`` is a loopback or unspecified-loopback bind.
+
+    Anything else is treated as a network-exposed bind by the safety gate.
+    Conservative on purpose — better to make the user pass --allow-public
+    once than to silently expose remote Python execution.
+    """
+    if not host:
+        return True
+    h = host.strip().lower()
+    return (
+        h in {"localhost", "::1"}
+        or h.startswith("127.")
+    )
+
+
 @app.command("setup")
 def setup(
     uproject: Path = typer.Argument(..., help="Path to the .uproject file"),
@@ -633,6 +649,36 @@ def setup(
         None,
         "--engine-path",
         help="Unreal install root (contains Engine/). Usually auto-detected.",
+    ),
+    bind: Optional[str] = typer.Option(
+        None,
+        "--bind",
+        help=(
+            "Override RemoteControlHttpServerHostname. Leave unset to keep "
+            "UE's default (typically loopback). Pass an interface IP or "
+            "0.0.0.0 to enable cross-host access — combine with --allow-public "
+            "for non-loopback binds."
+        ),
+    ),
+    websocket_port: Optional[int] = typer.Option(
+        None,
+        "--websocket-port",
+        help=(
+            "Override RemoteControlWebSocketServerPort. Leave unset to keep "
+            "UE's default (30020). Use this when running multiple UE editors "
+            "on the same host so their WebSocket endpoints don't collide."
+        ),
+    ),
+    allow_public: bool = typer.Option(
+        False,
+        "--allow-public",
+        help=(
+            "Required acknowledgment when --bind is non-loopback. UE Remote "
+            "Control runs WITHOUT authentication and bEnableRemotePythonExecution "
+            "is True, so a public bind exposes arbitrary Python execution to "
+            "anything on the network. Pass this flag only after confirming the "
+            "trust radius (firewall, trusted LAN, etc.)."
+        ),
     ),
     launch: bool = typer.Option(True, "--launch/--no-launch", help="Launch the editor after configuring"),
     headless: bool = typer.Option(
@@ -679,6 +725,23 @@ def setup(
         console.print(f"[red]{msg}[/red]")
         raise typer.Exit(2)
 
+    # Safety gate: a non-loopback bind exposes UE Remote Control to the
+    # network. Since we also enable bEnableRemotePythonExecution=True, that
+    # means anyone reachable can run arbitrary Python in the editor. Force
+    # an explicit acknowledgment via --allow-public.
+    if bind is not None and not _is_loopback_bind(bind) and not allow_public:
+        msg = (
+            f"--bind {bind!r} would expose UE Remote Control (with "
+            f"bEnableRemotePythonExecution=True) to the network. Re-run with "
+            f"--allow-public to acknowledge the trust-radius implication, or "
+            f"pick a loopback bind (omit --bind, or pass 127.0.0.1)."
+        )
+        if is_json_mode():
+            emit_error(msg, "InvalidArgument")
+            raise typer.Exit(2)
+        console.print(f"[red]{msg}[/red]")
+        raise typer.Exit(2)
+
     # Preview-only launch resolution so we can tell the user what WOULD happen.
     launch_plan: Optional[List[str]] = None
     launch_plan_error: Optional[str] = None
@@ -693,7 +756,10 @@ def setup(
             f"[bold]simul unreal setup[/bold]\n"
             f"  project:    {uproject}\n"
             f"  port:       {port}\n"
-            f"  launch:     {'yes' if launch else 'no'}\n"
+            + (f"  bind:       {bind}\n" if bind is not None else "")
+            + (f"  ws port:    {websocket_port}\n" if websocket_port is not None else "")
+            + (f"  [yellow]allow-public:[/yellow] yes\n" if allow_public else "")
+            + f"  launch:     {'yes' if launch else 'no'}\n"
             + (f"  launch cmd: {' '.join(launch_plan)}\n" if launch_plan else "")
             + (f"  [yellow]launch issue:[/yellow] {launch_plan_error}\n" if launch_plan_error else ""),
             title="Plan",
@@ -708,7 +774,12 @@ def setup(
 
     # Patch config files.
     try:
-        patch = ensure_remote_control_config(uproject, port=port)
+        patch = ensure_remote_control_config(
+            uproject,
+            port=port,
+            bind=bind,
+            websocket_port=websocket_port,
+        )
     except Exception as exc:
         if is_json_mode():
             emit_error(str(exc), type(exc).__name__)
@@ -745,6 +816,9 @@ def setup(
     payload: Dict[str, Any] = {
         "uproject": str(uproject),
         "port": port,
+        "bind": bind,
+        "websocket_port": websocket_port,
+        "allow_public": allow_public,
         "patched": {
             "uproject": {
                 "changed": patch.uproject.changed,
