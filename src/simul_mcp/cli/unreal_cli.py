@@ -11,6 +11,7 @@ JSON output on stdout, making them consumable by AI agents via Bash.
 """
 
 import asyncio
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -733,6 +734,22 @@ def setup(
             "trust radius (firewall, trusted LAN, etc.)."
         ),
     ),
+    passphrase: Optional[str] = typer.Option(
+        None,
+        "--passphrase",
+        help=(
+            "Plaintext passphrase to require on every Remote Control "
+            "request. Hashed with MD5 (UE 5.x's FMD5::HashAnsiString) and "
+            "written to the ini's +Passphrases array, plus pins "
+            "bEnforcePassphraseForRemoteClients=True. CRITICAL: enabling "
+            "this BLOCKS every Remote Control client — including simul-mcp "
+            "itself, which does not yet send the Passphrase HTTP header — "
+            "until they're updated to send 'Passphrase: <md5>' on each "
+            "request. Most useful with --bind <non-loopback> as a layer-2 "
+            "hardening on top of the IP allowlist; --bind alone is enough "
+            "for trusted-LAN setups."
+        ),
+    ),
     launch: bool = typer.Option(True, "--launch/--no-launch", help="Launch the editor after configuring"),
     headless: bool = typer.Option(
         True,
@@ -810,6 +827,33 @@ def setup(
         console.print(f"[red]{msg}[/red]")
         raise typer.Exit(2)
 
+    # Compute the MD5 hash UE expects (FMD5::HashAnsiString) and refuse the
+    # combination of --passphrase with a loopback-only bind: passphrase
+    # enforcement is layer-2 on top of the IP allowlist; it has no effect
+    # over loopback (where the IP allowlist alone already blocks remote
+    # access) but DOES break clients that don't send the Passphrase header.
+    # Refusing here surfaces the foot-gun before the user has a half-broken
+    # editor.
+    passphrase_md5: Optional[str] = None
+    if passphrase is not None:
+        if bind is None or _is_loopback_bind(bind):
+            msg = (
+                "--passphrase only adds value when --bind is set to a "
+                "non-loopback host. With the default loopback bind the IP "
+                "allowlist already blocks remote access, and enabling the "
+                "passphrase would break every client that doesn't send the "
+                "Passphrase header. Either drop --passphrase, or also pass "
+                "--bind <non-loopback> --allow-public."
+            )
+            if is_json_mode():
+                emit_error(msg, "InvalidArgument")
+                raise typer.Exit(2)
+            console.print(f"[red]{msg}[/red]")
+            raise typer.Exit(2)
+        passphrase_md5 = hashlib.md5(
+            passphrase.encode("ascii", errors="strict")
+        ).hexdigest()
+
     # Preview-only launch resolution so we can tell the user what WOULD happen.
     launch_plan: Optional[List[str]] = None
     launch_plan_error: Optional[str] = None
@@ -827,6 +871,11 @@ def setup(
             + (f"  bind:       {bind}\n" if bind is not None else "")
             + (f"  ws port:    {websocket_port}\n" if websocket_port is not None else "")
             + (f"  [yellow]allow-public:[/yellow] yes\n" if allow_public else "")
+            + (
+                f"  [yellow]passphrase:[/yellow] enabled (md5={passphrase_md5})\n"
+                if passphrase_md5
+                else ""
+            )
             + f"  launch:     {'yes' if launch else 'no'}\n"
             + (f"  launch cmd: {' '.join(launch_plan)}\n" if launch_plan else "")
             + (f"  [yellow]launch issue:[/yellow] {launch_plan_error}\n" if launch_plan_error else ""),
@@ -847,6 +896,7 @@ def setup(
             port=port,
             bind=bind,
             websocket_port=websocket_port,
+            passphrase_md5=passphrase_md5,
         )
     except Exception as exc:
         if is_json_mode():
@@ -887,6 +937,7 @@ def setup(
         "bind": bind,
         "websocket_port": websocket_port,
         "allow_public": allow_public,
+        "passphrase_enabled": passphrase_md5 is not None,
         "patched": {
             "uproject": {
                 "changed": patch.uproject.changed,
