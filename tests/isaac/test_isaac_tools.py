@@ -189,6 +189,20 @@ class TestExecuteJsonScript:
         assert result["success"] is False
         assert result["info"] == "manual"
 
+    def test_script_explicit_success_false_with_error_preserved(self) -> None:
+        """The combination PR #36 actually emits: explicit `success: false`
+        AND an `error` key (e.g. enable_isaac_extension's not-found
+        branch). The guard preserves the explicit False; the error key
+        is passed through unchanged."""
+        tools = _make_tools(
+            execute_return=_make_result(
+                {"success": False, "error": "Extension not found: foo"}
+            )
+        )
+        result = asyncio.run(tools.get_isaac_stage_info())
+        assert result["success"] is False
+        assert result["error"] == "Extension not found: foo"
+
     def test_script_explicit_success_true_with_error_preserved(self) -> None:
         """Scripts that explicitly set `success: true` AND include an
         `error` key (rare, e.g. a soft-warning convention) are
