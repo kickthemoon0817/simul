@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -517,13 +518,51 @@ def exec_script(
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
 
-    parsed = session._parse_python_json(raw_result)
-    success = not parsed.get("error")
+    # UE's PythonScriptLibrary.ExecutePythonCommandEx returns:
+    #   ReturnValue: bool  — true iff the Python script ran without raising
+    #   CommandResult: str — error message when ReturnValue is False
+    #   LogOutput: [{Type, Output}, ...] — every print/log line, where Type
+    #              is one of "Info" / "Warning" / "Error".
+    # Trust ReturnValue for success. Render Info / Warning / Error log
+    # entries separately so a script that calls unreal.log_warning(...)
+    # or unreal.log_error(...) doesn't silently lose its diagnostic output.
+    # Don't use _parse_python_json here — that helper is for internal
+    # callers whose scripts print exactly one JSON object; using it on
+    # user `exec` would reject any plain print("hello").
+    success = bool(raw_result.get("ReturnValue", False))
+    log_output = raw_result.get("LogOutput") or []
+    output_text = ""
+    warnings_text = ""
+    errors_text = ""
+    for entry in log_output:
+        if not isinstance(entry, dict):
+            continue
+        t = entry.get("Type")
+        o = entry.get("Output", "")
+        if t == "Info":
+            output_text += o
+        elif t == "Warning":
+            warnings_text += o
+        elif t == "Error":
+            errors_text += o
+    error_text = (
+        ""
+        if success
+        else str(raw_result.get("CommandResult") or "Python execution failed")
+    )
 
     if is_json_mode() and not raw:
-        parsed["success"] = success
-        parsed["raw"] = raw_result
-        print(json.dumps(parsed, default=str))
+        payload: Dict[str, Any] = {
+            "success": success,
+            "return_value": success,
+            "output": output_text,
+            "warnings": warnings_text,
+            "errors": errors_text,
+            "raw": raw_result,
+        }
+        if not success:
+            payload["error"] = error_text
+        print(json.dumps(payload, default=str))
         if not success:
             raise typer.Exit(1)
         return
@@ -534,15 +573,29 @@ def exec_script(
             raise typer.Exit(1)
         return
 
-    if success:
-        try:
-            formatted = json.dumps(parsed, indent=2, default=str)
-            console.print(Syntax(formatted, "json", theme="monokai"))
-        except Exception:
-            console.print(str(parsed))
-    else:
-        console.print(f"[red]Error:[/red] {parsed.get('error', 'Unknown')}")
+    # Human mode: render each stream prefixed and color-coded. Escape any
+    # Rich markup the script might have printed (e.g. a literal "[red]")
+    # so a malicious or accidental UE LogOutput entry can't inject styling
+    # into the user's terminal.
+    rendered_anything = False
+    if output_text:
+        text = output_text[:-1] if output_text.endswith("\n") else output_text
+        console.print(rich_escape(text))
+        rendered_anything = True
+    if warnings_text:
+        text = warnings_text[:-1] if warnings_text.endswith("\n") else warnings_text
+        console.print(f"[yellow]warnings:[/yellow]\n{rich_escape(text)}")
+        rendered_anything = True
+    if errors_text:
+        text = errors_text[:-1] if errors_text.endswith("\n") else errors_text
+        console.print(f"[red]errors:[/red]\n{rich_escape(text)}")
+        rendered_anything = True
+
+    if not success:
+        console.print(f"[red]Error:[/red] {rich_escape(error_text)}")
         raise typer.Exit(1)
+    if not rendered_anything:
+        console.print("[dim]ok (no output)[/dim]")
 
 
 # ---------------------------------------------------------------------------
