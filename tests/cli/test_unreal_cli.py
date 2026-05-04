@@ -256,6 +256,74 @@ def test_session_factory_default_does_not_inject_passphrase(monkeypatch) -> None
     assert session._passphrase_md5 is None
 
 
+def test_setup_payload_includes_engine_ini_when_bind_supplied(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Pinning regression for the iter6 verifier finding: the CLI's JSON
+    payload must surface `patched.engine_ini` so callers can tell that
+    the HTTP bind was actually written to Config/DefaultEngine.ini. The
+    SetupResult dataclass populates it whenever --bind is supplied; the
+    payload constructor in iter6 dropped it silently."""
+    uproject = _write_uproject(tmp_path)
+
+    async def _fake_poll(session, timeout, interval):
+        del session, timeout, interval
+        return {"connected": False}
+
+    monkeypatch.setattr(unreal_cli, "_poll_health", _fake_poll)
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "unreal",
+            "setup",
+            str(uproject),
+            "--bind",
+            "0.0.0.0",
+            "--allow-public",
+            "--no-launch",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 1, result.stdout  # not-connected stub
+    payload = json.loads(result.stdout)
+    assert "engine_ini" in payload["patched"]
+    engine_ini = payload["patched"]["engine_ini"]
+    assert engine_ini is not None
+    assert engine_ini["changed"] is True
+    assert "DefaultBindAddress" in engine_ini["added"]
+
+
+def test_setup_payload_engine_ini_is_none_when_no_bind(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When --bind is not supplied, no Config/DefaultEngine.ini is
+    written. The payload still surfaces the `engine_ini` key so callers
+    don't have to guess whether it was forgotten or intentionally skipped
+    — but its value is None."""
+    uproject = _write_uproject(tmp_path)
+
+    async def _fake_poll(session, timeout, interval):
+        del session, timeout, interval
+        return {"connected": False}
+
+    monkeypatch.setattr(unreal_cli, "_poll_health", _fake_poll)
+
+    result = runner.invoke(
+        app,
+        ["--json", "unreal", "setup", str(uproject), "--no-launch", "--yes"],
+    )
+
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert "engine_ini" in payload["patched"]
+    assert payload["patched"]["engine_ini"] is None
+    # And no DefaultEngine.ini should have been created on disk either.
+    assert not (tmp_path / "Config" / "DefaultEngine.ini").exists()
+
+
 def test_setup_polling_session_carries_passphrase_header(
     tmp_path: Path, monkeypatch
 ) -> None:
