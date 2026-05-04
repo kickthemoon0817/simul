@@ -132,6 +132,127 @@ def ping(
         raise typer.Exit(1)
 
 
+@app.command("bridge-up")
+def bridge_up(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+    timeout: Optional[float] = _timeout_opt,
+) -> None:
+    """Ensure the simul bridge extension is enabled.
+
+    Workflow:
+
+    1. Probe the bridge port (default 8229). If reachable → done.
+    2. Else probe the VS Code transport (default 8226). If unreachable
+       → Isaac Sim isn't running; report and exit.
+    3. Else enable ``khemoo.simul.mcp`` via the VS Code fallback, then
+       re-probe the bridge.
+
+    Closes the iter8 UX gap: a fresh ``isaac-sim.sh`` launch leaves the
+    bridge extension registered-but-disabled, so port 8229 silently
+    stays down. Pre-iter10 the manual fix was
+    ``simul-mcp isaac enable-extension khemoo.simul.mcp``; this command
+    bundles that into a single transparent step.
+    """
+    tools = _tools(host, port, timeout)
+    client = tools._client
+    bridge_addr = client.bridge_address
+    vscode_addr = client.vscode_address
+
+    async def _probe_bridge() -> bool:
+        try:
+            response = await client.bridge_request("ping", {})
+            return response.get("status") == "ok"
+        except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
+            return False
+
+    async def _probe_vscode() -> bool:
+        try:
+            r = await client.execute_vscode_only("print('pong')")
+            return bool(r.success) and "pong" in (r.output or "")
+        except (ConnectionRefusedError, TimeoutError, OSError):
+            return False
+
+    bridge_ok = asyncio.run(_probe_bridge())
+    if bridge_ok:
+        payload = {
+            "action": "already-up",
+            "bridge_address": bridge_addr,
+            "bridge_reachable": True,
+            "success": True,
+        }
+        if is_json_mode():
+            emit(payload)
+            return
+        console.print(
+            f"[green]Bridge already reachable[/green] @ {bridge_addr}"
+        )
+        return
+
+    vscode_ok = asyncio.run(_probe_vscode())
+    if not vscode_ok:
+        msg = (
+            f"Neither bridge ({bridge_addr}) nor VS Code transport "
+            f"({vscode_addr}) reachable — is Isaac Sim running?"
+        )
+        if is_json_mode():
+            emit_error(msg, "NotRunning")
+            return
+        console.print(f"[red]{msg}[/red]")
+        raise typer.Exit(1)
+
+    enable_result = asyncio.run(
+        tools.enable_isaac_extension(extension_id="khemoo.simul.mcp")
+    )
+    if not enable_result.get("success"):
+        msg = (
+            "VS Code transport reached but enabling khemoo.simul.mcp "
+            f"failed: {enable_result.get('error', 'unknown error')}. "
+            "Is the extension registered with Isaac Sim?"
+        )
+        if is_json_mode():
+            emit_error(msg, "ExtensionNotRegistered")
+            return
+        console.print(f"[red]{msg}[/red]")
+        raise typer.Exit(1)
+
+    # Code-reviewer HIGH from iter10: the bridge needs a frame or two
+    # to bind its TCP socket after the extension is enabled. A single
+    # immediate re-probe was flaky on the very happy path this command
+    # exists for. Poll up to ~3 s in 0.5 s steps.
+    async def _probe_bridge_with_retry(attempts: int = 6, delay: float = 0.5) -> bool:
+        for i in range(attempts):
+            if await _probe_bridge():
+                return True
+            if i < attempts - 1:
+                await asyncio.sleep(delay)
+        return False
+
+    bridge_ok = asyncio.run(_probe_bridge_with_retry())
+    payload = {
+        "action": "auto-enabled",
+        "bridge_address": bridge_addr,
+        "bridge_reachable": bridge_ok,
+        "extension_enabled": enable_result.get("enabled"),
+        "success": bridge_ok,
+    }
+    if is_json_mode():
+        emit(payload)
+        if not bridge_ok:
+            raise typer.Exit(1)
+        return
+    if bridge_ok:
+        console.print(
+            f"[green]Bridge enabled and reachable[/green] @ {bridge_addr}"
+        )
+        return
+    console.print(
+        f"[yellow]Bridge extension enabled but {bridge_addr} still not "
+        f"answering[/yellow] — extension may need a frame to bind"
+    )
+    raise typer.Exit(1)
+
+
 @app.command("bridge-capabilities")
 def bridge_capabilities(
     host: Optional[str] = _host_opt,
