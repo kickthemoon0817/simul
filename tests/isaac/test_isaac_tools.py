@@ -155,6 +155,52 @@ class TestExecuteJsonScript:
         assert result["success"] is True
         assert result["key"] == "value"
 
+    # iter8: presence of `error` in script output ⇒ wrapper marks
+    # success=False. Closes the issue #35-shape misleading-success-flag
+    # bug across every Isaac tool whose script emits only an error key
+    # (~30+ such sites pre-fix all returned `{"error":"...","success":true}`).
+
+    def test_script_error_key_implies_success_false(self) -> None:
+        """A script that emits only `{"error": "..."}` must result in
+        success=False at the wrapper layer. Pre-iter8 the wrapper used
+        `setdefault("success", True)` which left success=true alongside
+        the error string."""
+        tools = _make_tools(execute_return=_make_result({"error": "Prim not found: /World/Foo"}))
+        result = asyncio.run(tools.get_isaac_stage_info())
+        assert result["success"] is False
+        assert result["error"] == "Prim not found: /World/Foo"
+
+    def test_script_no_error_no_success_defaults_true(self) -> None:
+        """Empty data (no error, no explicit success) is treated as success.
+        Mirrors the prior `setdefault("success", True)` semantic for normal
+        successful tool calls."""
+        tools = _make_tools(execute_return=_make_result({"some": "info"}))
+        result = asyncio.run(tools.get_isaac_stage_info())
+        assert result["success"] is True
+        assert result["some"] == "info"
+
+    def test_script_explicit_success_false_preserved(self) -> None:
+        """Scripts that already set `success: false` (e.g. the
+        enable_isaac_extension not-found branch from PR #36) are
+        respected — the wrapper does NOT overwrite to True even when
+        no error key is present."""
+        tools = _make_tools(execute_return=_make_result({"success": False, "info": "manual"}))
+        result = asyncio.run(tools.get_isaac_stage_info())
+        assert result["success"] is False
+        assert result["info"] == "manual"
+
+    def test_script_explicit_success_true_with_error_preserved(self) -> None:
+        """Scripts that explicitly set `success: true` AND include an
+        `error` key (rare, e.g. a soft-warning convention) are
+        respected — the wrapper does NOT downgrade to False when the
+        script asked for True explicitly."""
+        tools = _make_tools(
+            execute_return=_make_result({"success": True, "error": "soft warning only"})
+        )
+        result = asyncio.run(tools.get_isaac_stage_info())
+        assert result["success"] is True
+        assert result["error"] == "soft warning only"
+
 
 
 # ---------------------------------------------------------------------------
