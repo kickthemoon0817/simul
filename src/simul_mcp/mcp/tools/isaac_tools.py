@@ -144,11 +144,15 @@ class IsaacTools(LoggerMixin):
 
         try:
             data: Dict[str, Any] = json.loads(output)
-            # Default to success=True only if the script did not express its
-            # own domain-level success flag. This lets scripts surface
-            # domain failures (e.g. "not found") without the wrapper
-            # masking them as success.
-            data.setdefault("success", True)
+            # Wrapper-level success-flag normalization. If the script
+            # already set `success` explicitly, honour it. Otherwise:
+            # presence of `error` ⇒ failure (this closes the issue #35
+            # shape across every Isaac tool whose script emits only an
+            # error key — pre-fix, ~30+ such sites all returned the
+            # misleading `{"error": "...", "success": true}` payload).
+            # No `error` and no explicit `success` ⇒ success.
+            if "success" not in data:
+                data["success"] = "error" not in data
             return data
         except json.JSONDecodeError as exc:
             return ErrorResponse(
