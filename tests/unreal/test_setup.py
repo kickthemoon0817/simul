@@ -95,6 +95,21 @@ def test_patch_uproject_raises_on_missing_file(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_remote_control_section_targets_RemoteControlCommon_module() -> None:
+    """Pinning regression for issue #44.
+
+    URemoteControlSettings lives in module RemoteControlCommon, so UE's
+    config loader expects the section under /Script/RemoteControlCommon.
+    Earlier versions of this patcher used /Script/RemoteControl which
+    UE silently ignored — keys appeared to work because their C++
+    defaults already matched what we wanted, but bRestrictServerAccess
+    and bEnableRemotePythonExecution (whose C++ defaults are False)
+    never actually flipped to True, gating remote Python execution
+    on UE 5.3+. Don't regress.
+    """
+    assert REMOTE_CONTROL_SECTION == "/Script/RemoteControlCommon.RemoteControlSettings"
+
+
 def test_patch_ini_creates_fresh_file(tmp_path: Path) -> None:
     result = patch_remote_control_ini(tmp_path, port=30010)
 
