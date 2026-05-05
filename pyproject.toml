@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "simul-mcp"
-version = "0.0.35"
+version = "0.0.36"
 description = "MCP server for 3D simulation and DCC tools — USD scene control, Isaac Sim, Blender, and Unreal Engine integration"
 authors = [
     {name = "khemoo"}
@@ -68,6 +68,10 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "simul_mcp" = ["py.typed"]
+"simul_mcp.bridge_ext" = ["khemoo.simul.mcp/**/*"]
+
+[tool.setuptools.exclude-package-data]
+"simul_mcp.bridge_ext" = ["khemoo.simul.mcp/**/__pycache__/*", "khemoo.simul.mcp/**/*.pyc"]
 
 [tool.black]
 line-length = 88

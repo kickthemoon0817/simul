@@ -48,15 +48,19 @@ def _read_init_version() -> str:
 
 
 def _read_bridge_ext_version() -> str:
-    text = (_REPO / "exts/khemoo.simul.mcp/config/extension.toml").read_text(
-        encoding="utf-8"
-    )
+    text = (
+        _REPO
+        / "src/simul_mcp/bridge_ext/khemoo.simul.mcp/config/extension.toml"
+    ).read_text(encoding="utf-8")
     m = re.search(
         r'^\[package\]\s*\nversion\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"',
         text,
         flags=re.MULTILINE,
     )
-    assert m, "exts/khemoo.simul.mcp/config/extension.toml [package] version not found"
+    assert m, (
+        "src/simul_mcp/bridge_ext/khemoo.simul.mcp/config/extension.toml "
+        "[package] version not found"
+    )
     return m.group(1)
 
 
@@ -65,7 +69,7 @@ def test_all_four_version_constants_agree() -> None:
         "pyproject.toml": _read_pyproject_version(),
         ".claude-plugin/plugin.json": _read_plugin_json_version(),
         "src/simul_mcp/__init__.py": _read_init_version(),
-        "exts/khemoo.simul.mcp/config/extension.toml": _read_bridge_ext_version(),
+        "src/simul_mcp/bridge_ext/khemoo.simul.mcp/config/extension.toml": _read_bridge_ext_version(),
     }
     distinct = set(versions.values())
     assert len(distinct) == 1, (

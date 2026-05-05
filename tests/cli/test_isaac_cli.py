@@ -382,16 +382,19 @@ def test_install_bridge_symlink_mode(tmp_path: Path) -> None:
 def test_install_bridge_auto_discovers_source_via_walking_parents(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Test-engineer Gap A: when --source is omitted, the command walks
-    parents from the simul_mcp package's __file__ looking for
-    exts/khemoo.simul.mcp/. This is the most common real-world
-    invocation (developer in repo checkout). Monkeypatch __file__ to
-    point inside a fake repo layout to exercise the walk."""
+    """Legacy fallback path: when the bundled bridge_ext/ sibling is
+    absent (very old editable checkouts), the command walks parents
+    from the simul_mcp package's __file__ looking for
+    exts/khemoo.simul.mcp/. iter14 made this the second-choice path
+    after the bundled location; this test exercises it by pointing
+    __file__ at a fake package with no bridge_ext sibling."""
     # Build a fake "repo" layout with the bridge source under exts/.
     fake_repo = tmp_path / "fake_repo"
     fake_pkg = fake_repo / "src" / "simul_mcp"
     fake_pkg.mkdir(parents=True)
     (fake_pkg / "__init__.py").write_text("", encoding="utf-8")
+    # NOTE: deliberately no bridge_ext/ sibling — forces the bundled
+    # check to miss so the legacy walk path runs.
     _write_bridge_source(fake_repo, "0.0.33")
     isaac_root = _make_isaac_root(tmp_path)
 
@@ -412,6 +415,48 @@ def test_install_bridge_auto_discovers_source_via_walking_parents(
     assert payload["version"] == "0.0.33"
     # Source path resolution went through our fake repo, not the real one.
     assert str(fake_repo) in payload["source"]
+
+
+def test_install_bridge_prefers_bundled_source_over_legacy_walk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """iter14 contract: the bundled copy at
+    ``simul_mcp/bridge_ext/khemoo.simul.mcp/`` is the primary source.
+    A pip-installed user has no ``exts/`` dir anywhere on disk; the
+    bundled copy must resolve without any repo layout present.
+
+    This test points ``simul_mcp.__file__`` at a fake package that has
+    a ``bridge_ext/khemoo.simul.mcp/`` sibling but NO ``exts/`` parent
+    chain — exactly the wheel-install topology — and verifies the
+    install succeeds from the bundled source.
+    """
+    # Fake wheel-install layout: simul_mcp/__init__.py with
+    # bridge_ext/khemoo.simul.mcp/ as a sibling, no exts/ anywhere.
+    fake_pkg = tmp_path / "wheel_pkg" / "simul_mcp"
+    fake_pkg.mkdir(parents=True)
+    (fake_pkg / "__init__.py").write_text("", encoding="utf-8")
+    bundled = fake_pkg / "bridge_ext" / "khemoo.simul.mcp"
+    (bundled / "config").mkdir(parents=True)
+    (bundled / "config" / "extension.toml").write_text(
+        '[package]\nversion = "0.0.99"\n', encoding="utf-8"
+    )
+    isaac_root = _make_isaac_root(tmp_path)
+
+    import simul_mcp as _sm
+    monkeypatch.setattr(_sm, "__file__", str(fake_pkg / "__init__.py"))
+
+    result = runner.invoke(app, [
+        "--json", "isaac", "install-bridge",
+        "--isaac-root", str(isaac_root),
+    ])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "copied"
+    assert payload["version"] == "0.0.99"
+    # Source resolution picked the bundled path, not anything under exts/.
+    assert "bridge_ext" in payload["source"]
+    assert "/exts/" not in payload["source"]
 
 
 def test_install_bridge_picks_up_isaac_sim_path_env_var(
