@@ -17,7 +17,7 @@ class UnrealPingResponse(BaseModel):
     reachable: bool = Field(..., description="Whether the Remote Control API responded")
     address: str = Field(..., description="host:port that was probed")
     latency_ms: Optional[float] = Field(None, description="Round-trip time in milliseconds")
-    error: Optional[str] = Field(None, description="Error message if unreachable")
+    error: Optional[str] = Field(None, description="Error message when success is False")
 
 
 class UnrealInstanceInfo(BaseModel):
@@ -62,7 +62,7 @@ class UnrealHealthCheckResponse(BaseModel):
     is_editor: Optional[bool] = Field(
         None, description="Whether the engine is running in editor mode"
     )
-    error: Optional[str] = Field(None, description="Error message if not connected")
+    error: Optional[str] = Field(None, description="Error message when success is False")
 
 
 class UnrealEngineInfoResponse(BaseModel):
