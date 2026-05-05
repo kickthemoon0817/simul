@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ..schemas.common import ErrorResponse
 from ..schemas.unreal import *
+from ._helpers import apply_success_from_error
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -56,7 +57,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.health_check()
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealHealthCheckResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -114,7 +115,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.ping()
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealPingResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -317,7 +318,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     resolution_y=resolution_y,
                     format=format,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealCaptureViewportResponse(**payload).dict()
                 return server._validate_output(
                     result,
@@ -438,7 +439,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_engine_info()
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealEngineInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -488,7 +489,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_loaded_map()
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealLoadedMapResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -555,7 +556,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     tag_filter=tag_filter or None,
                     max_results=max_results,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealListActorsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -608,7 +609,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_actor_info(actor_path)
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealGetActorInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -685,7 +686,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     package_paths=parsed_paths,
                     max_results=max_results,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSearchAssetsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -738,7 +739,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.describe_object(object_path)
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealDescribeObjectResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -799,7 +800,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 payload = await session.get_actor_thumbnail(
                     asset_path=asset_path, width=width, height=height
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealGetThumbnailResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -849,7 +850,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.summarize_scene()
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSceneSummaryResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -901,7 +902,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_viewport_info()
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealViewportInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -972,7 +973,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     rotation=(rotation_pitch, rotation_yaw, rotation_roll),
                     fov=fov,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSetCameraViewResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1031,7 +1032,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 payload = await session.focus_on_actor(
                     actor_path=actor_path, distance=distance
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealFocusActorResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1090,7 +1091,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     rotation=(rotation_pitch, rotation_yaw, rotation_roll),
                     label=label or None,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSpawnActorResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1135,7 +1136,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.delete_actor(actor_path=actor_path)
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealDeleteActorResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1193,7 +1194,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     rotation=(rotation_pitch, rotation_yaw, rotation_roll),
                     scale=(scale_x, scale_y, scale_z),
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSetActorTransformResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1245,7 +1246,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     property_value=property_value,
                     generate_transaction=generate_transaction,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSetActorPropertyResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1295,7 +1296,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     function_name=function_name,
                     parameters=parameters or None,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealCallActorFunctionResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1343,7 +1344,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     actor_path=actor_path,
                     parent_path=parent_path or None,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSetActorParentResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1393,7 +1394,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     component_class=component_class,
                     component_name=component_name or None,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealAddComponentResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1443,7 +1444,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     visible=visible,
                     propagate=propagate,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSetActorVisibilityResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1493,7 +1494,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 payload = await session.get_material_info(
                     material_path=material_path,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealGetMaterialInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1558,7 +1559,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     vector_params=vector_params,
                     texture_params=texture_params,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSetMaterialParamsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1608,7 +1609,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     instance_name=instance_name,
                     save_path=save_path,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealCreateMaterialInstanceResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1658,7 +1659,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     material_path=material_path,
                     slot_index=slot_index,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealAssignMaterialResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1720,7 +1721,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     attenuation_radius=attenuation_radius,
                     cast_shadows=cast_shadows,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSetLightParamsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1768,7 +1769,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     setting_name=setting_name,
                     setting_value=setting_value,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSetRenderSettingsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1814,7 +1815,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.control_simulation(action=action)
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealControlSimulationResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1856,7 +1857,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_simulation_status()
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealGetSimulationStatusResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1906,7 +1907,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     enable=enable,
                     simulate_physics=simulate_physics,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealEnablePhysicsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1956,7 +1957,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     collision_preset=collision_preset,
                     collision_enabled=collision_enabled,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSetCollisionResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2016,7 +2017,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     location_y=location_y,
                     location_z=location_z,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealApplyForceResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2070,7 +2071,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     angular_damping=angular_damping,
                     enable_gravity=enable_gravity,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSetPhysicsParamsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2128,7 +2129,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     import_materials=import_materials,
                     scale_factor=scale_factor,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealImportUsdResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2183,7 +2184,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     export_animations=export_animations,
                     convert_to_meters=convert_to_meters,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealExportUsdResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2245,7 +2246,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     add_collision=add_collision,
                     semantic_labels=labels,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealConvertToSimreadyResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2298,7 +2299,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     asset_path=asset_path,
                     checks=check_list,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealValidateSimreadyResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2340,7 +2341,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.get_interchange_info()
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealGetInterchangeInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2391,7 +2392,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 ).model_dump()
             with server.unreal_adapter.create_session() as session:
                 payload = await session.batch_operations(operations=ops)
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealBatchOperationsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2443,7 +2444,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     include_components=include_components,
                     class_filter=class_filter,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealQuerySceneGraphResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2496,7 +2497,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     analysis_types=types_list,
                     actor_filter=actor_filter,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealAnalyzeSceneForRoboticsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2553,7 +2554,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     bounds_min=bmin,
                     bounds_max=bmax,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealGenerateProceduralSceneResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2603,7 +2604,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     match_mode=match_mode,
                     max_results=max_results,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealGetActorBySemanticLabelResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2665,7 +2666,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     location=loc,
                     actor_label=actor_label,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealGenerateMeshPrimitiveResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2715,7 +2716,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     tool_mesh_path=tool_mesh_path,
                     operation=operation,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealApplyMeshBooleanResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2761,7 +2762,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 payload = await session.compute_convex_hull(
                     mesh_path=mesh_path,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealComputeConvexHullResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2815,7 +2816,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     min_cluster_size=min_cluster_size,
                     resolution=resolution,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealDecomposeConvexHullResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2876,7 +2877,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     scale=scale_list,
                     count=count,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealEditMeshTopologyResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2926,7 +2927,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     level=level,
                     scheme=scheme,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSubdivideMeshResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2978,7 +2979,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     target_percentage=target_percentage,
                     max_error=max_error,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealSimplifyMeshResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -3034,7 +3035,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     fill_holes=fill_holes,
                     keep_both_sides=keep_both_sides,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealCutMeshPlaneResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -3087,7 +3088,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     mesh_path=mesh_path,
                     checks=check_list,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealValidateMeshResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -3142,7 +3143,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     target_format=target_format,
                     tessellation_options=tess_opts,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealConvertMeshFormatResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -3196,7 +3197,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     target_triangle_count=target_triangle_count,
                     smoothing_iterations=smoothing_iterations,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealRemeshMeshResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -3248,7 +3249,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     uv_channel=uv_channel,
                     island_padding=island_padding,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = UnrealComputeMeshUvResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
