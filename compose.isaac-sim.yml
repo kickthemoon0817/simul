@@ -39,5 +39,5 @@ services:
       - "127.0.0.1:${ISAAC_BRIDGE_PORT:-8229}:${ISAAC_BRIDGE_PORT:-8229}"
       - "127.0.0.1:${ISAAC_VSCODE_PORT:-8226}:${ISAAC_VSCODE_PORT:-8226}"
     volumes:
-      - ./exts/khemoo.simul.mcp:/tmp/extsUser/khemoo.simul.mcp:ro
+      - ./src/simul_mcp/bridge_ext/khemoo.simul.mcp:/tmp/extsUser/khemoo.simul.mcp:ro
       - ${SIMUL_DISCOVERY_DIR:-/tmp/simul-mcp}:/tmp/simul-mcp

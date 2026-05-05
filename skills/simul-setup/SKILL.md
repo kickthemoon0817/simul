@@ -72,7 +72,9 @@ pip install -e ".[dev,blender]"     # Everything
 Isaac Sim provides its own `pxr` and `omni` Python modules — no extra pip packages needed.
 
 1. Install the `khemoo.simul.mcp` bridge extension into Isaac Sim:
-   - Copy `exts/khemoo.simul.mcp/` to your Isaac Sim extension folder
+   - Run `simul-mcp isaac install-bridge` (uses bundled
+     `src/simul_mcp/bridge_ext/khemoo.simul.mcp/`, works from a pip
+     install or repo checkout). Add `--symlink` for editable workflows.
    - Or use Docker Compose: `docker compose -f compose.isaac-sim.yml up`
 
 2. Enable the extension in Isaac Sim:

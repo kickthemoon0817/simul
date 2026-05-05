@@ -238,7 +238,7 @@ docker compose -f compose.isaac-sim.yml up -d
 
 This Compose file:
 - publishes the bridge and VS Code sockets from the container to the host
-- mounts `./exts/khemoo.simul.mcp` into `/tmp/extsUser/khemoo.simul.mcp`
+- mounts `./src/simul_mcp/bridge_ext/khemoo.simul.mcp` into `/tmp/extsUser/khemoo.simul.mcp`
 - starts `/isaac-sim/isaac-sim.sh --allow-root --no-window`
 - enables both `khemoo.simul.mcp` and `isaacsim.code_editor.vscode`
 - binds the bridge inside the container on `0.0.0.0:${ISAAC_BRIDGE_PORT:-8229}`
