@@ -3814,9 +3814,25 @@ class IsaacTools(LoggerMixin):
                 except Exception as e:
                     results[name] = {{"error": str(e)}}
 
+            # Issue #41: in Kit 107.3.3 (Isaac Sim 5.1) rep.create.render_product
+            # returns a HydraTexture wrapper. ann.attach([rp]) accepts the
+            # wrapper, but ann.detach([rp]) chains down to
+            # SyntheticData._get_node_path which calls
+            # renderProductPath.split("/") — and HydraTexture has no .split,
+            # so detach raises AttributeError mid-cleanup, dropping all AOV
+            # data. Detaching by the .path string instead bypasses the
+            # split call. Falls back to rp itself for any older Kit
+            # release that returns the path string directly.
+            rp_path = getattr(rp, "path", None) or getattr(rp, "render_product_path", None) or rp
             for ann in annotators.values():
-                ann.detach([rp])
-            rp.destroy()
+                try:
+                    ann.detach([rp_path])
+                except Exception:
+                    pass  # Detach failure must not lose collected AOV data.
+            try:
+                rp.destroy()
+            except Exception:
+                pass  # Destroy is best-effort cleanup.
 
             output = {{
                 "aovs": results,
