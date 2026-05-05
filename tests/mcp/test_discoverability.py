@@ -51,6 +51,14 @@ class FakeFastMCP:
             return func
         return decorator
 
+    def add_middleware(self, middleware: Any) -> None:
+        """Stub for FastMCP middleware registration.
+
+        SimulMCPServer adds a request-context middleware (PR #23)
+        before any tools register. The stub only needs to not raise.
+        """
+        return
+
 
 def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServer:
     """Instantiate SimulMCPServer with all adapters stubbed out."""
