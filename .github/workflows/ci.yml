@@ -1,0 +1,77 @@
+name: CI
+
+# Security note: this workflow only references trusted inputs
+# (matrix-defined Python version, github.ref, github.event_name)
+# and never interpolates user-controlled fields (issue title, PR
+# body, commit messages, head ref, etc.) into run: blocks. See
+# https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+# for the patterns this workflow deliberately avoids.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install project (with dev deps)
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Run unit tests
+        # The project's pyproject.toml addopts already bakes in
+        # `-m "not packaging"`, so the bare `pytest tests/`
+        # invocation skips the long-running wheel-build tests.
+        # Live engine tests (`isaac`, `unreal_live`) are gated by
+        # markers and skip automatically when the engine is not
+        # reachable. Reference baseline: ~495 passed, 0 failed
+        # (CLAUDE.md tracks the canonical count).
+        run: pytest tests/ --no-cov
+
+  packaging-gate:
+    # Pre-publish gate: builds the wheel and inspects its contents
+    # to catch regressions in iter14's bridge-ext bundling and
+    # iter15's exclude-package-data rule. Only runs on main + PRs
+    # to main since it's the slowest job (uv build per test).
+    name: Packaging regression tests
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install project (with dev deps)
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Run packaging-marker tests
+        # Override the addopts default `-m "not packaging"` by
+        # passing `-m packaging` last; pytest takes the LAST -m.
+        run: pytest tests/packaging/ -m packaging --no-cov -v
