@@ -643,13 +643,32 @@ simul-mcp/
 │   └── utils/           # Utility modules
 ├── src/simul_mcp/cli/    # Command-line interface
 │   └── main.py          # CLI implementation
-├── exts/                # Isaac Sim extension
-│   └── khemoo.simul.mcp/ # Extension package
+├── src/simul_mcp/bridge_ext/khemoo.simul.mcp/  # Isaac Sim extension
+│                          # bundled in the wheel since v0.0.36;
+│                          # publish via `simul-mcp isaac install-bridge`
 ├── tests/               # Test suite
 │   └── isaac/           # Isaac Sim tests
 ├── examples/            # Example scripts
 │   └── isaac/           # Isaac Sim examples
 ```
+
+### Isaac Sim bridge extension setup
+
+The `khemoo.simul.mcp` Kit extension that backs port 8229 is bundled
+inside the `simul-mcp` Python wheel as of v0.0.36. After installing
+the package (or pulling new repo commits) once per Isaac install:
+
+```bash
+# Publish the bundled bridge ext into Isaac's extsUser dir
+ISAAC_SIM_PATH=~/isaac-sim-5.1.0 simul-mcp isaac install-bridge --symlink
+
+# Then once per Isaac launch — auto-enables the ext + waits for port
+simul-mcp isaac bridge-up
+```
+
+`--symlink` is recommended for editable / repo-checkout workflows so
+future `git pull`s propagate without re-running `install-bridge`. See
+`CLAUDE.md` for the full lifecycle and the `bridge-up` retry semantics.
 
 ### Running Tests
 
