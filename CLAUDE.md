@@ -318,6 +318,18 @@ Implications:
   verification pattern). Most pytest invocations in the loop use this
   venv; calling system `python` won't have the editable simul-mcp
   install on path.
+- Don't add `__init__.py` to a `tests/<name>/` directory whose name
+  collides with an installed pip package (e.g. `packaging`,
+  `requests`, `setuptools`). Pytest treats the test dir as that
+  Python module and fails collection with `ModuleNotFoundError`.
+  Leave the test directory as a plain dir — pytest's rootdir-based
+  discovery handles it without an init.
+- Long-running build tests live under the `packaging` pytest marker
+  (e.g. `tests/packaging/test_wheel_contents.py` — runs `uv build`
+  then inspects the wheel zipfile). The default unit invocation
+  `pytest tests/ -m "not isaac and not unreal_live and not
+  packaging"` skips them; `pytest -m packaging` runs them as a
+  pre-publish gate.
 
 ## Live-driven testing — when the machine has the runtime, use it
 
