@@ -1,0 +1,97 @@
+name: CI
+
+# Security note: this workflow only references trusted inputs
+# (matrix-defined Python version, github.ref, github.event_name)
+# and never interpolates user-controlled fields (issue title, PR
+# body, commit messages, head ref, etc.) into run: blocks. See
+# https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+# for the patterns this workflow deliberately avoids.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+# Cancel any in-flight push run when the matching PR event fires
+# for the same ref — eliminates the duplicate-runs trap when a
+# contributor pushes to a feature branch with an open PR.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Principle of least privilege: this is a read-only test workflow
+# (no deployments, no releases, no comments). Drop GITHUB_TOKEN
+# down to read-only contents access.
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install project from uv.lock (with dev extras)
+        # uv sync respects uv.lock for reproducibility — the same
+        # transitive deps that local dev resolves are what CI runs.
+        # Without this, uv pip install would re-resolve from PyPI
+        # and a transitive break could flip CI red unrelated to
+        # the PR.
+        run: uv sync --extra dev
+
+      - name: Run unit tests
+        # The project's pyproject.toml addopts already bakes in
+        # `-m "not packaging"`, so the bare `pytest tests/`
+        # invocation skips the long-running wheel-build tests.
+        # Live engine tests (`isaac`, `unreal_live`) are gated by
+        # markers and skip automatically when the engine is not
+        # reachable.
+        run: uv run pytest tests/ --no-cov
+
+  packaging-gate:
+    # Pre-publish gate: builds the wheel and inspects its contents
+    # to catch regressions in iter14's bridge-ext bundling and
+    # iter15's exclude-package-data rule. Only runs on main + PRs
+    # to main since it's the slowest job (uv build per test).
+    # Note: a packaging-breaking change on a feature branch pushed
+    # without opening a PR will not be caught until the PR is
+    # created.
+    name: Packaging regression tests
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install project from uv.lock (with dev extras)
+        run: uv sync --extra dev
+
+      - name: Run packaging-marker tests
+        # Override the addopts default `-m "not packaging"` by
+        # passing `-m packaging` last; pytest takes the LAST -m.
+        run: uv run pytest tests/packaging/ -m packaging --no-cov -v
