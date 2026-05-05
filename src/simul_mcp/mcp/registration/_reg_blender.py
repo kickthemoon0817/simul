@@ -49,7 +49,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
 
             with server.blender_adapter.create_session() as session:
                 runtime_info = session.get_runtime_info()
-                runtime_info["success"] = True
+                apply_success_from_error(runtime_info)
                 result = BlenderInfoResponse(**runtime_info).model_dump()
                 return server._validate_output(
                     result,
@@ -122,7 +122,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     include_hidden=input_data.include_hidden,
                     max_items=input_data.max_items,
                 )
-                objects_payload["success"] = True
+                apply_success_from_error(objects_payload)
                 result = BlenderSceneObjectsResponse(**objects_payload).model_dump()
                 return server._validate_output(
                     result,
@@ -175,7 +175,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_object_info(input_data.object_name)
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderObjectInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -225,7 +225,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_mesh_info(input_data.object_name)
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderMeshInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -280,7 +280,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.object_name,
                     input_data.world_space,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderBoundingBoxResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -340,7 +340,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.object_type,
                     input_data.max_results,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderSearchObjectsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -382,7 +382,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.summarize_scene()
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderSceneSummaryResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -434,7 +434,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 payload = session.get_material_info(
                     input_data.material_name,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderMaterialInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -489,7 +489,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.object_name_a,
                     input_data.object_name_b,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderDistanceResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -547,7 +547,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.bounds_min,
                     input_data.bounds_max,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderBoundsCheckResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -610,7 +610,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.jpeg_quality,
                     input_data.use_render_fallback,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderCaptureViewportResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -668,7 +668,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     list(input_data.rotation_euler),
                     input_data.camera_name,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderSetCameraViewResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -712,7 +712,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_camera_info(camera_name)
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderCameraInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -770,7 +770,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.distance_factor,
                     input_data.camera_name,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderFocusOnObjectResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -812,7 +812,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_viewport_info()
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderViewportInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -881,7 +881,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.height,
                     input_data.jpeg_quality,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderCaptureSequenceResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -947,7 +947,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     list(input_data.rotation_euler),
                     list(input_data.scale),
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderCreateObjectResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -998,7 +998,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.delete_object(input_data.object_name)
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderDeleteObjectResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1066,7 +1066,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     rot,
                     sc,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderSetTransformResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1121,7 +1121,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.child_name,
                     input_data.parent_name,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderSetParentResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1176,7 +1176,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.object_name,
                     input_data.keep_transform,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderClearParentResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1240,7 +1240,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.metallic,
                     input_data.roughness,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderAssignMaterialResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1301,7 +1301,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.modifier_name,
                     dict(input_data.params),
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderAddModifierResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1372,7 +1372,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.spot_blend,
                     input_data.shadow_soft_size,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderSetLightParamsResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1425,7 +1425,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.open_blend_file(input_data.file_path)
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderOpenFileResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1475,7 +1475,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.save_blend_file(input_data.file_path)
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderSaveFileResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1530,7 +1530,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.file_path,
                     input_data.file_format,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderImportFileResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1590,7 +1590,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     file_format=input_data.file_format,
                     selected_only=input_data.selected_only,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderExportFileResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1632,7 +1632,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_file_info()
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderFileInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1682,7 +1682,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.set_frame(input_data.frame)
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderSetFrameResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1724,7 +1724,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.get_frame()
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderGetFrameResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1779,7 +1779,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.frame_start,
                     input_data.frame_end,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderSetFrameRangeResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1829,7 +1829,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 ).model_dump()
             with server.blender_adapter.create_session() as session:
                 payload = session.play_animation(input_data.action)
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderPlayAnimationResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1890,7 +1890,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.frame,
                     input_data.index,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderInsertKeyframeResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -1957,7 +1957,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.frame,
                     input_data.index,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderDeleteKeyframeResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2015,7 +2015,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 payload = session.get_keyframes(
                     input_data.object_name,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderGetKeyframesResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2096,7 +2096,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.linear_damping,
                     input_data.angular_damping,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderSetupRigidBodyResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2163,7 +2163,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.location,
                     input_data.name,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderAddForceFieldResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2221,7 +2221,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 payload = session.get_force_field_info(
                     input_data.object_name,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderGetForceFieldInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2291,7 +2291,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.location,
                     input_data.disable_collisions,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderAddConstraintResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2349,7 +2349,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 payload = session.get_constraint_info(
                     input_data.object_name,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderGetConstraintInfoResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2407,7 +2407,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 payload = session.get_physics_state(
                     input_data.object_name,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderGetPhysicsStateResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2474,7 +2474,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.end_frame,
                     input_data.step,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderGetTrajectoryResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2535,7 +2535,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.frame_start,
                     input_data.frame_end,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderBakeSimulationResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
@@ -2722,7 +2722,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     ),
                     collection_name=input_data.collection_name,
                 )
-                payload["success"] = True
+                apply_success_from_error(payload)
                 result = BlenderCreateMeshFromDataResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
