@@ -214,6 +214,197 @@ def test_bridge_up_auto_enables_then_reachable(monkeypatch) -> None:
     )
 
 
+def _write_bridge_source(root: Path, version: str) -> Path:
+    """Build a minimal bridge-ext source dir for install-bridge tests."""
+    source = root / "exts" / "khemoo.simul.mcp"
+    (source / "config").mkdir(parents=True, exist_ok=True)
+    (source / "config" / "extension.toml").write_text(
+        f'[package]\nversion = "{version}"\n', encoding="utf-8"
+    )
+    (source / "khemoo").mkdir(parents=True, exist_ok=True)
+    (source / "khemoo" / "__init__.py").write_text("", encoding="utf-8")
+    return source
+
+
+def _make_isaac_root(root: Path) -> Path:
+    isaac_root = root / "isaac-sim"
+    (isaac_root / "extsUser").mkdir(parents=True, exist_ok=True)
+    return isaac_root
+
+
+# ---------------------------------------------------------------------------
+# install-bridge — closes the iter11 publish gap (Isaac loads from extsUser,
+# repo bumps don't propagate without an explicit copy/symlink).
+# ---------------------------------------------------------------------------
+
+
+def test_install_bridge_refuses_without_isaac_root(tmp_path: Path, monkeypatch) -> None:
+    """No --isaac-root and no $ISAAC_SIM_PATH → InvalidArgument exit."""
+    source = _write_bridge_source(tmp_path, "0.0.33")
+    monkeypatch.delenv("ISAAC_SIM_PATH", raising=False)
+
+    result = runner.invoke(
+        app,
+        ["--json", "isaac", "install-bridge", "--source", str(source)],
+    )
+
+    assert result.exit_code != 0
+    assert "InvalidArgument" in result.stdout
+    assert "ISAAC_SIM_PATH" in result.stdout
+
+
+def test_install_bridge_refuses_when_extsUser_missing(tmp_path: Path) -> None:
+    """isaac-root that's not actually an Isaac install (no extsUser dir) →
+    refuses BEFORE writing anything."""
+    source = _write_bridge_source(tmp_path, "0.0.33")
+    fake_isaac = tmp_path / "not-actually-isaac"
+    fake_isaac.mkdir()
+
+    result = runner.invoke(
+        app,
+        [
+            "--json", "isaac", "install-bridge",
+            "--isaac-root", str(fake_isaac),
+            "--source", str(source),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "extsUser" in result.stdout
+
+
+def test_install_bridge_copies_into_extsUser(tmp_path: Path) -> None:
+    """Fresh install: dest doesn't exist → action=copied, version matches."""
+    source = _write_bridge_source(tmp_path, "0.0.33")
+    isaac_root = _make_isaac_root(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "--json", "isaac", "install-bridge",
+            "--isaac-root", str(isaac_root),
+            "--source", str(source),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "copied"
+    assert payload["version"] == "0.0.33"
+    assert payload["previous_version"] is None
+    assert payload["success"] is True
+    # File system: dest exists with correct version.
+    dest = isaac_root / "extsUser" / "khemoo.simul.mcp"
+    assert (dest / "config" / "extension.toml").is_file()
+    assert (dest / "khemoo" / "__init__.py").is_file()
+
+
+def test_install_bridge_already_current_no_op(tmp_path: Path) -> None:
+    """Re-running with the same version is a clean no-op (action=already-current).
+    No --force, no copy, no error."""
+    source = _write_bridge_source(tmp_path, "0.0.33")
+    isaac_root = _make_isaac_root(tmp_path)
+
+    # First install
+    runner.invoke(app, [
+        "--json", "isaac", "install-bridge",
+        "--isaac-root", str(isaac_root),
+        "--source", str(source),
+    ])
+    dest_toml = isaac_root / "extsUser" / "khemoo.simul.mcp" / "config" / "extension.toml"
+    mtime_before = dest_toml.stat().st_mtime
+
+    # Re-run
+    result = runner.invoke(app, [
+        "--json", "isaac", "install-bridge",
+        "--isaac-root", str(isaac_root),
+        "--source", str(source),
+    ])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "already-current"
+    assert payload["version"] == "0.0.33"
+    # File untouched.
+    assert dest_toml.stat().st_mtime == mtime_before
+
+
+def test_install_bridge_replaces_stale_dest(tmp_path: Path) -> None:
+    """Pre-existing stale dest (e.g. iter11's verifier scenario: dest at
+    0.0.13, source at 0.0.33) → action=copied, previous_version captured,
+    new version verified."""
+    isaac_root = _make_isaac_root(tmp_path)
+    # Pre-populate stale dest at 0.0.13.
+    stale_dest = isaac_root / "extsUser" / "khemoo.simul.mcp"
+    (stale_dest / "config").mkdir(parents=True)
+    (stale_dest / "config" / "extension.toml").write_text(
+        '[package]\nversion = "0.0.13"\n', encoding="utf-8"
+    )
+    # New source at 0.0.33.
+    source = _write_bridge_source(tmp_path, "0.0.33")
+
+    result = runner.invoke(app, [
+        "--json", "isaac", "install-bridge",
+        "--isaac-root", str(isaac_root),
+        "--source", str(source),
+    ])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "copied"
+    assert payload["previous_version"] == "0.0.13"
+    assert payload["version"] == "0.0.33"
+    assert payload["success"] is True
+
+
+def test_install_bridge_symlink_mode(tmp_path: Path) -> None:
+    """--symlink uses ln -s instead of copy. Repo edits then propagate
+    automatically (no re-install needed)."""
+    source = _write_bridge_source(tmp_path, "0.0.33")
+    isaac_root = _make_isaac_root(tmp_path)
+
+    result = runner.invoke(app, [
+        "--json", "isaac", "install-bridge",
+        "--isaac-root", str(isaac_root),
+        "--source", str(source),
+        "--symlink",
+    ])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "symlinked"
+    assert payload["version"] == "0.0.33"
+    dest = isaac_root / "extsUser" / "khemoo.simul.mcp"
+    assert dest.is_symlink()
+    assert dest.resolve() == source
+
+
+def test_install_bridge_force_replaces_matching_version(tmp_path: Path) -> None:
+    """--force replaces dest even when versions match (e.g. mode change
+    from copy to symlink, or stale-but-same-version content)."""
+    source = _write_bridge_source(tmp_path, "0.0.33")
+    isaac_root = _make_isaac_root(tmp_path)
+    runner.invoke(app, [
+        "--json", "isaac", "install-bridge",
+        "--isaac-root", str(isaac_root),
+        "--source", str(source),
+    ])
+
+    # Force re-install as symlink.
+    result = runner.invoke(app, [
+        "--json", "isaac", "install-bridge",
+        "--isaac-root", str(isaac_root),
+        "--source", str(source),
+        "--force", "--symlink",
+    ])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "symlinked"
+    dest = isaac_root / "extsUser" / "khemoo.simul.mcp"
+    assert dest.is_symlink()
+
+
 def test_bridge_up_enable_succeeds_but_bridge_stays_down(monkeypatch) -> None:
     """Fifth branch (test-engineer's flagged gap): enable succeeded but
     bridge port still doesn't bind even after the retry loop
