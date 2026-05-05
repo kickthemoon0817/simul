@@ -307,6 +307,17 @@ Implications:
 - The `simul-mcp` CLI exits non-zero when the parsed result has
   `success: false`. That's not an infrastructure failure — read the JSON
   payload.
+- Strings shaped like `/exts/khemoo.simul.mcp/<key>` (in
+  `compose.isaac-sim.yml`'s kit args, the bridge ext's `extension.py`,
+  and the CLI's `settings.set(...)` calls) are **Carb settings keys**,
+  not filesystem paths. The `/exts/<ext_name>/` namespace is Carb's
+  convention; it doesn't move when the bridge ext directory moves on
+  disk. Don't refactor them as part of a path rename.
+- The dev test runner is `~/pt/simul/.venv/bin/python` (and
+  `~/pt/simul/.venv/bin/simul-mcp` for the fresh-subprocess live
+  verification pattern). Most pytest invocations in the loop use this
+  venv; calling system `python` won't have the editable simul-mcp
+  install on path.
 
 ## Live-driven testing — when the machine has the runtime, use it
 
