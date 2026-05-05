@@ -367,7 +367,15 @@ def install_bridge(
 
     def _read_version(toml_path: Path) -> Optional[str]:
         import re
-        text = toml_path.read_text(encoding="utf-8")
+        # Read errors (PermissionError, broken symlink, partial extract,
+        # unreadable bytes) all collapse to None — the caller already
+        # treats None as "unknown / replace". This keeps the install
+        # workflow recoverable from a corrupted prior install instead of
+        # crashing with an unhandled exception.
+        try:
+            text = toml_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
         m = re.search(
             r'^\[package\]\s*\nversion\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"',
             text,
