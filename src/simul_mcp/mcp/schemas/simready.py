@@ -134,6 +134,9 @@ class SimReadyApplyMetadataResponse(BaseModel):
     """Response after applying SimReady metadata."""
 
     success: bool = Field(..., description="Whether metadata was applied")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Blender object name")
     applied_properties: List[str] = Field(
         ..., description="List of custom property keys written"
@@ -150,6 +153,9 @@ class SimReadyGetMetadataResponse(BaseModel):
     """Response containing SimReady metadata for an object."""
 
     success: bool = Field(...)
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(...)
     metadata: Optional[SimReadyMetadata] = Field(
         None, description="SimReady metadata (null if none found)"
@@ -189,6 +195,9 @@ class SimReadyValidateResponse(BaseModel):
     """Response from SimReady compliance validation."""
 
     success: bool = Field(...)
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     compliant: bool = Field(..., description="True when zero errors found")
     object_count: int = Field(..., description="Number of objects checked")
     issue_count: int = Field(..., description="Total issues found")
@@ -216,6 +225,9 @@ class SimReadyExportResponse(BaseModel):
     """Response after exporting SimReady USD."""
 
     success: bool = Field(...)
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     file_path: str = Field(..., description="Written file path")
     object_count: int = Field(..., description="Number of objects exported")
     validation_passed: bool = Field(
@@ -244,6 +256,9 @@ class SimReadySetupHierarchyResponse(BaseModel):
     """Response after setting up SimReady hierarchy."""
 
     success: bool = Field(...)
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     root_name: str = Field(..., description="Root empty name")
     children: List[str] = Field(..., description="Successfully parented children")
     hierarchy_path: str = Field(..., description="Logical hierarchy path from root")

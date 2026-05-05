@@ -8,6 +8,9 @@ class BlenderInfoResponse(BaseModel):
     """Response with Blender runtime information."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     version: List[int] = Field(..., description="Blender version tuple values")
     version_string: str = Field(..., description="Human-readable Blender version")
     binary_path: Optional[str] = Field(None, description="Blender binary path")
@@ -47,6 +50,9 @@ class BlenderSceneObjectsResponse(BaseModel):
     """Response for Blender scene object listing."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     collection: Optional[str] = Field(None, description="Collection used for filtering")
     include_hidden: bool = Field(
         ..., description="Whether hidden objects were included"
@@ -98,6 +104,9 @@ class BlenderObjectInfoResponse(BaseModel):
     """Detailed information about a single Blender object."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     name: str = Field(..., description="Object name")
     object_type: str = Field(..., description="Blender object type")
     location: List[float] = Field(
@@ -135,6 +144,9 @@ class BlenderMeshInfoResponse(BaseModel):
     """Counts-only mesh geometry information (O(1) access)."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Mesh object name")
     vertex_count: int = Field(..., description="Number of vertices")
     edge_count: int = Field(..., description="Number of edges")
@@ -158,6 +170,9 @@ class BlenderBoundingBoxResponse(BaseModel):
     """Eight world-space bounding box corners."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Object name")
     corners: List[List[float]] = Field(
         ..., description="Eight bounding box corners as [x, y, z] lists"
@@ -187,6 +202,9 @@ class BlenderSearchObjectsResponse(BaseModel):
     """Search results for object lookup."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     pattern: Optional[str] = Field(None, description="Name pattern used")
     object_type: Optional[str] = Field(None, description="Type filter used")
     count: int = Field(..., description="Number of matching objects")
@@ -198,6 +216,9 @@ class BlenderSceneSummaryResponse(BaseModel):
     """High-level scene summary grouped by type."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     total_objects: int = Field(..., description="Total number of objects")
     type_counts: Dict[str, int] = Field(
         ..., description="Object counts keyed by Blender type"
@@ -231,6 +252,9 @@ class BlenderMaterialInfoResponse(BaseModel):
     """Material information with bounded node tree traversal."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     material_name: str = Field(..., description="Material name")
     use_nodes: bool = Field(..., description="Whether material uses node tree")
     nodes: List[BlenderNodeEntry] = Field(
@@ -256,6 +280,9 @@ class BlenderDistanceResponse(BaseModel):
     """Distance measurement between two objects."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name_a: str = Field(..., description="First object name")
     object_name_b: str = Field(..., description="Second object name")
     distance: float = Field(..., description="Euclidean distance between objects")
@@ -289,6 +316,9 @@ class BlenderBoundsCheckResponse(BaseModel):
     """Result of a spatial bounds check."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Object name checked")
     within_bounds: bool = Field(
         ..., description="Whether object location is within the bounds"
@@ -332,6 +362,9 @@ class BlenderCaptureViewportResponse(BaseModel):
     """Base64-encoded JPEG viewport capture result."""
 
     success: bool = Field(..., description="Whether capture succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     image_base64: str = Field(..., description="Base64-encoded JPEG image data")
     width: int = Field(..., description="Captured image width")
     height: int = Field(..., description="Captured image height")
@@ -364,6 +397,9 @@ class BlenderSetCameraViewResponse(BaseModel):
     """Result of setting a camera view."""
 
     success: bool = Field(..., description="Whether operation succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     camera_name: str = Field(..., description="Name of the camera that was updated")
     location: List[float] = Field(
         ...,
@@ -383,6 +419,9 @@ class BlenderCameraInfoResponse(BaseModel):
     """Active camera information."""
 
     success: bool = Field(..., description="Whether request succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     camera_name: str = Field(..., description="Active camera name")
     location: List[float] = Field(
         ...,
@@ -422,6 +461,9 @@ class BlenderFocusOnObjectResponse(BaseModel):
     """Result of focusing camera on an object."""
 
     success: bool = Field(..., description="Whether focus operation succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     camera_name: str = Field(..., description="Camera that was updated")
     object_name: str = Field(..., description="Object that was focused on")
     camera_location: List[float] = Field(
@@ -442,6 +484,9 @@ class BlenderViewportInfoResponse(BaseModel):
     """Active viewport / render settings summary."""
 
     success: bool = Field(..., description="Whether request succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     render_engine: str = Field(..., description="Active render engine identifier")
     resolution_x: int = Field(..., description="Render resolution X")
     resolution_y: int = Field(..., description="Render resolution Y")
@@ -467,6 +512,9 @@ class BlenderCaptureSequenceResponse(BaseModel):
     """Multi-frame capture result with per-frame base64 images."""
 
     success: bool = Field(..., description="Whether capture succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     frames: List[Dict[str, Any]] = Field(
         ..., description="Per-frame data: [{frame: int, image_base64: str}, ...]"
     )
@@ -521,6 +569,9 @@ class BlenderCreateObjectResponse(BaseModel):
     """Response after creating a Blender object."""
 
     success: bool = Field(..., description="Whether creation succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     name: str = Field(..., description="Resulting object name")
     object_type: str = Field(..., description="Created object type")
     location: List[float] = Field(
@@ -541,6 +592,9 @@ class BlenderDeleteObjectResponse(BaseModel):
     """Response after deleting a Blender object."""
 
     success: bool = Field(..., description="Whether deletion succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     deleted_name: str = Field(..., description="Name of deleted object")
 
 
@@ -572,6 +626,9 @@ class BlenderSetTransformResponse(BaseModel):
     """Response after setting an object's transform."""
 
     success: bool = Field(..., description="Whether transform succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Object name")
     location: List[float] = Field(
         ...,
@@ -604,6 +661,9 @@ class BlenderSetParentResponse(BaseModel):
     """Response after parenting objects."""
 
     success: bool = Field(..., description="Whether parenting succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     child_name: str = Field(..., description="Child object name")
     parent_name: str = Field(..., description="Parent object name")
 
@@ -621,6 +681,9 @@ class BlenderClearParentResponse(BaseModel):
     """Response after unparenting an object."""
 
     success: bool = Field(..., description="Whether unparenting succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Object name")
     previous_parent: Optional[str] = Field(None, description="Previous parent name")
 
@@ -645,6 +708,9 @@ class BlenderAssignMaterialResponse(BaseModel):
     """Response after assigning a material."""
 
     success: bool = Field(..., description="Whether assignment succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Object name")
     material_name: str = Field(..., description="Material name assigned")
 
@@ -667,6 +733,9 @@ class BlenderAddModifierResponse(BaseModel):
     """Response after adding a modifier."""
 
     success: bool = Field(..., description="Whether modifier was added")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Object name")
     modifier_name: str = Field(..., description="Modifier name")
     modifier_type: str = Field(..., description="Modifier type")
@@ -692,6 +761,9 @@ class BlenderSetLightParamsResponse(BaseModel):
     """Response after setting light parameters."""
 
     success: bool = Field(..., description="Whether light params were set")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     light_name: str = Field(..., description="Light object name")
     light_type: str = Field(..., description="Light type (POINT/SUN/SPOT/AREA)")
     energy: float = Field(..., description="Current energy")
@@ -718,6 +790,9 @@ class BlenderOpenFileResponse(BaseModel):
     """Response after opening a .blend file."""
 
     success: bool = Field(..., description="Whether the file was opened")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     file_path: str = Field(..., description="Path that was opened")
     object_count: int = Field(..., description="Number of objects in the opened scene")
 
@@ -734,6 +809,9 @@ class BlenderSaveFileResponse(BaseModel):
     """Response after saving a .blend file."""
 
     success: bool = Field(..., description="Whether the file was saved")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     file_path: str = Field(..., description="Path the file was saved to")
 
 
@@ -750,6 +828,9 @@ class BlenderImportFileResponse(BaseModel):
     """Response after importing a file."""
 
     success: bool = Field(..., description="Whether the import succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     file_path: str = Field(..., description="Path that was imported")
     file_format: str = Field(..., description="Format that was imported")
     imported_objects: List[str] = Field(
@@ -771,6 +852,9 @@ class BlenderExportFileResponse(BaseModel):
     """Response after exporting a file."""
 
     success: bool = Field(..., description="Whether the export succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     file_path: str = Field(..., description="Path the file was exported to")
     file_format: str = Field(..., description="Format that was exported")
 
@@ -779,6 +863,9 @@ class BlenderFileInfoResponse(BaseModel):
     """Response with current file information."""
 
     success: bool = Field(..., description="Whether info retrieval succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     file_path: str = Field(..., description="Current .blend file path")
     is_saved: bool = Field(..., description="Whether the file has been saved to disk")
     is_dirty: bool = Field(..., description="Whether there are unsaved changes")
@@ -806,6 +893,9 @@ class BlenderSetFrameResponse(BaseModel):
     """Response after setting the animation frame."""
 
     success: bool = Field(..., description="Whether frame was set successfully")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     frame: int = Field(..., description="The frame that was set")
 
 
@@ -813,6 +903,9 @@ class BlenderGetFrameResponse(BaseModel):
     """Response with current frame and range information."""
 
     success: bool = Field(..., description="Whether retrieval succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     current_frame: int = Field(..., description="Current scene frame")
     frame_start: int = Field(..., description="Animation start frame")
     frame_end: int = Field(..., description="Animation end frame")
@@ -830,6 +923,9 @@ class BlenderSetFrameRangeResponse(BaseModel):
     """Response after setting the frame range."""
 
     success: bool = Field(..., description="Whether frame range was set")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     frame_start: int = Field(..., description="Start frame that was set")
     frame_end: int = Field(..., description="End frame that was set")
 
@@ -846,6 +942,9 @@ class BlenderPlayAnimationResponse(BaseModel):
     """Response after changing playback state."""
 
     success: bool = Field(..., description="Whether playback action succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     action: str = Field(..., description="The action that was performed")
     is_playing: bool = Field(..., description="Whether animation is currently playing")
 
@@ -865,6 +964,9 @@ class BlenderInsertKeyframeResponse(BaseModel):
     """Response after inserting a keyframe."""
 
     success: bool = Field(..., description="Whether keyframe was inserted")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Object name")
     data_path: str = Field(..., description="Property data path")
     frame: int = Field(..., description="Frame number of the keyframe")
@@ -885,6 +987,9 @@ class BlenderDeleteKeyframeResponse(BaseModel):
     """Response after deleting a keyframe."""
 
     success: bool = Field(..., description="Whether keyframe was deleted")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Object name")
     data_path: str = Field(..., description="Property data path")
     frame: int = Field(..., description="Frame number that was deleted")
@@ -914,6 +1019,9 @@ class BlenderGetKeyframesResponse(BaseModel):
     """Response with keyframe summary for an object."""
 
     success: bool = Field(..., description="Whether retrieval succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Object name")
     has_animation: bool = Field(
         ..., description="Whether the object has animation data"
@@ -959,6 +1067,9 @@ class BlenderSetupRigidBodyResponse(BaseModel):
     """Response after setting up rigid body."""
 
     success: bool = Field(..., description="Whether setup succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Name of the object")
     body_type: str = Field(..., description="Rigid body type set")
     mass: float = Field(..., description="Mass set")
@@ -989,6 +1100,9 @@ class BlenderAddForceFieldResponse(BaseModel):
     """Response after adding a force field."""
 
     success: bool = Field(..., description="Whether creation succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     name: str = Field(..., description="Name of the created force field object")
     field_type: str = Field(..., description="Type of force field")
     strength: float = Field(..., description="Strength of the field")
@@ -1010,6 +1124,9 @@ class BlenderGetForceFieldInfoResponse(BaseModel):
     """Response with force field details."""
 
     success: bool = Field(..., description="Whether query succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Name of the force field object")
     field_type: str = Field(..., description="Force field type")
     strength: float = Field(..., description="Field strength")
@@ -1050,6 +1167,9 @@ class BlenderAddConstraintResponse(BaseModel):
     """Response after adding a rigid body constraint."""
 
     success: bool = Field(..., description="Whether constraint was created")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     constraint_name: str = Field(..., description="Name of the constraint empty object")
     constraint_type: str = Field(..., description="Type of constraint")
     object1_name: str = Field(..., description="First constrained object")
@@ -1066,6 +1186,9 @@ class BlenderGetConstraintInfoResponse(BaseModel):
     """Response with rigid body constraint details."""
 
     success: bool = Field(..., description="Whether query succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Name of the constraint object")
     constraint_type: str = Field(..., description="Constraint type")
     object1_name: Optional[str] = Field(
@@ -1088,6 +1211,9 @@ class BlenderGetPhysicsStateResponse(BaseModel):
     """Response with physics state readback."""
 
     success: bool = Field(..., description="Whether query succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Name of the object")
     location: List[float] = Field(
         ...,
@@ -1149,6 +1275,9 @@ class BlenderGetTrajectoryResponse(BaseModel):
     """Response with trajectory data."""
 
     success: bool = Field(..., description="Whether query succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Name of the tracked object")
     point_count: int = Field(..., description="Number of trajectory points")
     points: List[BlenderTrajectoryPoint] = Field(
@@ -1167,6 +1296,9 @@ class BlenderBakeSimulationResponse(BaseModel):
     """Response after baking simulation."""
 
     success: bool = Field(..., description="Whether bake succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     frame_start: int = Field(..., description="First baked frame")
     frame_end: int = Field(..., description="Last baked frame")
 
@@ -1177,6 +1309,9 @@ class BlenderFreeBakeResponse(BaseModel):
     success: bool = Field(..., description="Whether free bake succeeded")
 
 
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
 # ---------------------------------------------------------------------------
 # End Blender physics schemas
 # ---------------------------------------------------------------------------
@@ -1259,6 +1394,9 @@ class BlenderCreateMeshFromDataResponse(BaseModel):
     """Response after creating a mesh from vertex/edge/face data."""
 
     success: bool = Field(..., description="Whether the mesh was created")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_name: str = Field(..., description="Final Blender object name")
     mesh_name: str = Field(..., description="Final Blender mesh data-block name")
     vertex_count: int = Field(..., description="Number of vertices created")

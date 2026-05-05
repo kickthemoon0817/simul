@@ -203,14 +203,16 @@ class TestIter17WrapperSurfacesAdapterError:
         result = asyncio.run(tool.func())
 
         # iter17 contract: success accurately reflects the presence of
-        # an error in the adapter payload. Note that the Blender response
-        # schemas (BlenderInfoResponse and friends) do not currently
-        # declare an `error: Optional[str]` field, so Pydantic strips
-        # the diagnostic message before it reaches the client. Adding
-        # `error` to those schemas is iter18 follow-up territory; the
-        # iter17 fix is the success-flag accuracy alone.
+        # an error in the adapter payload. iter18 added `error:
+        # Optional[str]` to all Blender + SimReady response schemas
+        # so the diagnostic message now survives Pydantic and reaches
+        # the client.
         assert result["success"] is False, (
             f"iter17 invariant broken: registered get_blender_info tool "
             f"returned success={result.get('success')!r} when adapter "
             f"returned an error payload. Full response: {result}"
+        )
+        assert result.get("error") == "Simulated runtime metadata fetch failure", (
+            f"iter18 invariant broken: error message did not survive "
+            f"Pydantic. Full response: {result}"
         )
