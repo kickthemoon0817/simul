@@ -24,10 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any, Dict, Optional
-from unittest.mock import AsyncMock
-
-import pytest
 
 from simul_mcp.config import Settings
 from simul_mcp.mcp.tools.isaac_tools import IsaacTools
@@ -128,17 +124,14 @@ def test_read_aovs_script_wraps_cleanup_in_try_except() -> None:
     statistics had already been computed.
     """
     script = _capture_script()
-    # Loose check: the cleanup section should have try/except around
-    # detach. We assert the bare detach is inside a 'try:' block by
-    # locating the substring patterns.
-    assert "try:" in script
-    # Specifically the detach call must be wrapped — the 'pass' inside
-    # the cleanup except block is the iter21 marker that the
-    # AttributeError no longer aborts the tool.
-    assert "Detach failure must not lose collected AOV data" in script, (
-        "Expected the iter21 cleanup-comment marker. Without the "
-        "try/except wrap, a detach failure (e.g. unexpected wrapper "
-        "type in a future Kit release) would lose AOV data again."
+    # The iter21 marker that the AttributeError no longer aborts the
+    # tool: any detach failure surfaces a `_detach_warning` print and
+    # the per-AOV stats already collected are returned. A regression
+    # that strips the wrap will lose this marker text.
+    assert "_detach_warning" in script, (
+        "Expected the iter21 cleanup marker. Without the try/except "
+        "wrap, a detach failure (e.g. unexpected wrapper type in a "
+        "future Kit release) would lose AOV data again."
     )
 
 
