@@ -12,6 +12,7 @@ JSON output on stdout, making them consumable by AI agents.
 import asyncio
 import base64
 import json
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -354,15 +355,13 @@ def install_bridge(
         bundled = package_root / "bridge_ext" / "khemoo.simul.mcp"
         if (bundled / "config" / "extension.toml").is_file():
             source_p = bundled
-    if source_p is None:
-        # Fallback: legacy repo layout for very old editable checkouts.
-        import simul_mcp as _sm
-        anchor = Path(_sm.__file__).resolve()
-        for parent in anchor.parents:
-            candidate = parent / "exts" / "khemoo.simul.mcp"
-            if (candidate / "config" / "extension.toml").is_file():
-                source_p = candidate
-                break
+        else:
+            # Fallback: legacy repo layout for very old editable checkouts.
+            for parent in package_root.parents:
+                candidate = parent / "exts" / "khemoo.simul.mcp"
+                if (candidate / "config" / "extension.toml").is_file():
+                    source_p = candidate
+                    break
     if source_p is None or not (source_p / "config" / "extension.toml").is_file():
         msg = (
             "Bridge source not found. Pass --source <path> pointing at "
@@ -379,7 +378,6 @@ def install_bridge(
         raise typer.Exit(2)
 
     def _read_version(toml_path: Path) -> Optional[str]:
-        import re
         # Read errors (PermissionError, broken symlink, partial extract,
         # unreadable bytes) all collapse to None — the caller already
         # treats None as "unknown / replace". This keeps the install

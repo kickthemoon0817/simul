@@ -454,9 +454,75 @@ def test_install_bridge_prefers_bundled_source_over_legacy_walk(
     payload = json.loads(result.stdout)
     assert payload["action"] == "copied"
     assert payload["version"] == "0.0.99"
-    # Source resolution picked the bundled path, not anything under exts/.
-    assert "bridge_ext" in payload["source"]
-    assert "/exts/" not in payload["source"]
+    # Pin the exact resolved path — substring-only checks would pass
+    # for any path that happens to contain "bridge_ext" elsewhere.
+    assert payload["source"] == str(bundled)
+
+
+def test_install_bridge_bundled_source_with_symlink_flag(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """iter14: bundled-source resolution must compose cleanly with
+    --symlink. A regression that mutated source_p between the bundled
+    resolve and the dest.symlink_to call would only show up when both
+    code paths run together — neither single-mode test catches it.
+    """
+    fake_pkg = tmp_path / "wheel_pkg" / "simul_mcp"
+    fake_pkg.mkdir(parents=True)
+    (fake_pkg / "__init__.py").write_text("", encoding="utf-8")
+    bundled = fake_pkg / "bridge_ext" / "khemoo.simul.mcp"
+    (bundled / "config").mkdir(parents=True)
+    (bundled / "config" / "extension.toml").write_text(
+        '[package]\nversion = "0.0.99"\n', encoding="utf-8"
+    )
+    isaac_root = _make_isaac_root(tmp_path)
+
+    import simul_mcp as _sm
+    monkeypatch.setattr(_sm, "__file__", str(fake_pkg / "__init__.py"))
+
+    result = runner.invoke(app, [
+        "--json", "isaac", "install-bridge",
+        "--isaac-root", str(isaac_root),
+        "--symlink",
+    ])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "symlinked"
+    dest = isaac_root / "extsUser" / "khemoo.simul.mcp"
+    assert dest.is_symlink()
+    # The symlink target must be the exact bundled path that the
+    # resolver picked — not something silently mutated mid-flow.
+    assert dest.resolve() == bundled.resolve()
+
+
+def test_install_bridge_bundled_toml_missing_falls_through(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Defensive: when the bundled directory exists but
+    config/extension.toml is missing (corrupted install / partial
+    wheel extraction), the resolver must skip the bundled candidate
+    and either find a legacy fallback or exit cleanly with
+    SourceNotFound — never crash on the missing file.
+    """
+    fake_pkg = tmp_path / "wheel_pkg" / "simul_mcp"
+    fake_pkg.mkdir(parents=True)
+    (fake_pkg / "__init__.py").write_text("", encoding="utf-8")
+    # Bundled dir exists but the toml is absent → must not be picked.
+    bundled_dir = fake_pkg / "bridge_ext" / "khemoo.simul.mcp" / "config"
+    bundled_dir.mkdir(parents=True)
+    isaac_root = _make_isaac_root(tmp_path)
+
+    import simul_mcp as _sm
+    monkeypatch.setattr(_sm, "__file__", str(fake_pkg / "__init__.py"))
+
+    result = runner.invoke(app, [
+        "--json", "isaac", "install-bridge",
+        "--isaac-root", str(isaac_root),
+    ])
+
+    assert result.exit_code != 0
+    assert "SourceNotFound" in result.stdout
 
 
 def test_install_bridge_picks_up_isaac_sim_path_env_var(
