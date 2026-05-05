@@ -326,10 +326,11 @@ Implications:
   discovery handles it without an init.
 - Long-running build tests live under the `packaging` pytest marker
   (e.g. `tests/packaging/test_wheel_contents.py` — runs `uv build`
-  then inspects the wheel zipfile). The default unit invocation
-  `pytest tests/ -m "not isaac and not unreal_live and not
-  packaging"` skips them; `pytest -m packaging` runs them as a
-  pre-publish gate.
+  then inspects the wheel zipfile). The bare `pytest tests/`
+  invocation skips them automatically because `-m "not packaging"`
+  is baked into `pyproject.toml addopts`; `pytest -m packaging`
+  runs them as a pre-publish gate (the LAST `-m` wins, so the
+  explicit override beats the default).
 
 ## Live-driven testing — when the machine has the runtime, use it
 

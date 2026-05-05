@@ -19,14 +19,17 @@ without any signal at build time.
 
 This test catches that class of regression by actually building a
 wheel and inspecting its zipfile contents. It is marked
-``packaging`` so the standard
-``pytest -m "not isaac and not unreal_live"`` invocation skips it
-(building a wheel takes ~10s, too slow for the fast unit loop).
-Release CI should run ``pytest -m packaging`` before publishing.
+``packaging`` so the default ``pytest`` invocation (which has
+``-m "not packaging"`` baked into ``addopts``) skips it — building
+a wheel takes ~1 s on uv but several seconds on ``python -m build``,
+too slow for the fast unit loop. Release CI should run
+``pytest -m packaging`` before publishing.
 """
 
 from __future__ import annotations
 
+import functools
+import re
 import shutil
 import subprocess
 import zipfile
@@ -38,9 +41,16 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 
 
+@functools.lru_cache(maxsize=None)
 def _have_uv_or_build() -> tuple[str, list[str]] | None:
     """Return (label, build-cmd-prefix) for whichever wheel builder
     is available; ``None`` if neither is installed.
+
+    Cached at module level so the three tests don't each spawn a
+    fresh ``python -c "import build"`` probe. This also pins the
+    answer for the whole pytest session — if the environment changes
+    mid-run the same builder is used by every test, eliminating a
+    cross-test inconsistency footgun.
 
     uv is preferred because it does not need pip in the calling venv
     (this project's dev venv is uv-managed and ships without pip),
@@ -58,17 +68,24 @@ def _have_uv_or_build() -> tuple[str, list[str]] | None:
         return None
 
 
-pytestmark = pytest.mark.packaging
+def _build_error_msg(label: str, proc: subprocess.CompletedProcess) -> str:
+    """Consistent build-failure message — both stderr and stdout
+    truncated identically. Some build tools route the actual failure
+    detail to stdout, so showing only stderr would hide it.
+    """
+    return (
+        f"{label} build failed (exit {proc.returncode}). "
+        f"stderr:\n{proc.stderr[-2000:]}\n"
+        f"stdout:\n{proc.stdout[-2000:]}"
+    )
 
 
-def test_wheel_ships_bundled_bridge_ext(tmp_path: Path) -> None:
-    """Build a wheel and assert the bundled bridge ext is present.
+def _run_build(tmp_path: Path) -> Path:
+    """Build a wheel into ``tmp_path/dist`` and return the wheel path.
 
-    Locks the iter14 contract: ``simul_mcp/bridge_ext/khemoo.simul.mcp/``
-    must contain at minimum the extension manifest (config/extension.toml)
-    and the entry-point Python module (khemoo/simul/mcp/extension.py).
-    Failure means a future setuptools or pyproject change broke the
-    package-data glob and no pip user can run ``install-bridge``.
+    Returns the single produced wheel path. Skips the test if no
+    builder is available; raises an ``AssertionError`` if the build
+    fails (the message includes the truncated subprocess output).
     """
     builder = _have_uv_or_build()
     if builder is None:
@@ -85,14 +102,26 @@ def test_wheel_ships_bundled_bridge_ext(tmp_path: Path) -> None:
     proc = subprocess.run(
         cmd, cwd=_REPO, capture_output=True, text=True, timeout=120
     )
-    assert proc.returncode == 0, (
-        f"{label} build failed (exit {proc.returncode}). "
-        f"stderr:\n{proc.stderr[-2000:]}\nstdout:\n{proc.stdout[-2000:]}"
-    )
+    assert proc.returncode == 0, _build_error_msg(label, proc)
 
     wheels = sorted(out_dir.glob("simul_mcp-*-py3-none-any.whl"))
     assert len(wheels) == 1, f"Expected exactly one wheel, got {wheels}"
-    wheel = wheels[0]
+    return wheels[0]
+
+
+pytestmark = pytest.mark.packaging
+
+
+def test_wheel_ships_bundled_bridge_ext(tmp_path: Path) -> None:
+    """Build a wheel and assert the bundled bridge ext is present.
+
+    Locks the iter14 contract: ``simul_mcp/bridge_ext/khemoo.simul.mcp/``
+    must contain at minimum the extension manifest (config/extension.toml)
+    and the entry-point Python module (khemoo/simul/mcp/extension.py).
+    Failure means a future setuptools or pyproject change broke the
+    package-data glob and no pip user can run ``install-bridge``.
+    """
+    wheel = _run_build(tmp_path)
 
     with zipfile.ZipFile(wheel) as zf:
         names = zf.namelist()
@@ -125,39 +154,26 @@ def test_wheel_excludes_pyc_bytecode(tmp_path: Path) -> None:
     bytecode. This test runs after a build and asserts the exclude
     actually fired — silent inclusion would mean the rule was either
     unrecognized by the active setuptools or the glob path is wrong.
+
+    Plants a sentinel ``.pyc`` in the source tree so the assertion
+    isn't vacuous on a clean dev machine. Cleans up the sentinel
+    AND the ``__pycache__`` dir if this test was the one that
+    created it (otherwise leaves it alone — could be a real
+    bytecode dir from a previous interpreter run that another
+    process owns).
     """
-    builder = _have_uv_or_build()
-    if builder is None:
-        pytest.skip("Neither `uv` nor `python -m build` is available.")
-    label, cmd = builder
-
-    out_dir = tmp_path / "dist"
-    out_dir.mkdir()
-    if label == "uv":
-        cmd = cmd + ["--out-dir", str(out_dir)]
-    else:
-        cmd = cmd + ["--outdir", str(out_dir)]
-
-    # Force-create a pycache file in the source tree so the exclude
-    # actually has something to drop. Without this, the test passes
-    # vacuously when the dev tree is already clean.
     pycache = (
         _REPO / "src" / "simul_mcp" / "bridge_ext"
         / "khemoo.simul.mcp" / "khemoo" / "simul" / "mcp" / "__pycache__"
     )
+    pycache_pre_existed = pycache.exists()
     pycache.mkdir(exist_ok=True)
-    sentinel = pycache / "regression_sentinel.cpython-311.pyc"
+    sentinel = pycache / "iter15_regression_sentinel.cpython-311.pyc"
     sentinel.write_bytes(b"\x00\x00\x00\x00")
     try:
-        proc = subprocess.run(
-            cmd, cwd=_REPO, capture_output=True, text=True, timeout=120
-        )
-        assert proc.returncode == 0, proc.stderr[-2000:]
+        wheel = _run_build(tmp_path)
 
-        wheels = sorted(out_dir.glob("simul_mcp-*-py3-none-any.whl"))
-        assert len(wheels) == 1, f"Expected exactly one wheel, got {wheels}"
-
-        with zipfile.ZipFile(wheels[0]) as zf:
+        with zipfile.ZipFile(wheel) as zf:
             names = zf.namelist()
 
         leaked = [n for n in names if n.endswith(".pyc") or "__pycache__" in n]
@@ -167,11 +183,18 @@ def test_wheel_excludes_pyc_bytecode(tmp_path: Path) -> None:
         )
     finally:
         sentinel.unlink(missing_ok=True)
-        # Don't remove the dir — other test runs may share it.
+        # Only remove the dir if this test created it, AND only when
+        # empty — a parallel test or import that wrote real bytecode
+        # mid-flight should not be wiped.
+        if not pycache_pre_existed and pycache.exists():
+            try:
+                pycache.rmdir()
+            except OSError:
+                pass  # Not empty — leave it.
 
 
 def test_wheel_extension_toml_version_matches_package(tmp_path: Path) -> None:
-    """The bundled extension.toml's version must equal simul_mcp.__version__.
+    """The bundled extension.toml's version must equal the wheel version.
 
     The 4-file lockstep at source level is enforced by
     ``test_version_lockstep.py``. This test extends that guarantee
@@ -179,30 +202,10 @@ def test_wheel_extension_toml_version_matches_package(tmp_path: Path) -> None:
     in the wheel must show the same version the wheel filename
     advertises. A drift here would mean ``install-bridge`` from a
     pip-installed copy publishes an extension whose Kit ID does not
-    match the parent package — which is exactly the iter11 drift
-    failure mode the lockstep was created to prevent.
+    match the parent package — exactly the iter11 drift failure
+    mode the lockstep was created to prevent.
     """
-    builder = _have_uv_or_build()
-    if builder is None:
-        pytest.skip("Neither `uv` nor `python -m build` is available.")
-    label, cmd = builder
-
-    out_dir = tmp_path / "dist"
-    out_dir.mkdir()
-    if label == "uv":
-        cmd = cmd + ["--out-dir", str(out_dir)]
-    else:
-        cmd = cmd + ["--outdir", str(out_dir)]
-
-    proc = subprocess.run(
-        cmd, cwd=_REPO, capture_output=True, text=True, timeout=120
-    )
-    assert proc.returncode == 0, proc.stderr[-2000:]
-
-    wheels = sorted(out_dir.glob("simul_mcp-*-py3-none-any.whl"))
-    assert len(wheels) == 1, f"Expected exactly one wheel, got {wheels}"
-    wheel = wheels[0]
-
+    wheel = _run_build(tmp_path)
     # Wheel filename: simul_mcp-X.Y.Z-py3-none-any.whl → "X.Y.Z"
     wheel_version = wheel.name.split("-")[1]
 
@@ -210,7 +213,6 @@ def test_wheel_extension_toml_version_matches_package(tmp_path: Path) -> None:
     with zipfile.ZipFile(wheel) as zf:
         toml_text = zf.read(member).decode("utf-8")
 
-    import re
     m = re.search(
         r'^\[package\]\s*\nversion\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"',
         toml_text,
