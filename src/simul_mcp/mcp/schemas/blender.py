@@ -1307,11 +1307,11 @@ class BlenderFreeBakeResponse(BaseModel):
     """Response after freeing baked simulation data."""
 
     success: bool = Field(..., description="Whether free bake succeeded")
-
-
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
+
+
 # ---------------------------------------------------------------------------
 # End Blender physics schemas
 # ---------------------------------------------------------------------------

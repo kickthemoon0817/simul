@@ -133,6 +133,9 @@ class TestBlenderToolRegistration:
         assert "list_blender_scene_objects" not in tool_names
 
 
+_SIMULATED_BLENDER_ERROR = "Simulated runtime metadata fetch failure"
+
+
 class FakeBlenderAdapterErroring:
     """Blender adapter stub whose adapter calls return failure-shape
     payloads (``{... "error": "..."}``).
@@ -166,7 +169,7 @@ class FakeBlenderAdapterErroring:
                 "binary_path": "",
                 "background": False,
                 "blend_file_path": None,
-                "error": "Simulated runtime metadata fetch failure",
+                "error": _SIMULATED_BLENDER_ERROR,
             },
         )
         yield session
@@ -212,7 +215,7 @@ class TestIter17WrapperSurfacesAdapterError:
             f"returned success={result.get('success')!r} when adapter "
             f"returned an error payload. Full response: {result}"
         )
-        assert result.get("error") == "Simulated runtime metadata fetch failure", (
+        assert result.get("error") == _SIMULATED_BLENDER_ERROR, (
             f"iter18 invariant broken: error message did not survive "
             f"Pydantic. Full response: {result}"
         )
