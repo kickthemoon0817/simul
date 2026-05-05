@@ -130,6 +130,9 @@ class FocusPrimResponse(BaseModel):
     """Response from focusing camera on a prim."""
 
     success: bool = Field(..., description="Whether focus succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     stage_id: str = Field(..., description="Stage identifier")
     prim_path: str = Field(..., description="Prim path")
     focus_point: List[float] = Field(
@@ -143,6 +146,9 @@ class FocusPrimResponse(BaseModel):
 
 class PrimActionResponse(BaseModel):
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     stage_id: str = Field(..., description="Stage identifier")
     prim_path: str = Field(..., description="Prim path")
     message: str = Field(..., description="Status message")
