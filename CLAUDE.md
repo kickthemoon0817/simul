@@ -150,15 +150,21 @@ The Python package is `simul-mcp`, installed editable from this repo
 
 ## Versioning
 
-Version is tracked in **three places that must always move together**:
+Version is tracked in **four places that must always move together**:
 
 - `pyproject.toml` → `[project] version = "X.Y.Z"`
 - `.claude-plugin/plugin.json` → `"version": "X.Y.Z"`
 - `src/simul_mcp/__init__.py` → `__version__ = "X.Y.Z"`
+- `exts/khemoo.simul.mcp/config/extension.toml` → `[package] version = "X.Y.Z"`
+  (the Isaac Sim bridge extension shipped from this repo — its
+  version-suffixed Kit ID, e.g. `khemoo.simul.mcp-X.Y.Z`, must match
+  the parent so callers reading either side see consistent metadata.
+  The bridge ext was added to the lockstep in iter11 after drifting
+  from 0.0.19 → 0.0.32 across 13 patch tags went unnoticed.)
 
 ### Release sequence — do not deviate
 
-1. Bump all three constants in a single commit on a
+1. Bump all four constants in a single commit on a
    `chore/bump-version-X.Y.Z` branch. Commit subject: `chore: bump version
    to X.Y.Z` — no parentheses, no body needed.
 2. Open a PR against `main`. Branch protection rejects direct pushes to
