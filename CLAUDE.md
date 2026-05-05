@@ -290,13 +290,17 @@ Implications:
   through PRs (`gh pr create … && gh pr merge <N> --merge --delete-branch`).
 - `gh issue view <N>` errors on this repo with the Projects-classic
   deprecation; use `gh api repos/kickthemoon0817/simul/issues/<N>` instead.
-- `pytest tests/ -m "not isaac and not unreal_live"` should be 100%
-  green on `main` (491+ passed, 0 failed, modulo deselected
-  packaging tests). The historical 14-16 pre-existing FakeFastMCP
+- `pytest tests/` should be 100% green on `main`. Reference
+  numbers from iter20 baseline: `491 passed, 6 skipped, 3
+  deselected, 0 failed`. The 6 skipped are `@pytest.mark.isaac` /
+  `@pytest.mark.unreal_live` tests that need a running engine;
+  the 3 deselected are the `packaging` marker tests
+  (`tests/packaging/test_wheel_contents.py`) that addopts skips
+  by default. The historical 14-16 pre-existing FakeFastMCP
   `add_middleware` failures were eliminated in iter17 (Blender
-  test file) + iter20 (the remaining 3: `tests/mcp/test_discoverability.py`,
+  file) + iter20 (the remaining 3: `tests/mcp/test_discoverability.py`,
   `tests/mcp/test_isaac_bridge_server.py`, `tests/mcp/test_isaac_session_routing.py`).
-  All 5 FakeFastMCP test doubles now stub `add_middleware` and
+  All 5 FakeFastMCP doubles now stub `add_middleware` and
   `resource`. New failures are real regressions; debug them.
 - The simul MCP server in a running Claude Code session does **not**
   hot-reload — Python loads source at process start, edits don't
