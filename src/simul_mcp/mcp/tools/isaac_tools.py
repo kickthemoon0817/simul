@@ -3814,9 +3814,69 @@ class IsaacTools(LoggerMixin):
                 except Exception as e:
                     results[name] = {{"error": str(e)}}
 
+            # Issue #41: in Kit 107.3.3 (Isaac Sim 5.1) rep.create.render_product
+            # returns a HydraTexture wrapper. ann.attach([rp]) accepts the
+            # wrapper, but ann.detach([rp]) chains down to
+            # SyntheticData._get_node_path which calls
+            # renderProductPath.split("/") — and HydraTexture has no .split,
+            # so detach raises AttributeError mid-cleanup, dropping all AOV
+            # data. Detaching by the path STRING instead bypasses the
+            # split call. The wrapper exposes the path under different
+            # names across Kit versions (.path attribute,
+            # .get_render_product_path() method, or just the bare string),
+            # so probe each form, validate the result is actually a string,
+            # and only fall back to rp itself when the bare string-return
+            # path is the actual return shape.
+            def _extract_rp_path(rpobj):
+                attr = getattr(rpobj, "path", None)
+                if isinstance(attr, str):
+                    return attr
+                attr = getattr(rpobj, "render_product_path", None)
+                if isinstance(attr, str):
+                    return attr
+                method = getattr(rpobj, "get_render_product_path", None)
+                if callable(method):
+                    try:
+                        result = method()
+                        if isinstance(result, str):
+                            return result
+                    except Exception:
+                        pass
+                if isinstance(rpobj, str):
+                    return rpobj
+                return None
+
+            rp_path = _extract_rp_path(rp)
             for ann in annotators.values():
-                ann.detach([rp])
-            rp.destroy()
+                try:
+                    if rp_path is not None:
+                        ann.detach([rp_path])
+                    else:
+                        # Probing failed — log so a future Kit release that
+                        # changes the wrapper API surfaces the issue rather
+                        # than silently corrupting the cleanup.
+                        print(json.dumps({{
+                            "_detach_warning": (
+                                "Could not extract render-product path "
+                                "string from "
+                                + type(rp).__name__
+                                + "; detach skipped to preserve AOV data."
+                            )
+                        }}))
+                except Exception as _det_err:
+                    print(json.dumps({{
+                        "_detach_warning": (
+                            "Detach raised "
+                            + type(_det_err).__name__
+                            + ": "
+                            + str(_det_err)
+                            + " — preserving AOV data."
+                        )
+                    }}))
+            try:
+                rp.destroy()
+            except Exception:
+                pass  # Destroy is best-effort cleanup.
 
             output = {{
                 "aovs": results,
