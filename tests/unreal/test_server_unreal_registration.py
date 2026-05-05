@@ -159,3 +159,81 @@ class TestUnrealToolRegistration:
         assert "spawn_unreal_actor" not in tool_names
         assert "delete_unreal_actor" not in tool_names
         assert "set_unreal_actor_transform" not in tool_names
+
+
+class FakeUnrealAdapterErroring:
+    """Unreal adapter stub whose adapter calls return failure-shape
+    payloads (``{connected: false, error: "..."}``).
+
+    Mirrors the on-the-wire shape that ``UnrealRuntimeSession.health_check()``
+    emits when the editor is not running (per
+    ``src/simul_mcp/adapters/unreal_runtime.py:573-578``). Used to
+    drive the iter16 contract test: the registered tool wrapper
+    must surface ``success=False`` instead of the historical bug
+    where a blanket ``payload["success"] = True`` masked it.
+    """
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def is_available(self) -> bool:
+        return True
+
+    def get_capabilities(self):
+        return ["unreal_health_check"]
+
+    @contextmanager
+    def create_session(self):
+        session = SimpleNamespace(
+            health_check=_coro(
+                {
+                    "connected": False,
+                    "error": (
+                        "Cannot connect to host 127.0.0.1:30010 ssl:default "
+                        "[Connect call failed]"
+                    ),
+                }
+            ),
+        )
+        yield session
+
+
+class TestIter16WrapperSurfacesAdapterError:
+    """End-to-end coverage of the iter16 invariant at the tool layer.
+
+    iter16 fixed 56 sites in ``_reg_unreal.py`` that unconditionally
+    wrote ``payload["success"] = True``, replacing them with the
+    new ``apply_success_from_error`` helper. Without a tool-layer
+    test, a future revert of any single site would silently slip
+    past — the only safety would be grep-level code review. This
+    test invokes the registered ``unreal_health_check`` tool
+    function directly and asserts the wire response carries
+    ``success=False`` when the adapter returned an error payload.
+    """
+
+    def test_unreal_health_check_returns_success_false_on_adapter_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
+        monkeypatch.setattr(server_module, "TaskConfig", None)
+        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
+        monkeypatch.setattr(
+            server_module, "UnrealRuntimeAdapter", FakeUnrealAdapterErroring
+        )
+
+        instance = server_module.SimulMCPServer(settings=Settings())
+        tool = next(
+            t for t in instance.mcp.tools if t.name == "unreal_health_check"
+        )
+
+        result = asyncio.run(tool.func())
+
+        assert result["success"] is False, (
+            f"iter16 invariant broken: registered unreal_health_check tool "
+            f"returned success={result.get('success')!r} when adapter "
+            f"returned an error payload. Full response: {result}"
+        )
+        assert result["connected"] is False
+        assert "error" in result and result["error"]

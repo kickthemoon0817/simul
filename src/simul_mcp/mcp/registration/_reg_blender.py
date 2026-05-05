@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from ..schemas.blender import *
 from ..schemas.common import ErrorResponse
 from ..schemas.simready import *
+from ._helpers import apply_success_from_error
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -2649,8 +2650,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     input_data.script,
                     input_data.timeout,
                 )
-                has_error = payload.get("error") is not None
-                payload["success"] = not has_error
+                apply_success_from_error(payload)
                 result = BlenderExecuteScriptResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
