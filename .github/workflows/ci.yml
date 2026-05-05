@@ -95,3 +95,58 @@ jobs:
         # Override the addopts default `-m "not packaging"` by
         # passing `-m packaging` last; pytest takes the LAST -m.
         run: uv run pytest tests/packaging/ -m packaging --no-cov -v
+
+  lint-and-typecheck:
+    # Informational lint visibility — does NOT block PRs because the
+    # repo carries a documented backlog (~941 mypy errors, isort
+    # drift in 5 files, flake8 line-length tension between black's
+    # 88 and CLAUDE.md's 119). Each tool runs with
+    # `continue-on-error: true` so failures surface in CI logs as a
+    # diff-friendly checklist for incremental cleanup, without
+    # gating merges on the full backlog. The job itself is also
+    # marked `continue-on-error` so the workflow's overall green
+    # status remains tied to the actual functional gates
+    # (unit-tests + packaging-gate).
+    name: Lint + type-check (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39  # v3.2.4
+        with:
+          enable-cache: true
+
+      - name: Install project from uv.lock (with dev extras)
+        run: uv sync --extra dev
+
+      - name: black --check (informational)
+        continue-on-error: true
+        run: uv run black --check src/ tests/
+
+      - name: isort --check-only (informational)
+        continue-on-error: true
+        run: uv run isort --check-only src/ tests/
+
+      - name: flake8 (informational)
+        # Note: project lacks a flake8 config, so default 79-char
+        # max-line-length applies — many failures expected against
+        # CLAUDE.md's 119-char convention. A future iter that adds
+        # `[flake8] max-line-length = 119` (or migrates to ruff)
+        # will tighten this gate.
+        continue-on-error: true
+        run: uv run flake8 src/ tests/
+
+      - name: mypy (informational)
+        # Per pyproject.toml [tool.mypy] this is strictly configured
+        # but the codebase has a ~941-error backlog as of iter22.
+        # Surfacing the count in CI lets contributors see whether
+        # their PR adds or removes errors.
+        continue-on-error: true
+        run: uv run mypy src/
