@@ -37,6 +37,20 @@ class FakeFastMCP:
 
         return decorator
 
+    def resource(self, *args, **kwargs):
+        """Stub for resource registration."""
+        def decorator(func):
+            return func
+        return decorator
+
+    def add_middleware(self, middleware: Any) -> None:
+        """Stub for FastMCP middleware registration.
+
+        SimulMCPServer adds a request-context middleware (PR #23)
+        before any tools register. The stub only needs to not raise.
+        """
+        return
+
 
 class FakeIsaacClient:
     """Small Isaac client double used for routing tests."""
