@@ -253,6 +253,197 @@ def bridge_up(
     raise typer.Exit(1)
 
 
+@app.command("install-bridge")
+def install_bridge(
+    isaac_root: Optional[Path] = typer.Option(
+        None,
+        "--isaac-root",
+        help=(
+            "Isaac Sim install root. Defaults to $ISAAC_SIM_PATH. "
+            "The bridge ext is published into <isaac-root>/extsUser/khemoo.simul.mcp/"
+            ", which is where Isaac actually loads user extensions from."
+        ),
+    ),
+    source: Optional[Path] = typer.Option(
+        None,
+        "--source",
+        help=(
+            "Path to the bridge extension source dir (the one containing "
+            "config/extension.toml). Defaults to the repo's "
+            "exts/khemoo.simul.mcp/, located by walking up from the "
+            "installed simul_mcp package."
+        ),
+    ),
+    symlink: bool = typer.Option(
+        False,
+        "--symlink",
+        help=(
+            "Symlink the source into Isaac's extsUser instead of copying. "
+            "Recommended for repo / editable-install workflows so future "
+            "git pulls are picked up without a re-install. Copy is the "
+            "default for safety on systems where Isaac runs as a different "
+            "user."
+        ),
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "Replace any existing extsUser copy. Without this flag the "
+            "command refuses if the dest exists and its version already "
+            "matches the source — that's a clean no-op."
+        ),
+    ),
+) -> None:
+    """Publish the bridge ext into Isaac's extsUser directory.
+
+    Closes the iter11 verifier finding: ``simul-mcp isaac list-extensions``
+    returned ``khemoo.simul.mcp-0.0.13`` even after the repo bumped to
+    0.0.33, because Isaac loads from ``<isaac-root>/extsUser/``, not the
+    repo. Repo-side bumps to ``exts/khemoo.simul.mcp/config/extension.toml``
+    have to be physically copied (or symlinked) into the editor's user
+    extension dir for the running Isaac to see them.
+
+    Workflow:
+
+      1. Resolve isaac-root: --isaac-root flag → $ISAAC_SIM_PATH → error.
+      2. Resolve source: --source flag → walk parents from the installed
+         simul_mcp package up to find ``exts/khemoo.simul.mcp/`` → error.
+      3. Read source ``config/extension.toml`` for the version.
+      4. If dest exists, read its version. Same version + no --force →
+         no-op success.
+      5. Otherwise: remove dest if present, then copytree (or symlink).
+      6. Re-verify dest version. Report.
+    """
+    import os
+    import shutil
+
+    # 1. Resolve isaac-root
+    isaac_root_p: Optional[Path] = (
+        isaac_root or (Path(os.environ["ISAAC_SIM_PATH"]) if os.environ.get("ISAAC_SIM_PATH") else None)
+    )
+    if isaac_root_p is None:
+        msg = (
+            "Isaac install root not set. Pass --isaac-root <path> or "
+            "export ISAAC_SIM_PATH=<path>."
+        )
+        if is_json_mode():
+            emit_error(msg, "InvalidArgument")
+            return
+        console.print(f"[red]{msg}[/red]")
+        raise typer.Exit(2)
+    isaac_root_p = isaac_root_p.expanduser().resolve()
+    exts_user = isaac_root_p / "extsUser"
+    if not exts_user.is_dir():
+        msg = f"extsUser/ not found under {isaac_root_p} — is this an Isaac Sim install root?"
+        if is_json_mode():
+            emit_error(msg, "InvalidArgument")
+            return
+        console.print(f"[red]{msg}[/red]")
+        raise typer.Exit(2)
+
+    # 2. Resolve source — walk from simul_mcp.__file__ up to find exts/...
+    source_p: Optional[Path] = source.expanduser().resolve() if source else None
+    if source_p is None:
+        import simul_mcp as _sm
+        anchor = Path(_sm.__file__).resolve()
+        for parent in anchor.parents:
+            candidate = parent / "exts" / "khemoo.simul.mcp"
+            if (candidate / "config" / "extension.toml").is_file():
+                source_p = candidate
+                break
+    if source_p is None or not (source_p / "config" / "extension.toml").is_file():
+        msg = (
+            "Bridge source not found. Pass --source <path> pointing at "
+            "the dir containing config/extension.toml. Pip-installed "
+            "simul-mcp does not bundle the bridge ext today; this command "
+            "currently requires a repo checkout."
+        )
+        if is_json_mode():
+            emit_error(msg, "SourceNotFound")
+            return
+        console.print(f"[red]{msg}[/red]")
+        raise typer.Exit(2)
+
+    def _read_version(toml_path: Path) -> Optional[str]:
+        import re
+        # Read errors (PermissionError, broken symlink, partial extract,
+        # unreadable bytes) all collapse to None — the caller already
+        # treats None as "unknown / replace". This keeps the install
+        # workflow recoverable from a corrupted prior install instead of
+        # crashing with an unhandled exception.
+        try:
+            text = toml_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        m = re.search(
+            r'^\[package\]\s*\nversion\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"',
+            text,
+            flags=re.MULTILINE,
+        )
+        return m.group(1) if m else None
+
+    src_version = _read_version(source_p / "config" / "extension.toml") or "?"
+
+    # 3-4. Inspect dest
+    dest = exts_user / "khemoo.simul.mcp"
+    dest_version_before: Optional[str] = None
+    if dest.exists():
+        dest_toml = dest / "config" / "extension.toml"
+        if dest_toml.is_file():
+            dest_version_before = _read_version(dest_toml)
+        if dest_version_before == src_version and not force:
+            payload = {
+                "action": "already-current",
+                "source": str(source_p),
+                "dest": str(dest),
+                "version": src_version,
+                "success": True,
+            }
+            if is_json_mode():
+                emit(payload)
+                return
+            console.print(
+                f"[green]Bridge ext already at {src_version} @ {dest}[/green]"
+            )
+            return
+
+    # 5. Replace
+    if dest.exists() or dest.is_symlink():
+        if dest.is_symlink() or dest.is_file():
+            dest.unlink()
+        else:
+            shutil.rmtree(dest)
+    if symlink:
+        dest.symlink_to(source_p, target_is_directory=True)
+        action = "symlinked"
+    else:
+        shutil.copytree(source_p, dest)
+        action = "copied"
+
+    # 6. Verify
+    dest_version_after = _read_version(dest / "config" / "extension.toml")
+    payload = {
+        "action": action,
+        "source": str(source_p),
+        "dest": str(dest),
+        "previous_version": dest_version_before,
+        "version": dest_version_after,
+        "success": dest_version_after == src_version,
+    }
+    if is_json_mode():
+        emit(payload)
+        if not payload["success"]:
+            raise typer.Exit(1)
+        return
+    console.print(
+        f"[green]Bridge ext {action}[/green] {source_p} → {dest} "
+        f"(was {dest_version_before or 'absent'}, now {dest_version_after})"
+    )
+    if not payload["success"]:
+        raise typer.Exit(1)
+
+
 @app.command("bridge-capabilities")
 def bridge_capabilities(
     host: Optional[str] = _host_opt,
