@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "simul-mcp"
-version = "0.0.36"
+version = "0.0.37"
 description = "MCP server for 3D simulation and DCC tools — USD scene control, Isaac Sim, Blender, and Unreal Engine integration"
 authors = [
     {name = "khemoo"}
@@ -139,12 +139,17 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
+    # Skip slow build-test gates by default. A bare `pytest tests/`
+    # should never burn ~1-30s building wheels for the fast unit
+    # loop. Override with `pytest -m packaging` (the LAST -m wins).
+    "-m", "not packaging",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "isaac: marks tests that require Isaac Sim environment",
     "unreal_live: marks tests that require a running Unreal Engine editor (Remote Control reachable on the configured host:port)",
+    "packaging: marks tests that build the wheel; require uv (or python -m build) on PATH and run for many seconds (deselect with '-m \"not packaging\"' — already in addopts default; explicit override with '-m packaging')",
 ]
 
 [tool.coverage.run]
