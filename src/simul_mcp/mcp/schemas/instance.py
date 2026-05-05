@@ -23,6 +23,9 @@ class ListIsaacInstancesResponse(BaseModel):
     """Response from list_isaac_instances tool."""
 
     success: bool = Field(True, description="Whether discovery completed")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     instances: List[IsaacInstanceInfo] = Field(default_factory=list, description="Discovered instances")
     active_instance: Optional[str] = Field(None, description="Name of the currently active instance")
     total_discovered: int = Field(0, description="Number of reachable instances found")
@@ -32,6 +35,9 @@ class SetActiveInstanceResponse(BaseModel):
     """Response from set_active_isaac_instance tool."""
 
     success: bool = Field(..., description="Whether the switch succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     active_instance: str = Field(..., description="Name of the now-active instance")
     address: str = Field(..., description="host:port of the now-active instance")
     message: str = Field("", description="Status message")

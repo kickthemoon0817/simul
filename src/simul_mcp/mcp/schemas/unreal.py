@@ -38,6 +38,9 @@ class UnrealListInstancesResponse(BaseModel):
     """Response listing all discovered Unreal Engine instances."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     instances: List[UnrealInstanceInfo] = Field(
         default_factory=list, description="Discovered instances"
     )
@@ -66,6 +69,9 @@ class UnrealEngineInfoResponse(BaseModel):
     """Response with Unreal Engine runtime information."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     engine_version: str = Field(..., description="Unreal Engine version string")
     project_name: str = Field(..., description="Active project name")
     loaded_map: str = Field(..., description="Currently loaded persistent level path")
@@ -78,6 +84,9 @@ class UnrealLoadedMapResponse(BaseModel):
     """Response with the currently loaded persistent level path."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     map_path: str = Field(..., description="Currently loaded persistent level path")
 
 
@@ -118,6 +127,9 @@ class UnrealListActorsResponse(BaseModel):
     """Response for actor listing."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actors: List[UnrealActorEntry] = Field(
         default_factory=list, description="Actors in the level"
     )
@@ -145,6 +157,9 @@ class UnrealGetActorInfoResponse(BaseModel):
     """Response with detailed actor information."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     name: str = Field(..., description="Actor label")
     path: str = Field(..., description="Full object path")
     class_name: str = Field(..., description="UClass name")
@@ -191,6 +206,9 @@ class UnrealSearchAssetsResponse(BaseModel):
     """Response from asset search."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     assets: List[UnrealAssetEntry] = Field(
         default_factory=list, description="Matching assets"
     )
@@ -219,6 +237,9 @@ class UnrealDescribeObjectResponse(BaseModel):
     """Response with UObject metadata."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     object_path: str = Field(..., description="Object path queried")
     class_name: str = Field(..., description="UClass name")
     properties: List[UnrealPropertyInfo] = Field(
@@ -243,6 +264,9 @@ class UnrealGetThumbnailResponse(BaseModel):
     """Response with a base64-encoded thumbnail image."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     asset_path: str = Field(..., description="Asset path queried")
     image_base64: str = Field(..., description="Base64-encoded PNG image")
     width: int = Field(..., description="Image width in pixels")
@@ -253,6 +277,9 @@ class UnrealSceneSummaryResponse(BaseModel):
     """LLM-friendly scene digest response."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     map_path: str = Field(..., description="Loaded map path")
     total_actors: int = Field(..., description="Total actor count in the level")
     actor_class_counts: Dict[str, int] = Field(
@@ -283,6 +310,9 @@ class UnrealCaptureViewportResponse(BaseModel):
     """Response with captured viewport image."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     image_base64: str = Field(..., description="Base64-encoded image data")
     resolution_x: int = Field(..., description="Actual capture width")
     resolution_y: int = Field(..., description="Actual capture height")
@@ -299,6 +329,9 @@ class UnrealViewportInfoResponse(BaseModel):
     """Viewport camera and render information."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     camera_location: Tuple[float, float, float] = Field(
         ..., description="Camera position (X, Y, Z) in cm"
     )
@@ -330,6 +363,9 @@ class UnrealSetCameraViewResponse(BaseModel):
     """Response after setting camera view."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     location: Tuple[float, float, float] = Field(
         ..., description="Applied camera position"
     )
@@ -352,6 +388,9 @@ class UnrealFocusActorResponse(BaseModel):
     """Response after focusing on actor."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Actor that was focused on")
     camera_location: Tuple[float, float, float] = Field(
         ..., description="Resulting camera position"
@@ -383,6 +422,9 @@ class UnrealSpawnActorResponse(BaseModel):
     """Response after spawning an actor."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Full path of the spawned actor")
     actor_class: str = Field(..., description="Class of the spawned actor")
     location: Tuple[float, float, float] = Field(
@@ -400,6 +442,9 @@ class UnrealDeleteActorResponse(BaseModel):
     """Response after deleting an actor."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Path of the deleted actor")
     deleted: bool = Field(..., description="Whether actor was actually deleted")
 
@@ -423,6 +468,9 @@ class UnrealSetActorTransformResponse(BaseModel):
     """Response after setting actor transform."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Actor whose transform was set")
     location: Tuple[float, float, float] = Field(..., description="Applied location")
     rotation: Tuple[float, float, float] = Field(..., description="Applied rotation")
@@ -444,6 +492,9 @@ class UnrealSetActorPropertyResponse(BaseModel):
     """Response after setting actor property."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Actor whose property was set")
     property_name: str = Field(..., description="Property that was set")
 
@@ -460,6 +511,9 @@ class UnrealCallActorFunctionResponse(BaseModel):
     """Response after calling an actor function."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Actor on which function was called")
     function_name: str = Field(..., description="Function that was called")
     return_value: Optional[str] = Field(None, description="Return value as JSON string")
@@ -478,6 +532,9 @@ class UnrealSetActorParentResponse(BaseModel):
     """Response after setting actor parent."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Child actor path")
     parent_path: Optional[str] = Field(
         None, description="Parent actor path (None if detached)"
@@ -500,6 +557,9 @@ class UnrealAddComponentResponse(BaseModel):
     """Response after adding a component."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Actor that received the component")
     component_path: str = Field(..., description="Full path of the new component")
     component_class: str = Field(..., description="Class of the added component")
@@ -517,6 +577,9 @@ class UnrealSetActorVisibilityResponse(BaseModel):
     """Response after setting actor visibility."""
 
     success: bool = Field(..., description="Whether request was successful")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Actor whose visibility was set")
     visible: bool = Field(..., description="Applied visibility state")
 
@@ -544,6 +607,9 @@ class UnrealGetMaterialInfoResponse(BaseModel):
     """Response with material instance parameters."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     material_path: str = Field(..., description="Material asset path")
     parent_path: Optional[str] = Field(None, description="Parent material path")
     parameters: List[UnrealMaterialParameterInfo] = Field(
@@ -570,6 +636,9 @@ class UnrealSetMaterialParamsResponse(BaseModel):
     """Response after setting material instance parameters."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     material_path: str = Field(..., description="Material Instance path")
     params_set: int = Field(0, description="Number of parameters set")
 
@@ -588,6 +657,9 @@ class UnrealCreateMaterialInstanceResponse(BaseModel):
     """Response with newly created material instance path."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     instance_path: str = Field(..., description="New MIC asset path")
     parent_path: str = Field(..., description="Parent material path")
 
@@ -604,6 +676,9 @@ class UnrealAssignMaterialResponse(BaseModel):
     """Response after assigning a material."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Actor path")
     material_path: str = Field(..., description="Assigned material path")
     slot_index: int = Field(0, description="Slot index")
@@ -633,6 +708,9 @@ class UnrealSetLightParamsResponse(BaseModel):
     """Response after setting light parameters."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Light actor path")
     params_set: int = Field(0, description="Number of params changed")
 
@@ -648,6 +726,9 @@ class UnrealSetRenderSettingsResponse(BaseModel):
     """Response after changing render settings."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     setting_name: str = Field(..., description="Setting name")
     applied: bool = Field(True, description="Whether the setting was applied")
 
@@ -670,6 +751,9 @@ class UnrealControlSimulationResponse(BaseModel):
     """Response after controlling a PIE session."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     action: str = Field(..., description="Action that was executed")
     state: str = Field(
         ...,
@@ -687,6 +771,9 @@ class UnrealGetSimulationStatusResponse(BaseModel):
     """Response with current PIE simulation status."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     is_playing: bool = Field(False, description="Whether PIE is running")
     is_paused: bool = Field(False, description="Whether PIE is paused")
     frame_count: int = Field(0, description="Number of simulated frames")
@@ -707,6 +794,9 @@ class UnrealEnablePhysicsResponse(BaseModel):
     """Response after toggling physics on an actor."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Actor that was modified")
     physics_enabled: bool = Field(..., description="Current physics state")
 
@@ -726,6 +816,9 @@ class UnrealSetCollisionResponse(BaseModel):
     """Response after setting collision configuration."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Actor that was modified")
     collision_preset: str = Field(..., description="Applied collision preset")
     collision_enabled: bool = Field(..., description="Current collision state")
@@ -753,6 +846,9 @@ class UnrealApplyForceResponse(BaseModel):
     """Response after applying a force or impulse."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Actor the force was applied to")
     force_applied: bool = Field(True, description="Whether force was applied")
     force_vector: List[float] = Field(..., description="Applied force vector [x, y, z]")
@@ -773,6 +869,9 @@ class UnrealSetPhysicsParamsResponse(BaseModel):
     """Response after setting physics parameters."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Actor that was modified")
     params_set: int = Field(..., description="Number of parameters set")
 
@@ -799,6 +898,9 @@ class UnrealImportUsdResponse(BaseModel):
     """Response after importing a USD file."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     imported_assets: List[str] = Field(..., description="List of imported asset paths")
     actor_paths: List[str] = Field(
         default_factory=list, description="Spawned actor paths in the level"
@@ -820,6 +922,9 @@ class UnrealExportUsdResponse(BaseModel):
     """Response after exporting actors to USD."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     output_path: str = Field(..., description="Written USD file path")
     actors_exported: int = Field(..., description="Number of actors exported")
     file_size_bytes: int = Field(0, description="Output file size in bytes")
@@ -841,6 +946,9 @@ class UnrealConvertToSimreadyResponse(BaseModel):
     """Response after SimReady conversion."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     output_path: str = Field(..., description="SimReady USD path")
     conversions_applied: List[str] = Field(
         ..., description="List of conversions applied"
@@ -869,6 +977,9 @@ class UnrealValidateSimreadyResponse(BaseModel):
     """Response after SimReady validation."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     usd_path: str = Field(..., description="Validated USD path")
     is_valid: bool = Field(..., description="Overall validation result")
     checks: Dict[str, bool] = Field(..., description="Per-check pass/fail results")
@@ -886,6 +997,9 @@ class UnrealGetInterchangeInfoResponse(BaseModel):
     """Response with Interchange Framework info."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     pipelines: List[Dict[str, Any]] = Field(
         ..., description="Available import/export pipelines"
     )
@@ -910,6 +1024,9 @@ class UnrealBatchOperationsResponse(BaseModel):
     """Response after batch execution."""
 
     success: bool = Field(True, description="Overall success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     results: List[Dict[str, Any]] = Field(..., description="Per-operation results")
     total: int = Field(..., description="Total operations submitted")
     succeeded: int = Field(..., description="Number that succeeded")
@@ -931,6 +1048,9 @@ class UnrealQuerySceneGraphResponse(BaseModel):
     """Response with scene graph tree."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     root: Dict[str, Any] = Field(
         ..., description="Scene graph tree (nested dicts with children)"
     )
@@ -958,6 +1078,9 @@ class UnrealAnalyzeSceneForRoboticsResponse(BaseModel):
     """Response with robotics scene analysis."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     traversable_surfaces: List[Dict[str, Any]] = Field(
         default_factory=list, description="Surfaces a robot can traverse"
     )
@@ -994,6 +1117,9 @@ class UnrealGenerateProceduralSceneResponse(BaseModel):
     """Response after procedural scene generation."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actors_spawned: List[str] = Field(..., description="Paths of spawned actors")
     total_spawned: int = Field(..., description="Number of actors spawned")
     scene_type: str = Field(..., description="Generated scene type")
@@ -1012,6 +1138,9 @@ class UnrealGetActorBySemanticLabelResponse(BaseModel):
     """Response with actors matching semantic label."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actors: List[Dict[str, Any]] = Field(
         ..., description="Matching actors with paths and labels"
     )
@@ -1047,6 +1176,9 @@ class UnrealGenerateMeshPrimitiveResponse(BaseModel):
     """Response after creating a mesh primitive."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     actor_path: str = Field(..., description="Created actor path")
     primitive_type: str = Field(..., description="Primitive type created")
     triangle_count: int = Field(..., description="Number of triangles")
@@ -1071,6 +1203,9 @@ class UnrealApplyMeshBooleanResponse(BaseModel):
     """Response after boolean operation."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     target_mesh_path: str = Field(..., description="Modified mesh path")
     operation: str = Field(..., description="Operation performed")
     result_triangle_count: int = Field(
@@ -1089,6 +1224,9 @@ class UnrealComputeConvexHullResponse(BaseModel):
     """Response after convex hull computation."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     mesh_path: str = Field(..., description="Source mesh path")
     hull_actor_path: str = Field(..., description="Created convex hull actor path")
     hull_vertex_count: int = Field(..., description="Hull vertex count")
@@ -1110,6 +1248,9 @@ class UnrealDecomposeConvexHullResponse(BaseModel):
     """Response after V-HACD decomposition."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     mesh_path: str = Field(..., description="Source mesh path")
     hull_count: int = Field(..., description="Number of convex hulls generated")
     hulls: List[Dict[str, Any]] = Field(
@@ -1144,6 +1285,9 @@ class UnrealEditMeshTopologyResponse(BaseModel):
     """Response after topology edit."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     mesh_path: str = Field(..., description="Modified mesh path")
     operation: str = Field(..., description="Operation performed")
     faces_affected: int = Field(0, description="Faces affected")
@@ -1166,6 +1310,9 @@ class UnrealSubdivideMeshResponse(BaseModel):
     """Response after mesh subdivision."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     mesh_path: str = Field(..., description="Subdivided mesh path")
     level: int = Field(..., description="Subdivision level applied")
     scheme: str = Field(..., description="Scheme used")
@@ -1194,6 +1341,9 @@ class UnrealSimplifyMeshResponse(BaseModel):
     """Response after mesh simplification."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     mesh_path: str = Field(..., description="Simplified mesh path")
     original_triangles: int = Field(..., description="Original triangle count")
     result_triangles: int = Field(
@@ -1218,6 +1368,9 @@ class UnrealCutMeshPlaneResponse(BaseModel):
     """Response after plane cut."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     mesh_path: str = Field(..., description="Cut mesh path")
     pieces: List[str] = Field(..., description="Resulting piece actor paths")
     cut_faces_added: int = Field(0, description="Number of fill faces added")
@@ -1242,6 +1395,9 @@ class UnrealValidateMeshResponse(BaseModel):
     """Response after mesh validation."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     mesh_path: str = Field(..., description="Validated mesh path")
     is_valid: bool = Field(..., description="Overall validation result")
     checks: Dict[str, bool] = Field(..., description="Per-check pass/fail results")
@@ -1268,6 +1424,9 @@ class UnrealConvertMeshFormatResponse(BaseModel):
     """Response after mesh format conversion."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     source_path: str = Field(..., description="Source mesh path")
     result_path: str = Field(..., description="Converted mesh path")
     source_format: str = Field(..., description="Original format")
@@ -1293,6 +1452,9 @@ class UnrealRemeshMeshResponse(BaseModel):
     """Response after remeshing."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     mesh_path: str = Field(..., description="Remeshed mesh path")
     mode: str = Field(..., description="Remesh mode used")
     original_triangles: int = Field(..., description="Original triangle count")
@@ -1318,6 +1480,9 @@ class UnrealComputeMeshUvResponse(BaseModel):
     """Response after UV computation."""
 
     success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
     mesh_path: str = Field(..., description="Mesh path")
     method: str = Field(..., description="UV method used")
     uv_channel: int = Field(..., description="UV channel written")
