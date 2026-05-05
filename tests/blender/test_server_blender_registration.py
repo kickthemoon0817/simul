@@ -49,13 +49,11 @@ class FakeFastMCP:
         """Stub for FastMCP middleware registration.
 
         SimulMCPServer adds a request-context middleware (PR #23) before
-        any tools register. Without this stub the tests collide with the
-        documented pre-existing FakeFastMCP add_middleware failure mode
-        — adding the stub removes this Blender test file from that set.
+        any tools register. The stub only needs to not raise — no test
+        in this file inspects the middleware list, so we don't bother
+        accumulating it.
         """
-        if not hasattr(self, "middlewares"):
-            self.middlewares = []
-        self.middlewares.append(middleware)
+        return
 
 
 class FakeBlenderAdapter:

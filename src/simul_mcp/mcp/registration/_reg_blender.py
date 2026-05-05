@@ -2582,6 +2582,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     error_type="RuntimeError",
                 ).model_dump()
             with server.blender_adapter.create_session() as session:
+                # Void side-effect: session.free_bake() returns None,
+                # so there is no payload to inspect for an `error` key.
+                # If the call fails it raises, and the outer except
+                # clause emits ErrorResponse. Reaching this line means
+                # the bake was actually freed — success=True is genuine.
                 session.free_bake()
                 result = BlenderFreeBakeResponse(
                     success=True,
@@ -2784,9 +2789,8 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     object_name=input_data.object_name,
                     metadata=input_data.metadata.model_dump(exclude_none=True),
                 )
-                result = SimReadyApplyMetadataResponse(
-                    success=True, **payload
-                ).model_dump()
+                apply_success_from_error(payload)
+                result = SimReadyApplyMetadataResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (SimReadyApplyMetadataResponse, ErrorResponse),
@@ -2836,7 +2840,8 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 payload = session.get_simready_metadata(
                     object_name=input_data.object_name,
                 )
-                result = SimReadyGetMetadataResponse(success=True, **payload).model_dump()
+                apply_success_from_error(payload)
+                result = SimReadyGetMetadataResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (SimReadyGetMetadataResponse, ErrorResponse),
@@ -2901,7 +2906,8 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     check_materials=input_data.check_materials,
                     check_hierarchy=input_data.check_hierarchy,
                 )
-                result = SimReadyValidateResponse(success=True, **payload).model_dump()
+                apply_success_from_error(payload)
+                result = SimReadyValidateResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (SimReadyValidateResponse, ErrorResponse),
@@ -2960,7 +2966,8 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                     embed_metadata=input_data.embed_metadata,
                     validate_before_export=input_data.validate_before_export,
                 )
-                result = SimReadyExportResponse(success=True, **payload).model_dump()
+                apply_success_from_error(payload)
+                result = SimReadyExportResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (SimReadyExportResponse, ErrorResponse),
@@ -3020,9 +3027,8 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                         else None
                     ),
                 )
-                result = SimReadySetupHierarchyResponse(
-                    success=True, **payload
-                ).model_dump()
+                apply_success_from_error(payload)
+                result = SimReadySetupHierarchyResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (
