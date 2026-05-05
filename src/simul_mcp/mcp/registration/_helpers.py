@@ -6,10 +6,10 @@ modules belong here. One-off helpers stay inline at their use site.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 
-def apply_success_from_error(payload: Dict[str, Any]) -> Dict[str, Any]:
+def apply_success_from_error(payload: dict[str, Any]) -> dict[str, Any]:
     """Mark ``payload['success']`` based on the presence of ``error``.
 
     Mirrors the iter8 fix in ``isaac_tools._execute_json_script`` and
@@ -26,7 +26,11 @@ def apply_success_from_error(payload: Dict[str, Any]) -> Dict[str, Any]:
     The rule:
 
       - If the payload already has an explicit ``success`` field
-        (some adapters set it themselves), leave it alone.
+        (some adapters set it themselves — e.g. ``unreal_runtime``
+        input-validation guards return ``{"success": False, "error":
+        "..."}``), leave it alone. The helper does NOT resolve a
+        ``success=True + error="..."`` contradiction; adapter
+        methods are responsible for never emitting that shape.
       - Otherwise, set ``success`` to ``True`` iff ``error`` is
         absent or ``None``.
 

@@ -89,3 +89,17 @@ def test_unreal_ping_success_shape_marks_true() -> None:
     }
     apply_success_from_error(payload)
     assert payload["success"] is True
+
+
+def test_parse_python_json_error_only_shape_marks_false() -> None:
+    """Concrete shape: ``UnrealRuntimeSession._parse_python_json``
+    on Python execution failure returns just ``{"error": "..."}``
+    with no other keys (per unreal_runtime.py:534, 545). Nine
+    adapter methods (``generate_mesh_primitive``,
+    ``edit_mesh_topology``, ``convert_mesh_format``, etc.) feed
+    through this path, so the minimal-shape edge case is worth
+    pinning explicitly."""
+    payload = {"error": "No JSON output from Python execution"}
+    apply_success_from_error(payload)
+    assert payload["success"] is False
+    assert payload["error"] == "No JSON output from Python execution"
