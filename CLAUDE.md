@@ -128,6 +128,68 @@ For multi-instance on one host (no remote exposure), separate the ports:
 simul unreal setup <.uproject> --port 30011 --websocket-port 30021 --yes
 ```
 
+## Isaac workflow — `install-bridge` once per Isaac install, then `bridge-up` per launch
+
+Isaac Sim 5.1 ships with a working VS Code transport on port 8226, but
+simul's preferred transport is the `khemoo.simul.mcp` bridge extension
+on port 8229 (typed protocol, faster, fewer round-trips). Two
+post-clone steps wire it up cleanly:
+
+### 1. One-time per Isaac install: `simul-mcp isaac install-bridge`
+
+The bridge extension lives at `<repo>/exts/khemoo.simul.mcp/` and must
+be physically present at `<isaac-root>/extsUser/khemoo.simul.mcp/` for
+the editor to load it. Repo bumps don't propagate by themselves — even
+when CLAUDE.md's four-file lockstep stays tight, Isaac keeps loading
+whatever stale copy is in `extsUser` until you publish.
+
+`simul-mcp isaac install-bridge` does the publish. Recommended for repo
+workflows:
+
+```
+ISAAC_SIM_PATH=~/isaac-sim-5.1.0 simul-mcp isaac install-bridge --symlink
+```
+
+`--symlink` (vs the default copy) means future `git pull`s on the repo
+propagate to Isaac without re-running the command. Use plain copy mode
+if Isaac runs as a different user from the repo owner.
+
+`--force` replaces the dest even when versions match (useful for
+switching copy ↔ symlink mode). Without `--force` the command no-ops
+when the dest version already matches the source.
+
+### 2. Per Isaac launch: `simul-mcp isaac bridge-up`
+
+A fresh `isaac-sim.sh` start leaves the bridge extension
+**registered but disabled** — port 8229 silently doesn't bind, even
+though the ext is present in `extsUser`. `simul-mcp isaac bridge-up`
+auto-enables it via the VS Code fallback transport (8226), then
+re-probes the bridge with a 6×0.5s retry loop (UE needs a frame to
+bind the socket).
+
+```
+simul-mcp isaac bridge-up
+```
+
+The command's JSON output reports `action: "already-up" | "auto-enabled"`,
+`success: bool`, `bridge_reachable: bool`, etc. Idempotent — re-running
+when the bridge is already up returns `already-up` instantly.
+
+### Hard rules
+
+- Never publish the bridge ext by hand-copying or symlinking — always
+  go through `install-bridge` so the version is read + verified at the
+  end (the command catches a partial extraction or a wrong-version
+  source up front).
+- After updating the repo (e.g. via `git pull`), re-run `bridge-up`
+  but NOT `install-bridge` if you used `--symlink` last time. The
+  symlink already tracks the repo; only the per-launch enable step
+  needs to repeat.
+- Never tell the user to manually run
+  `simul-mcp isaac enable-extension khemoo.simul.mcp` — that was the
+  pre-iter10 workaround. `bridge-up` does the same thing plus the
+  retry loop and structured payload.
+
 ## Project scope
 
 Simul is a Model Context Protocol (MCP) server that gives Claude Code and
