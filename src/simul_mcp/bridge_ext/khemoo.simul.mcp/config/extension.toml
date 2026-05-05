@@ -1,5 +1,5 @@
 [package]
-version = "0.0.36"
+version = "0.0.37"
 category = "Utility"
 title = "Simul MCP Bridge"
 description = "Production-oriented Isaac Sim bridge transport for Simul MCP with typed requests and VS Code fallback compatibility."
