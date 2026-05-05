@@ -1,5 +1,6 @@
 """Tests for Blender tool registration inside FastMCP server."""
 
+import asyncio
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -37,6 +38,22 @@ class FakeFastMCP:
     def get_tools(self):
         """Mirror FastMCP get_tools API."""
         return self.tools
+
+    def resource(self, *args, **kwargs):
+        """Stub for resource registration."""
+        def decorator(func):
+            return func
+        return decorator
+
+    def add_middleware(self, middleware: Any) -> None:
+        """Stub for FastMCP middleware registration.
+
+        SimulMCPServer adds a request-context middleware (PR #23) before
+        any tools register. The stub only needs to not raise — no test
+        in this file inspects the middleware list, so we don't bother
+        accumulating it.
+        """
+        return
 
 
 class FakeBlenderAdapter:
@@ -114,3 +131,86 @@ class TestBlenderToolRegistration:
 
         assert "get_blender_info" not in tool_names
         assert "list_blender_scene_objects" not in tool_names
+
+
+class FakeBlenderAdapterErroring:
+    """Blender adapter stub whose adapter calls return failure-shape
+    payloads (``{... "error": "..."}``).
+
+    iter17 extended ``apply_success_from_error`` to all 45 sites in
+    ``_reg_blender.py`` (44 historical + 1 inline already converted
+    in iter16). Most current Blender adapter methods raise on failure
+    rather than returning ``error``-keyed payloads — but defensive
+    normalization here means any future adapter method that does
+    emit ``error`` will surface as ``success: false`` automatically.
+    This fake adapter exercises that defensive contract: it returns
+    a payload with ``error`` set, and the wrapper must respect it
+    instead of clobbering with ``success: true``.
+    """
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def is_available(self) -> bool:
+        return True
+
+    def get_capabilities(self):
+        return ["blender_runtime_info"]
+
+    @contextmanager
+    def create_session(self):
+        session = SimpleNamespace(
+            get_runtime_info=lambda: {
+                "version": [0, 0, 0],
+                "version_string": "",
+                "binary_path": "",
+                "background": False,
+                "blend_file_path": None,
+                "error": "Simulated runtime metadata fetch failure",
+            },
+        )
+        yield session
+
+
+class TestIter17WrapperSurfacesAdapterError:
+    """End-to-end coverage of the iter17 invariant at the Blender tool layer.
+
+    Mirrors the iter16 ``TestIter16WrapperSurfacesAdapterError`` test
+    in ``tests/unreal/test_server_unreal_registration.py``. The 45
+    Blender registration sites that previously wrote
+    ``payload['success'] = True`` unconditionally have all been
+    replaced with ``apply_success_from_error(payload)``. Without an
+    integration test, a future revert would be caught only by grep.
+    """
+
+    def test_get_blender_info_returns_success_false_on_adapter_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
+        monkeypatch.setattr(server_module, "TaskConfig", None)
+        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(server_module, "is_blender_available", lambda: True)
+        monkeypatch.setattr(
+            server_module, "BlenderRuntimeAdapter", FakeBlenderAdapterErroring
+        )
+
+        instance = server_module.SimulMCPServer(settings=Settings())
+        tool = next(
+            t for t in instance.mcp.tools if t.name == "get_blender_info"
+        )
+
+        result = asyncio.run(tool.func())
+
+        # iter17 contract: success accurately reflects the presence of
+        # an error in the adapter payload. Note that the Blender response
+        # schemas (BlenderInfoResponse and friends) do not currently
+        # declare an `error: Optional[str]` field, so Pydantic strips
+        # the diagnostic message before it reaches the client. Adding
+        # `error` to those schemas is iter18 follow-up territory; the
+        # iter17 fix is the success-flag accuracy alone.
+        assert result["success"] is False, (
+            f"iter17 invariant broken: registered get_blender_info tool "
+            f"returned success={result.get('success')!r} when adapter "
+            f"returned an error payload. Full response: {result}"
+        )
