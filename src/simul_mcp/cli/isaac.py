@@ -12,6 +12,7 @@ JSON output on stdout, making them consumable by AI agents.
 import asyncio
 import base64
 import json
+import re
 import sys
 import textwrap
 from pathlib import Path
@@ -269,9 +270,9 @@ def install_bridge(
         "--source",
         help=(
             "Path to the bridge extension source dir (the one containing "
-            "config/extension.toml). Defaults to the repo's "
-            "exts/khemoo.simul.mcp/, located by walking up from the "
-            "installed simul_mcp package."
+            "config/extension.toml). Defaults to the bundled copy at "
+            "<simul_mcp>/bridge_ext/khemoo.simul.mcp/, which ships in both "
+            "editable installs and pip wheels."
         ),
     ),
     symlink: bool = typer.Option(
@@ -299,16 +300,16 @@ def install_bridge(
 
     Closes the iter11 verifier finding: ``simul-mcp isaac list-extensions``
     returned ``khemoo.simul.mcp-0.0.13`` even after the repo bumped to
-    0.0.33, because Isaac loads from ``<isaac-root>/extsUser/``, not the
-    repo. Repo-side bumps to ``exts/khemoo.simul.mcp/config/extension.toml``
-    have to be physically copied (or symlinked) into the editor's user
-    extension dir for the running Isaac to see them.
+    0.0.33, because Isaac loads from ``<isaac-root>/extsUser/``, not from
+    the wheel. The bridge ext now ships inside the wheel under
+    ``simul_mcp/bridge_ext/khemoo.simul.mcp/`` so pip-installed users can
+    publish it without a repo checkout (closes iter12 publish-gap todo).
 
     Workflow:
 
       1. Resolve isaac-root: --isaac-root flag → $ISAAC_SIM_PATH → error.
-      2. Resolve source: --source flag → walk parents from the installed
-         simul_mcp package up to find ``exts/khemoo.simul.mcp/`` → error.
+      2. Resolve source: --source flag → bundled
+         ``simul_mcp/bridge_ext/khemoo.simul.mcp/`` → error.
       3. Read source ``config/extension.toml`` for the version.
       4. If dest exists, read its version. Same version + no --force →
          no-op success.
@@ -342,22 +343,33 @@ def install_bridge(
         console.print(f"[red]{msg}[/red]")
         raise typer.Exit(2)
 
-    # 2. Resolve source — walk from simul_mcp.__file__ up to find exts/...
+    # 2. Resolve source — bundled copy ships inside the package so this
+    # works in both editable installs and pip wheels. The legacy repo
+    # path (exts/khemoo.simul.mcp/) is checked as a fallback for users
+    # who still have an old checkout layout, but new installs find the
+    # bundled copy first.
     source_p: Optional[Path] = source.expanduser().resolve() if source else None
     if source_p is None:
         import simul_mcp as _sm
-        anchor = Path(_sm.__file__).resolve()
-        for parent in anchor.parents:
-            candidate = parent / "exts" / "khemoo.simul.mcp"
-            if (candidate / "config" / "extension.toml").is_file():
-                source_p = candidate
-                break
+        package_root = Path(_sm.__file__).resolve().parent
+        bundled = package_root / "bridge_ext" / "khemoo.simul.mcp"
+        if (bundled / "config" / "extension.toml").is_file():
+            source_p = bundled
+        else:
+            # Fallback: legacy repo layout for very old editable checkouts.
+            for parent in package_root.parents:
+                candidate = parent / "exts" / "khemoo.simul.mcp"
+                if (candidate / "config" / "extension.toml").is_file():
+                    source_p = candidate
+                    break
     if source_p is None or not (source_p / "config" / "extension.toml").is_file():
         msg = (
             "Bridge source not found. Pass --source <path> pointing at "
-            "the dir containing config/extension.toml. Pip-installed "
-            "simul-mcp does not bundle the bridge ext today; this command "
-            "currently requires a repo checkout."
+            "the dir containing config/extension.toml. The bundled copy "
+            "should ship at simul_mcp/bridge_ext/khemoo.simul.mcp/ — if "
+            "it's missing, the wheel may have been built without "
+            "package-data; reinstall with `pip install -e .` from a "
+            "repo checkout, or `pip install --force-reinstall simul-mcp`."
         )
         if is_json_mode():
             emit_error(msg, "SourceNotFound")
@@ -366,7 +378,6 @@ def install_bridge(
         raise typer.Exit(2)
 
     def _read_version(toml_path: Path) -> Optional[str]:
-        import re
         # Read errors (PermissionError, broken symlink, partial extract,
         # unreadable bytes) all collapse to None — the caller already
         # treats None as "unknown / replace". This keeps the install

@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=62.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "simul-mcp"
-version = "0.0.35"
+version = "0.0.36"
 description = "MCP server for 3D simulation and DCC tools — USD scene control, Isaac Sim, Blender, and Unreal Engine integration"
 authors = [
     {name = "khemoo"}
@@ -68,6 +68,12 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "simul_mcp" = ["py.typed"]
+"simul_mcp.bridge_ext" = ["khemoo.simul.mcp/**/*"]
+
+[tool.setuptools.exclude-package-data]
+# Bytecode lives only inside __pycache__/ on Python 3 — one glob covers
+# every .pyc that would otherwise leak from a developer's dirty tree.
+"simul_mcp.bridge_ext" = ["khemoo.simul.mcp/**/__pycache__/*"]
 
 [tool.black]
 line-length = 88

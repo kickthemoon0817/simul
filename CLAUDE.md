@@ -137,11 +137,13 @@ post-clone steps wire it up cleanly:
 
 ### 1. One-time per Isaac install: `simul-mcp isaac install-bridge`
 
-The bridge extension lives at `<repo>/exts/khemoo.simul.mcp/` and must
-be physically present at `<isaac-root>/extsUser/khemoo.simul.mcp/` for
-the editor to load it. Repo bumps don't propagate by themselves — even
-when CLAUDE.md's four-file lockstep stays tight, Isaac keeps loading
-whatever stale copy is in `extsUser` until you publish.
+The bridge extension ships **inside** the `simul-mcp` Python package
+at `src/simul_mcp/bridge_ext/khemoo.simul.mcp/` (so pip installs and
+editable installs both have it on disk), and must be physically
+present at `<isaac-root>/extsUser/khemoo.simul.mcp/` for the editor
+to load it. Repo bumps and pip upgrades don't propagate by themselves
+— Isaac keeps loading whatever stale copy is in `extsUser` until you
+publish.
 
 `simul-mcp isaac install-bridge` does the publish. Recommended for repo
 workflows:
@@ -217,12 +219,15 @@ Version is tracked in **four places that must always move together**:
 - `pyproject.toml` → `[project] version = "X.Y.Z"`
 - `.claude-plugin/plugin.json` → `"version": "X.Y.Z"`
 - `src/simul_mcp/__init__.py` → `__version__ = "X.Y.Z"`
-- `exts/khemoo.simul.mcp/config/extension.toml` → `[package] version = "X.Y.Z"`
-  (the Isaac Sim bridge extension shipped from this repo — its
-  version-suffixed Kit ID, e.g. `khemoo.simul.mcp-X.Y.Z`, must match
-  the parent so callers reading either side see consistent metadata.
-  The bridge ext was added to the lockstep in iter11 after drifting
-  from 0.0.19 → 0.0.32 across 13 patch tags went unnoticed.)
+- `src/simul_mcp/bridge_ext/khemoo.simul.mcp/config/extension.toml` →
+  `[package] version = "X.Y.Z"` (the Isaac Sim bridge extension
+  shipped *inside the wheel* as of iter14 — its version-suffixed Kit
+  ID, e.g. `khemoo.simul.mcp-X.Y.Z`, must match the parent so callers
+  reading either side see consistent metadata. The bridge ext was
+  added to the lockstep in iter11 after drifting from 0.0.19 → 0.0.32
+  across 13 patch tags went unnoticed; iter14 moved its canonical
+  location into the package so pip-installed users no longer need a
+  repo checkout for `simul-mcp isaac install-bridge`.)
 
 ### Release sequence — do not deviate
 
@@ -302,6 +307,17 @@ Implications:
 - The `simul-mcp` CLI exits non-zero when the parsed result has
   `success: false`. That's not an infrastructure failure — read the JSON
   payload.
+- Strings shaped like `/exts/khemoo.simul.mcp/<key>` (in
+  `compose.isaac-sim.yml`'s kit args, the bridge ext's `extension.py`,
+  and the CLI's `settings.set(...)` calls) are **Carb settings keys**,
+  not filesystem paths. The `/exts/<ext_name>/` namespace is Carb's
+  convention; it doesn't move when the bridge ext directory moves on
+  disk. Don't refactor them as part of a path rename.
+- The dev test runner is `~/pt/simul/.venv/bin/python` (and
+  `~/pt/simul/.venv/bin/simul-mcp` for the fresh-subprocess live
+  verification pattern). Most pytest invocations in the loop use this
+  venv; calling system `python` won't have the editable simul-mcp
+  install on path.
 
 ## Live-driven testing — when the machine has the runtime, use it
 

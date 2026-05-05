@@ -18,7 +18,10 @@ sys.path.insert(0, str(src_path))
 from simul_mcp.config import Settings  # noqa: E402
 from simul_mcp.mcp import server as server_module  # noqa: E402
 
-extension_root = Path(__file__).resolve().parents[2] / "exts" / "khemoo.simul.mcp"
+extension_root = (
+    Path(__file__).resolve().parents[2]
+    / "src" / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"
+)
 sys.path.insert(0, str(extension_root))
 
 from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle  # noqa: E402
