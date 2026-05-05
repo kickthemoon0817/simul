@@ -145,6 +145,7 @@ markers = [
     "integration: marks tests as integration tests",
     "isaac: marks tests that require Isaac Sim environment",
     "unreal_live: marks tests that require a running Unreal Engine editor (Remote Control reachable on the configured host:port)",
+    "packaging: marks tests that build the wheel; require uv (or python -m build) on PATH and run for many seconds",
 ]
 
 [tool.coverage.run]
