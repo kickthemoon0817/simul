@@ -37,10 +37,7 @@ from simul_mcp.cli.output import emit, emit_error, is_json_mode, set_json_mode
 from simul_mcp.config import get_settings, load_settings, validate_settings
 from simul_mcp.logging import setup_logging, get_logger
 from simul_mcp.mcp.server import SimulMCPServer, start_mcp_server
-from simul_mcp.adapters import (
-    is_blender_available,
-    is_headless_available,
-)
+from simul_mcp.adapters import is_blender_available, is_headless_available
 
 # Import sub-apps
 from simul_mcp.cli.isaac import app as isaac_app
@@ -72,7 +69,9 @@ def _is_isaac_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
 # ---------------------------------------------------------------------------
 def _global_callback(
     json_output: bool = typer.Option(
-        False, "--json", help="Output structured JSON to stdout (auto-enabled when stdout is not a TTY)",
+        False,
+        "--json",
+        help="Output structured JSON to stdout (auto-enabled when stdout is not a TTY)",
     ),
 ) -> None:
     """Global options applied before any sub-command."""
@@ -91,7 +90,9 @@ console = Console(stderr=True)
 # Register sub-apps
 app.add_typer(isaac_app, name="isaac", help="Isaac Sim commands")
 app.add_typer(usd_app, name="usd", help="USD file commands (headless)")
-app.add_typer(unreal_app, name="unreal", help="Unreal Engine commands (Remote Control API)")
+app.add_typer(
+    unreal_app, name="unreal", help="Unreal Engine commands (Remote Control API)"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -101,9 +102,7 @@ logs_app = typer.Typer(name="logs", help="Inspect simul-mcp log files")
 app.add_typer(logs_app, name="logs")
 
 
-def _resolve_log_path(
-    explicit: Optional[Path], audit: bool, structured: bool
-) -> Path:
+def _resolve_log_path(explicit: Optional[Path], audit: bool, structured: bool) -> Path:
     """Pick the right default log path when the user did not pass one.
 
     ``audit`` -> ~/.simul/logs/audit.jsonl
@@ -187,9 +186,9 @@ def logs_paths() -> None:
         "main": _resolve_log_path(None, audit=False, structured=False),
         "structured_json": _resolve_log_path(None, audit=False, structured=True),
         "audit": _resolve_log_path(None, audit=True, structured=False),
-        "errors": Path(settings.logging.file_path).expanduser().with_name(
-            Path(settings.logging.file_path).stem + "_errors.log"
-        ),
+        "errors": Path(settings.logging.file_path)
+        .expanduser()
+        .with_name(Path(settings.logging.file_path).stem + "_errors.log"),
     }
     if is_json_mode():
         emit({k: str(v) for k, v in paths.items()})
@@ -210,9 +209,7 @@ def logs_tail(
     follow: bool = typer.Option(
         False, "--follow", help="Stream new lines as they arrive (Ctrl-C to stop)"
     ),
-    audit: bool = typer.Option(
-        False, "--audit", help="Tail the audit JSONL stream"
-    ),
+    audit: bool = typer.Option(False, "--audit", help="Tail the audit JSONL stream"),
     structured: bool = typer.Option(
         False, "--json-log", help="Tail the structured JSON file (vs. text log)"
     ),
@@ -316,7 +313,9 @@ def server(
         blender_available = is_blender_available()
         usd_available = is_headless_available()
 
-        backends_label = ", ".join(sorted(backend_set)) if backend_set else "all available"
+        backends_label = (
+            ", ".join(sorted(backend_set)) if backend_set else "all available"
+        )
         console.print(
             Panel.fit(
                 f"[bold blue]Simul -- 3D Simulation & DCC Tools[/bold blue]\n"
@@ -392,14 +391,33 @@ def info(
         for name in tool_names:
             if name.startswith(("list_isaac_instances", "set_active_isaac_instance")):
                 categories["Instance Management"].append(name)
-            elif name.startswith(("isaac_", "ping_isaac", "execute_isaac",
-                                  "get_isaac", "set_isaac", "create_isaac",
-                                  "delete_isaac", "search_isaac", "list_isaac",
-                                  "add_isaac", "duplicate_isaac", "reparent_isaac",
-                                  "import_isaac", "new_isaac", "open_isaac",
-                                  "save_isaac", "capture_isaac", "start_isaac",
-                                  "stop_isaac", "pause_isaac", "reset_isaac",
-                                  "step_isaac", "assign_isaac")):
+            elif name.startswith(
+                (
+                    "isaac_",
+                    "ping_isaac",
+                    "execute_isaac",
+                    "get_isaac",
+                    "set_isaac",
+                    "create_isaac",
+                    "delete_isaac",
+                    "search_isaac",
+                    "list_isaac",
+                    "add_isaac",
+                    "duplicate_isaac",
+                    "reparent_isaac",
+                    "import_isaac",
+                    "new_isaac",
+                    "open_isaac",
+                    "save_isaac",
+                    "capture_isaac",
+                    "start_isaac",
+                    "stop_isaac",
+                    "pause_isaac",
+                    "reset_isaac",
+                    "step_isaac",
+                    "assign_isaac",
+                )
+            ):
                 categories["Isaac Sim"].append(name)
             elif "blender" in name or "simready" in name:
                 categories["Blender"].append(name)
@@ -428,21 +446,29 @@ def info(
         system_table.add_row(
             f"Isaac Sim (TCP :{isaac_port})",
             "Reachable" if isaac_reachable else "Not Reachable",
-            "Simulation & viewport via TCP socket"
-            if isaac_reachable
-            else "Isaac Sim tools will retry at call time",
+            (
+                "Simulation & viewport via TCP socket"
+                if isaac_reachable
+                else "Isaac Sim tools will retry at call time"
+            ),
         )
         system_table.add_row(
             "Blender Runtime",
             "Available" if blender_available else "Not Available",
-            "Blender scene tools through bpy"
-            if blender_available
-            else "Install bpy to enable Blender tools",
+            (
+                "Blender scene tools through bpy"
+                if blender_available
+                else "Install bpy to enable Blender tools"
+            ),
         )
         system_table.add_row(
             "USD Headless",
             "Available" if usd_available else "Not Available",
-            "pxr library for USD file operations" if usd_available else "No USD support",
+            (
+                "pxr library for USD file operations"
+                if usd_available
+                else "No USD support"
+            ),
         )
         console.print(system_table)
         console.print()
@@ -466,8 +492,7 @@ def info(
 
         console.print(
             Panel.fit(
-                f"[bold]Summary[/bold]\n"
-                f"Total Registered Tools: {len(tool_names)}",
+                f"[bold]Summary[/bold]\n" f"Total Registered Tools: {len(tool_names)}",
                 title="Tool Summary",
             )
         )
@@ -483,7 +508,8 @@ def info(
 # commands  (P3: machine-readable introspection)
 # ---------------------------------------------------------------------------
 def _collect_commands(
-    typer_app: typer.Typer, prefix: str = "",
+    typer_app: typer.Typer,
+    prefix: str = "",
 ) -> list[dict[str, object]]:
     """Recursively collect command metadata from a Typer app tree."""
     result: list[dict[str, object]] = []
@@ -515,33 +541,53 @@ def _collect_commands(
                             continue
                         params = []
                         for p in sub_cmd.params:
-                            params.append({
-                                "name": p.name,
-                                "type": p.type.name if hasattr(p.type, "name") else str(p.type),
-                                "required": p.required,
-                                "default": str(p.default) if p.default is not None else None,
-                                "help": getattr(p, "help", None),
-                            })
-                        result.append({
-                            "command": sub_full,
-                            "description": sub_cmd.help or "",
-                            "params": params,
-                        })
+                            params.append(
+                                {
+                                    "name": p.name,
+                                    "type": (
+                                        p.type.name
+                                        if hasattr(p.type, "name")
+                                        else str(p.type)
+                                    ),
+                                    "required": p.required,
+                                    "default": (
+                                        str(p.default)
+                                        if p.default is not None
+                                        else None
+                                    ),
+                                    "help": getattr(p, "help", None),
+                                }
+                            )
+                        result.append(
+                            {
+                                "command": sub_full,
+                                "description": sub_cmd.help or "",
+                                "params": params,
+                            }
+                        )
             else:
                 params = []
                 for p in cmd.params:
-                    params.append({
-                        "name": p.name,
-                        "type": p.type.name if hasattr(p.type, "name") else str(p.type),
-                        "required": p.required,
-                        "default": str(p.default) if p.default is not None else None,
-                        "help": getattr(p, "help", None),
-                    })
-                result.append({
-                    "command": full_name,
-                    "description": cmd.help or "",
-                    "params": params,
-                })
+                    params.append(
+                        {
+                            "name": p.name,
+                            "type": (
+                                p.type.name if hasattr(p.type, "name") else str(p.type)
+                            ),
+                            "required": p.required,
+                            "default": (
+                                str(p.default) if p.default is not None else None
+                            ),
+                            "help": getattr(p, "help", None),
+                        }
+                    )
+                result.append(
+                    {
+                        "command": full_name,
+                        "description": cmd.help or "",
+                        "params": params,
+                    }
+                )
     return result
 
 
@@ -628,25 +674,26 @@ def version() -> None:
     """Show version information."""
     try:
         from simul_mcp import __version__
+
         version_str = __version__
     except ImportError:
         version_str = "unknown"
 
     settings = get_settings()
     isaac_port = settings.isaac_sim.socket_port
-    isaac_reachable = _is_isaac_reachable(
-        settings.isaac_sim.socket_host, isaac_port
-    )
+    isaac_reachable = _is_isaac_reachable(settings.isaac_sim.socket_host, isaac_port)
     blender_available = is_blender_available()
     usd_available = is_headless_available()
 
     if is_json_mode():
-        emit({
-            "version": version_str,
-            "isaac_sim": {"reachable": isaac_reachable, "port": isaac_port},
-            "blender": {"available": blender_available},
-            "usd_headless": {"available": usd_available},
-        })
+        emit(
+            {
+                "version": version_str,
+                "isaac_sim": {"reachable": isaac_reachable, "port": isaac_port},
+                "blender": {"available": blender_available},
+                "usd_headless": {"available": usd_available},
+            }
+        )
         return
 
     console.print(
@@ -666,7 +713,9 @@ def version() -> None:
 # ---------------------------------------------------------------------------
 @app.command()
 def stats(
-    tool_name: Optional[str] = typer.Option(None, "--tool", "-t", help="Filter to a specific tool"),
+    tool_name: Optional[str] = typer.Option(
+        None, "--tool", "-t", help="Filter to a specific tool"
+    ),
     recent: int = typer.Option(0, "--recent", "-r", help="Show last N call records"),
     reset: bool = typer.Option(False, "--reset", help="Clear all usage stats"),
 ) -> None:
@@ -720,8 +769,16 @@ def stats(
         log_table.add_column("Params", style="dim")
 
         for rec in recent_records:
-            status = "[green]OK[/green]" if rec.get("success") else f"[red]{rec.get('error', 'FAIL')}[/red]"
-            params_str = json.dumps(rec.get("params", {}), separators=(",", ":")) if rec.get("params") else ""
+            status = (
+                "[green]OK[/green]"
+                if rec.get("success")
+                else f"[red]{rec.get('error', 'FAIL')}[/red]"
+            )
+            params_str = (
+                json.dumps(rec.get("params", {}), separators=(",", ":"))
+                if rec.get("params")
+                else ""
+            )
             log_table.add_row(
                 rec.get("tool", "?"),
                 f"{rec.get('duration_ms', 0):.1f}ms",
