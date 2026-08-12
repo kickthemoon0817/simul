@@ -25,6 +25,7 @@ class BridgeServerLifecycle:
         max_response_bytes: int = 10 * 1024 * 1024,
         max_port_retries: int = 10,
         vscode_handler: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+        request_timeout: float = 120.0,
     ) -> None:
         self._host = host
         self._port = port
@@ -33,6 +34,7 @@ class BridgeServerLifecycle:
         self._max_response_bytes = max_response_bytes
         self._max_port_retries = max_port_retries
         self._vscode_handler = vscode_handler
+        self._request_timeout = request_timeout
         self._server: asyncio.AbstractServer | None = None
         self._actual_port: int = port
         self._discovery_file: str | None = None
@@ -160,7 +162,23 @@ class BridgeServerLifecycle:
             )
             request = BridgeRequest.from_json(request_bytes)
             request_id = request.request_id
-            response = await self._request_handler(request)
+            # Without this, a script that never returns hangs Kit permanently:
+            # the handler runs on the main thread, so nothing else in the app
+            # makes progress and SIGKILL is the only way out. Cutting the wait
+            # does not stop the runaway work, but it releases the client and
+            # makes the failure visible instead of silent.
+            response = await asyncio.wait_for(
+                self._request_handler(request), timeout=self._request_timeout
+            )
+        except asyncio.TimeoutError:
+            response = BridgeResponse.failure(
+                request_id=request_id,
+                name="RequestTimeout",
+                message=(
+                    f"Handler exceeded {self._request_timeout}s. The action may "
+                    "still be running inside Isaac Sim."
+                ),
+            )
         except Exception as exc:
             response = BridgeResponse.failure(
                 request_id=request_id,
