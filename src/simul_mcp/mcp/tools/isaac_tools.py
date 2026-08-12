@@ -41,6 +41,16 @@ def _coerce_str_to_float_list(value: Any) -> Any:
 # List of floats that tolerates JSON-string inputs from forgiving MCP clients.
 FloatList = Annotated[List[float], BeforeValidator(_coerce_str_to_float_list)]
 
+# 4K on the long edge. The old ceiling of 7680 allowed a 59-megapixel capture —
+# tens of megabytes pushed through several buffers before anything checked
+# whether the result could be delivered.
+MAX_CAPTURE_DIMENSION = 3840
+
+# Largest capture returned as inline base64. Encoding grows a file by ~33%, and
+# ~256 KB of PNG is already a large tool result; past this the caller gets the
+# path instead, which is the shape that keeps working.
+MAX_INLINE_CAPTURE_BYTES = 262_144
+
 
 class IsaacTools(LoggerMixin):
     """
@@ -870,24 +880,76 @@ class IsaacTools(LoggerMixin):
         self,
         width: int = 1280,
         height: int = 720,
+        inline: bool = False,
     ) -> Dict[str, Any]:
         """
-        Capture the active viewport as a base64-encoded PNG image.
+        Capture the active viewport to a PNG on the Isaac Sim host.
 
         Args:
-            width: Output image width in pixels (1–7680).
-            height: Output image height in pixels (1–7680).
+            width: Output image width in pixels (1–MAX_CAPTURE_DIMENSION).
+            height: Output image height in pixels (1–MAX_CAPTURE_DIMENSION).
+            inline: Also return the image as base64 in the response. Only
+                    honoured for files up to MAX_INLINE_CAPTURE_BYTES; above
+                    that the path is returned alone, since a larger payload
+                    overruns a client's per-result budget.
 
         Returns:
-            Dict with base64 image data and dimensions.
+            Dict with the capture path, dimensions, and byte size. With
+            ``inline`` and a small enough file, also ``image_base64``.
         """
-        width = max(1, min(width, 7680))
-        height = max(1, min(height, 7680))
+        width = max(1, min(width, MAX_CAPTURE_DIMENSION))
+        height = max(1, min(height, MAX_CAPTURE_DIMENSION))
+
+        if inline:
+            # Encode only below the cap, and say why when skipping. Emitting a
+            # payload the client has to spill to a file is worse than an
+            # honest path plus a reason.
+            emit_body = textwrap.dedent(
+                f"""\
+                size_bytes = os.path.getsize(out_path)
+                payload = {{
+                    "path": out_path,
+                    "width": {width},
+                    "height": {height},
+                    "format": "png",
+                    "size_bytes": size_bytes,
+                }}
+                if size_bytes <= {MAX_INLINE_CAPTURE_BYTES}:
+                    with open(out_path, "rb") as f:
+                        payload["image_base64"] = base64.b64encode(
+                            f.read()
+                        ).decode("ascii")
+                    payload["encoding"] = "base64"
+                else:
+                    payload["inline_skipped"] = (
+                        "Capture is %d bytes, above the %d byte inline cap. "
+                        "Read the file at 'path', or lower width/height."
+                        % (size_bytes, {MAX_INLINE_CAPTURE_BYTES})
+                    )
+                print(json.dumps(payload))
+                """
+            )
+        else:
+            emit_body = textwrap.dedent(
+                f"""\
+                print(json.dumps({{
+                    "path": out_path,
+                    "width": {width},
+                    "height": {height},
+                    "format": "png",
+                    "size_bytes": os.path.getsize(out_path),
+                }}))
+                """
+            )
+
+        emit = textwrap.indent(emit_body.rstrip(), " " * 24)
+
         script = textwrap.dedent(f"""\
             import json
             import base64
             import os
             import tempfile
+            import uuid
             try:
                 import omni.kit.viewport.utility as vp_util
                 import omni.kit.app
@@ -896,9 +958,12 @@ class IsaacTools(LoggerMixin):
                 if vp_api is None:
                     print(json.dumps({{"error": "No active viewport found"}}))
                 else:
-                    tmp_path = os.path.join(tempfile.gettempdir(), "_simul_mcp_capture.png")
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
+                    # Unique per capture: a fixed name makes an A/B pair
+                    # overwrite itself, and the caller now keeps the file.
+                    out_path = os.path.join(
+                        tempfile.gettempdir(),
+                        "simul_capture_%s.png" % uuid.uuid4().hex[:12],
+                    )
 
                     # Set requested resolution on the viewport
                     vp_api.resolution = ({width}, {height})
@@ -908,26 +973,17 @@ class IsaacTools(LoggerMixin):
 
                     # Kit 106+ (Isaac Sim 5.x): use schedule_capture with FileCapture
                     from omni.kit.widget.viewport.capture import FileCapture
-                    capture = FileCapture(tmp_path)
+                    capture = FileCapture(out_path)
                     vp_api.schedule_capture(capture)
 
                     # Wait for the file to be written
                     for _ in range(60):
                         await omni.kit.app.get_app().next_update_async()
-                        if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                             break
 
-                    if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
-                        with open(tmp_path, "rb") as f:
-                            data = base64.b64encode(f.read()).decode("ascii")
-                        os.remove(tmp_path)
-                        print(json.dumps({{
-                            "width": {width},
-                            "height": {height},
-                            "format": "png",
-                            "encoding": "base64",
-                            "image_base64": data,
-                        }}))
+                    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+{emit}
                     else:
                         print(json.dumps({{"error": "Viewport capture failed — file not created"}}))
             except ImportError as e:
