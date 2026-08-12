@@ -166,9 +166,16 @@ class BridgeCommandService:
 
         root_depth = len(str(root.GetPath()).rstrip("/").split("/"))
         prims = []
-        for prim in Usd.PrimRange(root):
+        # continue skips emitting a prim but still descends its subtree, so the
+        # depth limit bounded the response and not the work. Prune instead —
+        # and the max_items break below is unreachable while we continue past
+        # every deep prim on the stage.
+        prim_iter = iter(Usd.PrimRange(root))
+        for prim in prim_iter:
             path_str = str(prim.GetPath())
             depth = len(path_str.rstrip("/").split("/")) - root_depth
+            if max_depth >= 0 and depth >= max_depth:
+                prim_iter.PruneChildren()
             if max_depth >= 0 and depth > max_depth:
                 continue
             prim_type_name = prim.GetTypeName()
@@ -228,6 +235,13 @@ class BridgeCommandService:
         attrs: dict[str, Any] = {}
         for attr in prim.GetAttributes():
             try:
+                # GetTypeName reads schema metadata; Get() would decompress the
+                # whole array out of the crate layer just for _serialize_value
+                # to replace it with an element count.
+                type_name = attr.GetTypeName()
+                if getattr(type_name, "isArray", False):
+                    attrs[attr.GetName()] = f"<array {type_name}>"
+                    continue
                 value = attr.Get()
                 if value is not None:
                     attrs[attr.GetName()] = self._serialize_value(value)

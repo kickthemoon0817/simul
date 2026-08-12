@@ -41,6 +41,11 @@ def _coerce_str_to_float_list(value: Any) -> Any:
 # List of floats that tolerates JSON-string inputs from forgiving MCP clients.
 FloatList = Annotated[List[float], BeforeValidator(_coerce_str_to_float_list)]
 
+# How much of a Kit log to read when returning its tail. Kit logs reach several
+# gigabytes and the read happens on Kit's main thread, so the window bounds the
+# freeze; 2 MB still holds far more lines than the 500-entry maximum.
+LOG_SCAN_WINDOW_BYTES = 2 * 1024 * 1024
+
 
 def _pyval(value: Any) -> str:
     """Render a call parameter as a Python literal for embedding in a script.
@@ -334,9 +339,15 @@ class IsaacTools(LoggerMixin):
                     max_n = {max_items}
                     root_depth = len(str(root.GetPath()).rstrip("/").split("/"))
 
-                    for p in Usd.PrimRange(root):
+                    # continue skips emitting a prim but still descends its
+                    # subtree, so the depth limit bounded the output and not the
+                    # work. Prune instead.
+                    prim_iter = iter(Usd.PrimRange(root))
+                    for p in prim_iter:
                         path_str = str(p.GetPath())
                         depth = len(path_str.rstrip("/").split("/")) - root_depth
+                        if max_d >= 0 and depth >= max_d:
+                            prim_iter.PruneChildren()
                         if max_d >= 0 and depth > max_d:
                             continue
                         ptype = p.GetTypeName()
@@ -429,6 +440,13 @@ class IsaacTools(LoggerMixin):
                     attrs = {{}}
                     for attr in prim.GetAttributes():
                         try:
+                            # GetTypeName reads schema metadata; Get() would
+                            # decompress the whole array out of the crate layer
+                            # just for _serialize to replace it with a count.
+                            type_name = attr.GetTypeName()
+                            if getattr(type_name, "isArray", False):
+                                attrs[attr.GetName()] = "<array %s>" % (type_name,)
+                                continue
                             val = attr.Get()
                             if val is not None:
                                 attrs[attr.GetName()] = _serialize(val)
@@ -2993,9 +3011,12 @@ class IsaacTools(LoggerMixin):
                     root_depth = len({_root_path}.rstrip("/").split("/")) - 1
                     prims = []
                     truncated = False
-                    for p in Usd.PrimRange(root):
+                    prim_iter = iter(Usd.PrimRange(root))
+                    for p in prim_iter:
                         path_str = str(p.GetPath())
                         depth = len(path_str.rstrip("/").split("/")) - 1 - root_depth
+                        if depth >= {max_depth}:
+                            prim_iter.PruneChildren()
                         if depth > {max_depth}:
                             continue
                         if len(prims) >= {max_prims}:
@@ -4576,10 +4597,13 @@ class IsaacTools(LoggerMixin):
         _source_filter = _pyval(source_filter)
         _search = _pyval(search)
         script = textwrap.dedent(f"""\
+            import collections
             import json
             import re
             import os
-            import glob
+
+            # Counts and totals below describe this window, not the whole file.
+            SCAN_WINDOW_BYTES = {LOG_SCAN_WINDOW_BYTES}
 
             level_filter = {_level}
             last_n = {_last_n}
@@ -4591,14 +4615,20 @@ class IsaacTools(LoggerMixin):
 
             # Find the most recent Kit log file
             log_dir = os.path.expanduser("~/.nvidia-omniverse/logs/Kit")
-            log_files = []
+            log_path = None
+            newest_mtime = -1.0
             for root, dirs, files in os.walk(log_dir):
                 for f in files:
-                    if f.endswith(".log"):
-                        full = os.path.join(root, f)
-                        log_files.append((os.path.getmtime(full), full))
-            log_files.sort(reverse=True)
-            log_path = log_files[0][1] if log_files else None
+                    if not f.endswith(".log"):
+                        continue
+                    full = os.path.join(root, f)
+                    try:
+                        mtime = os.path.getmtime(full)
+                    except OSError:
+                        continue
+                    if mtime > newest_mtime:
+                        newest_mtime = mtime
+                        log_path = full
 
             if not log_path:
                 print(json.dumps({{"error": "No Kit log file found"}}))
@@ -4607,10 +4637,20 @@ class IsaacTools(LoggerMixin):
                     r'\\[(Info|Warning|Warn|Error|Fatal|Verbose)\\]\\s*\\[([^\\]]+)\\]\\s*(.*)',
                     re.IGNORECASE
                 )
-                entries = []
+                # Only the tail is ever returned, so only the tail is read.
+                # Kit logs reach multiple gigabytes, and this runs on the main
+                # thread — reading one to hand back 50 lines freezes the sim.
+                entries = collections.deque(maxlen=last_n)
+                matched = 0
                 counts = {{"verbose": 0, "info": 0, "warn": 0, "error": 0}}
+                log_size = os.path.getsize(log_path)
+                scan_start = max(0, log_size - SCAN_WINDOW_BYTES)
 
                 with open(log_path, "r", errors="replace") as f:
+                    if scan_start:
+                        f.seek(scan_start)
+                        f.readline()  # drop the partial line we landed inside
+                        scan_start = f.tell()
                     for line in f:
                         m = pattern.search(line)
                         if not m:
@@ -4637,6 +4677,7 @@ class IsaacTools(LoggerMixin):
                         if ts_match:
                             timestamp = ts_match.group(1)
 
+                        matched += 1
                         entries.append({{
                             "timestamp": timestamp,
                             "level": raw_level,
@@ -4644,10 +4685,13 @@ class IsaacTools(LoggerMixin):
                             "message": message[:500],
                         }})
 
-                tail = entries[-last_n:] if len(entries) > last_n else entries
+                tail = list(entries)
                 print(json.dumps({{
                     "log_file": log_path,
-                    "total_matching": len(entries),
+                    "log_size_bytes": log_size,
+                    "scanned_bytes": log_size - scan_start,
+                    "truncated_scan": scan_start > 0,
+                    "total_matching": matched,
                     "returned": len(tail),
                     "counts": counts,
                     "entries": tail,
