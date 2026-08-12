@@ -291,7 +291,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             return ErrorResponse(
                 error=f"Invalid format '{format}'. Must be one of {sorted(_VALID_FORMATS)}",
                 error_type="ValidationError",
-            ).dict()
+            ).model_dump()
 
         rate_error = server._check_rate_limit("capture_unreal_viewport")
         if rate_error:
@@ -302,7 +302,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 return ErrorResponse(
                     error="Unreal runtime not available",
                     error_type="RuntimeError",
-                ).dict()
+                ).model_dump()
 
             with server.unreal_adapter.create_session() as session:
                 payload = await session.capture_viewport(
@@ -311,7 +311,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     format=format,
                 )
                 apply_success_from_error(payload)
-                result = UnrealCaptureViewportResponse(**payload).dict()
+                result = UnrealCaptureViewportResponse(**payload).model_dump()
                 return server._validate_output(
                     result,
                     (UnrealCaptureViewportResponse, ErrorResponse),
@@ -320,7 +320,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
         except Exception as e:
             server.logger.error("Error capturing Unreal viewport: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").dict()
+            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
             return server._validate_output(
                 result,
                 (UnrealCaptureViewportResponse, ErrorResponse),
