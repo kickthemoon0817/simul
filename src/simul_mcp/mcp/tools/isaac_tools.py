@@ -177,7 +177,26 @@ class IsaacTools(LoggerMixin):
 
         try:
             response = await self._client.bridge_request(action, payload or {})
-        except (ConnectionRefusedError, TimeoutError, OSError, ValueError) as exc:
+        except (ConnectionRefusedError, TimeoutError, OSError) as exc:
+            # The bridge is unreachable, not the action unsupported. When a
+            # script transport sits below us, defer to it exactly as an
+            # UnknownAction does — returning an envelope here is final to the
+            # caller and strands the tool on a closed port while ping, which
+            # does fall back, still reports the instance reachable.
+            if self._client.fallback_to_vscode:
+                logger.debug(
+                    "Bridge action %s unreachable (%s); deferring to script path",
+                    action,
+                    exc,
+                )
+                return None
+            return ErrorResponse(
+                error=str(exc),
+                error_type=type(exc).__name__,
+            ).model_dump()
+        except ValueError as exc:
+            # Protocol-level failure (oversized request, malformed frame). The
+            # script path would not do better, so surface it.
             return ErrorResponse(
                 error=str(exc),
                 error_type=type(exc).__name__,
