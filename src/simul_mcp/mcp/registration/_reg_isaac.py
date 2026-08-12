@@ -247,10 +247,35 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         )
 
     @server.mcp.tool(
+        name="get_isaac_prim_detail",
+        description=(
+            "Read one or more aspects of a prim in a single call. Aspects: "
+            "info, transform, ancestors, relationships, variants, bounding_box, "
+            "mesh, light, material, rigid_body, collision, joint, mass, "
+            "animation, textures. Defaults to info."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+        output_schema=None,
+    )
+    async def get_isaac_prim_detail(
+        prim_path: str,
+        aspects: Optional[List[str]] = None,
+    ) -> ToolResult:
+        return await server._exec_isaac(
+            "get_isaac_prim_detail",
+            server._isaac_tools.get_isaac_prim_detail(
+                prim_path=prim_path, aspects=aspects
+            ),
+        )
+
+    @server.mcp.tool(
         name="get_isaac_prim_info",
         description=(
             "Get detailed information about a specific prim: type, attributes, "
             "applied schemas, children, references, and relationships."
+            "Deprecated: use get_isaac_prim_detail with aspects=['info']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -267,6 +292,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Get the local and world transform of a prim including "
             "translation, rotation, and scale."
+            "Deprecated: use get_isaac_prim_detail with aspects=['transform']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -569,6 +595,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Get rigid body physics properties: mass, velocity, "
             "angular velocity, and kinematic state."
+            "Deprecated: use get_isaac_prim_detail with aspects=['rigid_body']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -609,6 +636,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Get collision properties of a prim: enabled state "
             "and mesh approximation type."
+            "Deprecated: use get_isaac_prim_detail with aspects=['collision']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -629,6 +657,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Get joint information: type, connected bodies, limits, "
             "and break force/torque."
+            "Deprecated: use get_isaac_prim_detail with aspects=['joint']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -649,6 +678,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Get mass properties: mass, density, center of mass, "
             "and diagonal inertia tensor."
+            "Deprecated: use get_isaac_prim_detail with aspects=['mass']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -894,6 +924,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Get material properties: shader type, bound inputs, "
             "and connected textures for a material prim."
+            "Deprecated: use get_isaac_prim_detail with aspects=['material']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -1121,6 +1152,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Get the world-space axis-aligned bounding box of a prim "
             "including min, max, size, and center coordinates."
+            "Deprecated: use get_isaac_prim_detail with aspects=['bounding_box']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -1137,6 +1169,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Get mesh geometry details: vertex count, face count, "
             "has normals, has UVs, and subdivision scheme."
+            "Deprecated: use get_isaac_prim_detail with aspects=['mesh']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -1169,6 +1202,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Get detailed light properties: intensity, color, "
             "temperature, radius, shadow settings, and shaping."
+            "Deprecated: use get_isaac_prim_detail with aspects=['light']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -1219,6 +1253,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Get the ancestor chain from root to a prim, showing "
             "the full hierarchy path with types."
+            "Deprecated: use get_isaac_prim_detail with aspects=['ancestors']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -1259,6 +1294,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Get a prim's relationships: material binding, references, "
             "payloads, variant sets, and USD relationships."
+            "Deprecated: use get_isaac_prim_detail with aspects=['relationships']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -1307,6 +1343,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "List all external texture files referenced by scene materials "
             "with their referencing material paths."
+            "Deprecated: use get_isaac_prim_detail with aspects=['textures']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -1323,6 +1360,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Get variant sets on a prim: available variants "
             "and current selections for each set."
+            "Deprecated: use get_isaac_prim_detail with aspects=['variants']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -1371,6 +1409,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Get animation information for a prim: which attributes "
             "have time samples, sample counts, and time ranges."
+            "Deprecated: use get_isaac_prim_detail with aspects=['animation']."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True

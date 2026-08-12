@@ -41,6 +41,27 @@ def _coerce_str_to_float_list(value: Any) -> Any:
 # List of floats that tolerates JSON-string inputs from forgiving MCP clients.
 FloatList = Annotated[List[float], BeforeValidator(_coerce_str_to_float_list)]
 
+# Aspect name -> the method that reads it. Fifteen tools took exactly one
+# prim_path and differed only in which of these they returned, so they are one
+# tool with a selector rather than fifteen the caller has to tell apart.
+PRIM_DETAIL_ASPECTS = {
+    "info": "get_isaac_prim_info",
+    "transform": "get_isaac_prim_transform",
+    "ancestors": "get_isaac_prim_ancestors",
+    "relationships": "get_isaac_prim_relationships",
+    "variants": "get_isaac_prim_variants",
+    "bounding_box": "get_isaac_bounding_box",
+    "mesh": "get_isaac_mesh_info",
+    "light": "get_isaac_light_info",
+    "material": "get_isaac_material_info",
+    "rigid_body": "get_isaac_rigid_body_info",
+    "collision": "get_isaac_collision_info",
+    "joint": "get_isaac_joint_info",
+    "mass": "get_isaac_mass_properties",
+    "animation": "get_isaac_animation_info",
+    "textures": "get_isaac_texture_dependencies",
+}
+
 
 class IsaacTools(LoggerMixin):
     """
@@ -160,6 +181,45 @@ class IsaacTools(LoggerMixin):
                 error_type="JSONDecodeError",
                 details={"raw_output": output[:2000]},
             ).model_dump()
+
+    async def get_isaac_prim_detail(
+        self,
+        prim_path: str,
+        aspects: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Read one or more aspects of a prim in a single call.
+
+        Args:
+            prim_path: USD path of the prim to inspect.
+            aspects: Which aspects to read. Defaults to ``["info"]``. Valid
+                     names are the keys of PRIM_DETAIL_ASPECTS.
+
+        Returns:
+            Dict with one entry per requested aspect, keyed by aspect name.
+        """
+        requested = list(aspects) if aspects else ["info"]
+        unknown = [a for a in requested if a not in PRIM_DETAIL_ASPECTS]
+        if unknown:
+            return ErrorResponse(
+                error=(
+                    f"Unknown aspect(s): {', '.join(unknown)}. "
+                    f"Valid aspects: {', '.join(sorted(PRIM_DETAIL_ASPECTS))}."
+                ),
+                error_type="ValueError",
+            ).model_dump()
+
+        detail: Dict[str, Any] = {
+            "success": True,
+            "prim_path": prim_path,
+            "aspects": requested,
+        }
+        for aspect in requested:
+            method = getattr(self, PRIM_DETAIL_ASPECTS[aspect])
+            # Aspects are independent reads: one that fails is reported in
+            # place rather than discarding the rest of the answer.
+            detail[aspect] = await method(prim_path)
+        return detail
 
     async def _execute_bridge_action(
         self, action: str, payload: Optional[Dict[str, Any]] = None
