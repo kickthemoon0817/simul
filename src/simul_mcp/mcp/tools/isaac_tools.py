@@ -822,13 +822,19 @@ class IsaacTools(LoggerMixin):
                     if tgt is not None:
                         state.set_target_world(Gf.Vec3d(*tgt), True)
 
-                    # Read back the new state
+                    # Read back the new state. A camera Kit has never driven
+                    # through the viewport carries no center of interest, and
+                    # target_world raises instead of returning None, so a
+                    # position-only update must not depend on reading it.
                     new_pos = state.position_world
-                    new_tgt = state.target_world
+                    try:
+                        new_tgt = [float(x) for x in state.target_world]
+                    except Exception:
+                        new_tgt = None
                     print(json.dumps({{
                         "camera_path": cam_path,
                         "position": [float(x) for x in new_pos],
-                        "target": [float(x) for x in new_tgt],
+                        "target": new_tgt,
                     }}))
             except ImportError:
                 # Fallback: direct USD edit for headless mode
