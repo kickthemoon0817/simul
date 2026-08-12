@@ -232,7 +232,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         root_path: str = "/",
         prim_type: Optional[str] = None,
         max_depth: int = -1,
-        max_items: int = 500,
+        max_items: int = 100,
     ) -> Dict[str, Any]:
         return await server._exec_isaac(
             "list_isaac_prims",
@@ -1241,7 +1241,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     async def get_isaac_subtree(
         root_path: str = "/",
         max_depth: int = 5,
-        max_prims: int = 1000,
+        max_prims: int = 150,
     ) -> Dict[str, Any]:
         return await server._exec_isaac(
             "get_isaac_subtree",
@@ -1441,20 +1441,16 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "List extensions registered in the running Isaac Sim instance. "
             "Returns each extension's ID (version-suffixed, e.g. "
-            "'worv.env.sun-0.3.0'), version, and enabled status. "
-            "IMPORTANT for LLM clients: the unfiltered list is large (tens of "
-            "thousands of characters) and will exceed typical per-tool-result "
-            "token caps. Always pass enabled_only=true (small, current state) "
-            "or search='<substring>' (e.g. search='worv') to scope the result. "
-            "Only call without filters when you have explicit reason to enumerate "
-            "every registered extension."
+            "'worv.env.sun-0.3.0'), version, and enabled status. Lists enabled "
+            "extensions by default; pass enabled_only=false with "
+            "search='<substring>' to scope a wider query."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
     )
     async def list_isaac_extensions(
-        enabled_only: bool = False,
+        enabled_only: bool = True,
         search: Optional[str] = None,
     ) -> Dict[str, Any]:
         return await server._exec_isaac(

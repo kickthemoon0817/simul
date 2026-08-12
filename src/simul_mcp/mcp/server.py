@@ -33,6 +33,7 @@ from .. import __version__ as _source_version
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
 from ..utils.timing import RateLimiter
+from .result_budget import apply_result_budget
 from .schemas.common import ErrorResponse
 from .tools.isaac_tools import IsaacTools
 from .session_manager import SessionManager
@@ -413,7 +414,9 @@ class SimulMCPServer(LoggerMixin):
                         binding.port
                     ).heartbeat(binding.agent_id, tool_name)
                     binding.last_heartbeat = time.time()
-                return result
+                # Applied at the chokepoint so every Isaac tool is covered by
+                # one rule rather than each growing its own cap.
+                return apply_result_budget(result)
             except Exception as exc:
                 duration_ms = (time.monotonic() - t0) * 1000
                 self.usage_tracker.record(

@@ -272,7 +272,7 @@ class IsaacTools(LoggerMixin):
         root_path: str = "/",
         prim_type: Optional[str] = None,
         max_depth: int = -1,
-        max_items: int = 500,
+        max_items: int = 100,
     ) -> Dict[str, Any]:
         """
         List prims in the current Isaac Sim stage with optional filtering.
@@ -286,7 +286,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with list of prim entries (path, type, name, active).
         """
-        max_items = max(1, min(max_items, 10000))
+        max_items = max(1, min(max_items, 1000))
         bridge_result = await self._execute_bridge_action(
             "list_prims",
             {
@@ -2949,7 +2949,7 @@ class IsaacTools(LoggerMixin):
         self,
         root_path: str = "/",
         max_depth: int = 5,
-        max_prims: int = 1000,
+        max_prims: int = 150,
     ) -> Dict[str, Any]:
         """
         Get a full subtree as a flat list with depth info.
@@ -3551,7 +3551,7 @@ class IsaacTools(LoggerMixin):
 
     async def list_isaac_extensions(
         self,
-        enabled_only: bool = False,
+        enabled_only: bool = True,
         search: Optional[str] = None,
     ) -> Dict[str, Any]:
         """

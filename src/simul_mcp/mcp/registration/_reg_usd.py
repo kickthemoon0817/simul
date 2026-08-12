@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from ..result_budget import apply_result_budget
 from ..schemas.common import BoundingBox, ErrorResponse, Transform
 from ..schemas.usd import (
     BBoxRequest,
@@ -646,8 +647,14 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                     results=results,
                     count=len(results),
                 ).model_dump()
-                return server._validate_output(
-                    result, (PrimSearchResponse, ErrorResponse), "search_prims"
+                # search_type="by_type", query="Mesh" returns every mesh path in
+                # the file with no cap. The USD tools have no shared chokepoint
+                # to hang this on, so the budget is applied here directly;
+                # `count` stays the true total.
+                return apply_result_budget(
+                    server._validate_output(
+                        result, (PrimSearchResponse, ErrorResponse), "search_prims"
+                    )
                 )
 
         except Exception as e:
