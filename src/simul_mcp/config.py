@@ -83,7 +83,11 @@ class IsaacSimConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     path: Optional[str] = Field(
-        default=None, description="Path to Isaac Sim installation"
+        # Read from the environment so the field is the one source of truth.
+        # It existed and was never populated, while callers reached past it to
+        # os.environ directly.
+        default_factory=lambda: os.environ.get("ISAAC_SIM_PATH") or None,
+        description="Path to Isaac Sim installation (defaults to $ISAAC_SIM_PATH)",
     )
     headless: bool = Field(default=False, description="Run in headless mode")
     enable_livestream: bool = Field(default=False, description="Enable livestream")
@@ -333,35 +337,6 @@ class USDConfig(BaseModel):
     max_file_size_mb: int = Field(
         default=500, description="Maximum USD file size in MB", ge=1
     )
-
-
-class MeshConfig(BaseModel):
-    """Mesh processing configuration."""
-
-    model_config = ConfigDict(frozen=True)
-
-    decimation_enabled: bool = Field(default=True, description="Enable mesh decimation")
-    max_faces: int = Field(
-        default=50000, description="Maximum faces for decimation", ge=1
-    )
-    preserve_boundaries: bool = Field(
-        default=True, description="Preserve mesh boundaries"
-    )
-    preserve_topology: bool = Field(default=False, description="Preserve mesh topology")
-    compute_normals: bool = Field(default=True, description="Compute mesh normals")
-    compute_tangents: bool = Field(default=False, description="Compute mesh tangents")
-    validate_topology: bool = Field(default=True, description="Validate mesh topology")
-    include_materials: bool = Field(
-        default=True, description="Include materials in export"
-    )
-    include_textures: bool = Field(
-        default=True, description="Include textures in export"
-    )
-    texture_resolution: int = Field(
-        default=1024, description="Texture resolution", ge=64
-    )
-
-
 class ViewportConfig(BaseModel):
     """Viewport configuration."""
 
@@ -466,78 +441,6 @@ class SecurityConfig(BaseModel):
     burst_size: int = Field(
         default=10, description="Burst size for rate limiting", ge=1
     )
-
-
-class PerformanceConfig(BaseModel):
-    """Performance configuration."""
-
-    model_config = ConfigDict(frozen=True)
-
-    memory_limit_gb: int = Field(default=8, description="Memory limit in GB", ge=1)
-    gc_threshold: int = Field(
-        default=1000, description="Garbage collection threshold", ge=1
-    )
-    enable_memory_profiling: bool = Field(
-        default=False, description="Enable memory profiling"
-    )
-    max_workers: int = Field(default=4, description="Maximum worker threads", ge=1)
-    enable_async_operations: bool = Field(
-        default=True, description="Enable async operations"
-    )
-    enable_result_caching: bool = Field(
-        default=True, description="Enable result caching"
-    )
-    cache_ttl_seconds: int = Field(
-        default=300, description="Cache TTL in seconds", ge=1
-    )
-    max_cache_entries: int = Field(
-        default=1000, description="Maximum cache entries", ge=1
-    )
-
-
-class FeatureFlags(BaseModel):
-    """Feature flags configuration."""
-
-    model_config = ConfigDict(frozen=True)
-
-    enable_mesh_analysis: bool = Field(default=True, description="Enable mesh analysis")
-    enable_material_extraction: bool = Field(
-        default=True, description="Enable material extraction"
-    )
-    enable_animation_support: bool = Field(
-        default=False, description="Enable animation support"
-    )
-    enable_physics_queries: bool = Field(
-        default=True, description="Enable physics queries"
-    )
-    enable_lighting_analysis: bool = Field(
-        default=True, description="Enable lighting analysis"
-    )
-    enable_scene_graph_export: bool = Field(
-        default=True, description="Enable scene graph export"
-    )
-    enable_batch_operations: bool = Field(
-        default=True, description="Enable batch operations"
-    )
-    enable_streaming: bool = Field(default=False, description="Enable streaming")
-
-
-class DevelopmentConfig(BaseModel):
-    """Development configuration."""
-
-    model_config = ConfigDict(frozen=True)
-
-    debug_mode: bool = Field(default=False, description="Enable debug mode")
-    profiling_enabled: bool = Field(default=False, description="Enable profiling")
-    verbose_usd_logging: bool = Field(
-        default=False, description="Enable verbose USD logging"
-    )
-    enable_hot_reload: bool = Field(default=False, description="Enable hot reload")
-    enable_mock_isaac: bool = Field(default=False, description="Enable mock Isaac Sim")
-    use_test_data: bool = Field(default=False, description="Use test data")
-    skip_gpu_operations: bool = Field(default=False, description="Skip GPU operations")
-
-
 class Settings(BaseSettings):
     """Main settings class that combines all configuration sections."""
 
@@ -547,13 +450,9 @@ class Settings(BaseSettings):
     blender: BlenderConfig = Field(default_factory=BlenderConfig)
     unreal: UnrealConfig = Field(default_factory=UnrealConfig)
     usd: USDConfig = Field(default_factory=USDConfig)
-    mesh: MeshConfig = Field(default_factory=MeshConfig)
     viewport: ViewportConfig = Field(default_factory=ViewportConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
-    performance: PerformanceConfig = Field(default_factory=PerformanceConfig)
-    features: FeatureFlags = Field(default_factory=FeatureFlags)
-    development: DevelopmentConfig = Field(default_factory=DevelopmentConfig)
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -800,39 +699,6 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     ),
                 }
             ),
-            "mesh": _compact_dict(
-                {
-                    "decimation_enabled": _coalesce(
-                        mesh.get("decimation_enabled"), mesh_decimation.get("enabled")
-                    ),
-                    "max_faces": _coalesce(mesh.get("max_faces"), mesh_decimation.get("max_faces")),
-                    "preserve_boundaries": _coalesce(
-                        mesh.get("preserve_boundaries"),
-                        mesh_decimation.get("preserve_boundaries"),
-                    ),
-                    "preserve_topology": _coalesce(
-                        mesh.get("preserve_topology"), mesh_decimation.get("preserve_topology")
-                    ),
-                    "compute_normals": _coalesce(
-                        mesh.get("compute_normals"), mesh_analysis.get("compute_normals")
-                    ),
-                    "compute_tangents": _coalesce(
-                        mesh.get("compute_tangents"), mesh_analysis.get("compute_tangents")
-                    ),
-                    "validate_topology": _coalesce(
-                        mesh.get("validate_topology"), mesh_analysis.get("validate_topology")
-                    ),
-                    "include_materials": _coalesce(
-                        mesh.get("include_materials"), mesh_export.get("include_materials")
-                    ),
-                    "include_textures": _coalesce(
-                        mesh.get("include_textures"), mesh_export.get("include_textures")
-                    ),
-                    "texture_resolution": _coalesce(
-                        mesh.get("texture_resolution"), mesh_export.get("texture_resolution")
-                    ),
-                }
-            ),
             "viewport": _compact_dict(
                 {
                     "default_width": _coalesce(
@@ -906,60 +772,6 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     ),
                     "burst_size": _coalesce(
                         security.get("burst_size"), security_rate.get("burst_size")
-                    ),
-                }
-            ),
-            "performance": _compact_dict(
-                {
-                    "memory_limit_gb": _coalesce(
-                        performance.get("memory_limit_gb"), performance_memory.get("limit_gb")
-                    ),
-                    "gc_threshold": _coalesce(
-                        performance.get("gc_threshold"), performance_memory.get("gc_threshold")
-                    ),
-                    "enable_memory_profiling": _coalesce(
-                        performance.get("enable_memory_profiling"),
-                        performance_memory.get("enable_memory_profiling"),
-                    ),
-                    "max_workers": _coalesce(
-                        performance.get("max_workers"), performance_threading.get("max_workers")
-                    ),
-                    "enable_async_operations": _coalesce(
-                        performance.get("enable_async_operations"),
-                        performance_threading.get("enable_async_operations"),
-                    ),
-                    "enable_result_caching": _coalesce(
-                        performance.get("enable_result_caching"),
-                        performance_caching.get("enable_result_caching"),
-                    ),
-                    "cache_ttl_seconds": _coalesce(
-                        performance.get("cache_ttl_seconds"),
-                        performance_caching.get("cache_ttl_seconds"),
-                    ),
-                    "max_cache_entries": _coalesce(
-                        performance.get("max_cache_entries"),
-                        performance_caching.get("max_cache_entries"),
-                    ),
-                }
-            ),
-            "features": raw.get("features"),
-            "development": _compact_dict(
-                {
-                    "debug_mode": development.get("debug_mode"),
-                    "profiling_enabled": development.get("profiling_enabled"),
-                    "verbose_usd_logging": development.get("verbose_usd_logging"),
-                    "enable_hot_reload": development.get("enable_hot_reload"),
-                    "enable_mock_isaac": _coalesce(
-                        development.get("enable_mock_isaac"),
-                        development_testing.get("enable_mock_isaac"),
-                    ),
-                    "use_test_data": _coalesce(
-                        development.get("use_test_data"),
-                        development_testing.get("use_test_data"),
-                    ),
-                    "skip_gpu_operations": _coalesce(
-                        development.get("skip_gpu_operations"),
-                        development_testing.get("skip_gpu_operations"),
                     ),
                 }
             ),
