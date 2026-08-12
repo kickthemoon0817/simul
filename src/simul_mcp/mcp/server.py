@@ -32,6 +32,7 @@ from ..adapters import (
 from .. import __version__ as _source_version
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
+from ..utils.paths import PathPolicy
 from ..utils.timing import RateLimiter
 from .schemas.common import ErrorResponse
 from .tools.isaac_tools import IsaacTools
@@ -147,6 +148,9 @@ class SimulMCPServer(LoggerMixin):
         self.settings = settings or get_settings()
         self._backends = backends  # None means "all available"
         self._project_root = Path(__file__).resolve().parents[3]
+        self._path_policy = PathPolicy.from_settings(
+            self.settings, project_root=self._project_root
+        )
         self._allowed_paths = self._resolve_allowed_paths()
 
         self.usage_tracker = ToolUsageTracker()
@@ -425,39 +429,12 @@ class SimulMCPServer(LoggerMixin):
                 ).model_dump()
 
     def _resolve_allowed_paths(self) -> List[Path]:
-        allowed_paths: List[Path] = []
-        for path_str in self.settings.security.allowed_paths:
-            expanded = os.path.expandvars(path_str)
-            candidate = Path(expanded).expanduser()
-            if not candidate.is_absolute():
-                candidate = self._project_root / candidate
-            try:
-                candidate = candidate.resolve()
-            except Exception:
-                candidate = candidate.absolute()
-            allowed_paths.append(candidate)
-        return allowed_paths
+        return self._path_policy.allowed_roots
 
     def _is_path_allowed(self, path_str: str) -> bool:
-        if not self.settings.security.sandbox_enabled:
-            return True
-        if not path_str:
-            return False
-        expanded = os.path.expandvars(path_str)
-        candidate = Path(expanded).expanduser()
-        if not candidate.is_absolute():
-            candidate = self._project_root / candidate
-        try:
-            candidate = candidate.resolve()
-        except Exception:
-            candidate = candidate.absolute()
-        for allowed_path in self._allowed_paths:
-            try:
-                candidate.relative_to(allowed_path)
-                return True
-            except ValueError:
-                continue
-        return False
+        # Kept as a fast-fail at the MCP boundary. The authoritative check now
+        # lives in the tools layer, below both this and the CLI.
+        return self._path_policy.is_allowed(path_str)
 
     def _validate_input(
         self, model: Type[BaseModel], **kwargs
