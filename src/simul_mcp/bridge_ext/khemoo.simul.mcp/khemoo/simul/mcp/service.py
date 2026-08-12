@@ -8,6 +8,22 @@ from .executor import ScriptExecutor
 from .protocol import BridgeRequest, BridgeResponse
 
 
+# Actions that only read state. They are safe to dispatch without the request
+# lock: Kit is single-threaded, so they cannot interleave mid-operation with a
+# mutating action, and holding them behind a long-running step is what made a
+# health-check ping look like an unreachable instance.
+READ_ONLY_ACTIONS = frozenset(
+    {
+        "ping",
+        "capabilities",
+        "get_stage_info",
+        "get_simulation_state",
+        "get_prim_info",
+        "list_prims",
+    }
+)
+
+
 class BridgeCommandService:
     """Dispatch typed bridge actions inside Isaac Sim."""
 
