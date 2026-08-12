@@ -27,6 +27,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
+        output_schema=None,
     )
     async def list_isaac_instances(
         scan: bool = True,
@@ -90,6 +91,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False
         ),
+        output_schema=None,
     )
     async def set_active_isaac_instance(
         instance_name: str,
@@ -177,6 +179,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False
         ),
+        output_schema=None,
     )
     async def claim_isaac_instance(
         purpose: str,
@@ -239,6 +242,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False
         ),
+        output_schema=None,
     )
     async def release_isaac_instance(
         agent_id: Optional[str] = None,

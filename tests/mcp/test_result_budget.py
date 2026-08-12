@@ -153,8 +153,13 @@ def test_exec_isaac_applies_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
 
     result = asyncio.run(instance._exec_isaac("list_isaac_prims", _huge()))
 
-    assert _encoded_size(result) <= DEFAULT_RESULT_BUDGET_BYTES
-    assert result["truncated"] is True
+    # _exec_isaac returns a ToolResult; what crosses the wire is the JSON in its
+    # single content block, so that is what the budget has to bound.
+    wire_text = result.content[0].text
+    payload = json.loads(wire_text)
+
+    assert len(wire_text) <= DEFAULT_RESULT_BUDGET_BYTES
+    assert payload["truncated"] is True
 
 
 # ---------------------------------------------------------------------------

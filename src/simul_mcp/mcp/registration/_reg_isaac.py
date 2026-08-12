@@ -10,6 +10,8 @@ import json
 import time
 
 from ...adapters import ScriptResult
+from fastmcp.tools.tool import ToolResult
+
 from ..schemas.common import ErrorResponse
 
 if TYPE_CHECKING:
@@ -212,7 +214,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_stage_info() -> Dict[str, Any]:
+    async def get_isaac_stage_info() -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_stage_info",
             server._isaac_tools.get_isaac_stage_info(),
@@ -233,7 +235,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         prim_type: Optional[str] = None,
         max_depth: int = -1,
         max_items: int = 100,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_prims",
             server._isaac_tools.list_isaac_prims(
@@ -254,7 +256,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_prim_info(prim_path: str) -> Dict[str, Any]:
+    async def get_isaac_prim_info(prim_path: str) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_prim_info",
             server._isaac_tools.get_isaac_prim_info(prim_path=prim_path),
@@ -272,7 +274,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def get_isaac_prim_transform(
         prim_path: str, world_space: bool = True
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_prim_transform",
             server._isaac_tools.get_isaac_prim_transform(
@@ -295,7 +297,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         query: str = "Mesh",
         root_path: str = "/",
         max_results: int = 100,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "search_isaac_prims",
             server._isaac_tools.search_isaac_prims(
@@ -316,7 +318,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_scene_summary() -> Dict[str, Any]:
+    async def get_isaac_scene_summary() -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_scene_summary",
             server._isaac_tools.get_isaac_scene_summary(),
@@ -336,7 +338,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def get_isaac_camera_info(
         camera_path: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_camera_info",
             server._isaac_tools.get_isaac_camera_info(
@@ -351,7 +353,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def list_isaac_cameras() -> Dict[str, Any]:
+    async def list_isaac_cameras() -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_cameras",
             server._isaac_tools.list_isaac_cameras(),
@@ -371,7 +373,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         position: Optional[List[float]] = None,
         target: Optional[List[float]] = None,
         camera_path: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_camera",
             server._isaac_tools.set_isaac_camera(
@@ -394,7 +396,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     async def capture_isaac_viewport(
         width: int = 1280,
         height: int = 720,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "capture_isaac_viewport",
             server._isaac_tools.capture_isaac_viewport(
@@ -418,7 +420,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         prim_path: str,
         prim_type: str = "Xform",
         attributes: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "create_isaac_prim",
             server._isaac_tools.create_isaac_prim(
@@ -436,7 +438,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             destructive=True,
         ),
     )
-    async def delete_isaac_prim(prim_path: str) -> Dict[str, Any]:
+    async def delete_isaac_prim(prim_path: str) -> ToolResult:
         return await server._exec_isaac(
             "delete_isaac_prim",
             server._isaac_tools.delete_isaac_prim(prim_path=prim_path),
@@ -457,7 +459,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         translation: Optional[List[float]] = None,
         rotation_euler: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_prim_transform",
             server._isaac_tools.set_isaac_prim_transform(
@@ -477,7 +479,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def set_isaac_prim_visibility(
         prim_path: str, visible: bool
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_prim_visibility",
             server._isaac_tools.set_isaac_prim_visibility(
@@ -499,7 +501,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         prim_path: str,
         attribute_name: str,
         value: Any,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_prim_attribute",
             server._isaac_tools.set_isaac_prim_attribute(
@@ -518,7 +520,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def duplicate_isaac_prim(
         prim_path: str, new_path: str
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "duplicate_isaac_prim",
             server._isaac_tools.duplicate_isaac_prim(
@@ -535,7 +537,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def reparent_isaac_prim(
         prim_path: str, new_parent_path: str
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "reparent_isaac_prim",
             server._isaac_tools.reparent_isaac_prim(
@@ -556,7 +558,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_physics_scene() -> Dict[str, Any]:
+    async def get_isaac_physics_scene() -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_physics_scene",
             server._isaac_tools.get_isaac_physics_scene(),
@@ -574,7 +576,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def get_isaac_rigid_body_info(
         prim_path: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_rigid_body_info",
             server._isaac_tools.get_isaac_rigid_body_info(
@@ -594,7 +596,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def list_isaac_physics_objects(
         root_path: str = "/",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_physics_objects",
             server._isaac_tools.list_isaac_physics_objects(
@@ -614,7 +616,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def get_isaac_collision_info(
         prim_path: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_collision_info",
             server._isaac_tools.get_isaac_collision_info(
@@ -634,7 +636,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def get_isaac_joint_info(
         prim_path: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_joint_info",
             server._isaac_tools.get_isaac_joint_info(
@@ -654,7 +656,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def get_isaac_mass_properties(
         prim_path: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_mass_properties",
             server._isaac_tools.get_isaac_mass_properties(
@@ -675,7 +677,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def add_isaac_rigid_body(
         prim_path: str, kinematic: bool = False
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "add_isaac_rigid_body",
             server._isaac_tools.add_isaac_rigid_body(
@@ -695,7 +697,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def add_isaac_collision(
         prim_path: str, approximation: str = "none"
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "add_isaac_collision",
             server._isaac_tools.add_isaac_collision(
@@ -718,7 +720,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         mass: Optional[float] = None,
         density: Optional[float] = None,
         center_of_mass: Optional[List[float]] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_mass_properties",
             server._isaac_tools.set_isaac_mass_properties(
@@ -744,7 +746,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         static_friction: float = 0.5,
         dynamic_friction: float = 0.5,
         restitution: float = 0.0,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_physics_material",
             server._isaac_tools.set_isaac_physics_material(
@@ -770,7 +772,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         prim_path: str = "/World/PhysicsScene",
         gravity_direction: Optional[List[float]] = None,
         gravity_magnitude: float = 9.81,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "create_isaac_physics_scene",
             server._isaac_tools.create_isaac_physics_scene(
@@ -792,7 +794,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_simulation_state() -> Dict[str, Any]:
+    async def get_isaac_simulation_state() -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_simulation_state",
             server._isaac_tools.get_isaac_simulation_state(),
@@ -805,7 +807,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
-    async def start_isaac_simulation() -> Dict[str, Any]:
+    async def start_isaac_simulation() -> ToolResult:
         return await server._exec_isaac(
             "start_isaac_simulation",
             server._isaac_tools.start_isaac_simulation(),
@@ -818,7 +820,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
-    async def stop_isaac_simulation() -> Dict[str, Any]:
+    async def stop_isaac_simulation() -> ToolResult:
         return await server._exec_isaac(
             "stop_isaac_simulation",
             server._isaac_tools.stop_isaac_simulation(),
@@ -831,7 +833,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
-    async def pause_isaac_simulation() -> Dict[str, Any]:
+    async def pause_isaac_simulation() -> ToolResult:
         return await server._exec_isaac(
             "pause_isaac_simulation",
             server._isaac_tools.pause_isaac_simulation(),
@@ -848,7 +850,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def step_isaac_simulation(
         num_steps: int = 1,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "step_isaac_simulation",
             server._isaac_tools.step_isaac_simulation(
@@ -863,7 +865,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
-    async def reset_isaac_simulation() -> Dict[str, Any]:
+    async def reset_isaac_simulation() -> ToolResult:
         return await server._exec_isaac(
             "reset_isaac_simulation",
             server._isaac_tools.reset_isaac_simulation(),
@@ -879,7 +881,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_simulation_time() -> Dict[str, Any]:
+    async def get_isaac_simulation_time() -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_simulation_time",
             server._isaac_tools.get_isaac_simulation_time(),
@@ -899,7 +901,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def get_isaac_material_info(
         material_path: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_material_info",
             server._isaac_tools.get_isaac_material_info(
@@ -914,7 +916,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def list_isaac_materials() -> Dict[str, Any]:
+    async def list_isaac_materials() -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_materials",
             server._isaac_tools.list_isaac_materials(),
@@ -932,7 +934,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def assign_isaac_material(
         prim_path: str, material_path: str
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "assign_isaac_material",
             server._isaac_tools.assign_isaac_material(
@@ -956,7 +958,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         material_path: str,
         property_name: str,
         value: Any,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_material_property",
             server._isaac_tools.set_isaac_material_property(
@@ -985,7 +987,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         roughness: float = 0.5,
         metallic: float = 0.0,
         opacity: float = 1.0,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "create_isaac_material",
             server._isaac_tools.create_isaac_material(
@@ -1008,7 +1010,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             destructive=True,
         ),
     )
-    async def open_isaac_stage(file_path: str) -> Dict[str, Any]:
+    async def open_isaac_stage(file_path: str) -> ToolResult:
         if not server._is_path_allowed(file_path):
             return ErrorResponse(
                 error="File path is not allowed by sandbox policy",
@@ -1032,7 +1034,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def save_isaac_stage(
         file_path: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         if file_path is not None and not server._is_path_allowed(file_path):
             return ErrorResponse(
                 error="File path is not allowed by sandbox policy",
@@ -1052,7 +1054,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             destructive=True,
         ),
     )
-    async def new_isaac_stage() -> Dict[str, Any]:
+    async def new_isaac_stage() -> ToolResult:
         return await server._exec_isaac(
             "new_isaac_stage",
             server._isaac_tools.new_isaac_stage(),
@@ -1071,7 +1073,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     async def import_isaac_asset(
         asset_path: str,
         target_path: str = "/World/ImportedAsset",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         if not server._is_path_allowed(asset_path):
             return ErrorResponse(
                 error="File path is not allowed by sandbox policy",
@@ -1097,7 +1099,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def add_isaac_reference(
         prim_path: str, reference_path: str
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         if not server._is_path_allowed(reference_path):
             return ErrorResponse(
                 error="File path is not allowed by sandbox policy",
@@ -1124,7 +1126,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_bounding_box(prim_path: str) -> Dict[str, Any]:
+    async def get_isaac_bounding_box(prim_path: str) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_bounding_box",
             server._isaac_tools.get_isaac_bounding_box(prim_path=prim_path),
@@ -1140,7 +1142,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_mesh_info(prim_path: str) -> Dict[str, Any]:
+    async def get_isaac_mesh_info(prim_path: str) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_mesh_info",
             server._isaac_tools.get_isaac_mesh_info(prim_path=prim_path),
@@ -1156,7 +1158,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def list_isaac_lights(root_path: str = "/") -> Dict[str, Any]:
+    async def list_isaac_lights(root_path: str = "/") -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_lights",
             server._isaac_tools.list_isaac_lights(root_path=root_path),
@@ -1172,7 +1174,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_light_info(prim_path: str) -> Dict[str, Any]:
+    async def get_isaac_light_info(prim_path: str) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_light_info",
             server._isaac_tools.get_isaac_light_info(prim_path=prim_path),
@@ -1198,7 +1200,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         color_temperature: Optional[float] = None,
         angle: Optional[float] = None,
         texture_file: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "create_isaac_light",
             server._isaac_tools.create_isaac_light(
@@ -1222,7 +1224,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_prim_ancestors(prim_path: str) -> Dict[str, Any]:
+    async def get_isaac_prim_ancestors(prim_path: str) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_prim_ancestors",
             server._isaac_tools.get_isaac_prim_ancestors(prim_path=prim_path),
@@ -1242,7 +1244,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         root_path: str = "/",
         max_depth: int = 5,
         max_prims: int = 150,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_subtree",
             server._isaac_tools.get_isaac_subtree(
@@ -1262,7 +1264,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_prim_relationships(prim_path: str) -> Dict[str, Any]:
+    async def get_isaac_prim_relationships(prim_path: str) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_prim_relationships",
             server._isaac_tools.get_isaac_prim_relationships(prim_path=prim_path),
@@ -1278,7 +1280,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_layer_info() -> Dict[str, Any]:
+    async def get_isaac_layer_info() -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_layer_info",
             server._isaac_tools.get_isaac_layer_info(),
@@ -1294,7 +1296,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_scene_stats(root_path: str = "/") -> Dict[str, Any]:
+    async def get_isaac_scene_stats(root_path: str = "/") -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_scene_stats",
             server._isaac_tools.get_isaac_scene_stats(root_path=root_path),
@@ -1310,7 +1312,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_texture_dependencies(root_path: str = "/") -> Dict[str, Any]:
+    async def get_isaac_texture_dependencies(root_path: str = "/") -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_texture_dependencies",
             server._isaac_tools.get_isaac_texture_dependencies(root_path=root_path),
@@ -1326,7 +1328,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_prim_variants(prim_path: str) -> Dict[str, Any]:
+    async def get_isaac_prim_variants(prim_path: str) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_prim_variants",
             server._isaac_tools.get_isaac_prim_variants(prim_path=prim_path),
@@ -1342,7 +1344,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
-    async def focus_isaac_viewport(prim_path: str) -> Dict[str, Any]:
+    async def focus_isaac_viewport(prim_path: str) -> ToolResult:
         return await server._exec_isaac(
             "focus_isaac_viewport",
             server._isaac_tools.focus_isaac_viewport(prim_path=prim_path),
@@ -1358,7 +1360,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_selection() -> Dict[str, Any]:
+    async def get_isaac_selection() -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_selection",
             server._isaac_tools.get_isaac_selection(),
@@ -1374,7 +1376,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_animation_info(prim_path: str) -> Dict[str, Any]:
+    async def get_isaac_animation_info(prim_path: str) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_animation_info",
             server._isaac_tools.get_isaac_animation_info(prim_path=prim_path),
@@ -1394,7 +1396,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         origin: List[float],
         direction: List[float],
         max_distance: float = 10000.0,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "raycast_isaac_scene",
             server._isaac_tools.raycast_isaac_scene(
@@ -1420,7 +1422,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         prim_type: Optional[str] = None,
         root_path: str = "/",
         max_results: int = 100,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "find_isaac_prims_in_area",
             server._isaac_tools.find_isaac_prims_in_area(
@@ -1452,7 +1454,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     async def list_isaac_extensions(
         enabled_only: bool = True,
         search: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_extensions",
             server._isaac_tools.list_isaac_extensions(
@@ -1476,7 +1478,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
-    async def enable_isaac_extension(extension_id: str) -> Dict[str, Any]:
+    async def enable_isaac_extension(extension_id: str) -> ToolResult:
         return await server._exec_isaac(
             "enable_isaac_extension",
             server._isaac_tools.enable_isaac_extension(
@@ -1499,7 +1501,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             destructive=True,
         ),
     )
-    async def disable_isaac_extension(extension_id: str) -> Dict[str, Any]:
+    async def disable_isaac_extension(extension_id: str) -> ToolResult:
         return await server._exec_isaac(
             "disable_isaac_extension",
             server._isaac_tools.disable_isaac_extension(
@@ -1524,7 +1526,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_carb_settings(keys: List[str]) -> Dict[str, Any]:
+    async def get_isaac_carb_settings(keys: List[str]) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_carb_settings",
             server._isaac_tools.get_carb_settings(keys=keys),
@@ -1542,7 +1544,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
-    async def set_isaac_carb_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    async def set_isaac_carb_settings(settings: Dict[str, Any]) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_carb_settings",
             server._isaac_tools.set_carb_settings(settings=settings),
@@ -1572,7 +1574,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         camera_path: str = "/OmniverseKit_Persp",
         resolution: Optional[List[int]] = None,
         num_frames: int = 5,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "read_isaac_aovs",
             server._isaac_tools.read_aovs(
@@ -1594,7 +1596,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def list_isaac_aovs() -> Dict[str, Any]:
+    async def list_isaac_aovs() -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_aovs",
             server._isaac_tools.list_aovs(),
@@ -1625,7 +1627,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         attributes: Optional[List[str]] = None,
         root_path: str = "/",
         max_prims: int = 200,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "query_isaac_typed_prims",
             server._isaac_tools.query_usd_typed_prims(
@@ -1650,7 +1652,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_viewport_info() -> Dict[str, Any]:
+    async def get_isaac_viewport_info() -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_viewport_info",
             server._isaac_tools.get_viewport_info(),
@@ -1667,7 +1669,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def list_isaac_render_vars() -> Dict[str, Any]:
+    async def list_isaac_render_vars() -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_render_vars",
             server._isaac_tools.list_render_vars(),
@@ -1689,7 +1691,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def list_isaac_graphs() -> Dict[str, Any]:
+    async def list_isaac_graphs() -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_graphs",
             server._isaac_tools.list_isaac_graphs(),
@@ -1709,7 +1711,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     async def get_isaac_graph_nodes(
         graph_path: str,
         max_nodes: int = 200,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_graph_nodes",
             server._isaac_tools.get_isaac_graph_nodes(
@@ -1735,7 +1737,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         graph_path: str,
         node_path: str,
         node_type: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "create_isaac_graph_node",
             server._isaac_tools.create_isaac_graph_node(
@@ -1761,7 +1763,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     async def connect_isaac_graph_nodes(
         source_attr_path: str,
         target_attr_path: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "connect_isaac_graph_nodes",
             server._isaac_tools.connect_isaac_graph_nodes(
@@ -1785,7 +1787,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     async def set_isaac_graph_node_values(
         node_path: str,
         values: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_graph_node_values",
             server._isaac_tools.set_isaac_graph_node_values(
@@ -1809,7 +1811,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     async def list_isaac_graph_node_types(
         search: Optional[str] = None,
         max_types: int = 200,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_graph_node_types",
             server._isaac_tools.list_isaac_graph_node_types(
@@ -1832,7 +1834,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     async def delete_isaac_graph_node(
         graph_path: str,
         node_path: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "delete_isaac_graph_node",
             server._isaac_tools.delete_isaac_graph_node(
@@ -1863,7 +1865,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         last_n: int = 50,
         source_filter: Optional[str] = None,
         search: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_logs",
             server._isaac_tools.get_isaac_logs(
@@ -1885,7 +1887,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=False
         ),
     )
-    async def set_isaac_log_level(level: str) -> Dict[str, Any]:
+    async def set_isaac_log_level(level: str) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_log_level",
             server._isaac_tools.set_isaac_log_level(level=level),
@@ -1905,7 +1907,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_runtime_info() -> Dict[str, Any]:
+    async def get_isaac_runtime_info() -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_runtime_info",
             server._isaac_tools.get_runtime_info(),

@@ -48,7 +48,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
-        output_schema=server._tool_output_schema(StageInfo, ErrorResponse),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def load_usd_file(file_path: str) -> Dict[str, Any]:
@@ -134,7 +134,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
-        output_schema=server._tool_output_schema(USDFileInfo, ErrorResponse),
+        output_schema=None,
     )
     async def validate_usd_file(file_path: str) -> Dict[str, Any]:
         rate_error = server._check_rate_limit("validate_usd_file")
@@ -192,7 +192,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
-        output_schema=server._tool_output_schema(PrimInfo, ErrorResponse),
+        output_schema=None,
     )
     async def get_prim_info(stage_id: str, prim_path: str) -> Dict[str, Any]:
         """
@@ -308,7 +308,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=False, destructive=True
         ),
-        output_schema=server._tool_output_schema(PrimActionResponse, ErrorResponse),
+        output_schema=None,
     )
     async def create_prim(
         stage_id: str,
@@ -384,7 +384,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=False, destructive=True
         ),
-        output_schema=server._tool_output_schema(PrimActionResponse, ErrorResponse),
+        output_schema=None,
     )
     async def update_prim_attributes(
         stage_id: str,
@@ -463,7 +463,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=False, destructive=True
         ),
-        output_schema=server._tool_output_schema(PrimActionResponse, ErrorResponse),
+        output_schema=None,
     )
     async def delete_prim(stage_id: str, prim_path: str) -> Dict[str, Any]:
         rate_error = server._check_rate_limit("delete_prim")
@@ -529,7 +529,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
-        output_schema=server._tool_output_schema(MeshInfo, ErrorResponse),
+        output_schema=None,
     )
     async def get_mesh_info(stage_id: str, prim_path: str) -> Dict[str, Any]:
         rate_error = server._check_rate_limit("get_mesh_info")
@@ -588,7 +588,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
-        output_schema=server._tool_output_schema(PrimSearchResponse, ErrorResponse),
+        output_schema=None,
     )
     async def search_prims(
         stage_id: str, search_type: str, query: str, exact_match: bool = False
@@ -675,7 +675,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
-        output_schema=server._tool_output_schema(BBoxResponse, ErrorResponse),
+        output_schema=None,
     )
     async def get_bounding_box(
         stage_id: str, prim_path: Optional[str] = None, world_space: bool = True
@@ -764,7 +764,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
-        output_schema=server._tool_output_schema(SceneSummaryResponse, ErrorResponse),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def summarize_scene(

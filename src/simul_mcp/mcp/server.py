@@ -16,8 +16,9 @@ from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple, Type, Union
 
 from fastmcp import FastMCP
 from fastmcp.server.context import _current_context
+from fastmcp.tools.tool import ToolResult
 from fastmcp.server.tasks import TaskConfig
-from mcp.types import ToolAnnotations
+from mcp.types import TextContent, ToolAnnotations
 from pydantic import BaseModel
 
 from ..adapters import (
@@ -377,7 +378,7 @@ class SimulMCPServer(LoggerMixin):
         tool_name: str,
         coro: Coroutine[Any, Any, Dict[str, Any]],
         params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         Execute an Isaac Sim tool coroutine with rate limiting,
         unified error handling, and usage tracking.
@@ -395,7 +396,7 @@ class SimulMCPServer(LoggerMixin):
             self.usage_tracker.record(
                 tool_name, 0.0, False, params=params, error="rate_limited",
             )
-            return rate_error
+            return self._as_text_result(rate_error)
         instance_name = self._get_effective_instance_name()
         lock = self._get_instance_lock(instance_name)
         async with lock:
@@ -416,16 +417,18 @@ class SimulMCPServer(LoggerMixin):
                     binding.last_heartbeat = time.time()
                 # Applied at the chokepoint so every Isaac tool is covered by
                 # one rule rather than each growing its own cap.
-                return apply_result_budget(result)
+                return self._as_text_result(apply_result_budget(result))
             except Exception as exc:
                 duration_ms = (time.monotonic() - t0) * 1000
                 self.usage_tracker.record(
                     tool_name, duration_ms, False, params=params, error=str(exc),
                 )
                 logger.error("Isaac tool %s failed: %s", tool_name, exc)
-                return ErrorResponse(
-                    error=str(exc), error_type=type(exc).__name__
-                ).model_dump()
+                return self._as_text_result(
+                    ErrorResponse(
+                        error=str(exc), error_type=type(exc).__name__
+                    ).model_dump()
+                )
 
     def _resolve_allowed_paths(self) -> List[Path]:
         allowed_paths: List[Path] = []
@@ -510,6 +513,19 @@ class SimulMCPServer(LoggerMixin):
             details={"tool": tool_name},
         ).model_dump()
 
+    def _as_text_result(self, payload: Dict[str, Any]) -> ToolResult:
+        """Return ``payload`` as a single JSON content block.
+
+        Returning a plain dict makes FastMCP emit the payload twice — once as
+        JSON text and again as ``structuredContent`` — and both copies land in
+        the caller's context window. A content-only ToolResult is the one shape
+        that sends it once; ``output_schema=None`` alone does not (it drops the
+        schema from the listing but keeps the duplicate).
+        """
+        return ToolResult(
+            content=[TextContent(type="text", text=json.dumps(payload, default=str))]
+        )
+
     def _tool_annotations(
         self,
         read_only: bool,
@@ -517,30 +533,16 @@ class SimulMCPServer(LoggerMixin):
         open_world: bool,
         destructive: bool = False,
     ) -> Optional[Any]:
-        annotations = {
-            "readOnlyHint": read_only,
-            "idempotentHint": idempotent,
-            "openWorldHint": open_world,
-            "destructiveHint": destructive,
-        }
+        # Only the hints that carry information. idempotentHint and
+        # openWorldHint collapsed to a handful of combinations across the whole
+        # surface, and destructiveHint was false on the large majority — all of
+        # it paid for in every session's tool listing.
+        annotations: Dict[str, Any] = {"readOnlyHint": read_only}
+        if destructive:
+            annotations["destructiveHint"] = True
         if ToolAnnotations:
             return ToolAnnotations(**annotations)
         return annotations
-
-    def _tool_output_schema(self, *models: Type[BaseModel]) -> Dict[str, Any]:
-        if len(models) == 1:
-            model = models[0]
-            if hasattr(model, "model_json_schema"):
-                return model.model_json_schema()
-            return model.schema()
-
-        # FastMCP 2.x validates output schema as a single object and rejects
-        # union schemas such as oneOf. Use a permissive object schema for
-        # multi-response tools to stay compatible across FastMCP versions.
-        return {
-            "type": "object",
-            "additionalProperties": True,
-        }
 
     def _task_optional(self) -> Optional[Any]:
         """
