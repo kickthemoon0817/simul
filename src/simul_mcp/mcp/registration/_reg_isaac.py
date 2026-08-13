@@ -252,7 +252,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "Read one or more aspects of a prim in a single call. Aspects: "
             "info, transform, ancestors, relationships, variants, bounding_box, "
             "mesh, light, material, rigid_body, collision, joint, mass, "
-            "animation, textures. Defaults to info."
+            "animation. Defaults to info."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True

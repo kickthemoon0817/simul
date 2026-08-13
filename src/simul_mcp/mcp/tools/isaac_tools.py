@@ -59,8 +59,13 @@ PRIM_DETAIL_ASPECTS = {
     "joint": "get_isaac_joint_info",
     "mass": "get_isaac_mass_properties",
     "animation": "get_isaac_animation_info",
-    "textures": "get_isaac_texture_dependencies",
 }
+
+# get_isaac_texture_dependencies takes a *root* path and scans for materials
+# beneath it, so as a per-prim "aspect" it answers a different question than
+# its name promises: on the standard layout (materials under /World/Looks,
+# mesh at /World/Cube) asking a mesh for its textures returns nothing. Left
+# out until it can take a prim and resolve that prim's bound material.
 
 
 class IsaacTools(LoggerMixin):
