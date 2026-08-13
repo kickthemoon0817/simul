@@ -23,7 +23,16 @@ services:
   isaac-sim:
     image: ${ISAAC_SIM_IMAGE:-nvcr.io/nvidia/isaac-sim:5.1.0}
     container_name: ${ISAAC_SIM_CONTAINER_NAME:-simul-isaac51}
-    user: "${ISAAC_SIM_UID:-1000}:${ISAAC_SIM_GID:-1000}"
+    # Runs as root inside the container, which this image requires: /isaac-sim
+    # is mode 0750 root:root, so any other uid — including the image's own
+    # isaac-sim user (1234) — cannot traverse it and the entrypoint dies with
+    # "Permission denied" (exit 126) before Kit ever starts. The --allow-root
+    # and OMNI_KIT_ALLOW_ROOT below already assume this; the uid override that
+    # used to sit here contradicted them and made the file unstartable.
+    #
+    # Container root is not host root: it is confined to the container, and the
+    # exposure boundary is the 127.0.0.1 publish below, not the uid.
+    user: "${ISAAC_SIM_USER:-0:0}"
     gpus: all
     entrypoint:
       - /isaac-sim/isaac-sim.sh

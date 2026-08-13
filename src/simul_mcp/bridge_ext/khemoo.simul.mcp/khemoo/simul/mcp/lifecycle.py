@@ -122,6 +122,14 @@ class BridgeServerLifecycle:
         try:
             with os.fdopen(fd, "w") as f:
                 json.dump(data, f)
+            # mkstemp creates 0600. In a container the bridge runs as root
+            # (the Isaac Sim image keeps /isaac-sim mode 0750 root:root), so a
+            # 0600 file on the shared discovery volume is unreadable by the MCP
+            # server running as an ordinary user on the host — discovery finds
+            # nothing even though the bridge is up. The contents are a pid, a
+            # host and two ports; the directory stays 0700, so this only widens
+            # access where the directory was deliberately shared.
+            os.chmod(tmp, 0o644)
             os.rename(tmp, filepath)
         except Exception:
             try:
