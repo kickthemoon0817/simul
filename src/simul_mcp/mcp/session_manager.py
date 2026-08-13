@@ -13,7 +13,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +208,12 @@ class SessionManager:
             pass
         return results
 
-    def score_compatibility(self, incoming_purpose: str, instance_port: int) -> dict[str, Any]:
+    def score_compatibility(
+        self,
+        incoming_purpose: str,
+        instance_port: int,
+        status: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
         """
         Score how compatible an incoming agent's purpose is with an instance's
         current sessions.
@@ -216,12 +221,16 @@ class SessionManager:
         Args:
             incoming_purpose: The new agent's purpose description.
             instance_port: Port of the instance to check.
+            status: Session status already read for this instance. Passing it
+                    avoids re-reading and re-parsing the same session file,
+                    which callers that have just called ``get_status`` would
+                    otherwise do twice per instance.
 
         Returns:
             Dict with compatibility level, score, reason, and existing sessions.
         """
-        session = InstanceSession(instance_port, self._dir)
-        status = session.get_status()
+        if status is None:
+            status = InstanceSession(instance_port, self._dir).get_status()
         sessions = status["sessions"]
 
         if not sessions:

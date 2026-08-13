@@ -58,6 +58,12 @@ from ..logging import LoggerMixin, get_logger
 
 logger = get_logger(__name__)
 
+# Largest capture returned as inline base64. A 1080p screenshot is typically
+# several megabytes once encoded, which overruns a client's per-result budget;
+# above this the caller gets the path on the editor host instead. Kept local to
+# the adapter so this layer does not depend on the MCP layer.
+MAX_INLINE_CAPTURE_BYTES = 262_144
+
 
 class UnrealRuntimeSession(LoggerMixin):
     """
@@ -936,6 +942,7 @@ class UnrealRuntimeSession(LoggerMixin):
         resolution_x: int = 1920,
         resolution_y: int = 1080,
         format: str = "png",
+        inline: bool = False,
     ) -> Dict[str, Any]:
         """
         Capture viewport screenshot via HighResScreenshot console command.
@@ -973,14 +980,16 @@ class UnrealRuntimeSession(LoggerMixin):
             )
         except Exception:
             return {
-                "image_base64": "",
+                "path": "",
+                "size_bytes": 0,
                 "resolution_x": resolution_x,
                 "resolution_y": resolution_y,
                 "format": format,
             }
 
+        max_inline = MAX_INLINE_CAPTURE_BYTES
         read_code = f"""
-import os, glob, base64, unreal
+import os, glob, base64, json, unreal
 saved = unreal.Paths.project_saved_dir()
 ss_root = os.path.join(saved, 'Screenshots')
 candidates = {candidates_repr}
@@ -999,19 +1008,25 @@ for subdir in candidates:
             pass
     if target:
         break
-data = ''
+payload = {{'path': target or '', 'size_bytes': 0}}
 if target:
     try:
-        size = os.path.getsize(target)
+        payload['size_bytes'] = os.path.getsize(target)
     except OSError:
-        size = 0
-    if size > 0:
+        payload['size_bytes'] = 0
+    if {inline!r} and 0 < payload['size_bytes'] <= {max_inline}:
         with open(target, 'rb') as f:
-            data = base64.b64encode(f.read()).decode()
-print('{marker}' + data)
+            payload['image_base64'] = base64.b64encode(f.read()).decode()
+    elif {inline!r} and payload['size_bytes'] > {max_inline}:
+        payload['inline_skipped'] = (
+            'Capture is %d bytes, above the %d byte inline cap. '
+            'Read the file at path, or lower the resolution.'
+            % (payload['size_bytes'], {max_inline})
+        )
+print('{marker}' + json.dumps(payload))
 """
 
-        image_data = ""
+        capture_payload: Dict[str, Any] = {}
         # Initial render budget so UE's frame loop runs HighResShot.
         await asyncio.sleep(0.5)
         deadline = asyncio.get_event_loop().time() + 15.0
@@ -1024,20 +1039,31 @@ print('{marker}' + data)
                 output = entry.get("Output", "")
                 idx = output.find(marker)
                 if idx >= 0:
-                    image_data = output[idx + len(marker):].strip()
+                    raw = output[idx + len(marker):].strip()
+                    try:
+                        capture_payload = json.loads(raw)
+                    except ValueError:
+                        capture_payload = {}
                     break
-            if image_data:
+            if capture_payload.get("path"):
                 break
             if asyncio.get_event_loop().time() >= deadline:
                 break
             await asyncio.sleep(0.5)
 
-        return {
-            "image_base64": image_data,
+        result: Dict[str, Any] = {
+            "path": capture_payload.get("path", ""),
+            "size_bytes": capture_payload.get("size_bytes", 0),
             "resolution_x": resolution_x,
             "resolution_y": resolution_y,
             "format": format,
         }
+        if "image_base64" in capture_payload:
+            result["image_base64"] = capture_payload["image_base64"]
+            result["encoding"] = "base64"
+        if "inline_skipped" in capture_payload:
+            result["inline_skipped"] = capture_payload["inline_skipped"]
+        return result
 
     async def get_viewport_info(self) -> Dict[str, Any]:
         """

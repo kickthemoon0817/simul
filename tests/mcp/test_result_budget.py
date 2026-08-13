@@ -214,3 +214,37 @@ def test_list_prims_clamp_is_lowered() -> None:
 
     assert "99999" not in script, "requested max_items reached the script unclamped"
     assert re.search(r"=\s*1000\b", script), "expected the clamped ceiling of 1000"
+
+
+def test_payload_whose_bulk_is_not_a_top_level_list_is_left_alone() -> None:
+    """Trimming the largest top-level list must not make things worse.
+
+    get_isaac_prim_detail returns its bulk inside dict values with one small
+    metadata list ("aspects"). Trimming that list drops the record of what was
+    asked for, claims a truncation that did not happen, and leaves the payload
+    over budget anyway — it even grew, because the notice costs more than the
+    list did.
+    """
+    bulk = {f"attr_{i}": "x" * 200 for i in range(300)}
+    payload = {
+        "success": True,
+        "prim_path": "/World/Robot",
+        "aspects": ["info", "mesh", "relationships"],
+        "info": dict(bulk),
+        "mesh": dict(bulk),
+    }
+    before = _encoded_size(payload)
+
+    result = apply_result_budget(dict(payload))
+
+    assert result["aspects"] == ["info", "mesh", "relationships"], "metadata list was eaten"
+    assert result.get("truncated") is not True, "claimed a truncation that did not happen"
+    assert _encoded_size(result) <= before + 64, "result grew"
+
+
+def test_oversize_payload_it_cannot_trim_says_so() -> None:
+    """Silently returning an over-budget payload hides the problem."""
+    bulk = {f"attr_{i}": "x" * 200 for i in range(300)}
+    result = apply_result_budget({"success": True, "info": bulk})
+
+    assert result["oversized_bytes"] > DEFAULT_RESULT_BUDGET_BYTES

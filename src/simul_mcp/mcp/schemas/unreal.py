@@ -313,7 +313,15 @@ class UnrealCaptureViewportResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    image_base64: str = Field(..., description="Base64-encoded image data")
+    path: str = Field("", description="Capture path on the Unreal editor host")
+    size_bytes: int = Field(0, description="Size of the capture file in bytes")
+    image_base64: Optional[str] = Field(
+        None, description="Base64 image data; only present for small inline captures"
+    )
+    encoding: Optional[str] = Field(None, description="Encoding of image_base64")
+    inline_skipped: Optional[str] = Field(
+        None, description="Why inline data was omitted, when it was"
+    )
     resolution_x: int = Field(..., description="Actual capture width")
     resolution_y: int = Field(..., description="Actual capture height")
     format: str = Field(..., description="Image format used")

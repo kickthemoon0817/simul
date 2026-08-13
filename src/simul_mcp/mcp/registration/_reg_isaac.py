@@ -6,10 +6,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-import json
-import time
-
-from ...adapters import ScriptResult
 from fastmcp.tools.tool import ToolResult
 
 from ..schemas.common import ErrorResponse
@@ -56,120 +52,11 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         Returns:
             Dict with success, output, and optional error info.
         """
-        MAX_CODE_SIZE: int = 100_000  # 100 KB
-        if len(code) > MAX_CODE_SIZE:
-            return server._as_text_result(ErrorResponse(
-                error=f"Code payload too large ({len(code)} bytes, max {MAX_CODE_SIZE}).",
-                error_type="PayloadTooLarge",
-            ).model_dump())
-
-        rate_error = server._check_rate_limit("execute_isaac_script")
-        if rate_error:
-            server.usage_tracker.record(
-                "execute_isaac_script", 0.0, False,
-                params={"code_bytes": len(code)},
-                error="rate_limited",
-            )
-            return server._as_text_result(rate_error)
-
-        log_params: Dict[str, Any] = {
-            "code_bytes": len(code),
-        }
-        client = server._get_request_isaac_client()
-        instance_name = server._get_effective_instance_name()
-        lock = server._get_instance_lock(instance_name)
-        async with lock:
-            t0 = time.monotonic()
-            try:
-                if client.bridge_enabled:
-                    result = await client.execute_vscode_only(code)
-                else:
-                    result = await client.execute(code)
-                duration_ms = (time.monotonic() - t0) * 1000
-                if not result.success:
-                    server.usage_tracker.record(
-                        "execute_isaac_script", duration_ms, False,
-                        params=log_params,
-                        error=result.error_value or "Script execution failed",
-                    )
-                    return server._as_text_result(ErrorResponse(
-                        error=result.error_value or "Script execution failed",
-                        error_type=result.error_name or "RuntimeError",
-                        details={"traceback": result.traceback} if result.traceback else None,
-                    ).model_dump())
-
-                binding = server._get_active_binding()
-                if binding is not None:
-                    server.session_manager.get_instance_session(
-                        binding.port
-                    ).heartbeat(binding.agent_id, "execute_isaac_script")
-                    binding.last_heartbeat = time.time()
-
-                # If output is valid JSON, return it directly
-                output = result.output.strip()
-                if output:
-                    try:
-                        parsed = json.loads(output)
-                        server.usage_tracker.record(
-                            "execute_isaac_script", duration_ms, True,
-                            params=log_params,
-                        )
-                        if isinstance(parsed, dict):
-                            return server._as_text_result(parsed)
-                        return server._as_text_result({
-                            "success": True,
-                            "output": result.output,
-                            "parsed": parsed,
-                        })
-                    except json.JSONDecodeError:
-                        pass
-
-                server.usage_tracker.record(
-                    "execute_isaac_script", duration_ms, True,
-                    params=log_params,
-                )
-                return server._as_text_result({"success": True, "output": result.output})
-
-            except ConnectionRefusedError:
-                duration_ms = (time.monotonic() - t0) * 1000
-                server.usage_tracker.record(
-                    "execute_isaac_script", duration_ms, False,
-                    params=log_params,
-                    error="ConnectionError",
-                )
-                return server._as_text_result(ErrorResponse(
-                    error=(
-                        f"Isaac Sim is not reachable at {client.address}. "
-                        "Ensure Isaac Sim is running with the "
-                        "isaacsim.code_editor.vscode extension enabled. "
-                        "Use ping_isaac to verify connectivity."
-                    ),
-                    error_type="ConnectionError",
-                ).model_dump())
-            except TimeoutError:
-                duration_ms = (time.monotonic() - t0) * 1000
-                server.usage_tracker.record(
-                    "execute_isaac_script", duration_ms, False,
-                    params=log_params,
-                    error="TimeoutError",
-                )
-                return server._as_text_result(ErrorResponse(
-                    error=(
-                        f"Script execution timed out after "
-                        f"{client.timeout_seconds}s on {client.address}. "
-                        "The script may be too slow or Isaac Sim may be unresponsive. "
-                        "Use ping_isaac to check if Isaac Sim is still reachable."
-                    ),
-                    error_type="TimeoutError",
-                ).model_dump())
-            except Exception as exc:
-                duration_ms = (time.monotonic() - t0) * 1000
-                server.usage_tracker.record(
-                    "execute_isaac_script", duration_ms, False,
-                    params=log_params,
-                    error=str(exc),
-                )
-                return server._as_text_result(ErrorResponse(error=str(exc), error_type="Exception").model_dump())
+        return await server._exec_isaac(
+            "execute_isaac_script",
+            server._isaac_tools.execute_script(code),
+            params={"code_bytes": len(code)},
+        )
 
     @server.mcp.tool(
         name="ping_isaac",
@@ -412,8 +299,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="capture_isaac_viewport",
         description=(
-            "Capture the current viewport as a PNG image and return "
-            "the file path or base64-encoded data."
+            "Capture the current viewport to a PNG on the Isaac Sim host and "
+            "return its path. Pass inline=true to also receive base64 image "
+            "data, which is only included for small captures."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -426,7 +314,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         return await server._exec_isaac(
             "capture_isaac_viewport",
             server._isaac_tools.capture_isaac_viewport(
-                width=width, height=height
+                width=width, height=height, inline=inline
             ),
         )
 

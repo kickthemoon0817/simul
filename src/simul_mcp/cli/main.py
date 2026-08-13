@@ -287,10 +287,20 @@ def server(
         else:
             settings = get_settings()
 
-        if log_level:
-            settings.logging.level = log_level.upper()
-        if verbose:
-            settings.logging.level = "DEBUG"
+        # LoggingConfig is frozen on purpose, so rebuild the section rather
+        # than assigning into it — assignment raises ValidationError and took
+        # both of these flags down with it.
+        resolved_level = (
+            "DEBUG" if verbose else (log_level.upper() if log_level else None)
+        )
+        if resolved_level:
+            settings = settings.model_copy(
+                update={
+                    "logging": settings.logging.model_copy(
+                        update={"level": resolved_level}
+                    )
+                }
+            )
 
         # Parse --backends into a set
         backend_set = None

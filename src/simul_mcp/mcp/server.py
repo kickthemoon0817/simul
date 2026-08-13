@@ -12,7 +12,19 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Dict,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Type,
+    Union,
+)
 
 from fastmcp import FastMCP
 from fastmcp.server.context import _current_context
@@ -33,7 +45,9 @@ from ..adapters import (
 from .. import __version__ as _source_version
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
+from ..utils.paths import PathPolicy
 from ..utils.timing import RateLimiter
+from .registration._helpers import apply_success_from_error
 from .result_budget import apply_result_budget
 from .schemas.common import ErrorResponse
 from .tools.isaac_tools import IsaacTools
@@ -138,6 +152,9 @@ class SimulMCPServer(LoggerMixin):
         self.settings = settings or get_settings()
         self._backends = backends  # None means "all available"
         self._project_root = Path(__file__).resolve().parents[3]
+        self._path_policy = PathPolicy.from_settings(
+            self.settings, project_root=self._project_root
+        )
         self._allowed_paths = self._resolve_allowed_paths()
 
         self.usage_tracker = ToolUsageTracker()
@@ -149,6 +166,10 @@ class SimulMCPServer(LoggerMixin):
         self._rate_limit_rate = self.settings.security.requests_per_minute / 60.0
         self._rate_limit_burst = self.settings.security.burst_size
         self._tool_timeout = self.settings.server.timeout
+        # How long a call waits for an instance already in use. Generous enough
+        # for ordinary contention, short enough that a caller is not left
+        # guessing through a 1000-frame step.
+        self._instance_lock_timeout = float(self.settings.server.timeout)
 
         # Initialize adapters
         self.headless_adapter = (
@@ -385,10 +406,33 @@ class SimulMCPServer(LoggerMixin):
             self.usage_tracker.record(
                 tool_name, 0.0, False, params=params, error="rate_limited",
             )
+            # Caller already built the coroutine; nothing will await it now.
+            coro.close()
             return self._as_text_result(rate_error)
         instance_name = self._get_effective_instance_name()
         lock = self._get_instance_lock(instance_name)
-        async with lock:
+        try:
+            # Bounded, so a caller queued behind a long step learns the instance
+            # is busy instead of waiting until its own client gives up. Without
+            # this the only signal is a timeout, which reads as "unreachable".
+            await asyncio.wait_for(
+                lock.acquire(), timeout=self._instance_lock_timeout
+            )
+        except asyncio.TimeoutError:
+            self.usage_tracker.record(
+                tool_name, 0.0, False, params=params, error="instance_busy",
+            )
+            coro.close()
+            return self._as_text_result(
+                ErrorResponse(
+                    error=(
+                        f"Isaac instance {instance_name!r} is busy with another "
+                        "call. It is running, not unreachable — retry shortly."
+                    ),
+                    error_type="InstanceBusy",
+                ).model_dump()
+            )
+        try:
             t0 = time.monotonic()
             try:
                 result = await coro
@@ -418,41 +462,16 @@ class SimulMCPServer(LoggerMixin):
                         error=str(exc), error_type=type(exc).__name__
                     ).model_dump()
                 )
+        finally:
+            lock.release()
 
     def _resolve_allowed_paths(self) -> List[Path]:
-        allowed_paths: List[Path] = []
-        for path_str in self.settings.security.allowed_paths:
-            expanded = os.path.expandvars(path_str)
-            candidate = Path(expanded).expanduser()
-            if not candidate.is_absolute():
-                candidate = self._project_root / candidate
-            try:
-                candidate = candidate.resolve()
-            except Exception:
-                candidate = candidate.absolute()
-            allowed_paths.append(candidate)
-        return allowed_paths
+        return self._path_policy.allowed_roots
 
     def _is_path_allowed(self, path_str: str) -> bool:
-        if not self.settings.security.sandbox_enabled:
-            return True
-        if not path_str:
-            return False
-        expanded = os.path.expandvars(path_str)
-        candidate = Path(expanded).expanduser()
-        if not candidate.is_absolute():
-            candidate = self._project_root / candidate
-        try:
-            candidate = candidate.resolve()
-        except Exception:
-            candidate = candidate.absolute()
-        for allowed_path in self._allowed_paths:
-            try:
-                candidate.relative_to(allowed_path)
-                return True
-            except ValueError:
-                continue
-        return False
+        # Kept as a fast-fail at the MCP boundary. The authoritative check now
+        # lives in the tools layer, below both this and the CLI.
+        return self._path_policy.is_allowed(path_str)
 
     def _validate_input(
         self, model: Type[BaseModel], **kwargs
@@ -501,6 +520,66 @@ class SimulMCPServer(LoggerMixin):
             error_type="ValidationError",
             details={"tool": tool_name},
         ).model_dump()
+
+    async def _exec_backend(
+        self,
+        tool_name: str,
+        adapter: Any,
+        adapter_label: str,
+        response_model: Type[BaseModel],
+        call: Callable[[Any], Awaitable[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        """
+        Run a DCC-backend tool with the shared envelope.
+
+        The Isaac family has had ``_exec_isaac`` for this since the start,
+        which is why its tools are a single forwarding line each while Unreal
+        and Blender hand-rolled the same rate limit, availability check,
+        session scope, success normalisation, model validation and error
+        wrapping per tool. Copying it ~110 times is what let four sites keep
+        pydantic v1's ``.dict()`` long after the rest of the codebase moved.
+
+        Args:
+            tool_name: Registered tool name, used for rate limiting and logs.
+            adapter: Runtime adapter, or None when the backend is absent.
+            adapter_label: Human-readable backend name for the error message.
+            response_model: Schema the payload is validated against.
+            call: Receives an open session and returns the payload.
+
+        Returns:
+            Validated response dict, or an error envelope.
+        """
+        rate_error = self._check_rate_limit(tool_name)
+        if rate_error:
+            return rate_error
+
+        models = (response_model, ErrorResponse)
+        try:
+            if adapter is None or not adapter.is_available():
+                return self._validate_output(
+                    ErrorResponse(
+                        error=f"{adapter_label} runtime not available",
+                        error_type="RuntimeError",
+                    ).model_dump(),
+                    models,
+                    tool_name,
+                )
+
+            with adapter.create_session() as session:
+                payload = await call(session)
+                apply_success_from_error(payload)
+                return self._validate_output(
+                    response_model(**payload).model_dump(), models, tool_name
+                )
+        except Exception as exc:
+            self.logger.error("Error in %s: %s", tool_name, exc)
+            return self._validate_output(
+                ErrorResponse(
+                    error=str(exc), error_type="Exception"
+                ).model_dump(),
+                models,
+                tool_name,
+            )
 
     def _as_text_result(self, payload: Dict[str, Any]) -> ToolResult:
         """Return ``payload`` as a single JSON content block.
@@ -725,7 +804,7 @@ class SimulMCPServer(LoggerMixin):
             if c._bridge_configured and c._bridge_port is not None:
                 existing_ports.add(c._bridge_port)  # bridge port
 
-        discovered: Dict[str, IsaacSocketClient] = {}
+        candidates: List[tuple[str, IsaacSocketClient]] = []
         for filename in os.listdir(discovery_dir):
             if not filename.endswith(".json"):
                 continue
@@ -779,12 +858,20 @@ class SimulMCPServer(LoggerMixin):
                 bridge_fallback_to_vscode=self.settings.isaac_sim.bridge_fallback_to_vscode,
             )
 
-            # Verify the instance is actually reachable
-            if await client.ping():
-                name = f"isaac-{port}"
-                discovered[name] = client
+            candidates.append((f"isaac-{port}", client))
 
-        return discovered
+        if not candidates:
+            return {}
+
+        # Verify reachability for every candidate at once. Each has its own
+        # socket, so there is nothing to serialise, and a stale discovery file
+        # would otherwise burn its full timeout before the next is even tried.
+        alive = await asyncio.gather(*(client.ping() for _, client in candidates))
+        return {
+            name: client
+            for (name, client), reachable in zip(candidates, alive)
+            if reachable
+        }
 
     async def _scan_isaac_instances(self) -> Dict[str, IsaacSocketClient]:
         """
@@ -870,7 +957,13 @@ class SimulMCPServer(LoggerMixin):
         }
         try:
             if client.bridge_enabled:
-                stage_info = await client.bridge_request("get_stage_info", {})
+                # The listing reports a prim count only incidentally, and
+                # producing one costs a full stage traversal inside Kit for
+                # every instance enumerated. Ask stage info to skip it; callers
+                # that want the number have get_isaac_stage_info.
+                stage_info = await client.bridge_request(
+                    "get_stage_info", {"include_prim_count": False}
+                )
                 sim_state = await client.bridge_request("get_simulation_state", {})
                 if stage_info.get("status") == "ok":
                     payload = stage_info.get("payload", {})
@@ -897,7 +990,9 @@ class SimulMCPServer(LoggerMixin):
                 "print(json.dumps({\n"
                 "    'stage_url': ctx.get_stage_url(),\n"
                 "    'up_axis': UsdGeom.GetStageUpAxis(stage) if stage else None,\n"
-                "    'prim_count': len(list(stage.Traverse())) if stage else 0,\n"
+                # Skipped for the same reason as the bridge path: a per-instance
+                # stage traversal is far too expensive for a listing field.
+                "    'prim_count': None,\n"
                 "    'is_playing': tl.is_playing(),\n"
                 "}))\n"
             )
