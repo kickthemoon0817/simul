@@ -12,7 +12,19 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Dict,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Type,
+    Union,
+)
 
 from fastmcp import FastMCP
 from fastmcp.server.context import _current_context
@@ -35,6 +47,7 @@ from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
 from ..utils.paths import PathPolicy
 from ..utils.timing import RateLimiter
+from .registration._helpers import apply_success_from_error
 from .result_budget import apply_result_budget
 from .schemas.common import ErrorResponse
 from .tools.isaac_tools import IsaacTools
@@ -518,6 +531,66 @@ class SimulMCPServer(LoggerMixin):
             error_type="ValidationError",
             details={"tool": tool_name},
         ).model_dump()
+
+    async def _exec_backend(
+        self,
+        tool_name: str,
+        adapter: Any,
+        adapter_label: str,
+        response_model: Type[BaseModel],
+        call: Callable[[Any], Awaitable[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        """
+        Run a DCC-backend tool with the shared envelope.
+
+        The Isaac family has had ``_exec_isaac`` for this since the start,
+        which is why its tools are a single forwarding line each while Unreal
+        and Blender hand-rolled the same rate limit, availability check,
+        session scope, success normalisation, model validation and error
+        wrapping per tool. Copying it ~110 times is what let four sites keep
+        pydantic v1's ``.dict()`` long after the rest of the codebase moved.
+
+        Args:
+            tool_name: Registered tool name, used for rate limiting and logs.
+            adapter: Runtime adapter, or None when the backend is absent.
+            adapter_label: Human-readable backend name for the error message.
+            response_model: Schema the payload is validated against.
+            call: Receives an open session and returns the payload.
+
+        Returns:
+            Validated response dict, or an error envelope.
+        """
+        rate_error = self._check_rate_limit(tool_name)
+        if rate_error:
+            return rate_error
+
+        models = (response_model, ErrorResponse)
+        try:
+            if adapter is None or not adapter.is_available():
+                return self._validate_output(
+                    ErrorResponse(
+                        error=f"{adapter_label} runtime not available",
+                        error_type="RuntimeError",
+                    ).model_dump(),
+                    models,
+                    tool_name,
+                )
+
+            with adapter.create_session() as session:
+                payload = await call(session)
+                apply_success_from_error(payload)
+                return self._validate_output(
+                    response_model(**payload).model_dump(), models, tool_name
+                )
+        except Exception as exc:
+            self.logger.error("Error in %s: %s", tool_name, exc)
+            return self._validate_output(
+                ErrorResponse(
+                    error=str(exc), error_type="Exception"
+                ).model_dump(),
+                models,
+                tool_name,
+            )
 
     def _as_text_result(self, payload: Dict[str, Any]) -> ToolResult:
         """Return ``payload`` as a single JSON content block.
