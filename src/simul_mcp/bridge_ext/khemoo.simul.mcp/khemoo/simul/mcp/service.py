@@ -8,6 +8,23 @@ from .executor import ScriptExecutor
 from .protocol import BridgeRequest, BridgeResponse
 
 
+# Array attributes big enough that pulling their value is the cost being
+# avoided. Gating on names rather than on isArray keeps small arrays such as
+# xformOpOrder and primvars:displayColor readable; skipping those would lose
+# information the caller needs and save nothing.
+BULK_GEOMETRY_ATTRIBUTES = frozenset(
+    {
+        "points", "normals", "velocities", "accelerations",
+        "faceVertexIndices", "faceVertexCounts", "holeIndices",
+        "cornerIndices", "cornerSharpnesses", "creaseIndices",
+        "creaseLengths", "creaseSharpnesses", "curveVertexCounts", "widths",
+        "primvars:st", "primvars:normals",
+        "positions", "orientations", "scales", "protoIndices",
+        "invisibleIds", "ids",
+    }
+)
+
+
 class BridgeCommandService:
     """Dispatch typed bridge actions inside Isaac Sim."""
 
@@ -122,6 +139,11 @@ class BridgeCommandService:
         root = stage.GetPseudoRoot()
         root_prims = [str(prim.GetPath()) for prim in root.GetChildren()]
         default_prim = stage.GetDefaultPrim()
+        # Counting prims walks the entire stage on Kit's main thread. Callers
+        # that only need stage metadata can opt out; the key stays present so
+        # the response shape does not change. Older clients omit the flag and
+        # keep the previous behaviour.
+        include_prim_count = request.payload.get("include_prim_count", True)
         payload = {
             "transport": "simul_bridge",
             "stage_url": str(ctx.get_stage_url()),
@@ -131,7 +153,9 @@ class BridgeCommandService:
             "start_time": stage.GetStartTimeCode(),
             "end_time": stage.GetEndTimeCode(),
             "frame_rate": stage.GetFramesPerSecond(),
-            "total_prims": sum(1 for _ in stage.Traverse()),
+            "total_prims": (
+                sum(1 for _ in stage.Traverse()) if include_prim_count else None
+            ),
             "root_prims": root_prims,
             "layer_count": len(stage.GetLayerStack()),
             "default_prim": str(default_prim.GetPath()) if default_prim else None,
@@ -166,9 +190,16 @@ class BridgeCommandService:
 
         root_depth = len(str(root.GetPath()).rstrip("/").split("/"))
         prims = []
-        for prim in Usd.PrimRange(root):
+        # continue skips emitting a prim but still descends its subtree, so the
+        # depth limit bounded the response and not the work. Prune instead —
+        # and the max_items break below is unreachable while we continue past
+        # every deep prim on the stage.
+        prim_iter = iter(Usd.PrimRange(root))
+        for prim in prim_iter:
             path_str = str(prim.GetPath())
             depth = len(path_str.rstrip("/").split("/")) - root_depth
+            if max_depth >= 0 and depth >= max_depth:
+                prim_iter.PruneChildren()
             if max_depth >= 0 and depth > max_depth:
                 continue
             prim_type_name = prim.GetTypeName()
@@ -228,6 +259,17 @@ class BridgeCommandService:
         attrs: dict[str, Any] = {}
         for attr in prim.GetAttributes():
             try:
+                # Bulk geometry only: Get() would decompress the whole array
+                # out of the crate layer just for _serialize_value to replace
+                # it with an element count. Small arrays such as xformOpOrder
+                # still come back in full — they carry information the caller
+                # needs and cost nothing to read.
+                attr_name = attr.GetName()
+                if attr_name in BULK_GEOMETRY_ATTRIBUTES:
+                    type_name = attr.GetTypeName()
+                    if getattr(type_name, "isArray", False):
+                        attrs[attr_name] = f"<array {type_name}>"
+                        continue
                 value = attr.Get()
                 if value is not None:
                     attrs[attr.GetName()] = self._serialize_value(value)
