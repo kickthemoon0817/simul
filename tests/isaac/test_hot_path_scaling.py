@@ -271,3 +271,36 @@ def test_depth_limited_listing_prunes_instead_of_skipping() -> None:
 
     assert ranges, "script never built a PrimRange"
     assert ranges[0].pruned > 0, "depth limit skipped prims without pruning the subtree"
+
+
+def test_small_arrays_are_still_returned_in_full() -> None:
+    """Skipping every array throws away information the caller needs.
+
+    Before the bulk-array guard, arrays of 16 or fewer elements came back in
+    full; only larger ones collapsed to "[N elements]". xformOpOrder is a
+    one-element token[] that tells a caller which xform ops exist before it
+    calls set_isaac_prim_transform, and primvars:displayColor is a
+    one-element color3f[] carrying the object's colour. Both are arrays, and
+    neither is bulk.
+    """
+    op_order = _RecordingAttribute(
+        "xformOpOrder", is_array=True, value=["xformOp:translate"]
+    )
+    points = _RecordingAttribute("points", is_array=True, value=list(range(200_000)))
+
+    prim = MagicMock()
+    prim.IsValid.return_value = True
+    prim.GetAttributes.return_value = [op_order, points]
+    prim.IsA.return_value = False
+    prim.GetRelationships.return_value = []
+    stage = MagicMock()
+    stage.GetPrimAtPath.return_value = prim
+
+    script = _capture_script("get_isaac_prim_info", prim_path="/World/Cube")
+    try:
+        _run_script(script, _usd_modules(stage))
+    except TypeError:
+        pass
+
+    assert points.get_calls == 0, "bulk geometry array should still be skipped"
+    assert op_order.get_calls == 1, "small non-bulk array was discarded unread"

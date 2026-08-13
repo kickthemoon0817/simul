@@ -46,6 +46,42 @@ FloatList = Annotated[List[float], BeforeValidator(_coerce_str_to_float_list)]
 # freeze; 2 MB still holds far more lines than the 500-entry maximum.
 LOG_SCAN_WINDOW_BYTES = 2 * 1024 * 1024
 
+# Array attributes big enough that pulling their value is the cost being
+# avoided. Gating on these names rather than on isArray matters: xformOpOrder
+# is a one-element token[] telling a caller which xform ops exist, and
+# primvars:displayColor is a one-element color3f[] carrying the object colour.
+# Both are arrays, neither is bulk, and skipping them loses information the
+# caller needs while saving nothing. Anything not listed here takes the normal
+# path, which already collapses arrays over 16 elements to a count.
+BULK_GEOMETRY_ATTRIBUTES = frozenset(
+    {
+        "points",
+        "normals",
+        "velocities",
+        "accelerations",
+        "faceVertexIndices",
+        "faceVertexCounts",
+        "holeIndices",
+        "cornerIndices",
+        "cornerSharpnesses",
+        "creaseIndices",
+        "creaseLengths",
+        "creaseSharpnesses",
+        "curveVertexCounts",
+        "widths",
+        "primvars:st",
+        "primvars:normals",
+        # PointInstancer
+        "positions",
+        "orientations",
+        "scales",
+        "protoIndices",
+        "invisibleIds",
+        "ids",
+    }
+)
+
+
 
 def _pyval(value: Any) -> str:
     """Render a call parameter as a Python literal for embedding in a script.
@@ -390,6 +426,7 @@ class IsaacTools(LoggerMixin):
             return bridge_result
 
         _prim_path = _pyval(prim_path)
+        _bulk_attrs = repr(set(BULK_GEOMETRY_ATTRIBUTES))
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -437,16 +474,20 @@ class IsaacTools(LoggerMixin):
                             pass
                         return str(v)
 
+                    BULK_GEOMETRY_ATTRS = {_bulk_attrs}
                     attrs = {{}}
                     for attr in prim.GetAttributes():
                         try:
-                            # GetTypeName reads schema metadata; Get() would
-                            # decompress the whole array out of the crate layer
-                            # just for _serialize to replace it with a count.
-                            type_name = attr.GetTypeName()
-                            if getattr(type_name, "isArray", False):
-                                attrs[attr.GetName()] = "<array %s>" % (type_name,)
-                                continue
+                            # Bulk geometry only: Get() would decompress the
+                            # whole array out of the crate layer just for
+                            # _serialize to replace it with a count. Small
+                            # arrays still come back in full.
+                            attr_name = attr.GetName()
+                            if attr_name in BULK_GEOMETRY_ATTRS:
+                                type_name = attr.GetTypeName()
+                                if getattr(type_name, "isArray", False):
+                                    attrs[attr_name] = "<array %s>" % (type_name,)
+                                    continue
                             val = attr.Get()
                             if val is not None:
                                 attrs[attr.GetName()] = _serialize(val)

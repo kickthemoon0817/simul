@@ -8,6 +8,23 @@ from .executor import ScriptExecutor
 from .protocol import BridgeRequest, BridgeResponse
 
 
+# Array attributes big enough that pulling their value is the cost being
+# avoided. Gating on names rather than on isArray keeps small arrays such as
+# xformOpOrder and primvars:displayColor readable; skipping those would lose
+# information the caller needs and save nothing.
+BULK_GEOMETRY_ATTRIBUTES = frozenset(
+    {
+        "points", "normals", "velocities", "accelerations",
+        "faceVertexIndices", "faceVertexCounts", "holeIndices",
+        "cornerIndices", "cornerSharpnesses", "creaseIndices",
+        "creaseLengths", "creaseSharpnesses", "curveVertexCounts", "widths",
+        "primvars:st", "primvars:normals",
+        "positions", "orientations", "scales", "protoIndices",
+        "invisibleIds", "ids",
+    }
+)
+
+
 class BridgeCommandService:
     """Dispatch typed bridge actions inside Isaac Sim."""
 
@@ -235,13 +252,17 @@ class BridgeCommandService:
         attrs: dict[str, Any] = {}
         for attr in prim.GetAttributes():
             try:
-                # GetTypeName reads schema metadata; Get() would decompress the
-                # whole array out of the crate layer just for _serialize_value
-                # to replace it with an element count.
-                type_name = attr.GetTypeName()
-                if getattr(type_name, "isArray", False):
-                    attrs[attr.GetName()] = f"<array {type_name}>"
-                    continue
+                # Bulk geometry only: Get() would decompress the whole array
+                # out of the crate layer just for _serialize_value to replace
+                # it with an element count. Small arrays such as xformOpOrder
+                # still come back in full — they carry information the caller
+                # needs and cost nothing to read.
+                attr_name = attr.GetName()
+                if attr_name in BULK_GEOMETRY_ATTRIBUTES:
+                    type_name = attr.GetTypeName()
+                    if getattr(type_name, "isArray", False):
+                        attrs[attr_name] = f"<array {type_name}>"
+                        continue
                 value = attr.Get()
                 if value is not None:
                     attrs[attr.GetName()] = self._serialize_value(value)
