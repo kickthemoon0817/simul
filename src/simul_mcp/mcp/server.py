@@ -731,7 +731,7 @@ class SimulMCPServer(LoggerMixin):
             if c._bridge_configured and c._bridge_port is not None:
                 existing_ports.add(c._bridge_port)  # bridge port
 
-        discovered: Dict[str, IsaacSocketClient] = {}
+        candidates: List[tuple[str, IsaacSocketClient]] = []
         for filename in os.listdir(discovery_dir):
             if not filename.endswith(".json"):
                 continue
@@ -785,12 +785,20 @@ class SimulMCPServer(LoggerMixin):
                 bridge_fallback_to_vscode=self.settings.isaac_sim.bridge_fallback_to_vscode,
             )
 
-            # Verify the instance is actually reachable
-            if await client.ping():
-                name = f"isaac-{port}"
-                discovered[name] = client
+            candidates.append((f"isaac-{port}", client))
 
-        return discovered
+        if not candidates:
+            return {}
+
+        # Verify reachability for every candidate at once. Each has its own
+        # socket, so there is nothing to serialise, and a stale discovery file
+        # would otherwise burn its full timeout before the next is even tried.
+        alive = await asyncio.gather(*(client.ping() for _, client in candidates))
+        return {
+            name: client
+            for (name, client), reachable in zip(candidates, alive)
+            if reachable
+        }
 
     async def _scan_isaac_instances(self) -> Dict[str, IsaacSocketClient]:
         """
@@ -876,7 +884,13 @@ class SimulMCPServer(LoggerMixin):
         }
         try:
             if client.bridge_enabled:
-                stage_info = await client.bridge_request("get_stage_info", {})
+                # The listing reports a prim count only incidentally, and
+                # producing one costs a full stage traversal inside Kit for
+                # every instance enumerated. Ask stage info to skip it; callers
+                # that want the number have get_isaac_stage_info.
+                stage_info = await client.bridge_request(
+                    "get_stage_info", {"include_prim_count": False}
+                )
                 sim_state = await client.bridge_request("get_simulation_state", {})
                 if stage_info.get("status") == "ok":
                     payload = stage_info.get("payload", {})
@@ -903,7 +917,9 @@ class SimulMCPServer(LoggerMixin):
                 "print(json.dumps({\n"
                 "    'stage_url': ctx.get_stage_url(),\n"
                 "    'up_axis': UsdGeom.GetStageUpAxis(stage) if stage else None,\n"
-                "    'prim_count': len(list(stage.Traverse())) if stage else 0,\n"
+                # Skipped for the same reason as the bridge path: a per-instance
+                # stage traversal is far too expensive for a listing field.
+                "    'prim_count': None,\n"
                 "    'is_playing': tl.is_playing(),\n"
                 "}))\n"
             )

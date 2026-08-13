@@ -139,6 +139,11 @@ class BridgeCommandService:
         root = stage.GetPseudoRoot()
         root_prims = [str(prim.GetPath()) for prim in root.GetChildren()]
         default_prim = stage.GetDefaultPrim()
+        # Counting prims walks the entire stage on Kit's main thread. Callers
+        # that only need stage metadata can opt out; the key stays present so
+        # the response shape does not change. Older clients omit the flag and
+        # keep the previous behaviour.
+        include_prim_count = request.payload.get("include_prim_count", True)
         payload = {
             "transport": "simul_bridge",
             "stage_url": str(ctx.get_stage_url()),
@@ -148,7 +153,9 @@ class BridgeCommandService:
             "start_time": stage.GetStartTimeCode(),
             "end_time": stage.GetEndTimeCode(),
             "frame_rate": stage.GetFramesPerSecond(),
-            "total_prims": sum(1 for _ in stage.Traverse()),
+            "total_prims": (
+                sum(1 for _ in stage.Traverse()) if include_prim_count else None
+            ),
             "root_prims": root_prims,
             "layer_count": len(stage.GetLayerStack()),
             "default_prim": str(default_prim.GetPath()) if default_prim else None,

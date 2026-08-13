@@ -4,6 +4,7 @@ Instance discovery, routing, and session management for Simul MCP Server.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ..schemas.common import ErrorResponse
@@ -20,9 +21,10 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         description=(
             "Discover all running Isaac Sim instances and their session status. "
             "Scans the configured port range and returns each instance's status, "
-            "loaded stage URL, prim count, simulation state, and active agent "
-            "sessions with their purposes. Use this to find a free or compatible "
-            "instance before starting work."
+            "loaded stage URL, simulation state, and active agent sessions with "
+            "their purposes. Use this to find a free or compatible instance "
+            "before starting work; unreachable instances report "
+            "instance_status 'unreachable'."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -47,19 +49,33 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             discovered = await server._scan_isaac_instances()
             server._isaac_clients.update(discovered)
 
-        instances = []
-        for name, client in server._isaac_clients.items():
+        async def _instance_entry(name: str, client: Any) -> Dict[str, Any]:
             brief = await server._get_instance_brief(name, client)
             session_status = server.session_manager.get_instance_session(
                 client._port
             ).get_status()
             brief["sessions"] = session_status["sessions"]
             brief["session_count"] = session_status["session_count"]
+
+            if not brief.get("reachable"):
+                # Session bookkeeping says nothing about whether we can talk to
+                # the instance, so an empty session list must not read as
+                # "available". Reporting free/clear/1.0 next to reachable=false
+                # is what let an agent select an instance that was not running.
+                brief["instance_status"] = "unreachable"
+                brief["compatibility"] = "blocked"
+                brief["compatibility_score"] = 0.0
+                brief["compatibility_reason"] = (
+                    "Instance is not reachable — is Isaac Sim running with the "
+                    "bridge extension enabled?"
+                )
+                return brief
+
             brief["instance_status"] = session_status["status"]
 
             if my_purpose and session_status["sessions"]:
                 compat = server.session_manager.score_compatibility(
-                    my_purpose, client._port
+                    my_purpose, client._port, status=session_status
                 )
                 brief["compatibility"] = compat["compatibility"]
                 brief["compatibility_score"] = compat["score"]
@@ -69,7 +85,16 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
                 brief["compatibility_score"] = 1.0
                 brief["compatibility_reason"] = "No active sessions — instance is free"
 
-            instances.append(brief)
+            return brief
+
+        instances = list(
+            await asyncio.gather(
+                *(
+                    _instance_entry(name, client)
+                    for name, client in server._isaac_clients.items()
+                )
+            )
+        )
 
         reachable = [i for i in instances if i["reachable"]]
         return {
