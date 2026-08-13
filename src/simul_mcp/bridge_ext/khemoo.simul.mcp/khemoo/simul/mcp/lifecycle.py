@@ -13,6 +13,10 @@ from typing import Any, Awaitable, Callable
 from .protocol import BridgeRequest, BridgeResponse
 
 
+class _RequestReadTimeout(Exception):
+    """The client stalled mid-request; not the in-sim handler's fault."""
+
+
 class BridgeServerLifecycle:
     """Manage the typed TCP bridge server lifecycle."""
 
@@ -156,10 +160,20 @@ class BridgeServerLifecycle:
         """Handle a bridge-protocol client (length-prefixed JSON)."""
         request_id = ""
         try:
-            request_bytes = await asyncio.wait_for(
-                reader.readexactly(payload_size),
-                timeout=30.0,
-            )
+            try:
+                request_bytes = await asyncio.wait_for(
+                    reader.readexactly(payload_size),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                # Distinguished from the handler timeout below: this one means
+                # the client sent a length prefix and then stalled. Reporting it
+                # as "the handler is still running inside Isaac Sim" would point
+                # the operator at the wrong subsystem entirely.
+                raise _RequestReadTimeout(
+                    f"Client sent {payload_size} bytes of header then stalled; "
+                    "no request body within 30.0s."
+                ) from None
             request = BridgeRequest.from_json(request_bytes)
             request_id = request.request_id
             # Without this, a script that never returns hangs Kit permanently:
@@ -169,6 +183,12 @@ class BridgeServerLifecycle:
             # makes the failure visible instead of silent.
             response = await asyncio.wait_for(
                 self._request_handler(request), timeout=self._request_timeout
+            )
+        except _RequestReadTimeout as exc:
+            response = BridgeResponse.failure(
+                request_id=request_id,
+                name="RequestReadTimeout",
+                message=str(exc),
             )
         except asyncio.TimeoutError:
             response = BridgeResponse.failure(
