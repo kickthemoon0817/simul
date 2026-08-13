@@ -232,7 +232,26 @@ class IsaacTools(LoggerMixin):
 
         try:
             response = await self._client.bridge_request(action, payload or {})
-        except (ConnectionRefusedError, TimeoutError, OSError, ValueError) as exc:
+        except (ConnectionRefusedError, TimeoutError, OSError) as exc:
+            # The bridge is unreachable, not the action unsupported. When a
+            # script transport sits below us, defer to it exactly as an
+            # UnknownAction does — returning an envelope here is final to the
+            # caller and strands the tool on a closed port while ping, which
+            # does fall back, still reports the instance reachable.
+            if self._client.fallback_to_vscode:
+                logger.debug(
+                    "Bridge action %s unreachable (%s); deferring to script path",
+                    action,
+                    exc,
+                )
+                return None
+            return ErrorResponse(
+                error=str(exc),
+                error_type=type(exc).__name__,
+            ).model_dump()
+        except ValueError as exc:
+            # Protocol-level failure (oversized request, malformed frame). The
+            # script path would not do better, so surface it.
             return ErrorResponse(
                 error=str(exc),
                 error_type=type(exc).__name__,
@@ -895,13 +914,19 @@ class IsaacTools(LoggerMixin):
                     if tgt is not None:
                         state.set_target_world(Gf.Vec3d(*tgt), True)
 
-                    # Read back the new state
+                    # Read back the new state. A camera Kit has never driven
+                    # through the viewport carries no center of interest, and
+                    # target_world raises instead of returning None, so a
+                    # position-only update must not depend on reading it.
                     new_pos = state.position_world
-                    new_tgt = state.target_world
+                    try:
+                        new_tgt = [float(x) for x in state.target_world]
+                    except Exception:
+                        new_tgt = None
                     print(json.dumps({{
                         "camera_path": cam_path,
                         "position": [float(x) for x in new_pos],
-                        "target": [float(x) for x in new_tgt],
+                        "target": new_tgt,
                     }}))
             except ImportError:
                 # Fallback: direct USD edit for headless mode
