@@ -39,12 +39,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="load_usd_file",
-        description=(
-            "Load a USD file and return stage information. "
-            "Operates on local USD files via the headless adapter — "
-            "no running application required. For live Isaac Sim stages, "
-            "use the isaac_* prefixed tools instead."
-        ),
+        description="Load a USD file and return stage information.",
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
@@ -125,12 +120,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="validate_usd_file",
-        description=(
-            "Validate a USD file without loading it. "
-            "Operates on local USD files via the headless adapter — "
-            "no running application required. For live Isaac Sim stages, "
-            "use the isaac_* prefixed tools instead."
-        ),
+        description="Validate a USD file without loading it.",
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
@@ -183,12 +173,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="get_prim_info",
-        description=(
-            "Get information about a USD prim. "
-            "Operates on local USD files via the headless adapter — "
-            "no running application required. For live Isaac Sim stages, "
-            "use the isaac_* prefixed tools instead."
-        ),
+        description="Get information about a USD prim.",
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
@@ -299,12 +284,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="create_prim",
-        description=(
-            "Create a prim in a USD stage. "
-            "Operates on local USD files via the headless adapter — "
-            "no running application required. For live Isaac Sim stages, "
-            "use the isaac_* prefixed tools instead."
-        ),
+        description="Create a prim in a USD stage.",
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=False, destructive=True
         ),
@@ -375,12 +355,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="update_prim_attributes",
-        description=(
-            "Update attributes on a USD prim. "
-            "Operates on local USD files via the headless adapter — "
-            "no running application required. For live Isaac Sim stages, "
-            "use the isaac_* prefixed tools instead."
-        ),
+        description="Update attributes on a USD prim.",
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=False, destructive=True
         ),
@@ -454,12 +429,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="delete_prim",
-        description=(
-            "Delete a prim from a USD stage. "
-            "Operates on local USD files via the headless adapter — "
-            "no running application required. For live Isaac Sim stages, "
-            "use the isaac_* prefixed tools instead."
-        ),
+        description="Delete a prim from a USD stage.",
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=False, destructive=True
         ),
@@ -520,12 +490,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="get_mesh_info",
-        description=(
-            "Get mesh information for a mesh prim. "
-            "Operates on local USD files via the headless adapter — "
-            "no running application required. For live Isaac Sim stages, "
-            "use the isaac_* prefixed tools instead."
-        ),
+        description="Get mesh information for a mesh prim.",
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
@@ -579,12 +544,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="search_prims",
-        description=(
-            "Search for prims in a USD stage. "
-            "Operates on local USD files via the headless adapter — "
-            "no running application required. For live Isaac Sim stages, "
-            "use the isaac_* prefixed tools instead."
-        ),
+        description="Search for prims in a USD stage.",
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
@@ -666,12 +626,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="get_bounding_box",
-        description=(
-            "Get bounding box for a prim or entire stage. "
-            "Operates on local USD files via the headless adapter — "
-            "no running application required. For live Isaac Sim stages, "
-            "use the isaac_* prefixed tools instead."
-        ),
+        description="Get bounding box for a prim or entire stage.",
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
@@ -755,12 +710,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="summarize_scene",
-        description=(
-            "Generate a summary of a USD scene. "
-            "Operates on local USD files via the headless adapter — "
-            "no running application required. For live Isaac Sim stages, "
-            "use the isaac_* prefixed tools instead."
-        ),
+        description="Generate a summary of a USD scene.",
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
