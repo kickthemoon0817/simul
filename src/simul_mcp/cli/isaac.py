@@ -766,52 +766,33 @@ def exec_script(
         code = script
 
     tools = _tools(host, port, timeout)
-    try:
-        if tools._client.bridge_enabled:
-            result = asyncio.run(tools._client.execute_vscode_only(code))
-        else:
-            result = asyncio.run(tools._client.execute(code))
-    except (ConnectionRefusedError, TimeoutError) as exc:
+    # Same path the MCP tool takes, rather than reaching through _client into
+    # the adapter with a second copy of the transport rules.
+    payload = asyncio.run(tools.execute_script(code, keep_raw_output=raw))
+    if payload.get("error"):
         if is_json_mode():
-            emit_error(str(exc), type(exc).__name__)
-        console.print(f"[red]{exc}[/red]")
+            emit_error(payload["error"], payload.get("error_type", "Error"))
+        console.print(f"[red]{payload['error']}[/red]")
         raise typer.Exit(1)
 
+    # execute_script unwraps a JSON object when the script printed one. It only
+    # carries stdout as well when asked, which --raw does — otherwise the whole
+    # payload would be returned twice.
+    text_output = payload.get("output", "")
+
     if is_json_mode() and not raw:
-        output_data: Dict[str, Any] = {"success": result.success, "output": result.output}
-        if not result.success:
-            output_data["error_name"] = result.error_name
-            output_data["error_value"] = result.error_value
-            output_data["traceback"] = result.traceback
-        # Try to parse output as JSON for structured embedding
-        try:
-            output_data["parsed"] = json.loads(result.output)
-        except (json.JSONDecodeError, ValueError):
-            pass
-        emit(output_data)
-        if not result.success:
-            raise typer.Exit(1)
+        emit(payload)
         return
 
     if raw:
-        print(result.output)
-        if not result.success:
-            print(result.error_value, file=sys.stderr)
-            raise typer.Exit(1)
+        print(text_output)
         return
 
-    if result.success:
-        try:
-            parsed = json.loads(result.output)
-            formatted = json.dumps(parsed, indent=2)
-            console.print(Syntax(formatted, "json", theme="monokai"))
-        except (json.JSONDecodeError, ValueError):
-            console.print(result.output)
+    if "output" in payload and len(payload) <= 2:
+        console.print(text_output)
     else:
-        console.print(f"[red]Error:[/red] {result.error_name}: {result.error_value}")
-        if result.traceback:
-            console.print(Panel(result.traceback, title="Traceback", border_style="red"))
-        raise typer.Exit(1)
+        formatted = json.dumps(payload, indent=2)
+        console.print(Syntax(formatted, "json", theme="monokai"))
 
 
 # ---------------------------------------------------------------------------
