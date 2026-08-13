@@ -12,6 +12,7 @@ src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
 from simul_mcp.adapters.isaac_socket_client import ScriptResult
+from simul_mcp.config import Settings
 from simul_mcp.mcp.tools.isaac_tools import IsaacTools
 
 
@@ -68,7 +69,9 @@ def _make_tools(
         return_value=execute_return,
         side_effect=execute_side_effect,
     )
-    return IsaacTools(client=client, settings=MagicMock())
+    # Real Settings, not a MagicMock: a mock settings object reports an empty
+    # allowed-path list with the sandbox still enabled, which denies every path.
+    return IsaacTools(client=client, settings=Settings())
 
 
 # ---------------------------------------------------------------------------
@@ -903,16 +906,16 @@ class TestStageAssetOps:
 
     def test_open_isaac_stage(self) -> None:
         """open_isaac_stage opens a USD file."""
-        data = {"file_path": "/scenes/test.usd", "opened": True, "total_prims": 50}
+        data = {"file_path": "/tmp/simul_mcp/test.usd", "opened": True, "total_prims": 50}
         tools = _make_tools(execute_return=_make_result(data))
-        result = asyncio.run(tools.open_isaac_stage(file_path="/scenes/test.usd"))
+        result = asyncio.run(tools.open_isaac_stage(file_path="/tmp/simul_mcp/test.usd"))
         assert result["success"] is True
         assert result["opened"] is True
         assert result["total_prims"] == 50
 
     def test_save_isaac_stage(self) -> None:
         """save_isaac_stage saves the current stage."""
-        data = {"file_path": "/scenes/test.usd", "saved": True}
+        data = {"file_path": "/tmp/simul_mcp/test.usd", "saved": True}
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(tools.save_isaac_stage())
         assert result["success"] is True
@@ -920,11 +923,11 @@ class TestStageAssetOps:
 
     def test_save_isaac_stage_with_path(self) -> None:
         """save_isaac_stage with explicit file path."""
-        data = {"file_path": "/scenes/output.usd", "saved": True}
+        data = {"file_path": "/tmp/simul_mcp/output.usd", "saved": True}
         tools = _make_tools(execute_return=_make_result(data))
-        result = asyncio.run(tools.save_isaac_stage(file_path="/scenes/output.usd"))
+        result = asyncio.run(tools.save_isaac_stage(file_path="/tmp/simul_mcp/output.usd"))
         assert result["success"] is True
-        assert result["file_path"] == "/scenes/output.usd"
+        assert result["file_path"] == "/tmp/simul_mcp/output.usd"
 
     def test_new_isaac_stage(self) -> None:
         """new_isaac_stage creates a blank stage."""
@@ -936,10 +939,10 @@ class TestStageAssetOps:
 
     def test_import_isaac_asset(self) -> None:
         """import_isaac_asset imports an external asset."""
-        data = {"asset_path": "/assets/robot.usd", "target_path": "/World/Robot", "imported": True}
+        data = {"asset_path": "/tmp/simul_mcp/robot.usd", "target_path": "/World/Robot", "imported": True}
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(
-            tools.import_isaac_asset(asset_path="/assets/robot.usd", target_path="/World/Robot")
+            tools.import_isaac_asset(asset_path="/tmp/simul_mcp/robot.usd", target_path="/World/Robot")
         )
         assert result["success"] is True
         assert result["imported"] is True
@@ -947,10 +950,10 @@ class TestStageAssetOps:
 
     def test_add_isaac_reference(self) -> None:
         """add_isaac_reference adds a USD reference to a prim."""
-        data = {"prim_path": "/World/Ref", "reference_path": "/assets/model.usd", "added": True, "total_references": 1}
+        data = {"prim_path": "/World/Ref", "reference_path": "/tmp/simul_mcp/model.usd", "added": True, "total_references": 1}
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(
-            tools.add_isaac_reference(prim_path="/World/Ref", reference_path="/assets/model.usd")
+            tools.add_isaac_reference(prim_path="/World/Ref", reference_path="/tmp/simul_mcp/model.usd")
         )
         assert result["success"] is True
         assert result["added"] is True
