@@ -290,8 +290,8 @@ def server(
         # LoggingConfig is frozen on purpose, so rebuild the section rather
         # than assigning into it — assignment raises ValidationError and took
         # both of these flags down with it.
-        resolved_level = "DEBUG" if verbose else (
-            log_level.upper() if log_level else None
+        resolved_level = (
+            "DEBUG" if verbose else (log_level.upper() if log_level else None)
         )
         if resolved_level:
             settings = settings.model_copy(

@@ -583,9 +583,6 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
     usd_files = usd.get("files") or {}
     usd_performance = usd.get("performance") or {}
     mesh = raw.get("mesh") or {}
-    mesh_decimation = mesh.get("decimation") or {}
-    mesh_analysis = mesh.get("analysis") or {}
-    mesh_export = mesh.get("export") or {}
     viewport = raw.get("viewport") or {}
     viewport_capture = viewport.get("capture") or {}
     viewport_rendering = viewport.get("rendering") or {}
@@ -597,11 +594,7 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
     security_sandbox = security.get("sandbox") or {}
     security_rate = security.get("rate_limiting") or {}
     performance = raw.get("performance") or {}
-    performance_memory = performance.get("memory") or {}
-    performance_threading = performance.get("threading") or {}
-    performance_caching = performance.get("caching") or {}
     development = raw.get("development") or {}
-    development_testing = development.get("testing") or {}
 
     return _compact_dict(
         {
