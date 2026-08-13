@@ -319,7 +319,9 @@ def install_bridge(
     import os
     import shutil
 
-    # 1. Resolve isaac-root
+    # 1. Resolve isaac-root. Read the environment here rather than through
+    # get_settings(): that is lru_cached, so a Settings built earlier in the
+    # process would pin an ISAAC_SIM_PATH that was set afterwards.
     isaac_root_p: Optional[Path] = (
         isaac_root or (Path(os.environ["ISAAC_SIM_PATH"]) if os.environ.get("ISAAC_SIM_PATH") else None)
     )
