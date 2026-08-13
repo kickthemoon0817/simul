@@ -16,6 +16,7 @@ from pydantic import BeforeValidator
 from ...adapters import IsaacSocketClient, ScriptResult
 from ...config import Settings, get_settings
 from ...logging import LoggerMixin, get_logger
+from ...utils.paths import PathPolicy
 from ..schemas.common import ErrorResponse
 
 logger = get_logger(__name__)
@@ -124,6 +125,10 @@ class IsaacTools(LoggerMixin):
         self._default_client = client
         self._client_resolver = client_resolver
         self.settings = settings or get_settings()
+        # Enforced here rather than at the MCP boundary alone: the CLI calls
+        # these methods directly, so a check that lives only in registration
+        # governs one of the two entry points.
+        self._path_policy = PathPolicy.from_settings(self.settings)
 
     @property
     def _client(self) -> IsaacSocketClient:
@@ -136,6 +141,20 @@ class IsaacTools(LoggerMixin):
     def _client(self, client: IsaacSocketClient) -> None:
         """Update the default client when using non-session-scoped routing."""
         self._default_client = client
+
+    def _sandbox_denial(self, path: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Return an error payload when ``path`` is outside the sandbox.
+
+        ``None`` means "carry on" — either the path is allowed, or there is no
+        path to police (an optional save-as target that was not supplied).
+        """
+        if path is None or self._path_policy.is_allowed(path):
+            return None
+        return ErrorResponse(
+            error="File path is not allowed by sandbox policy",
+            error_type="SandboxError",
+            details={"file_path": path},
+        ).model_dump()
 
     async def _execute_json_script(
         self, script: str, transport_mode: str = "default"
@@ -2517,6 +2536,9 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the stage was opened.
         """
+        denial = self._sandbox_denial(file_path)
+        if denial is not None:
+            return denial
         _file_path = _pyval(file_path)
         script = textwrap.dedent(f"""\
             import json
@@ -2549,6 +2571,9 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the stage was saved.
         """
+        denial = self._sandbox_denial(file_path)
+        if denial is not None:
+            return denial
         if file_path:
             _file_path = _pyval(file_path)
             script = textwrap.dedent(f"""\
@@ -2619,6 +2644,9 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the asset was imported.
         """
+        denial = self._sandbox_denial(asset_path)
+        if denial is not None:
+            return denial
         _asset_path = _pyval(asset_path)
         _target_path = _pyval(target_path)
         script = textwrap.dedent(f"""\
@@ -2658,6 +2686,9 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the reference was added.
         """
+        denial = self._sandbox_denial(reference_path)
+        if denial is not None:
+            return denial
         _prim_path = _pyval(prim_path)
         _ref_path = _pyval(reference_path)
         script = textwrap.dedent(f"""\
