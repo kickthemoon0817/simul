@@ -51,6 +51,12 @@ MAX_CAPTURE_DIMENSION = 3840
 # path instead, which is the shape that keeps working.
 MAX_INLINE_CAPTURE_BYTES = 262_144
 
+# Captures are kept rather than deleted, since the caller is handed a path — so
+# something has to reclaim them. Keep the most recent N and drop the rest: an
+# A/B pair needs two, a comparison sweep a few more, and nobody wants the whole
+# session's frames sitting in the temp dir.
+MAX_RETAINED_CAPTURES = 20
+
 
 class IsaacTools(LoggerMixin):
     """
@@ -943,6 +949,7 @@ class IsaacTools(LoggerMixin):
             )
 
         emit = textwrap.indent(emit_body.rstrip(), " " * 24)
+        max_retained = MAX_RETAINED_CAPTURES
 
         script = textwrap.dedent(f"""\
             import json
@@ -960,10 +967,32 @@ class IsaacTools(LoggerMixin):
                 else:
                     # Unique per capture: a fixed name makes an A/B pair
                     # overwrite itself, and the caller now keeps the file.
+                    capture_dir = tempfile.gettempdir()
                     out_path = os.path.join(
-                        tempfile.gettempdir(),
+                        capture_dir,
                         "simul_capture_%s.png" % uuid.uuid4().hex[:12],
                     )
+
+                    # Reclaim earlier captures; the caller keeps the path, so
+                    # nothing else ever deletes them.
+                    try:
+                        previous = sorted(
+                            (
+                                os.path.join(capture_dir, name)
+                                for name in os.listdir(capture_dir)
+                                if name.startswith("simul_capture_")
+                                and name.endswith(".png")
+                            ),
+                            key=os.path.getmtime,
+                            reverse=True,
+                        )
+                        for stale in previous[{max_retained} - 1:]:
+                            try:
+                                os.remove(stale)
+                            except OSError:
+                                pass
+                    except OSError:
+                        pass
 
                     # Set requested resolution on the viewport
                     vp_api.resolution = ({width}, {height})
