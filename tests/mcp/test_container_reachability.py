@@ -77,3 +77,18 @@ def test_compose_binds_the_container_on_all_interfaces() -> None:
     # The host side is what must stay loopback-only.
     assert '"127.0.0.1:${ISAAC_BRIDGE_PORT:-8229}' in compose
     assert '"127.0.0.1:${ISAAC_VSCODE_PORT:-8226}' in compose
+
+
+def test_compose_does_not_force_a_uid_the_image_rejects() -> None:
+    """The image keeps /isaac-sim mode 0750 root:root.
+
+    Forcing uid 1000 makes the entrypoint fail with "Permission denied" (exit
+    126) before Kit starts — verified against nvcr.io/nvidia/isaac-sim:5.1.0,
+    where even the image's own isaac-sim user (1234) cannot traverse it.
+    """
+    compose = (repo_root / "compose.isaac-sim.yml").read_text()
+
+    assert "ISAAC_SIM_UID:-1000" not in compose, (
+        "forcing uid 1000 makes the container exit 126 before Kit starts"
+    )
+    assert "ISAAC_SIM_USER:-0:0" in compose
