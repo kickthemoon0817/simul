@@ -162,6 +162,10 @@ class SimulMCPServer(LoggerMixin):
         self._rate_limit_rate = self.settings.security.requests_per_minute / 60.0
         self._rate_limit_burst = self.settings.security.burst_size
         self._tool_timeout = self.settings.server.timeout
+        # How long a call waits for an instance already in use. Generous enough
+        # for ordinary contention, short enough that a caller is not left
+        # guessing through a 1000-frame step.
+        self._instance_lock_timeout = float(self.settings.server.timeout)
 
         # Initialize adapters
         self.headless_adapter = (
@@ -398,10 +402,31 @@ class SimulMCPServer(LoggerMixin):
             self.usage_tracker.record(
                 tool_name, 0.0, False, params=params, error="rate_limited",
             )
+            # Caller already built the coroutine; nothing will await it now.
+            coro.close()
             return rate_error
         instance_name = self._get_effective_instance_name()
         lock = self._get_instance_lock(instance_name)
-        async with lock:
+        try:
+            # Bounded, so a caller queued behind a long step learns the instance
+            # is busy instead of waiting until its own client gives up. Without
+            # this the only signal is a timeout, which reads as "unreachable".
+            await asyncio.wait_for(
+                lock.acquire(), timeout=self._instance_lock_timeout
+            )
+        except asyncio.TimeoutError:
+            self.usage_tracker.record(
+                tool_name, 0.0, False, params=params, error="instance_busy",
+            )
+            coro.close()
+            return ErrorResponse(
+                error=(
+                    f"Isaac instance {instance_name!r} is busy with another "
+                    "call. It is running, not unreachable — retry shortly."
+                ),
+                error_type="InstanceBusy",
+            ).model_dump()
+        try:
             t0 = time.monotonic()
             try:
                 result = await coro
@@ -427,6 +452,8 @@ class SimulMCPServer(LoggerMixin):
                 return ErrorResponse(
                     error=str(exc), error_type=type(exc).__name__
                 ).model_dump()
+        finally:
+            lock.release()
 
     def _resolve_allowed_paths(self) -> List[Path]:
         return self._path_policy.allowed_roots
