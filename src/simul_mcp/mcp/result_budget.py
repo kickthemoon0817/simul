@@ -63,9 +63,15 @@ def apply_result_budget(
     if _encoded_size(payload) <= budget_bytes:
         return payload
 
+    def _oversized(original: Dict[str, Any]) -> Dict[str, Any]:
+        """Report an over-budget payload we could not usefully trim."""
+        noted = dict(original)
+        noted["oversized_bytes"] = _encoded_size(original)
+        return noted
+
     largest = _largest_list_field(payload)
     if largest is None:
-        return payload
+        return _oversized(payload)
 
     field, items = largest
     total = len(items)
@@ -95,4 +101,18 @@ def apply_result_budget(
         "total": total,
         "hint": hint,
     }
-    return trimmed
+
+    # Only keep the trim if it actually helped. The largest *top-level* list is
+    # not always where the bulk is: get_isaac_prim_detail carries its weight in
+    # dict values with one small "aspects" list, and prim info carries it in
+    # "attributes" while the only list is "children". Trimming those drops
+    # metadata the caller needs, reports a truncation that did not happen, and
+    # leaves the payload over budget — larger, in fact, since the notice costs
+    # more than the list did.
+    if _encoded_size(trimmed) < _encoded_size(payload):
+        return trimmed
+
+    # Nothing worth trimming at the top level. Say the payload is oversized
+    # rather than pretending it was cut; a caller acting on a false
+    # "truncated" flag would go looking for data that is all still here.
+    return _oversized(payload)

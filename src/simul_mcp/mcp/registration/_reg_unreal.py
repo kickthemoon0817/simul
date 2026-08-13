@@ -261,7 +261,11 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @server.mcp.tool(
         name="capture_unreal_viewport",
-        description="Capture a viewport screenshot via HighResScreenshot.",
+        description=(
+            "Capture a viewport screenshot via HighResScreenshot and return "
+            "its path on the editor host. Pass inline=true to also receive "
+            "base64 image data, included only for small captures."
+        ),
         annotations=server._tool_annotations(
             read_only=True,
             idempotent=False,
@@ -274,6 +278,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         resolution_x: int = 1920,
         resolution_y: int = 1080,
         format: str = "png",
+        inline: bool = False,
     ) -> Dict[str, Any]:
         """
         Capture viewport screenshot.
@@ -309,6 +314,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     resolution_x=resolution_x,
                     resolution_y=resolution_y,
                     format=format,
+                    inline=inline,
                 )
                 apply_success_from_error(payload)
                 result = UnrealCaptureViewportResponse(**payload).dict()

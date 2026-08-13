@@ -16,6 +16,7 @@ from pydantic import BeforeValidator
 from ...adapters import IsaacSocketClient, ScriptResult
 from ...config import Settings, get_settings
 from ...logging import LoggerMixin, get_logger
+from ...utils.paths import PathPolicy
 from ..schemas.common import ErrorResponse
 
 logger = get_logger(__name__)
@@ -40,6 +41,80 @@ def _coerce_str_to_float_list(value: Any) -> Any:
 
 # List of floats that tolerates JSON-string inputs from forgiving MCP clients.
 FloatList = Annotated[List[float], BeforeValidator(_coerce_str_to_float_list)]
+
+# Largest raw script accepted for execution.
+MAX_SCRIPT_BYTES = 100_000
+
+# 4K on the long edge. The old ceiling of 7680 allowed a 59-megapixel capture —
+# tens of megabytes pushed through several buffers before anything checked
+# whether the result could be delivered.
+MAX_CAPTURE_DIMENSION = 3840
+
+# Largest capture returned as inline base64. Encoding grows a file by ~33%, and
+# ~256 KB of PNG is already a large tool result; past this the caller gets the
+# path instead, which is the shape that keeps working.
+MAX_INLINE_CAPTURE_BYTES = 262_144
+
+# Captures are kept rather than deleted, since the caller is handed a path — so
+# something has to reclaim them. Keep the most recent N and drop the rest: an
+# A/B pair needs two, a comparison sweep a few more, and nobody wants the whole
+# session's frames sitting in the temp dir.
+MAX_RETAINED_CAPTURES = 20
+
+# How much of a Kit log to read when returning its tail. Kit logs reach several
+# gigabytes and the read happens on Kit's main thread, so the window bounds the
+# freeze; 2 MB still holds far more lines than the 500-entry maximum.
+LOG_SCAN_WINDOW_BYTES = 2 * 1024 * 1024
+
+# Array attributes big enough that pulling their value is the cost being
+# avoided. Gating on these names rather than on isArray matters: xformOpOrder
+# is a one-element token[] telling a caller which xform ops exist, and
+# primvars:displayColor is a one-element color3f[] carrying the object colour.
+# Both are arrays, neither is bulk, and skipping them loses information the
+# caller needs while saving nothing. Anything not listed here takes the normal
+# path, which already collapses arrays over 16 elements to a count.
+BULK_GEOMETRY_ATTRIBUTES = frozenset(
+    {
+        "points",
+        "normals",
+        "velocities",
+        "accelerations",
+        "faceVertexIndices",
+        "faceVertexCounts",
+        "holeIndices",
+        "cornerIndices",
+        "cornerSharpnesses",
+        "creaseIndices",
+        "creaseLengths",
+        "creaseSharpnesses",
+        "curveVertexCounts",
+        "widths",
+        "primvars:st",
+        "primvars:normals",
+        # PointInstancer
+        "positions",
+        "orientations",
+        "scales",
+        "protoIndices",
+        "invisibleIds",
+        "ids",
+    }
+)
+
+
+
+def _pyval(value: Any) -> str:
+    """Render a call parameter as a Python literal for embedding in a script.
+
+    The generated scripts are Python source, so parameters must be embedded as
+    Python literals. ``json.dumps`` spells ``None``/``True``/``False`` as
+    ``null``/``true``/``false``, which are undefined names once they land in the
+    script and raise ``NameError`` inside Isaac Sim. ``repr`` keeps them Python.
+
+    Use this for every embedded parameter, including required ones — a single
+    idiom is what keeps the ``null`` class of bug from coming back.
+    """
+    return repr(value)
 
 
 class IsaacTools(LoggerMixin):
@@ -69,6 +144,10 @@ class IsaacTools(LoggerMixin):
         self._default_client = client
         self._client_resolver = client_resolver
         self.settings = settings or get_settings()
+        # Enforced here rather than at the MCP boundary alone: the CLI calls
+        # these methods directly, so a check that lives only in registration
+        # governs one of the two entry points.
+        self._path_policy = PathPolicy.from_settings(self.settings)
 
     @property
     def _client(self) -> IsaacSocketClient:
@@ -81,6 +160,20 @@ class IsaacTools(LoggerMixin):
     def _client(self, client: IsaacSocketClient) -> None:
         """Update the default client when using non-session-scoped routing."""
         self._default_client = client
+
+    def _sandbox_denial(self, path: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Return an error payload when ``path`` is outside the sandbox.
+
+        ``None`` means "carry on" — either the path is allowed, or there is no
+        path to police (an optional save-as target that was not supplied).
+        """
+        if path is None or self._path_policy.is_allowed(path):
+            return None
+        return ErrorResponse(
+            error="File path is not allowed by sandbox policy",
+            error_type="SandboxError",
+            details={"file_path": path},
+        ).model_dump()
 
     async def _execute_json_script(
         self, script: str, transport_mode: str = "default"
@@ -161,6 +254,102 @@ class IsaacTools(LoggerMixin):
                 details={"raw_output": output[:2000]},
             ).model_dump()
 
+    async def execute_script(
+        self, code: str, keep_raw_output: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Execute raw Python inside the running Isaac Sim process.
+
+        The single implementation of the raw-script path. Callers get the
+        transport policy, the JSON unwrap and the error envelopes from here;
+        rate limiting, instance locking, usage tracking and the session
+        heartbeat come from the server wrapper that invokes it.
+
+        Args:
+            code: Python source to run in Isaac Sim's interpreter.
+            keep_raw_output: Also return the script's stdout verbatim even when
+                it parsed as a JSON object. Off by default because it doubles
+                the payload; the CLI's --raw needs it, MCP callers do not.
+
+        Returns:
+            The script's JSON object when it printed one, otherwise its text
+            output, or an error envelope.
+        """
+        if len(code) > MAX_SCRIPT_BYTES:
+            return ErrorResponse(
+                error=(
+                    f"Code payload too large ({len(code)} bytes, "
+                    f"max {MAX_SCRIPT_BYTES})."
+                ),
+                error_type="PayloadTooLarge",
+            ).model_dump()
+
+        client = self._client
+        try:
+            if self._raw_script_transport_mode == "vscode_only":
+                result = await client.execute_vscode_only(code)
+            else:
+                result = await client.execute(code)
+        except ConnectionRefusedError:
+            return ErrorResponse(
+                error=(
+                    f"Isaac Sim is not reachable at {client.address}. "
+                    "Ensure Isaac Sim is running with the "
+                    "isaacsim.code_editor.vscode extension enabled. "
+                    "Use ping_isaac to verify connectivity."
+                ),
+                error_type="ConnectionError",
+            ).model_dump()
+        except TimeoutError:
+            return ErrorResponse(
+                error=(
+                    f"Script execution timed out after "
+                    f"{client.timeout_seconds}s on {client.address}. "
+                    "The script may be too slow or Isaac Sim may be "
+                    "unresponsive. Use ping_isaac to check if Isaac Sim is "
+                    "still reachable."
+                ),
+                error_type="TimeoutError",
+            ).model_dump()
+        except Exception as exc:
+            logger.error("Script execution failed: %s", exc, exc_info=True)
+            return ErrorResponse(
+                error=str(exc), error_type="Exception"
+            ).model_dump()
+
+        if not result.success:
+            return ErrorResponse(
+                error=result.error_value or "Script execution failed",
+                error_type=result.error_name or "RuntimeError",
+                details=(
+                    {"traceback": result.traceback} if result.traceback else None
+                ),
+            ).model_dump()
+
+        output = result.output.strip()
+        if output:
+            try:
+                parsed = json.loads(output)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                # A generated script reports failure as {"error": ...}; stamping
+                # success onto that contradicts it, and the caller reading
+                # "success" is usually an LLM that will believe the flag.
+                parsed.setdefault("success", "error" not in parsed)
+                if keep_raw_output:
+                    parsed.setdefault("output", result.output)
+                return parsed
+            if parsed is not None:
+                # A bare JSON value is not a payload, so keep the text too.
+                return {
+                    "success": True,
+                    "output": result.output,
+                    "parsed": parsed,
+                }
+
+        return {"success": True, "output": result.output}
+
     async def _execute_bridge_action(
         self, action: str, payload: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
@@ -177,7 +366,26 @@ class IsaacTools(LoggerMixin):
 
         try:
             response = await self._client.bridge_request(action, payload or {})
-        except (ConnectionRefusedError, TimeoutError, OSError, ValueError) as exc:
+        except (ConnectionRefusedError, TimeoutError, OSError) as exc:
+            # The bridge is unreachable, not the action unsupported. When a
+            # script transport sits below us, defer to it exactly as an
+            # UnknownAction does — returning an envelope here is final to the
+            # caller and strands the tool on a closed port while ping, which
+            # does fall back, still reports the instance reachable.
+            if self._client.fallback_to_vscode:
+                logger.debug(
+                    "Bridge action %s unreachable (%s); deferring to script path",
+                    action,
+                    exc,
+                )
+                return None
+            return ErrorResponse(
+                error=str(exc),
+                error_type=type(exc).__name__,
+            ).model_dump()
+        except ValueError as exc:
+            # Protocol-level failure (oversized request, malformed frame). The
+            # script path would not do better, so surface it.
             return ErrorResponse(
                 error=str(exc),
                 error_type=type(exc).__name__,
@@ -299,8 +507,8 @@ class IsaacTools(LoggerMixin):
         if bridge_result is not None:
             return bridge_result
 
-        _root_path = json.dumps(root_path)
-        _prim_type = json.dumps(prim_type or "")
+        _root_path = _pyval(root_path)
+        _prim_type = _pyval(prim_type or "")
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -320,9 +528,15 @@ class IsaacTools(LoggerMixin):
                     max_n = {max_items}
                     root_depth = len(str(root.GetPath()).rstrip("/").split("/"))
 
-                    for p in Usd.PrimRange(root):
+                    # continue skips emitting a prim but still descends its
+                    # subtree, so the depth limit bounded the output and not the
+                    # work. Prune instead.
+                    prim_iter = iter(Usd.PrimRange(root))
+                    for p in prim_iter:
                         path_str = str(p.GetPath())
                         depth = len(path_str.rstrip("/").split("/")) - root_depth
+                        if max_d >= 0 and depth >= max_d:
+                            prim_iter.PruneChildren()
                         if max_d >= 0 and depth > max_d:
                             continue
                         ptype = p.GetTypeName()
@@ -364,7 +578,8 @@ class IsaacTools(LoggerMixin):
         if bridge_result is not None:
             return bridge_result
 
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
+        _bulk_attrs = repr(set(BULK_GEOMETRY_ATTRIBUTES))
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -412,9 +627,20 @@ class IsaacTools(LoggerMixin):
                             pass
                         return str(v)
 
+                    BULK_GEOMETRY_ATTRS = {_bulk_attrs}
                     attrs = {{}}
                     for attr in prim.GetAttributes():
                         try:
+                            # Bulk geometry only: Get() would decompress the
+                            # whole array out of the crate layer just for
+                            # _serialize to replace it with a count. Small
+                            # arrays still come back in full.
+                            attr_name = attr.GetName()
+                            if attr_name in BULK_GEOMETRY_ATTRS:
+                                type_name = attr.GetTypeName()
+                                if getattr(type_name, "isArray", False):
+                                    attrs[attr_name] = "<array %s>" % (type_name,)
+                                    continue
                             val = attr.Get()
                             if val is not None:
                                 attrs[attr.GetName()] = _serialize(val)
@@ -498,7 +724,7 @@ class IsaacTools(LoggerMixin):
         if bridge_result is not None:
             return bridge_result
 
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         world_str = "True" if world_space else "False"
         script = textwrap.dedent(f"""\
             import json
@@ -576,9 +802,9 @@ class IsaacTools(LoggerMixin):
         if bridge_result is not None:
             return bridge_result
 
-        _root_path = json.dumps(root_path)
-        _search_type = json.dumps(search_type)
-        _query = json.dumps(query)
+        _root_path = _pyval(root_path)
+        _search_type = _pyval(search_type)
+        _query = _pyval(query)
         script = textwrap.dedent(f"""\
             import json, re
             import omni.usd
@@ -681,7 +907,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with camera position, target, focal length, clipping range, etc.
         """
-        _cam_path = json.dumps(camera_path or "")
+        _cam_path = _pyval(camera_path or "")
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -795,7 +1021,7 @@ class IsaacTools(LoggerMixin):
         """
         pos_str = str(position) if position else "None"
         tgt_str = str(target) if target else "None"
-        _cam_path = json.dumps(camera_path or "")
+        _cam_path = _pyval(camera_path or "")
         script = textwrap.dedent(f"""\
             import json
             from pxr import Gf, Usd, UsdGeom
@@ -822,13 +1048,19 @@ class IsaacTools(LoggerMixin):
                     if tgt is not None:
                         state.set_target_world(Gf.Vec3d(*tgt), True)
 
-                    # Read back the new state
+                    # Read back the new state. A camera Kit has never driven
+                    # through the viewport carries no center of interest, and
+                    # target_world raises instead of returning None, so a
+                    # position-only update must not depend on reading it.
                     new_pos = state.position_world
-                    new_tgt = state.target_world
+                    try:
+                        new_tgt = [float(x) for x in state.target_world]
+                    except Exception:
+                        new_tgt = None
                     print(json.dumps({{
                         "camera_path": cam_path,
                         "position": [float(x) for x in new_pos],
-                        "target": [float(x) for x in new_tgt],
+                        "target": new_tgt,
                     }}))
             except ImportError:
                 # Fallback: direct USD edit for headless mode
@@ -870,24 +1102,77 @@ class IsaacTools(LoggerMixin):
         self,
         width: int = 1280,
         height: int = 720,
+        inline: bool = False,
     ) -> Dict[str, Any]:
         """
-        Capture the active viewport as a base64-encoded PNG image.
+        Capture the active viewport to a PNG on the Isaac Sim host.
 
         Args:
-            width: Output image width in pixels (1–7680).
-            height: Output image height in pixels (1–7680).
+            width: Output image width in pixels (1–MAX_CAPTURE_DIMENSION).
+            height: Output image height in pixels (1–MAX_CAPTURE_DIMENSION).
+            inline: Also return the image as base64 in the response. Only
+                    honoured for files up to MAX_INLINE_CAPTURE_BYTES; above
+                    that the path is returned alone, since a larger payload
+                    overruns a client's per-result budget.
 
         Returns:
-            Dict with base64 image data and dimensions.
+            Dict with the capture path, dimensions, and byte size. With
+            ``inline`` and a small enough file, also ``image_base64``.
         """
-        width = max(1, min(width, 7680))
-        height = max(1, min(height, 7680))
+        width = max(1, min(width, MAX_CAPTURE_DIMENSION))
+        height = max(1, min(height, MAX_CAPTURE_DIMENSION))
+
+        if inline:
+            # Encode only below the cap, and say why when skipping. Emitting a
+            # payload the client has to spill to a file is worse than an
+            # honest path plus a reason.
+            emit_body = textwrap.dedent(
+                f"""\
+                size_bytes = os.path.getsize(out_path)
+                payload = {{
+                    "path": out_path,
+                    "width": {width},
+                    "height": {height},
+                    "format": "png",
+                    "size_bytes": size_bytes,
+                }}
+                if size_bytes <= {MAX_INLINE_CAPTURE_BYTES}:
+                    with open(out_path, "rb") as f:
+                        payload["image_base64"] = base64.b64encode(
+                            f.read()
+                        ).decode("ascii")
+                    payload["encoding"] = "base64"
+                else:
+                    payload["inline_skipped"] = (
+                        "Capture is %d bytes, above the %d byte inline cap. "
+                        "Read the file at 'path', or lower width/height."
+                        % (size_bytes, {MAX_INLINE_CAPTURE_BYTES})
+                    )
+                print(json.dumps(payload))
+                """
+            )
+        else:
+            emit_body = textwrap.dedent(
+                f"""\
+                print(json.dumps({{
+                    "path": out_path,
+                    "width": {width},
+                    "height": {height},
+                    "format": "png",
+                    "size_bytes": os.path.getsize(out_path),
+                }}))
+                """
+            )
+
+        emit = textwrap.indent(emit_body.rstrip(), " " * 24)
+        max_retained = MAX_RETAINED_CAPTURES
+
         script = textwrap.dedent(f"""\
             import json
             import base64
             import os
             import tempfile
+            import uuid
             try:
                 import omni.kit.viewport.utility as vp_util
                 import omni.kit.app
@@ -896,9 +1181,34 @@ class IsaacTools(LoggerMixin):
                 if vp_api is None:
                     print(json.dumps({{"error": "No active viewport found"}}))
                 else:
-                    tmp_path = os.path.join(tempfile.gettempdir(), "_simul_mcp_capture.png")
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
+                    # Unique per capture: a fixed name makes an A/B pair
+                    # overwrite itself, and the caller now keeps the file.
+                    capture_dir = tempfile.gettempdir()
+                    out_path = os.path.join(
+                        capture_dir,
+                        "simul_capture_%s.png" % uuid.uuid4().hex[:12],
+                    )
+
+                    # Reclaim earlier captures; the caller keeps the path, so
+                    # nothing else ever deletes them.
+                    try:
+                        previous = sorted(
+                            (
+                                os.path.join(capture_dir, name)
+                                for name in os.listdir(capture_dir)
+                                if name.startswith("simul_capture_")
+                                and name.endswith(".png")
+                            ),
+                            key=os.path.getmtime,
+                            reverse=True,
+                        )
+                        for stale in previous[{max_retained} - 1:]:
+                            try:
+                                os.remove(stale)
+                            except OSError:
+                                pass
+                    except OSError:
+                        pass
 
                     # Set requested resolution on the viewport
                     vp_api.resolution = ({width}, {height})
@@ -908,26 +1218,17 @@ class IsaacTools(LoggerMixin):
 
                     # Kit 106+ (Isaac Sim 5.x): use schedule_capture with FileCapture
                     from omni.kit.widget.viewport.capture import FileCapture
-                    capture = FileCapture(tmp_path)
+                    capture = FileCapture(out_path)
                     vp_api.schedule_capture(capture)
 
                     # Wait for the file to be written
                     for _ in range(60):
                         await omni.kit.app.get_app().next_update_async()
-                        if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                             break
 
-                    if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
-                        with open(tmp_path, "rb") as f:
-                            data = base64.b64encode(f.read()).decode("ascii")
-                        os.remove(tmp_path)
-                        print(json.dumps({{
-                            "width": {width},
-                            "height": {height},
-                            "format": "png",
-                            "encoding": "base64",
-                            "image_base64": data,
-                        }}))
+                    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+{emit}
                     else:
                         print(json.dumps({{"error": "Viewport capture failed — file not created"}}))
             except ImportError as e:
@@ -959,9 +1260,9 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the created prim path and type.
         """
-        _prim_path = json.dumps(prim_path)
-        _prim_type = json.dumps(prim_type)
-        _attrs_str = json.dumps(json.dumps(attributes)) if attributes else '"{}"'
+        _prim_path = _pyval(prim_path)
+        _prim_type = _pyval(prim_type)
+        _attrs_str = _pyval(json.dumps(attributes)) if attributes else '"{}"'
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1002,7 +1303,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming deletion.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1044,7 +1345,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with updated transform values.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         t_str = str(translation) if translation else "None"
         r_str = str(rotation_euler) if rotation_euler else "None"
         s_str = str(scale) if scale else "None"
@@ -1119,8 +1420,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the visibility state.
         """
-        _prim_path = json.dumps(prim_path)
-        _vis_token = json.dumps("inherited" if visible else "invisible")
+        _prim_path = _pyval(prim_path)
+        _vis_token = _pyval("inherited" if visible else "invisible")
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1163,9 +1464,9 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the attribute was set.
         """
-        _prim_path = json.dumps(prim_path)
-        _attr_name = json.dumps(attribute_name)
-        _val_str = json.dumps(json.dumps(value))
+        _prim_path = _pyval(prim_path)
+        _attr_name = _pyval(attribute_name)
+        _val_str = _pyval(json.dumps(value))
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1210,8 +1511,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the duplication.
         """
-        _prim_path = json.dumps(prim_path)
-        _new_path = json.dumps(new_path)
+        _prim_path = _pyval(prim_path)
+        _new_path = _pyval(new_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1261,8 +1562,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with the new full path of the reparented prim.
         """
-        _prim_path = json.dumps(prim_path)
-        _new_parent = json.dumps(new_parent_path)
+        _prim_path = _pyval(prim_path)
+        _new_parent = _pyval(new_parent_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1353,7 +1654,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with mass, velocity, angular velocity, kinematic state, etc.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1413,7 +1714,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with lists of rigid bodies, colliders, and joints.
         """
-        _root_path = json.dumps(root_path)
+        _root_path = _pyval(root_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1459,7 +1760,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with collision enabled state and approximation type.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1503,7 +1804,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with joint type, bodies, limits, and drive settings.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1568,7 +1869,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with mass, density, center of mass, and inertia tensor.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1620,7 +1921,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the API was applied.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         kin_str = "True" if kinematic else "False"
         script = textwrap.dedent(f"""\
             import json
@@ -1667,8 +1968,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming collision was added.
         """
-        _prim_path = json.dumps(prim_path)
-        _approx = json.dumps(approximation)
+        _prim_path = _pyval(prim_path)
+        _approx = _pyval(approximation)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1715,7 +2016,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming updated mass properties.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         m_str = str(mass) if mass is not None else "None"
         d_str = str(density) if density is not None else "None"
         com_str = str(center_of_mass) if center_of_mass else "None"
@@ -1772,7 +2073,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the physics material was set.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -1818,7 +2119,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the physics scene was created with its settings.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         grav_dir = gravity_direction or [0.0, 0.0, -1.0]
         script = textwrap.dedent(f"""\
             import json
@@ -2098,7 +2399,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with material shader, inputs, and bound prims.
         """
-        _mat_path = json.dumps(material_path)
+        _mat_path = _pyval(material_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2217,8 +2518,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the material binding.
         """
-        _prim_path = json.dumps(prim_path)
-        _mat_path = json.dumps(material_path)
+        _prim_path = _pyval(prim_path)
+        _mat_path = _pyval(material_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2262,9 +2563,9 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the property was set.
         """
-        _mat_path = json.dumps(material_path)
-        _prop_name = json.dumps(property_name)
-        _val_str = json.dumps(json.dumps(value))
+        _mat_path = _pyval(material_path)
+        _prop_name = _pyval(property_name)
+        _val_str = _pyval(json.dumps(value))
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2341,8 +2642,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the material and shader were created.
         """
-        _mat_path = json.dumps(material_path)
-        _shader_type = json.dumps(shader_type)
+        _mat_path = _pyval(material_path)
+        _shader_type = _pyval(shader_type)
         color = diffuse_color or [0.8, 0.8, 0.8]
         script = textwrap.dedent(f"""\
             import json
@@ -2419,7 +2720,10 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the stage was opened.
         """
-        _file_path = json.dumps(file_path)
+        denial = self._sandbox_denial(file_path)
+        if denial is not None:
+            return denial
+        _file_path = _pyval(file_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2451,8 +2755,11 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the stage was saved.
         """
+        denial = self._sandbox_denial(file_path)
+        if denial is not None:
+            return denial
         if file_path:
-            _file_path = json.dumps(file_path)
+            _file_path = _pyval(file_path)
             script = textwrap.dedent(f"""\
                 import json
                 import omni.usd
@@ -2521,8 +2828,11 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the asset was imported.
         """
-        _asset_path = json.dumps(asset_path)
-        _target_path = json.dumps(target_path)
+        denial = self._sandbox_denial(asset_path)
+        if denial is not None:
+            return denial
+        _asset_path = _pyval(asset_path)
+        _target_path = _pyval(target_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2560,8 +2870,11 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the reference was added.
         """
-        _prim_path = json.dumps(prim_path)
-        _ref_path = json.dumps(reference_path)
+        denial = self._sandbox_denial(reference_path)
+        if denial is not None:
+            return denial
+        _prim_path = _pyval(prim_path)
+        _ref_path = _pyval(reference_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2603,7 +2916,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with min, max, size, and center of the bounding box.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2653,7 +2966,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with vertex_count, face_count, has_normals, has_uvs, etc.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2704,7 +3017,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with count and list of lights with type, intensity, color.
         """
-        _root_path = json.dumps(root_path)
+        _root_path = _pyval(root_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2758,7 +3071,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with light type, intensity, color, shadow settings, etc.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2833,10 +3146,10 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the light was created with its properties.
         """
-        _prim_path = json.dumps(prim_path)
-        _light_type = json.dumps(light_type)
+        _prim_path = _pyval(prim_path)
+        _light_type = _pyval(light_type)
         rgb = color or [1.0, 1.0, 1.0]
-        _tex = json.dumps(texture_file) if texture_file else "None"
+        _tex = _pyval(texture_file or None)
         valid_types = [
             "DomeLight", "DistantLight", "SphereLight",
             "RectLight", "DiskLight", "CylinderLight",
@@ -2915,7 +3228,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with the ordered list of ancestors from root to prim.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2962,7 +3275,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with tree structure showing path, type, name, and depth.
         """
-        _root_path = json.dumps(root_path)
+        _root_path = _pyval(root_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -2979,9 +3292,12 @@ class IsaacTools(LoggerMixin):
                     root_depth = len({_root_path}.rstrip("/").split("/")) - 1
                     prims = []
                     truncated = False
-                    for p in Usd.PrimRange(root):
+                    prim_iter = iter(Usd.PrimRange(root))
+                    for p in prim_iter:
                         path_str = str(p.GetPath())
                         depth = len(path_str.rstrip("/").split("/")) - 1 - root_depth
+                        if depth >= {max_depth}:
+                            prim_iter.PruneChildren()
                         if depth > {max_depth}:
                             continue
                         if len(prims) >= {max_prims}:
@@ -3014,7 +3330,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with material_binding, references, payloads, variant_sets.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -3137,7 +3453,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with total_prims, total_vertices, total_faces, etc.
         """
-        _root_path = json.dumps(root_path)
+        _root_path = _pyval(root_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -3208,7 +3524,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with unique texture file paths and their referencing materials.
         """
-        _root_path = json.dumps(root_path)
+        _root_path = _pyval(root_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -3263,7 +3579,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with variant sets and their selections.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -3303,7 +3619,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict confirming the viewport was focused.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -3381,7 +3697,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with animated attributes, sample counts, and time ranges.
         """
-        _prim_path = json.dumps(prim_path)
+        _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -3487,8 +3803,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with matching prims sorted by distance from center.
         """
-        _root_path = json.dumps(root_path)
-        _prim_type = json.dumps(prim_type) if prim_type else "None"
+        _root_path = _pyval(root_path)
+        _prim_type = _pyval(prim_type or None)
         script = textwrap.dedent(f"""\
             import json
             import math
@@ -3662,7 +3978,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict mapping each key to its current value.
         """
-        _keys = json.dumps(keys)
+        _keys = _pyval(keys)
         script = textwrap.dedent(f"""\
             import json
             import carb.settings
@@ -3693,7 +4009,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with applied settings and their verified new values.
         """
-        _settings = json.dumps(settings)
+        _settings = _pyval(settings)
         script = textwrap.dedent(f"""\
             import json
             import carb.settings
@@ -3753,9 +4069,9 @@ class IsaacTools(LoggerMixin):
             return {"error": "resolution must be [width, height]", "error_type": "ValueError"}
         res = [max(1, min(res[0], 3840)), max(1, min(res[1], 2160))]
 
-        _aov_names = json.dumps(aov_names)
-        _camera = json.dumps(camera_path)
-        _res = json.dumps(res)
+        _aov_names = _pyval(aov_names)
+        _camera = _pyval(camera_path)
+        _res = _pyval(res)
         script = textwrap.dedent(f"""\
             import json
             import numpy as np
@@ -3943,9 +4259,9 @@ class IsaacTools(LoggerMixin):
             return {"error": "attributes must not exceed 32 entries", "error_type": "ValueError"}
         max_prims = max(1, min(max_prims, 2000))
 
-        _type_name = json.dumps(type_name)
-        _attributes = json.dumps(attributes)
-        _root_path = json.dumps(root_path)
+        _type_name = _pyval(type_name)
+        _attributes = _pyval(attributes)
+        _root_path = _pyval(root_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -4144,7 +4460,7 @@ class IsaacTools(LoggerMixin):
             input/output attribute names with connections.
         """
         max_nodes = max(1, min(max_nodes, 1000))
-        _graph_path = json.dumps(graph_path)
+        _graph_path = _pyval(graph_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.graph.core as og
@@ -4216,9 +4532,9 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with created node path and type.
         """
-        _graph_path = json.dumps(graph_path)
-        _node_path = json.dumps(node_path)
-        _node_type = json.dumps(node_type)
+        _graph_path = _pyval(graph_path)
+        _node_path = _pyval(node_path)
+        _node_type = _pyval(node_type)
         script = textwrap.dedent(f"""\
             import json
             import omni.graph.core as og
@@ -4259,8 +4575,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with connection confirmation.
         """
-        _source = json.dumps(source_attr_path)
-        _target = json.dumps(target_attr_path)
+        _source = _pyval(source_attr_path)
+        _target = _pyval(target_attr_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.graph.core as og
@@ -4293,8 +4609,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with applied values.
         """
-        _node_path = json.dumps(node_path)
-        _values = json.dumps(values)
+        _node_path = _pyval(node_path)
+        _values = _pyval(values)
         script = textwrap.dedent(f"""\
             import json
             import omni.graph.core as og
@@ -4340,7 +4656,7 @@ class IsaacTools(LoggerMixin):
             Dict with list of registered node type names.
         """
         max_types = max(1, min(max_types, 2000))
-        _search = json.dumps(search)
+        _search = _pyval(search)
         script = textwrap.dedent(f"""\
             import json
             import omni.graph.core as og
@@ -4376,8 +4692,8 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with deletion confirmation.
         """
-        _graph_path = json.dumps(graph_path)
-        _node_path = json.dumps(node_path)
+        _graph_path = _pyval(graph_path)
+        _node_path = _pyval(node_path)
         script = textwrap.dedent(f"""\
             import json
             import omni.graph.core as og
@@ -4557,15 +4873,18 @@ class IsaacTools(LoggerMixin):
             Dict with log entries, counts per level, and log file path.
         """
         last_n = max(1, min(last_n, 500))
-        _level = json.dumps(level.lower())
+        _level = _pyval(level.lower())
         _last_n = last_n
-        _source_filter = json.dumps(source_filter)
-        _search = json.dumps(search)
+        _source_filter = _pyval(source_filter)
+        _search = _pyval(search)
         script = textwrap.dedent(f"""\
+            import collections
             import json
             import re
             import os
-            import glob
+
+            # Counts and totals below describe this window, not the whole file.
+            SCAN_WINDOW_BYTES = {LOG_SCAN_WINDOW_BYTES}
 
             level_filter = {_level}
             last_n = {_last_n}
@@ -4577,14 +4896,20 @@ class IsaacTools(LoggerMixin):
 
             # Find the most recent Kit log file
             log_dir = os.path.expanduser("~/.nvidia-omniverse/logs/Kit")
-            log_files = []
+            log_path = None
+            newest_mtime = -1.0
             for root, dirs, files in os.walk(log_dir):
                 for f in files:
-                    if f.endswith(".log"):
-                        full = os.path.join(root, f)
-                        log_files.append((os.path.getmtime(full), full))
-            log_files.sort(reverse=True)
-            log_path = log_files[0][1] if log_files else None
+                    if not f.endswith(".log"):
+                        continue
+                    full = os.path.join(root, f)
+                    try:
+                        mtime = os.path.getmtime(full)
+                    except OSError:
+                        continue
+                    if mtime > newest_mtime:
+                        newest_mtime = mtime
+                        log_path = full
 
             if not log_path:
                 print(json.dumps({{"error": "No Kit log file found"}}))
@@ -4593,10 +4918,20 @@ class IsaacTools(LoggerMixin):
                     r'\\[(Info|Warning|Warn|Error|Fatal|Verbose)\\]\\s*\\[([^\\]]+)\\]\\s*(.*)',
                     re.IGNORECASE
                 )
-                entries = []
+                # Only the tail is ever returned, so only the tail is read.
+                # Kit logs reach multiple gigabytes, and this runs on the main
+                # thread — reading one to hand back 50 lines freezes the sim.
+                entries = collections.deque(maxlen=last_n)
+                matched = 0
                 counts = {{"verbose": 0, "info": 0, "warn": 0, "error": 0}}
+                log_size = os.path.getsize(log_path)
+                scan_start = max(0, log_size - SCAN_WINDOW_BYTES)
 
                 with open(log_path, "r", errors="replace") as f:
+                    if scan_start:
+                        f.seek(scan_start)
+                        f.readline()  # drop the partial line we landed inside
+                        scan_start = f.tell()
                     for line in f:
                         m = pattern.search(line)
                         if not m:
@@ -4623,6 +4958,7 @@ class IsaacTools(LoggerMixin):
                         if ts_match:
                             timestamp = ts_match.group(1)
 
+                        matched += 1
                         entries.append({{
                             "timestamp": timestamp,
                             "level": raw_level,
@@ -4630,10 +4966,13 @@ class IsaacTools(LoggerMixin):
                             "message": message[:500],
                         }})
 
-                tail = entries[-last_n:] if len(entries) > last_n else entries
+                tail = list(entries)
                 print(json.dumps({{
                     "log_file": log_path,
-                    "total_matching": len(entries),
+                    "log_size_bytes": log_size,
+                    "scanned_bytes": log_size - scan_start,
+                    "truncated_scan": scan_start > 0,
+                    "total_matching": matched,
                     "returned": len(tail),
                     "counts": counts,
                     "entries": tail,
@@ -4651,7 +4990,7 @@ class IsaacTools(LoggerMixin):
         Returns:
             Dict with the previous and new log level.
         """
-        _level = json.dumps(level.lower())
+        _level = _pyval(level.lower())
         script = textwrap.dedent(f"""\
             import json
             import carb.logging
