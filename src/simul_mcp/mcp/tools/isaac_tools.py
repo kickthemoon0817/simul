@@ -164,7 +164,9 @@ class IsaacTools(LoggerMixin):
                 details={"raw_output": output[:2000]},
             ).model_dump()
 
-    async def execute_script(self, code: str) -> Dict[str, Any]:
+    async def execute_script(
+        self, code: str, keep_raw_output: bool = False
+    ) -> Dict[str, Any]:
         """
         Execute raw Python inside the running Isaac Sim process.
 
@@ -175,6 +177,9 @@ class IsaacTools(LoggerMixin):
 
         Args:
             code: Python source to run in Isaac Sim's interpreter.
+            keep_raw_output: Also return the script's stdout verbatim even when
+                it parsed as a JSON object. Off by default because it doubles
+                the payload; the CLI's --raw needs it, MCP callers do not.
 
         Returns:
             The script's JSON object when it printed one, otherwise its text
@@ -238,7 +243,12 @@ class IsaacTools(LoggerMixin):
             except json.JSONDecodeError:
                 parsed = None
             if isinstance(parsed, dict):
-                parsed.setdefault("success", True)
+                # A generated script reports failure as {"error": ...}; stamping
+                # success onto that contradicts it, and the caller reading
+                # "success" is usually an LLM that will believe the flag.
+                parsed.setdefault("success", "error" not in parsed)
+                if keep_raw_output:
+                    parsed.setdefault("output", result.output)
                 return parsed
             if parsed is not None:
                 # A bare JSON value is not a payload, so keep the text too.

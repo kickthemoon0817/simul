@@ -766,15 +766,16 @@ def exec_script(
     tools = _tools(host, port, timeout)
     # Same path the MCP tool takes, rather than reaching through _client into
     # the adapter with a second copy of the transport rules.
-    payload = asyncio.run(tools.execute_script(code))
+    payload = asyncio.run(tools.execute_script(code, keep_raw_output=raw))
     if payload.get("error"):
         if is_json_mode():
             emit_error(payload["error"], payload.get("error_type", "Error"))
         console.print(f"[red]{payload['error']}[/red]")
         raise typer.Exit(1)
 
-    # execute_script already unwrapped a JSON object when the script printed
-    # one; "output" survives only for scripts that printed something else.
+    # execute_script unwraps a JSON object when the script printed one. It only
+    # carries stdout as well when asked, which --raw does — otherwise the whole
+    # payload would be returned twice.
     text_output = payload.get("output", "")
 
     if is_json_mode() and not raw:

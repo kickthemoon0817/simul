@@ -130,3 +130,29 @@ def test_bridge_enabled_keeps_raw_scripts_on_the_vscode_socket() -> None:
 
     assert client.execute_vscode_only.await_count == 1
     assert client.execute.await_count == 0
+
+
+def test_a_script_error_payload_is_not_stamped_successful() -> None:
+    """Generated scripts report failure as {"error": ...}; do not contradict it."""
+    tools, _ = _tools(
+        ScriptResult(success=True, output=json.dumps({"error": "No stage is currently open"}))
+    )
+
+    result = asyncio.run(tools.execute_script("print(...)"))
+
+    assert result["error"] == "No stage is currently open"
+    assert result.get("success") is not True, "stamped success onto an error payload"
+
+
+def test_raw_stdout_is_preserved_for_json_emitting_scripts() -> None:
+    """`--raw` exists to hand back stdout; a JSON script must not yield nothing."""
+    tools, _ = _tools(ScriptResult(success=True, output='{"prims": [1, 2]}'))
+
+    plain = asyncio.run(tools.execute_script("print(...)"))
+    assert "output" not in plain, "stdout duplicated the payload for MCP callers"
+
+    tools2, _ = _tools(ScriptResult(success=True, output='{"prims": [1, 2]}'))
+    raw = asyncio.run(tools2.execute_script("print(...)", keep_raw_output=True))
+
+    assert raw["prims"] == [1, 2]
+    assert raw["output"] == '{"prims": [1, 2]}', "raw stdout was discarded"
