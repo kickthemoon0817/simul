@@ -88,6 +88,19 @@ class BridgeServerLifecycle:
         await self._server.wait_closed()
         self._server = None
 
+    # A wildcard bind covers every interface, loopback included, but it is not
+    # an address anything can connect to — and the reader drops a discovery
+    # entry whose host is not loopback. Advertise the address the wildcard
+    # already answers on, so a container that binds 0.0.0.0 (which is what
+    # Docker's published port requires) still shows up.
+    _WILDCARD_BINDS = frozenset({"", "0.0.0.0", "::", "*"})
+
+    def _advertised_host(self) -> str:
+        """Return an address a client can actually dial."""
+        if self._host in self._WILDCARD_BINDS:
+            return "127.0.0.1"
+        return self._host
+
     def write_discovery_file(
         self,
         discovery_dir: str,
@@ -99,7 +112,7 @@ class BridgeServerLifecycle:
         filepath = os.path.join(discovery_dir, f"simul-mcp-{pid}.json")
         data = {
             "pid": pid,
-            "host": self._host,
+            "host": self._advertised_host(),
             "port": self._actual_port,
             "configured_port": self._port,
         }

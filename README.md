@@ -241,7 +241,9 @@ This Compose file:
 - mounts `./src/simul_mcp/bridge_ext/khemoo.simul.mcp` into `/tmp/extsUser/khemoo.simul.mcp`
 - starts `/isaac-sim/isaac-sim.sh --allow-root --no-window`
 - enables both `khemoo.simul.mcp` and `isaacsim.code_editor.vscode`
-- binds the bridge inside the container on `0.0.0.0:${ISAAC_BRIDGE_PORT:-8229}`
+- binds the bridge inside the container on `0.0.0.0:${ISAAC_BRIDGE_PORT:-8229}` —
+  a container-loopback bind cannot receive a published port, so the host would
+  connect and then be closed on with no data
 - enables bridge `execute_script` by default for easy local use
 - binds the VS Code fallback inside the container on `0.0.0.0:${ISAAC_VSCODE_PORT:-8226}`
 - publishes those ports back to the host on the same numbers

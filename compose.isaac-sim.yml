@@ -1,7 +1,19 @@
 # SECURITY: The bridge extension socket accepts TCP connections WITHOUT
-# authentication. By default it binds to 127.0.0.1 (localhost only).
-# Set ISAAC_BIND_HOST=0.0.0.0 only in trusted networks.
-# For remote access, use SSH tunnels or a reverse proxy with auth.
+# authentication. Isolation here comes from the *publish* address, not the
+# bind address:
+#
+#   - Inside the container the bridge binds 0.0.0.0. Docker forwards a
+#     published port to the container's network interface, never to its
+#     loopback, so a container-loopback bind is unreachable — the host
+#     connects, docker-proxy accepts, and the peer closes with no data. That
+#     silent hang looks exactly like Isaac Sim being down.
+#   - On the host the ports are published to 127.0.0.1 only, so nothing off
+#     this machine can reach them. That is where the loopback restriction
+#     belongs.
+#
+# Set ISAAC_BIND_HOST only if you know why; publishing on 0.0.0.0 (dropping
+# the 127.0.0.1: prefix below) is what actually exposes the socket to the
+# network. For remote access use an SSH tunnel or an authenticating proxy.
 #
 # The bridge handles both typed JSON and raw Python (VS Code compat)
 # protocols on a single port. The VS Code extension is kept as a
@@ -24,12 +36,12 @@ services:
       - khemoo.simul.mcp
       - --enable
       - isaacsim.code_editor.vscode
-      - --/exts/khemoo.simul.mcp/host=${ISAAC_BIND_HOST:-127.0.0.1}
+      - --/exts/khemoo.simul.mcp/host=${ISAAC_BIND_HOST:-0.0.0.0}
       - --/exts/khemoo.simul.mcp/port=${ISAAC_BRIDGE_PORT:-8229}
       - --/exts/khemoo.simul.mcp/allow_unsafe_execution=true
       - --/exts/khemoo.simul.mcp/max_port_retries=${ISAAC_MAX_PORT_RETRIES:-10}
       - --/exts/khemoo.simul.mcp/discovery_dir=/tmp/simul-mcp
-      - --/exts/isaacsim.code_editor.vscode/host=${ISAAC_BIND_HOST:-127.0.0.1}
+      - --/exts/isaacsim.code_editor.vscode/host=${ISAAC_BIND_HOST:-0.0.0.0}
       - --/exts/isaacsim.code_editor.vscode/port=${ISAAC_VSCODE_PORT:-8226}
     environment:
       ACCEPT_EULA: "Y"
