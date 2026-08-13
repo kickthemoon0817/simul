@@ -271,8 +271,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="capture_isaac_viewport",
         description=(
-            "Capture the current viewport as a PNG image and return "
-            "the file path or base64-encoded data."
+            "Capture the current viewport to a PNG on the Isaac Sim host and "
+            "return its path. Pass inline=true to also receive base64 image "
+            "data, which is only included for small captures."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -281,11 +282,12 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     async def capture_isaac_viewport(
         width: int = 1280,
         height: int = 720,
+        inline: bool = False,
     ) -> Dict[str, Any]:
         return await server._exec_isaac(
             "capture_isaac_viewport",
             server._isaac_tools.capture_isaac_viewport(
-                width=width, height=height
+                width=width, height=height, inline=inline
             ),
         )
 

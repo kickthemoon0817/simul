@@ -599,7 +599,7 @@ class TestUnrealRuntimeSessionPhase2:
                     "LogOutput": [
                         # A leading info line should be ignored; the marker line wins.
                         {"Type": "Info", "Output": "LogPython: capture starting"},
-                        {"Type": "Info", "Output": "@@SIMUL_SCREENSHOT@@iVBOR=="},
+                        {"Type": "Info", "Output": '@@SIMUL_SCREENSHOT@@{"path": "/proj/Saved/Screenshots/shot.jpeg", "size_bytes": 5, "image_base64": "iVBOR=="}'},
                     ],
                 })
             return FakeResponse({}, 404)
@@ -607,9 +607,11 @@ class TestUnrealRuntimeSessionPhase2:
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
         result = asyncio.run(session.capture_viewport(
-            resolution_x=1280, resolution_y=720, format="jpeg"
+            resolution_x=1280, resolution_y=720, format="jpeg", inline=True
         ))
 
+        assert result["path"] == "/proj/Saved/Screenshots/shot.jpeg"
+        assert result["size_bytes"] == 5
         assert result["image_base64"] == "iVBOR=="
         assert result["resolution_x"] == 1280
         assert result["resolution_y"] == 720
@@ -662,7 +664,7 @@ class TestUnrealRuntimeSessionPhase2:
 
         result = asyncio.run(session.capture_viewport())
 
-        assert result["image_base64"] == ""
+        assert result["path"] == ""
         assert result["resolution_x"] == 1920
         assert result["resolution_y"] == 1080
         assert result["format"] == "png"

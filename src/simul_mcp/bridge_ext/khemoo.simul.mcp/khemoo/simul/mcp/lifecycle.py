@@ -13,6 +13,10 @@ from typing import Any, Awaitable, Callable
 from .protocol import BridgeRequest, BridgeResponse
 
 
+class _RequestReadTimeout(Exception):
+    """The client stalled mid-request; not the in-sim handler's fault."""
+
+
 class BridgeServerLifecycle:
     """Manage the typed TCP bridge server lifecycle."""
 
@@ -25,6 +29,7 @@ class BridgeServerLifecycle:
         max_response_bytes: int = 10 * 1024 * 1024,
         max_port_retries: int = 10,
         vscode_handler: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+        request_timeout: float = 120.0,
     ) -> None:
         self._host = host
         self._port = port
@@ -33,6 +38,7 @@ class BridgeServerLifecycle:
         self._max_response_bytes = max_response_bytes
         self._max_port_retries = max_port_retries
         self._vscode_handler = vscode_handler
+        self._request_timeout = request_timeout
         self._server: asyncio.AbstractServer | None = None
         self._actual_port: int = port
         self._discovery_file: str | None = None
@@ -154,13 +160,45 @@ class BridgeServerLifecycle:
         """Handle a bridge-protocol client (length-prefixed JSON)."""
         request_id = ""
         try:
-            request_bytes = await asyncio.wait_for(
-                reader.readexactly(payload_size),
-                timeout=30.0,
-            )
+            try:
+                request_bytes = await asyncio.wait_for(
+                    reader.readexactly(payload_size),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                # Distinguished from the handler timeout below: this one means
+                # the client sent a length prefix and then stalled. Reporting it
+                # as "the handler is still running inside Isaac Sim" would point
+                # the operator at the wrong subsystem entirely.
+                raise _RequestReadTimeout(
+                    f"Client sent {payload_size} bytes of header then stalled; "
+                    "no request body within 30.0s."
+                ) from None
             request = BridgeRequest.from_json(request_bytes)
             request_id = request.request_id
-            response = await self._request_handler(request)
+            # Without this, a script that never returns hangs Kit permanently:
+            # the handler runs on the main thread, so nothing else in the app
+            # makes progress and SIGKILL is the only way out. Cutting the wait
+            # does not stop the runaway work, but it releases the client and
+            # makes the failure visible instead of silent.
+            response = await asyncio.wait_for(
+                self._request_handler(request), timeout=self._request_timeout
+            )
+        except _RequestReadTimeout as exc:
+            response = BridgeResponse.failure(
+                request_id=request_id,
+                name="RequestReadTimeout",
+                message=str(exc),
+            )
+        except asyncio.TimeoutError:
+            response = BridgeResponse.failure(
+                request_id=request_id,
+                name="RequestTimeout",
+                message=(
+                    f"Handler exceeded {self._request_timeout}s. The action may "
+                    "still be running inside Isaac Sim."
+                ),
+            )
         except Exception as exc:
             response = BridgeResponse.failure(
                 request_id=request_id,

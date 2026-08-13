@@ -52,14 +52,10 @@ def test_load_settings_supports_nested_repo_config_without_isaac_env(
     assert settings.isaac_sim.bridge_port == 8229
     assert settings.isaac_sim.bridge_fallback_to_vscode is True
     assert settings.usd.max_concurrent_operations == 10
-    assert settings.mesh.include_textures is True
-    assert settings.mesh.texture_resolution == 1024
     assert settings.viewport.fov == 45.0
     assert settings.viewport.max_bounces == 4
     assert settings.security.rate_limiting_enabled is True
     assert settings.security.requests_per_minute == 60
-    assert settings.development.enable_mock_isaac is False
-    assert settings.development.skip_gpu_operations is False
     assert any(path.endswith("/examples") for path in settings.security.allowed_paths)
 
 

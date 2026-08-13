@@ -370,6 +370,14 @@ class IsaacSocketClient:
         try:
             writer.write(frame)
             await writer.drain()
+            # The bridge's raw-code path reads until EOF or a 5 s idle timeout;
+            # without this it would wait out that timeout on every request that
+            # reached it.
+            try:
+                if writer.can_write_eof():
+                    writer.write_eof()
+            except (OSError, RuntimeError):
+                pass
 
             try:
                 header = await asyncio.wait_for(
