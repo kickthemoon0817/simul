@@ -169,12 +169,12 @@ async def test_three_agents_route_to_three_distinct_isaac_apps(
         worker("agent-c", "container"),
     )
 
-    assert [result["address"] for result in results] == [
+    assert [_payload(result)["address"] for result in results] == [
         "127.0.0.1:8229",
         "127.0.0.1:8329",
         "127.0.0.1:9229",
     ]
-    assert [result["vscode_address"] for result in results] == [
+    assert [_payload(result)["vscode_address"] for result in results] == [
         "127.0.0.1:8226",
         "127.0.0.1:8326",
         "127.0.0.1:9226",
