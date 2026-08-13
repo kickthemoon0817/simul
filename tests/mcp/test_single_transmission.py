@@ -136,3 +136,33 @@ def test_annotations_drop_constant_noise(monkeypatch: pytest.MonkeyPatch) -> Non
         assert "idempotentHint" not in dumped
         assert "openWorldHint" not in dumped
         assert dumped.get("destructiveHint") is not False
+
+
+def test_every_isaac_tool_is_single_transmission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tools that bypass _exec_isaac must convert too, or they keep the duplicate.
+
+    execute_isaac_script and ping_isaac build their own responses rather than
+    going through _exec_isaac, so the central fix does not reach them.
+    execute_isaac_script returns arbitrary script output — the largest payload
+    on the surface — which makes it the worst one to leave duplicating.
+    """
+    instance = _make_server(monkeypatch)
+
+    dict_returning = [
+        tool.name
+        for tool in instance.mcp.tools
+        if tool.name.endswith("_isaac") or tool.name.startswith(("isaac_", "execute_isaac", "ping_isaac"))
+    ]
+    assert "ping_isaac" in dict_returning
+
+    import inspect
+
+    for tool in instance.mcp.tools:
+        if tool.name not in {"execute_isaac_script", "ping_isaac"}:
+            continue
+        annotation = inspect.signature(tool.func).return_annotation
+        assert "ToolResult" in str(annotation), (
+            f"{tool.name} still returns a plain dict, so its payload is sent twice"
+        )

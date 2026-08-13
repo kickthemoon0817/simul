@@ -42,7 +42,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True, destructive=True
         ),
     )
-    async def execute_isaac_script(code: str) -> Dict[str, Any]:
+    async def execute_isaac_script(code: str) -> ToolResult:
         """
         Execute Python code inside the running Isaac Sim process.
 
@@ -58,10 +58,10 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         """
         MAX_CODE_SIZE: int = 100_000  # 100 KB
         if len(code) > MAX_CODE_SIZE:
-            return ErrorResponse(
+            return server._as_text_result(ErrorResponse(
                 error=f"Code payload too large ({len(code)} bytes, max {MAX_CODE_SIZE}).",
                 error_type="PayloadTooLarge",
-            ).model_dump()
+            ).model_dump())
 
         rate_error = server._check_rate_limit("execute_isaac_script")
         if rate_error:
@@ -70,7 +70,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 params={"code_bytes": len(code)},
                 error="rate_limited",
             )
-            return rate_error
+            return server._as_text_result(rate_error)
 
         log_params: Dict[str, Any] = {
             "code_bytes": len(code),
@@ -92,11 +92,11 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                         params=log_params,
                         error=result.error_value or "Script execution failed",
                     )
-                    return ErrorResponse(
+                    return server._as_text_result(ErrorResponse(
                         error=result.error_value or "Script execution failed",
                         error_type=result.error_name or "RuntimeError",
                         details={"traceback": result.traceback} if result.traceback else None,
-                    ).model_dump()
+                    ).model_dump())
 
                 binding = server._get_active_binding()
                 if binding is not None:
@@ -115,12 +115,12 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                             params=log_params,
                         )
                         if isinstance(parsed, dict):
-                            return parsed
-                        return {
+                            return server._as_text_result(parsed)
+                        return server._as_text_result({
                             "success": True,
                             "output": result.output,
                             "parsed": parsed,
-                        }
+                        })
                     except json.JSONDecodeError:
                         pass
 
@@ -128,7 +128,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                     "execute_isaac_script", duration_ms, True,
                     params=log_params,
                 )
-                return {"success": True, "output": result.output}
+                return server._as_text_result({"success": True, "output": result.output})
 
             except ConnectionRefusedError:
                 duration_ms = (time.monotonic() - t0) * 1000
@@ -137,7 +137,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                     params=log_params,
                     error="ConnectionError",
                 )
-                return ErrorResponse(
+                return server._as_text_result(ErrorResponse(
                     error=(
                         f"Isaac Sim is not reachable at {client.address}. "
                         "Ensure Isaac Sim is running with the "
@@ -145,7 +145,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                         "Use ping_isaac to verify connectivity."
                     ),
                     error_type="ConnectionError",
-                ).model_dump()
+                ).model_dump())
             except TimeoutError:
                 duration_ms = (time.monotonic() - t0) * 1000
                 server.usage_tracker.record(
@@ -153,7 +153,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                     params=log_params,
                     error="TimeoutError",
                 )
-                return ErrorResponse(
+                return server._as_text_result(ErrorResponse(
                     error=(
                         f"Script execution timed out after "
                         f"{client.timeout_seconds}s on {client.address}. "
@@ -161,7 +161,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                         "Use ping_isaac to check if Isaac Sim is still reachable."
                     ),
                     error_type="TimeoutError",
-                ).model_dump()
+                ).model_dump())
             except Exception as exc:
                 duration_ms = (time.monotonic() - t0) * 1000
                 server.usage_tracker.record(
@@ -169,7 +169,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                     params=log_params,
                     error=str(exc),
                 )
-                return ErrorResponse(error=str(exc), error_type="Exception").model_dump()
+                return server._as_text_result(ErrorResponse(error=str(exc), error_type="Exception").model_dump())
 
     @server.mcp.tool(
         name="ping_isaac",
@@ -182,7 +182,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def ping_isaac() -> Dict[str, Any]:
+    async def ping_isaac() -> ToolResult:
         """
         Ping Isaac Sim to verify connectivity.
 
@@ -191,16 +191,16 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         """
         rate_error = server._check_rate_limit("ping_isaac")
         if rate_error:
-            return rate_error
+            return server._as_text_result(rate_error)
         client = server._get_request_isaac_client()
         reachable = await client.ping()
-        return {
+        return server._as_text_result({
             "reachable": reachable,
             "address": client.address,
             "bridge_address": client.bridge_address,
             "vscode_address": client.vscode_address,
             "timeout_seconds": client.timeout_seconds,
-        }
+        })
 
     # -- Scene Inspection tools -------------------------------------------
 
