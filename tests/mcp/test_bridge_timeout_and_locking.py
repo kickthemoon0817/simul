@@ -187,5 +187,9 @@ def test_busy_instance_reports_busy_instead_of_waiting_forever(
 
     result = asyncio.run(_exercise())
 
-    assert result.get("error_type") == "InstanceBusy"
-    assert "busy" in result["error"].lower()
+    # _exec_isaac returns a content-only ToolResult so the payload is not also
+    # sent as structuredContent; the busy envelope rides in that content block.
+    payload = json.loads(result.content[0].text)
+
+    assert payload.get("error_type") == "InstanceBusy"
+    assert "busy" in payload["error"].lower()

@@ -24,6 +24,7 @@ def register_stats_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
+        output_schema=None,
     )
     async def get_tool_usage_stats(
         tool_name: Optional[str] = None,
@@ -54,6 +55,7 @@ def register_stats_tools(server: "SimulMCPServer") -> None:
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False
         ),
+        output_schema=None,
     )
     async def reset_tool_usage_stats() -> Dict[str, Any]:
         """Reset all usage tracking data."""

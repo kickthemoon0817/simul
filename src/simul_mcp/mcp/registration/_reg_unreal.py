@@ -32,9 +32,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealHealthCheckResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def unreal_health_check() -> Dict[str, Any]:
@@ -90,9 +88,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealPingResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def ping_unreal() -> Dict[str, Any]:
@@ -144,9 +140,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealListInstancesResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def list_unreal_instances(
@@ -277,9 +271,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealCaptureViewportResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def capture_unreal_viewport(
@@ -420,9 +412,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealEngineInfoResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_unreal_engine_info() -> Dict[str, Any]:
@@ -470,9 +460,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealLoadedMapResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_unreal_loaded_map() -> Dict[str, Any]:
@@ -524,9 +512,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealListActorsResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def list_unreal_actors(
@@ -587,9 +573,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealGetActorInfoResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_unreal_actor_info(actor_path: str) -> Dict[str, Any]:
@@ -640,9 +624,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSearchAssetsResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def search_unreal_assets(
@@ -717,9 +699,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealDescribeObjectResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def describe_unreal_object(object_path: str) -> Dict[str, Any]:
@@ -770,9 +750,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealGetThumbnailResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_unreal_actor_thumbnail(
@@ -831,9 +809,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSceneSummaryResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def summarize_unreal_scene() -> Dict[str, Any]:
@@ -883,9 +859,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealViewportInfoResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_unreal_viewport_info() -> Dict[str, Any]:
@@ -933,9 +907,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSetCameraViewResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_unreal_camera_view(
@@ -1004,9 +976,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealFocusActorResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def focus_unreal_on_actor(
@@ -1065,9 +1035,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSpawnActorResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def spawn_unreal_actor(
@@ -1122,9 +1090,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             open_world=True,
             destructive=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealDeleteActorResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def delete_unreal_actor(
@@ -1166,9 +1132,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSetActorTransformResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_unreal_actor_transform(
@@ -1224,9 +1188,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSetActorPropertyResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_unreal_actor_property(
@@ -1276,9 +1238,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealCallActorFunctionResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def call_unreal_actor_function(
@@ -1326,9 +1286,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSetActorParentResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_unreal_actor_parent(
@@ -1374,9 +1332,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealAddComponentResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def add_unreal_component(
@@ -1424,9 +1380,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSetActorVisibilityResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_unreal_actor_visibility(
@@ -1478,9 +1432,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealGetMaterialInfoResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_unreal_material_info(
@@ -1524,9 +1476,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSetMaterialParamsResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_unreal_material_params(
@@ -1589,9 +1539,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealCreateMaterialInstanceResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def create_unreal_material_instance(
@@ -1639,9 +1587,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealAssignMaterialResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def assign_unreal_material(
@@ -1689,9 +1635,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSetLightParamsResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_unreal_light_params(
@@ -1751,9 +1695,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSetRenderSettingsResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_unreal_render_settings(
@@ -1801,9 +1743,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealControlSimulationResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def control_unreal_simulation(
@@ -1845,9 +1785,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealGetSimulationStatusResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_unreal_simulation_status() -> Dict[str, Any]:
@@ -1887,9 +1825,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealEnablePhysicsResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def enable_unreal_physics(
@@ -1937,9 +1873,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSetCollisionResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_unreal_collision(
@@ -1987,9 +1921,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealApplyForceResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def apply_unreal_force(
@@ -2047,9 +1979,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSetPhysicsParamsResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_unreal_physics_params(
@@ -2105,9 +2035,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealImportUsdResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def import_unreal_usd(
@@ -2159,9 +2087,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealExportUsdResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def export_unreal_usd(
@@ -2214,9 +2140,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealConvertToSimreadyResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def convert_to_simready(
@@ -2276,9 +2200,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealValidateSimreadyResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def validate_simready_asset(
@@ -2329,9 +2251,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealGetInterchangeInfoResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_unreal_interchange_info() -> Dict[str, Any]:
@@ -2375,9 +2295,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealBatchOperationsResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def batch_unreal_operations(
@@ -2422,9 +2340,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealQuerySceneGraphResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def query_unreal_scene_graph(
@@ -2474,9 +2390,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealAnalyzeSceneForRoboticsResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def analyze_unreal_scene_for_robotics(
@@ -2527,9 +2441,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealGenerateProceduralSceneResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def generate_unreal_procedural_scene(
@@ -2584,9 +2496,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealGetActorBySemanticLabelResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_unreal_actor_by_semantic_label(
@@ -2638,9 +2548,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealGenerateMeshPrimitiveResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def generate_unreal_mesh_primitive(
@@ -2696,9 +2604,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealApplyMeshBooleanResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def apply_unreal_mesh_boolean(
@@ -2746,9 +2652,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealComputeConvexHullResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def compute_unreal_convex_hull(
@@ -2792,9 +2696,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealDecomposeConvexHullResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def decompose_unreal_convex_hull(
@@ -2846,9 +2748,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealEditMeshTopologyResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def edit_unreal_mesh_topology(
@@ -2907,9 +2807,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSubdivideMeshResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def subdivide_unreal_mesh(
@@ -2957,9 +2855,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealSimplifyMeshResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def simplify_unreal_mesh(
@@ -3009,9 +2905,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealCutMeshPlaneResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def cut_unreal_mesh_plane(
@@ -3065,9 +2959,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealValidateMeshResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def validate_unreal_mesh(
@@ -3118,9 +3010,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealConvertMeshFormatResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def convert_unreal_mesh_format(
@@ -3173,9 +3063,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealRemeshMeshResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def remesh_unreal_mesh(
@@ -3227,9 +3115,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            UnrealComputeMeshUvResponse, ErrorResponse
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def compute_unreal_mesh_uv(

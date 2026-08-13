@@ -112,6 +112,15 @@ def _make_server(
     return server_module.SimulMCPServer(settings=settings)
 
 
+def _payload(result: Any) -> dict[str, Any]:
+    """Read a tool result's JSON content block.
+
+    Isaac tools return a content-only ToolResult so the payload is not also sent
+    as structuredContent.
+    """
+    return json.loads(result.content[0].text)
+
+
 def _get_tool(instance: server_module.SimulMCPServer, name: str) -> Callable[..., Any]:
     for tool in instance.mcp.tools:
         if tool.name == name:
@@ -160,12 +169,12 @@ async def test_three_agents_route_to_three_distinct_isaac_apps(
         worker("agent-c", "container"),
     )
 
-    assert [result["address"] for result in results] == [
+    assert [_payload(result)["address"] for result in results] == [
         "127.0.0.1:8229",
         "127.0.0.1:8329",
         "127.0.0.1:9229",
     ]
-    assert [result["vscode_address"] for result in results] == [
+    assert [_payload(result)["vscode_address"] for result in results] == [
         "127.0.0.1:8226",
         "127.0.0.1:8326",
         "127.0.0.1:9226",
@@ -215,7 +224,7 @@ async def test_same_instance_calls_are_serialized_per_instance(
     results = await asyncio.gather(worker("agent-a"), worker("agent-b"))
 
     assert max_running == 1
-    assert all(result["address"] == "127.0.0.1:8229" for result in results)
+    assert all(_payload(result)["address"] == "127.0.0.1:8229" for result in results)
 
 
 @pytest.mark.asyncio

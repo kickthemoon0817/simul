@@ -26,7 +26,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(BlenderInfoResponse, ErrorResponse),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_info() -> Dict[str, Any]:
@@ -74,10 +74,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderSceneObjectsResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def list_blender_scene_objects(
@@ -149,10 +146,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderObjectInfoResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_object_info(
@@ -199,10 +193,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderMeshInfoResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_mesh_info(
@@ -249,10 +240,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderBoundingBoxResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_bounding_box(
@@ -306,10 +294,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderSearchObjectsResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def search_blender_objects(
@@ -364,10 +349,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderSceneSummaryResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def summarize_blender_scene() -> Dict[str, Any]:
@@ -406,10 +388,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderMaterialInfoResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_material_info(
@@ -458,10 +437,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderDistanceResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_distance_between(
@@ -513,10 +489,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderBoundsCheckResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def check_blender_object_bounds(
@@ -573,10 +546,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderCaptureViewportResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def capture_blender_viewport(
@@ -634,10 +604,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderSetCameraViewResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_blender_camera_view(
@@ -692,10 +659,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderCameraInfoResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_camera_info(
@@ -736,10 +700,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderFocusOnObjectResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def focus_blender_on_object(
@@ -794,10 +755,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderViewportInfoResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_viewport_info() -> Dict[str, Any]:
@@ -838,10 +796,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderCaptureSequenceResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def capture_blender_viewport_sequence(
@@ -907,10 +862,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderCreateObjectResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def create_blender_object(
@@ -972,10 +924,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             open_world=True,
             destructive=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderDeleteObjectResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def delete_blender_object(
@@ -1022,10 +971,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderSetTransformResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_blender_object_transform(
@@ -1090,10 +1036,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderSetParentResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_blender_object_parent(
@@ -1145,10 +1088,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderClearParentResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def clear_blender_object_parent(
@@ -1200,10 +1140,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderAssignMaterialResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def assign_blender_material(
@@ -1264,10 +1201,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderAddModifierResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def add_blender_modifier(
@@ -1325,10 +1259,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderSetLightParamsResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_blender_light_params(
@@ -1399,10 +1330,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             open_world=True,
             destructive=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderOpenFileResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def open_blender_file(
@@ -1449,10 +1377,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderSaveFileResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def save_blender_file(
@@ -1499,10 +1424,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderImportFileResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def import_blender_file(
@@ -1556,10 +1478,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderExportFileResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def export_blender_file(
@@ -1614,10 +1533,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderFileInfoResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_file_info() -> Dict[str, Any]:
@@ -1658,10 +1574,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderSetFrameResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_blender_frame(frame: int) -> Dict[str, Any]:
@@ -1706,10 +1619,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderGetFrameResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_frame() -> Dict[str, Any]:
@@ -1748,10 +1658,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderSetFrameRangeResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def set_blender_frame_range(
@@ -1803,10 +1710,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderPlayAnimationResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def play_blender_animation(
@@ -1853,10 +1757,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderInsertKeyframeResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def insert_blender_keyframe(
@@ -1920,10 +1821,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderDeleteKeyframeResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def delete_blender_keyframe(
@@ -1987,10 +1885,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderGetKeyframesResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_keyframes(
@@ -2047,10 +1942,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderSetupRigidBodyResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def setup_blender_rigid_body(
@@ -2126,10 +2018,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderAddForceFieldResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def add_blender_force_field(
@@ -2193,10 +2082,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderGetForceFieldInfoResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_force_field_info(
@@ -2251,10 +2137,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderAddConstraintResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def add_blender_rigid_body_constraint(
@@ -2321,10 +2204,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderGetConstraintInfoResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_constraint_info(
@@ -2379,10 +2259,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderGetPhysicsStateResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_physics_state(
@@ -2437,10 +2314,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderGetTrajectoryResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_blender_object_trajectory(
@@ -2504,10 +2378,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderBakeSimulationResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def bake_blender_simulation(
@@ -2565,10 +2436,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderFreeBakeResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def free_blender_bake() -> Dict[str, Any]:
@@ -2624,10 +2492,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderExecuteScriptResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def execute_blender_script(
@@ -2682,10 +2547,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            BlenderCreateMeshFromDataResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def create_blender_mesh_from_data(
@@ -2763,10 +2625,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            SimReadyApplyMetadataResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def apply_simready_metadata(
@@ -2817,10 +2676,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            SimReadyGetMetadataResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def get_simready_metadata(
@@ -2868,10 +2724,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=True,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            SimReadyValidateResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def validate_simready_compliance(
@@ -2934,10 +2787,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            SimReadyExportResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def export_simready_usd(
@@ -2994,10 +2844,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             idempotent=False,
             open_world=True,
         ),
-        output_schema=server._tool_output_schema(
-            SimReadySetupHierarchyResponse,
-            ErrorResponse,
-        ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def setup_simready_hierarchy(
