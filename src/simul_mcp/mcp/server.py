@@ -566,7 +566,11 @@ class SimulMCPServer(LoggerMixin):
                 )
 
             with adapter.create_session() as session:
-                payload = await call(session)
+                # Unreal sessions are async, Blender sessions are sync; accept
+                # both so one envelope serves every backend.
+                payload = call(session)
+                if inspect.isawaitable(payload):
+                    payload = await payload
                 apply_success_from_error(payload)
                 return self._validate_output(
                     response_model(**payload).model_dump(), models, tool_name
