@@ -9,6 +9,7 @@ import os
 import socket
 import struct
 import tempfile
+import uuid
 from typing import Any, Awaitable, Callable
 
 # Stdlib on purpose: this module must stay importable without Kit, and inside
@@ -46,6 +47,8 @@ class BridgeServerLifecycle:
         self._vscode_handler = vscode_handler
         self._request_timeout = request_timeout
         self._socket_path = socket_path
+        self._actual_socket_path: str | None = None
+        self._socket_inode: tuple[int, int] | None = None
         self._server: asyncio.AbstractServer | None = None
         self._unix_server: asyncio.AbstractServer | None = None
         self._actual_port: int = port
@@ -55,6 +58,11 @@ class BridgeServerLifecycle:
     def address(self) -> str:
         """Return the bound bridge address."""
         return f"{self._host}:{self._actual_port}"
+
+    @property
+    def actual_socket_path(self) -> str | None:
+        """Return the Unix socket path actually bound, when one is serving."""
+        return self._actual_socket_path
 
     @property
     def actual_port(self) -> int:
@@ -101,22 +109,53 @@ class BridgeServerLifecycle:
         if not self._socket_path or self._unix_server is not None:
             return
         try:
-            # A previous crash leaves the socket inode behind and bind() would
-            # fail EADDRINUSE; there is one bridge per path, so replace it.
-            if os.path.exists(self._socket_path):
-                os.unlink(self._socket_path)
+            path = self._socket_path
+            if os.path.exists(path):
+                if await self._socket_is_live(path):
+                    # Another instance is serving here — typically a second
+                    # container sharing the discovery volume, where every
+                    # bridge is pid 1 and ships the same configured name.
+                    # Stealing the name would hijack its traffic and, on
+                    # stop, destroy its socket. Bind a unique sibling and
+                    # advertise that instead.
+                    stem, ext = os.path.splitext(path)
+                    path = f"{stem}-{uuid.uuid4().hex[:8]}{ext or '.sock'}"
+                else:
+                    # A crash left the inode behind; bind() would refuse it.
+                    os.unlink(path)
             self._unix_server = await asyncio.start_unix_server(
-                self._handle_client, path=self._socket_path
+                self._handle_client, path=path
             )
             await self._unix_server.start_serving()
             # connect(2) needs write permission on the socket inode. In a
             # container this process is root, so the default mode would leave
             # the host user unable to connect — the 0600 discovery-file
             # failure again, one layer down.
-            os.chmod(self._socket_path, 0o666)
+            os.chmod(path, 0o666)
+            self._actual_socket_path = path
+            info = os.stat(path)
+            self._socket_inode = (info.st_dev, info.st_ino)
         except OSError as exc:
             logger.warning("Bridge Unix socket %s unavailable: %s", self._socket_path, exc)
             self._unix_server = None
+            self._actual_socket_path = None
+            self._socket_inode = None
+
+    @staticmethod
+    async def _socket_is_live(path: str) -> bool:
+        """Return True when something is accepting connections at ``path``."""
+        try:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(path), timeout=0.5
+            )
+        except (OSError, asyncio.TimeoutError):
+            return False
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+        return True
 
     async def stop(self) -> None:
         """Stop the bridge TCP server."""
@@ -130,11 +169,18 @@ class BridgeServerLifecycle:
             self._unix_server.close()
             await self._unix_server.wait_closed()
             self._unix_server = None
-        if self._socket_path and os.path.exists(self._socket_path):
+        if self._actual_socket_path and self._socket_inode is not None:
+            # Only remove the inode this instance bound. Another bridge may
+            # have replaced the name since; deleting its live socket would cut
+            # it off with nothing in any log.
             try:
-                os.unlink(self._socket_path)
+                info = os.stat(self._actual_socket_path)
+                if (info.st_dev, info.st_ino) == self._socket_inode:
+                    os.unlink(self._actual_socket_path)
             except OSError:
                 pass
+        self._actual_socket_path = None
+        self._socket_inode = None
 
     # A wildcard bind covers every interface, loopback included, but it is not
     # an address anything can connect to — and the reader drops a discovery
@@ -166,8 +212,8 @@ class BridgeServerLifecycle:
         }
         if vscode_port is not None:
             data["vscode_port"] = vscode_port
-        if self._socket_path and self._unix_server is not None:
-            data["socket_path"] = self._socket_path
+        if self._actual_socket_path and self._unix_server is not None:
+            data["socket_path"] = self._actual_socket_path
         fd, tmp = tempfile.mkstemp(dir=discovery_dir, suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:

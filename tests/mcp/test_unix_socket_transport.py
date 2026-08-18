@@ -375,3 +375,176 @@ def test_discovery_translates_a_container_side_socket_path(
             await lifecycle.stop()
 
     assert asyncio.run(_exercise())["payload"]["via"] == "uds"
+
+
+# ---------------------------------------------------------------------------
+# Two instances sharing one discovery dir must stay distinct (#121 review)
+# ---------------------------------------------------------------------------
+
+
+def _tagged_lifecycle(tmp_path: Path, tag: str) -> BridgeServerLifecycle:
+    async def handler(request: Any) -> BridgeResponse:
+        return BridgeResponse.success(request.request_id, {"who": tag})
+
+    return BridgeServerLifecycle(
+        host="127.0.0.1",
+        port=0,
+        request_handler=handler,
+        socket_path=str(tmp_path / "bridge.sock"),
+    )
+
+
+async def _who(path: str) -> str:
+    reader, writer = await asyncio.open_unix_connection(path)
+    body = json.dumps(
+        {"protocol_version": 1, "request_id": "w", "action": "ping", "payload": {}}
+    ).encode()
+    writer.write(struct.pack(">I", len(body)) + body)
+    await writer.drain()
+    header = await reader.readexactly(4)
+    payload = json.loads(
+        (await reader.readexactly(struct.unpack(">I", header)[0])).decode()
+    )
+    writer.close()
+    await writer.wait_closed()
+    return payload["payload"]["who"]
+
+
+def test_second_bridge_does_not_hijack_a_live_socket(tmp_path: Path) -> None:
+    """Both containers ship the same configured name; both must stay reachable.
+
+    Every container is pid 1 in its own namespace, so per-pid names collide
+    identically — uniqueness has to come from refusing to steal a live socket
+    and binding a generated sibling instead.
+    """
+
+    async def _exercise() -> tuple[str, str]:
+        a = _tagged_lifecycle(tmp_path, "A")
+        b = _tagged_lifecycle(tmp_path, "B")
+        await a.start()
+        await b.start()
+        try:
+            assert (
+                a.actual_socket_path != b.actual_socket_path
+            ), "both bridges claim the same socket path"
+            return await _who(a.actual_socket_path), await _who(b.actual_socket_path)
+        finally:
+            await a.stop()
+            await b.stop()
+
+    who_a, who_b = asyncio.run(_exercise())
+
+    assert (who_a, who_b) == ("A", "B")
+
+
+def test_stopping_one_bridge_leaves_the_other_reachable(tmp_path: Path) -> None:
+    """Unlink on stop must only remove a socket the stopper actually owns."""
+
+    async def _exercise() -> str:
+        a = _tagged_lifecycle(tmp_path, "A")
+        b = _tagged_lifecycle(tmp_path, "B")
+        await a.start()
+        await b.start()
+        try:
+            await a.stop()
+            return await _who(b.actual_socket_path)
+        finally:
+            await b.stop()
+
+    assert asyncio.run(_exercise()) == "B"
+
+
+def test_discovery_file_advertises_the_actual_socket(tmp_path: Path) -> None:
+    """A generated sibling name must be what gets advertised."""
+
+    async def _exercise() -> tuple[str, str]:
+        a = _tagged_lifecycle(tmp_path, "A")
+        b = _tagged_lifecycle(tmp_path, "B")
+        await a.start()
+        await b.start()
+        try:
+            b.write_discovery_file(str(tmp_path), pid=99)
+            written = json.loads((tmp_path / "simul-mcp-99.json").read_text())
+            return written["socket_path"], b.actual_socket_path
+        finally:
+            await a.stop()
+            await b.stop()
+
+    advertised, actual = asyncio.run(_exercise())
+
+    assert advertised == actual
+
+
+def test_two_discovered_instances_resolve_to_distinct_backends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The end-to-end misrouting from the review: tools for instance A must not
+    execute inside instance B."""
+
+    async def _exercise() -> tuple[str, str]:
+        a = _tagged_lifecycle(tmp_path, "A")
+        b = _tagged_lifecycle(tmp_path, "B")
+        await a.start()
+        await b.start()
+        try:
+            for i, lc in enumerate((a, b)):
+                (tmp_path / f"simul-mcp-{100 + i}.json").write_text(
+                    json.dumps(
+                        {
+                            "pid": os.getpid(),
+                            "host": "127.0.0.1",
+                            "port": 43000 + i,
+                            "vscode_port": 42000 + i,
+                            "socket_path": lc.actual_socket_path,
+                        }
+                    )
+                )
+            srv = _server(monkeypatch, tmp_path)
+            found = await srv._discover_from_files()
+            assert len(found) == 2, f"expected 2 instances, found {list(found)}"
+            answers = []
+            for client in found.values():
+                response = await client.bridge_request("ping", {})
+                answers.append(response["payload"]["who"])
+            return tuple(sorted(answers))
+        finally:
+            await a.stop()
+            await b.stop()
+
+    assert asyncio.run(_exercise()) == ("A", "B")
+
+
+def test_socket_client_failures_name_the_socket_not_the_tcp_pair(
+    tmp_path: Path,
+) -> None:
+    """Diagnostics must point at the endpoint that was dialled.
+
+    A socket-only client reporting "127.0.0.1:8229" — or worse, "None:None" —
+    sends the operator to a port that was never touched: the same
+    misdirection class #119/#120 were about.
+    """
+    sock = str(tmp_path / "nothing-here.sock")
+    client = IsaacSocketClient(
+        host="127.0.0.1",
+        port=1,
+        bridge_host=None,
+        bridge_port=None,
+        bridge_socket_path=sock,
+        prefer_bridge=True,
+        fallback_to_vscode=False,
+    )
+
+    assert client.bridge_endpoint == sock
+    assert "None" not in client.address
+
+    async def _exercise() -> str:
+        try:
+            await client.bridge_request("ping", {})
+        except ConnectionRefusedError as exc:
+            return str(exc)
+        raise AssertionError("connect to a missing socket should refuse")
+
+    message = asyncio.run(_exercise())
+
+    assert sock in message
+    assert "8229" not in message

@@ -141,8 +141,20 @@ class IsaacSocketClient:
     def address(self) -> str:
         """Return the target address as host:port string."""
         if self._prefer_bridge and self._bridge_configured:
-            return f"{self._bridge_host}:{self._bridge_port}"
+            return self.bridge_endpoint
         return f"{self._host}:{self._port}"
+
+    @property
+    def bridge_endpoint(self) -> str:
+        """The bridge endpoint actually dialled: socket path or host:port.
+
+        Error messages and log-dedup keys must name this, not the TCP pair —
+        a socket-only client reporting "127.0.0.1:8229" (or "None:None")
+        points the operator at a port that was never dialled.
+        """
+        if self._bridge_socket_path is not None:
+            return self._bridge_socket_path
+        return f"{self._bridge_host}:{self._bridge_port}"
 
     @property
     def bridge_address(self) -> str:
@@ -199,7 +211,7 @@ class IsaacSocketClient:
                     # Subsequent failures with the same destinations drop to DEBUG
                     # so a long-lived process running without the bridge does not
                     # spam the log on every tool call.
-                    fallback_key = f"{self.bridge_address}->{self.vscode_address}"
+                    fallback_key = f"{self.bridge_endpoint}->{self.vscode_address}"
                     level = (
                         logging.WARNING
                         if fallback_key not in self._logged_bridge_failures
@@ -209,7 +221,7 @@ class IsaacSocketClient:
                     logger.log(
                         level,
                         "Bridge transport failed at %s, falling back to VS Code socket %s: %s",
-                        self.bridge_address,
+                        self.bridge_endpoint,
                         self.vscode_address,
                         exc,
                     )
@@ -362,12 +374,11 @@ class IsaacSocketClient:
             )
         frame = struct.pack(">I", len(request_bytes)) + request_bytes
 
+        endpoint = self.bridge_endpoint
         if self._bridge_socket_path is not None:
             connect = asyncio.open_unix_connection(self._bridge_socket_path)
-            endpoint = self._bridge_socket_path
         else:
             connect = asyncio.open_connection(self._bridge_host, self._bridge_port)
-            endpoint = self.bridge_address
         try:
             reader, writer = await asyncio.wait_for(
                 connect, timeout=self._bridge_timeout_seconds
@@ -410,7 +421,7 @@ class IsaacSocketClient:
                 )
             except asyncio.IncompleteReadError as exc:
                 raise ConnectionError(
-                    f"Bridge at {self.bridge_address} closed connection before sending full response."
+                    f"Bridge at {self.bridge_endpoint} closed connection before sending full response."
                 ) from exc
 
             response: Dict[str, Any] = json.loads(response_bytes.decode("utf-8"))

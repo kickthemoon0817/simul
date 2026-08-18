@@ -51,10 +51,19 @@ services:
       - --/exts/khemoo.simul.mcp/max_port_retries=${ISAAC_MAX_PORT_RETRIES:-10}
       - --/exts/khemoo.simul.mcp/discovery_dir=/tmp/simul-mcp
       # Unix socket on the shared discovery volume: the host connects through
-      # the bind mount with no published port and no docker-proxy hop. The TCP
-      # publishes below stay for the VS Code fallback and for clients that do
-      # not speak the socket; with socket-only use they can be removed.
-      - --/exts/khemoo.simul.mcp/socket_path=${SIMUL_DISCOVERY_DIR:-/tmp/simul-mcp}/bridge.sock
+      # the bind mount with no published port and no docker-proxy hop. The
+      # path is the CONTAINER side of the volume mapping below, so it stays
+      # literal — interpolating the host-side SIMUL_DISCOVERY_DIR here would
+      # make the bridge bind a directory that does not exist in the container
+      # whenever the host dir is overridden, and the socket would silently
+      # never appear.
+      #
+      # The socket is chmod 0666, so any local user on the host can reach it,
+      # same as the 127.0.0.1 TCP publishes below: the bridge itself is
+      # unauthenticated either way, and the boundary is the mode of the
+      # directory the volume points at. The TCP publishes stay for the VS Code
+      # fallback; remove them only if that trade is understood.
+      - --/exts/khemoo.simul.mcp/socket_path=/tmp/simul-mcp/bridge.sock
       - --/exts/isaacsim.code_editor.vscode/host=${ISAAC_BIND_HOST:-0.0.0.0}
       - --/exts/isaacsim.code_editor.vscode/port=${ISAAC_VSCODE_PORT:-8226}
     environment:

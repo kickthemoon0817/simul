@@ -271,7 +271,19 @@ class IsaacMCPServerExtension(OmniExtBase):
             vscode_port=self._vscode_port,
         )
         if self._socket_path and self._server._unix_server is not None:
-            carb.log_info(f"Simul MCP bridge also serving on unix socket {self._socket_path}")
+            carb.log_info(
+                f"Simul MCP bridge also serving on unix socket {self._server.actual_socket_path}"
+            )
+        elif self._socket_path:
+            # Configured but not serving — sun_path too long, unwritable dir,
+            # or the volume missing. Without this line a bridge degraded to
+            # TCP-only is indistinguishable from one never configured for the
+            # socket.
+            carb.log_warn(
+                f"Simul MCP bridge unix socket {self._socket_path} is NOT serving; "
+                "continuing on TCP only. Check the path exists inside the "
+                "container and is on the shared volume."
+            )
         carb.log_info(f"Simul MCP bridge serving at {self._server.address}")
         self._refresh_ui()
 
