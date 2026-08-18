@@ -29,6 +29,7 @@ from .scene import SceneInspectionMixin
 from .simulation import SimulationMixin
 from .stage import StageAssetMixin
 from .system import SystemMixin
+from .ui import UiObservabilityMixin
 
 
 class IsaacTools(
@@ -45,6 +46,7 @@ class IsaacTools(
     RenderMixin,
     OmniGraphMixin,
     DiagnosticsMixin,
+    UiObservabilityMixin,
     IsaacScriptBase,
 ):
     """

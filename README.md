@@ -464,6 +464,10 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 `read_isaac_aovs`, `list_isaac_aovs`, `list_isaac_render_vars`, `get_isaac_carb_settings`, `set_isaac_carb_settings`
 
+### Isaac Sim — GUI & App State
+
+`get_isaac_ui_state` (consolidated snapshot: windows, focus, viewport, selection, timeline, stage), `get_isaac_ui_window` (widget-tree inspection of one window)
+
 ### Isaac Sim — USD Schema Queries
 
 `query_isaac_typed_prims` — find prims by schema type (UsdLux, UsdGeom, UsdShade) and read attributes in one call

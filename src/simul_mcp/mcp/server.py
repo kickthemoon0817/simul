@@ -28,11 +28,12 @@ from typing import (
 
 from fastmcp import FastMCP
 from fastmcp.server.context import _current_context
-from fastmcp.tools.tool import ToolResult
 from fastmcp.server.tasks import TaskConfig
+from fastmcp.tools.tool import ToolResult
 from mcp.types import TextContent, ToolAnnotations
 from pydantic import BaseModel
 
+from .. import __version__ as _source_version
 from ..adapters import (
     BlenderRuntimeAdapter,
     HeadlessUSDAdapter,
@@ -42,7 +43,6 @@ from ..adapters import (
     is_headless_available,
     is_unreal_available,
 )
-from .. import __version__ as _source_version
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
 from ..utils.paths import PathPolicy
@@ -50,8 +50,8 @@ from ..utils.timing import RateLimiter
 from .registration._helpers import apply_success_from_error
 from .result_budget import apply_result_budget
 from .schemas.common import ErrorResponse
-from .tools.isaac_tools import IsaacTools
 from .session_manager import SessionManager
+from .tools.isaac_tools import IsaacTools
 from .usage_tracker import ToolUsageTracker
 
 logger = get_logger(__name__)
@@ -74,7 +74,9 @@ _MCP_INSTRUCTIONS: str = (
     "Use Blender tools when a Blender runtime is connected. "
     "Use Unreal tools when an Unreal Engine instance is connected.\n\n"
     "TOOL SELECTION — prefer a granular tool when one covers the "
-    "operation; they are cheaper and return structured results. Reach for "
+    "operation; they are cheaper and return structured results. For GUI/app "
+    "state (windows, focus, selection, timeline) use get_isaac_ui_state; to "
+    "inspect one window's widget tree use get_isaac_ui_window. Reach for "
     "execute_isaac_script when none does (custom extensions, replicator "
     "workflows, robotics APIs, warp kernels). Read the "
     "'simul://isaac-sim/skills' resource for scripting patterns and API "
@@ -212,7 +214,9 @@ class SimulMCPServer(LoggerMixin):
             BlenderRuntimeAdapter(self.settings) if is_blender_available() else None
         )
         self.unreal_adapter = (
-            UnrealRuntimeAdapter(self.settings) if UnrealRuntimeAdapter is not None else None
+            UnrealRuntimeAdapter(self.settings)
+            if UnrealRuntimeAdapter is not None
+            else None
         )
 
         # Initialize FastMCP server
@@ -232,6 +236,7 @@ class SimulMCPServer(LoggerMixin):
         # composes with all decorator overloads, sync + async tool bodies, and
         # any future tools without per-registration changes.
         from ..logging import build_request_context_middleware
+
         self.mcp.add_middleware(build_request_context_middleware())
 
         # Register tools and resources
@@ -404,7 +409,11 @@ class SimulMCPServer(LoggerMixin):
         rate_error = self._check_rate_limit(tool_name)
         if rate_error is not None:
             self.usage_tracker.record(
-                tool_name, 0.0, False, params=params, error="rate_limited",
+                tool_name,
+                0.0,
+                False,
+                params=params,
+                error="rate_limited",
             )
             # Caller already built the coroutine; nothing will await it now.
             coro.close()
@@ -415,12 +424,14 @@ class SimulMCPServer(LoggerMixin):
             # Bounded, so a caller queued behind a long step learns the instance
             # is busy instead of waiting until its own client gives up. Without
             # this the only signal is a timeout, which reads as "unreachable".
-            await asyncio.wait_for(
-                lock.acquire(), timeout=self._instance_lock_timeout
-            )
+            await asyncio.wait_for(lock.acquire(), timeout=self._instance_lock_timeout)
         except asyncio.TimeoutError:
             self.usage_tracker.record(
-                tool_name, 0.0, False, params=params, error="instance_busy",
+                tool_name,
+                0.0,
+                False,
+                params=params,
+                error="instance_busy",
             )
             coro.close()
             return self._as_text_result(
@@ -439,14 +450,17 @@ class SimulMCPServer(LoggerMixin):
                 duration_ms = (time.monotonic() - t0) * 1000
                 success = not result.get("error")
                 self.usage_tracker.record(
-                    tool_name, duration_ms, success, params=params,
+                    tool_name,
+                    duration_ms,
+                    success,
+                    params=params,
                     error=result.get("error") if not success else None,
                 )
                 binding = self._get_active_binding()
                 if binding is not None:
-                    self.session_manager.get_instance_session(
-                        binding.port
-                    ).heartbeat(binding.agent_id, tool_name)
+                    self.session_manager.get_instance_session(binding.port).heartbeat(
+                        binding.agent_id, tool_name
+                    )
                     binding.last_heartbeat = time.time()
                 # Applied at the chokepoint so every Isaac tool is covered by
                 # one rule rather than each growing its own cap.
@@ -454,7 +468,11 @@ class SimulMCPServer(LoggerMixin):
             except Exception as exc:
                 duration_ms = (time.monotonic() - t0) * 1000
                 self.usage_tracker.record(
-                    tool_name, duration_ms, False, params=params, error=str(exc),
+                    tool_name,
+                    duration_ms,
+                    False,
+                    params=params,
+                    error=str(exc),
                 )
                 logger.error("Isaac tool %s failed: %s", tool_name, exc)
                 return self._as_text_result(
@@ -578,9 +596,7 @@ class SimulMCPServer(LoggerMixin):
         except Exception as exc:
             self.logger.error("Error in %s: %s", tool_name, exc)
             return self._validate_output(
-                ErrorResponse(
-                    error=str(exc), error_type="Exception"
-                ).model_dump(),
+                ErrorResponse(error=str(exc), error_type="Exception").model_dump(),
                 models,
                 tool_name,
             )
@@ -737,17 +753,15 @@ class SimulMCPServer(LoggerMixin):
 
     def _bridge_port_for_socket(self, socket_port: int) -> int:
         """Derive the bridge port for an Isaac instance from its socket port."""
-        derived = (
-            self.settings.isaac_sim.bridge_port
-            + (socket_port - self.settings.isaac_sim.socket_port)
+        derived = self.settings.isaac_sim.bridge_port + (
+            socket_port - self.settings.isaac_sim.socket_port
         )
         return max(1024, min(derived, 65535))
 
     def _socket_port_for_bridge(self, bridge_port: int) -> int:
         """Derive the VS Code socket port for an instance from its bridge port."""
-        derived = (
-            self.settings.isaac_sim.socket_port
-            + (bridge_port - self.settings.isaac_sim.bridge_port)
+        derived = self.settings.isaac_sim.socket_port + (
+            bridge_port - self.settings.isaac_sim.bridge_port
         )
         return max(1024, min(derived, 65535))
 
@@ -840,9 +854,7 @@ class SimulMCPServer(LoggerMixin):
                     # inside the local dir — inside the boundary by
                     # construction.
                     resolved = os.path.realpath(
-                        os.path.join(
-                            discovery_dir, os.path.basename(str(socket_path))
-                        )
+                        os.path.join(discovery_dir, os.path.basename(str(socket_path)))
                     )
                 if not resolved.startswith(boundary) or not os.path.exists(resolved):
                     socket_path = None
@@ -1041,7 +1053,6 @@ class SimulMCPServer(LoggerMixin):
             info["reachable"] = True
         return info
 
-
     def _backend_enabled(self, name: str) -> bool:
         """Return True if *name* is in the selected backends (or all when None)."""
         return self._backends is None or name in self._backends
@@ -1049,12 +1060,12 @@ class SimulMCPServer(LoggerMixin):
     def _register_tools(self) -> None:
         """Register MCP tools for enabled backends only."""
         from .registration import (
-            register_instance_tools,
-            register_usd_tools,
-            register_isaac_tools,
             register_blender_tools,
-            register_unreal_tools,
+            register_instance_tools,
+            register_isaac_tools,
             register_stats_tools,
+            register_unreal_tools,
+            register_usd_tools,
         )
 
         # Instance discovery and routing (always registered)

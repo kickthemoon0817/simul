@@ -81,13 +81,15 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             return server._as_text_result(rate_error)
         client = server._get_request_isaac_client()
         reachable = await client.ping()
-        return server._as_text_result({
-            "reachable": reachable,
-            "address": client.address,
-            "bridge_address": client.bridge_address,
-            "vscode_address": client.vscode_address,
-            "timeout_seconds": client.timeout_seconds,
-        })
+        return server._as_text_result(
+            {
+                "reachable": reachable,
+                "address": client.address,
+                "bridge_address": client.bridge_address,
+                "vscode_address": client.vscode_address,
+                "timeout_seconds": client.timeout_seconds,
+            }
+        )
 
     # -- Scene Inspection tools -------------------------------------------
 
@@ -254,9 +256,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_camera_info",
-            server._isaac_tools.get_isaac_camera_info(
-                camera_path=camera_path
-            ),
+            server._isaac_tools.get_isaac_camera_info(camera_path=camera_path),
         )
 
     @server.mcp.tool(
@@ -348,7 +348,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         name="delete_isaac_prim",
         description="Delete a prim and all its children from the stage.",
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True,
+            read_only=False,
+            idempotent=True,
+            open_world=True,
             destructive=True,
         ),
     )
@@ -391,9 +393,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
-    async def set_isaac_prim_visibility(
-        prim_path: str, visible: bool
-    ) -> ToolResult:
+    async def set_isaac_prim_visibility(prim_path: str, visible: bool) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_prim_visibility",
             server._isaac_tools.set_isaac_prim_visibility(
@@ -432,9 +432,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True
         ),
     )
-    async def duplicate_isaac_prim(
-        prim_path: str, new_path: str
-    ) -> ToolResult:
+    async def duplicate_isaac_prim(prim_path: str, new_path: str) -> ToolResult:
         return await server._exec_isaac(
             "duplicate_isaac_prim",
             server._isaac_tools.duplicate_isaac_prim(
@@ -449,9 +447,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
-    async def reparent_isaac_prim(
-        prim_path: str, new_parent_path: str
-    ) -> ToolResult:
+    async def reparent_isaac_prim(prim_path: str, new_parent_path: str) -> ToolResult:
         return await server._exec_isaac(
             "reparent_isaac_prim",
             server._isaac_tools.reparent_isaac_prim(
@@ -494,9 +490,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_rigid_body_info",
-            server._isaac_tools.get_isaac_rigid_body_info(
-                prim_path=prim_path
-            ),
+            server._isaac_tools.get_isaac_rigid_body_info(prim_path=prim_path),
         )
 
     @server.mcp.tool(
@@ -514,9 +508,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     ) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_physics_objects",
-            server._isaac_tools.list_isaac_physics_objects(
-                root_path=root_path
-            ),
+            server._isaac_tools.list_isaac_physics_objects(root_path=root_path),
         )
 
     @server.mcp.tool(
@@ -535,9 +527,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_collision_info",
-            server._isaac_tools.get_isaac_collision_info(
-                prim_path=prim_path
-            ),
+            server._isaac_tools.get_isaac_collision_info(prim_path=prim_path),
         )
 
     @server.mcp.tool(
@@ -556,9 +546,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_joint_info",
-            server._isaac_tools.get_isaac_joint_info(
-                prim_path=prim_path
-            ),
+            server._isaac_tools.get_isaac_joint_info(prim_path=prim_path),
         )
 
     @server.mcp.tool(
@@ -577,18 +565,14 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_mass_properties",
-            server._isaac_tools.get_isaac_mass_properties(
-                prim_path=prim_path
-            ),
+            server._isaac_tools.get_isaac_mass_properties(prim_path=prim_path),
         )
 
     # -- Physics Configuration tools --------------------------------------
 
     @server.mcp.tool(
         name="add_isaac_rigid_body",
-        description=(
-            "Apply RigidBodyAPI to a prim, optionally making it kinematic."
-        ),
+        description=("Apply RigidBodyAPI to a prim, optionally making it kinematic."),
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=True
         ),
@@ -759,9 +743,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="step_isaac_simulation",
-        description=(
-            "Step the simulation forward by N physics steps."
-        ),
+        description=("Step the simulation forward by N physics steps."),
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=True
         ),
@@ -771,9 +753,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     ) -> ToolResult:
         return await server._exec_isaac(
             "step_isaac_simulation",
-            server._isaac_tools.step_isaac_simulation(
-                num_steps=num_steps
-            ),
+            server._isaac_tools.step_isaac_simulation(num_steps=num_steps),
         )
 
     @server.mcp.tool(
@@ -823,9 +803,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_material_info",
-            server._isaac_tools.get_isaac_material_info(
-                material_path=material_path
-            ),
+            server._isaac_tools.get_isaac_material_info(material_path=material_path),
         )
 
     @server.mcp.tool(
@@ -851,9 +829,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
-    async def assign_isaac_material(
-        prim_path: str, material_path: str
-    ) -> ToolResult:
+    async def assign_isaac_material(prim_path: str, material_path: str) -> ToolResult:
         return await server._exec_isaac(
             "assign_isaac_material",
             server._isaac_tools.assign_isaac_material(
@@ -925,7 +901,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         name="open_isaac_stage",
         description="Open a USD stage file in Isaac Sim.",
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True,
+            read_only=False,
+            idempotent=True,
+            open_world=True,
             destructive=True,
         ),
     )
@@ -969,7 +947,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         name="new_isaac_stage",
         description="Create a new empty stage in Isaac Sim.",
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True,
+            read_only=False,
+            idempotent=True,
+            open_world=True,
             destructive=True,
         ),
     )
@@ -1016,9 +996,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True
         ),
     )
-    async def add_isaac_reference(
-        prim_path: str, reference_path: str
-    ) -> ToolResult:
+    async def add_isaac_reference(prim_path: str, reference_path: str) -> ToolResult:
         if not server._is_path_allowed(reference_path):
             return ErrorResponse(
                 error="File path is not allowed by sandbox policy",
@@ -1293,6 +1271,50 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         )
 
     @server.mcp.tool(
+        name="get_isaac_ui_state",
+        description=(
+            "Get a consolidated snapshot of the Isaac Sim GUI and app "
+            "state: omni.ui windows (visibility, focus, docking), active "
+            "viewport, selection, timeline, and open-stage status. "
+            "Degrades gracefully on headless runs."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_ui_state() -> ToolResult:
+        return await server._exec_isaac(
+            "get_isaac_ui_state",
+            server._isaac_tools.get_isaac_ui_state(),
+        )
+
+    @server.mcp.tool(
+        name="get_isaac_ui_window",
+        description=(
+            "Inspect one omni.ui window as a widget tree: widget types, "
+            "identifiers, label text, state flags, and model values, "
+            "depth- and count-limited. Window titles come from "
+            "get_isaac_ui_state."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_ui_window(
+        window_title: str,
+        max_depth: int = 4,
+        max_widgets: int = 400,
+    ) -> ToolResult:
+        return await server._exec_isaac(
+            "get_isaac_ui_window",
+            server._isaac_tools.get_isaac_ui_window(
+                window_title=window_title,
+                max_depth=max_depth,
+                max_widgets=max_widgets,
+            ),
+        )
+
+    @server.mcp.tool(
         name="get_isaac_animation_info",
         description=(
             "Get animation information for a prim: which attributes "
@@ -1424,7 +1446,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "version."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True,
+            read_only=False,
+            idempotent=True,
+            open_world=True,
             destructive=True,
         ),
     )
@@ -1463,8 +1487,8 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         name="set_isaac_carb_settings",
         description=(
             "Write one or more Carbonite (carb) settings by key path. "
-            "Takes a dict of key-value pairs (e.g. {\"/rtx/fog/enabled\": true, "
-            "\"/rtx/fog/fogEndDist\": 200.0}). Returns the verified new values "
+            'Takes a dict of key-value pairs (e.g. {"/rtx/fog/enabled": true, '
+            '"/rtx/fog/fogEndDist": 200.0}). Returns the verified new values '
             "after applying. Changes take effect immediately in the renderer."
         ),
         annotations=server._tool_annotations(
@@ -1754,7 +1778,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "and all its connections."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True,
+            read_only=False,
+            idempotent=True,
+            open_world=True,
             destructive=True,
         ),
     )
