@@ -12,6 +12,7 @@ src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
 from simul_mcp.adapters import blender_runtime  # noqa: E402
+from simul_mcp.config import SecurityConfig, Settings  # noqa: E402
 
 
 class FakeVector:
@@ -1885,6 +1886,16 @@ class TestFileIOTools:
         fake_bpy._ops_calls = ops_calls  # type: ignore[attr-defined]
         return fake_bpy
 
+    @staticmethod
+    def _session_allowing(tmp_path: Path) -> "blender_runtime.BlenderRuntimeSession":
+        """Build a session whose sandbox policy also admits the pytest tmp dir."""
+        security = SecurityConfig(
+            allowed_paths=[*SecurityConfig().allowed_paths, str(tmp_path)]
+        )
+        return blender_runtime.BlenderRuntimeSession(
+            settings=Settings(security=security)
+        )
+
     # -- open_blend_file -----------------------------------------------------
 
     def test_open_blend_file(
@@ -1899,7 +1910,7 @@ class TestFileIOTools:
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
-        session = blender_runtime.BlenderRuntimeSession()
+        session = self._session_allowing(tmp_path)
         result = session.open_blend_file(str(blend_file))
 
         assert result["file_path"] == str(blend_file)
@@ -1914,7 +1925,7 @@ class TestFileIOTools:
 
         session = blender_runtime.BlenderRuntimeSession()
         with pytest.raises(FileNotFoundError, match="File not found"):
-            session.open_blend_file("/nonexistent/path.blend")
+            session.open_blend_file("/tmp/simul_mcp/nonexistent/path.blend")
 
     def test_open_blend_file_wrong_ext(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1927,7 +1938,7 @@ class TestFileIOTools:
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
-        session = blender_runtime.BlenderRuntimeSession()
+        session = self._session_allowing(tmp_path)
         with pytest.raises(ValueError, match="Not a .blend file"):
             session.open_blend_file(str(txt_file))
 
@@ -1940,9 +1951,9 @@ class TestFileIOTools:
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        result = session.save_blend_file(file_path="/tmp/out.blend")
+        result = session.save_blend_file(file_path="/tmp/simul_mcp/out.blend")
 
-        assert result["file_path"] == "/tmp/out.blend"
+        assert result["file_path"] == "/tmp/simul_mcp/out.blend"
         assert fake_bpy._ops_calls[0]["op"] == "wm.save_as_mainfile"
 
     def test_save_blend_file_in_place(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2024,7 +2035,7 @@ class TestFileIOTools:
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
-        session = blender_runtime.BlenderRuntimeSession()
+        session = self._session_allowing(tmp_path)
         result = session.import_file(str(obj_file), "OBJ")
 
         assert result["file_format"] == "OBJ"
@@ -2049,7 +2060,7 @@ class TestFileIOTools:
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
-        session = blender_runtime.BlenderRuntimeSession()
+        session = self._session_allowing(tmp_path)
         result = session.import_file(str(obj_file), "OBJ")
 
         assert result["file_format"] == "OBJ"
@@ -2072,7 +2083,7 @@ class TestFileIOTools:
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
-        session = blender_runtime.BlenderRuntimeSession()
+        session = self._session_allowing(tmp_path)
         result = session.import_file(str(fbx_file), "FBX")
 
         assert result["file_format"] == "FBX"
@@ -2086,7 +2097,7 @@ class TestFileIOTools:
 
         session = blender_runtime.BlenderRuntimeSession()
         with pytest.raises(ValueError, match="Unsupported format"):
-            session.import_file("/some/file.abc", "ABC")
+            session.import_file("/tmp/simul_mcp/file.abc", "ABC")
 
     def test_import_file_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Importing a nonexistent file raises FileNotFoundError."""
@@ -2096,7 +2107,7 @@ class TestFileIOTools:
 
         session = blender_runtime.BlenderRuntimeSession()
         with pytest.raises(FileNotFoundError, match="File not found"):
-            session.import_file("/nonexistent/model.obj", "OBJ")
+            session.import_file("/tmp/simul_mcp/nonexistent/model.obj", "OBJ")
 
     # -- export_file ---------------------------------------------------------
 
@@ -2107,10 +2118,10 @@ class TestFileIOTools:
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        result = session.export_file("/tmp/out.obj", "OBJ")
+        result = session.export_file("/tmp/simul_mcp/out.obj", "OBJ")
 
         assert result["file_format"] == "OBJ"
-        assert result["file_path"] == "/tmp/out.obj"
+        assert result["file_path"] == "/tmp/simul_mcp/out.obj"
         assert fake_bpy._ops_calls[0]["op"] == "wm.obj_export"
 
     def test_export_obj_v36(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2120,7 +2131,7 @@ class TestFileIOTools:
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        result = session.export_file("/tmp/out.obj", "OBJ")
+        result = session.export_file("/tmp/simul_mcp/out.obj", "OBJ")
 
         assert result["file_format"] == "OBJ"
         assert fake_bpy._ops_calls[0]["op"] == "export_scene.obj"
@@ -2132,7 +2143,7 @@ class TestFileIOTools:
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        session.export_file("/tmp/out.obj", "OBJ", selected_only=True)
+        session.export_file("/tmp/simul_mcp/out.obj", "OBJ", selected_only=True)
 
         call = fake_bpy._ops_calls[0]
         assert call["export_selected_objects"] is True
@@ -2145,7 +2156,7 @@ class TestFileIOTools:
 
         session = blender_runtime.BlenderRuntimeSession()
         with pytest.raises(ValueError, match="Unsupported format"):
-            session.export_file("/tmp/out.abc", "ABC")
+            session.export_file("/tmp/simul_mcp/out.abc", "ABC")
 
 
 class TestAnimationTools:
@@ -2517,16 +2528,14 @@ class TestExecuteScript:
             app=SimpleNamespace(version=(4, 0, 0)),
             data=SimpleNamespace(
                 objects=SimpleNamespace(get=lambda name: None),
-                filepath="/tmp/test.blend",
+                filepath="/tmp/simul_mcp/test.blend",
             ),
             context=SimpleNamespace(
                 scene=SimpleNamespace(name="Scene"),
             ),
         )
 
-    def test_execute_simple_script(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_execute_simple_script(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Execute a script that prints output."""
         fake_bpy = self._make_fake_bpy_for_script()
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
@@ -2540,9 +2549,7 @@ class TestExecuteScript:
         assert result["duration_seconds"] >= 0.0
         assert "error" not in result
 
-    def test_execute_script_with_result(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_execute_script_with_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Script assigns __result__ and it is returned."""
         fake_bpy = self._make_fake_bpy_for_script()
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
@@ -2563,16 +2570,12 @@ class TestExecuteScript:
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        result = session.execute_script(
-            "__result__ = bpy.context.scene.name"
-        )
+        result = session.execute_script("__result__ = bpy.context.scene.name")
 
         assert result["return_value"] == "'Scene'"
         assert "error" not in result
 
-    def test_execute_script_syntax_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_execute_script_syntax_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Script with syntax error returns error in payload."""
         fake_bpy = self._make_fake_bpy_for_script()
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
@@ -2711,9 +2714,7 @@ class TestCreateMeshFromData:
 
     # -- Basic creation ------------------------------------------------------
 
-    def test_create_mesh_triangle(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_create_mesh_triangle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Create a basic triangle from 3 vertices and 1 face."""
         fake_bpy = self._make_fake_bpy_for_mesh_data()
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
@@ -2732,9 +2733,7 @@ class TestCreateMeshFromData:
         assert result["face_count"] == 1
         assert len(fake_bpy._linked_objects) == 1
 
-    def test_create_mesh_with_location(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_create_mesh_with_location(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Object location is set when provided."""
         fake_bpy = self._make_fake_bpy_for_mesh_data()
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
@@ -2751,9 +2750,7 @@ class TestCreateMeshFromData:
         obj = fake_bpy._created_objects[0]
         assert obj.location == (5.0, 6.0, 7.0)
 
-    def test_create_mesh_edges_only(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_create_mesh_edges_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Create a wireframe mesh with edges but no faces."""
         fake_bpy = self._make_fake_bpy_for_mesh_data()
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
@@ -2833,9 +2830,7 @@ class TestCreateMeshFromData:
 
     # -- Collection linking --------------------------------------------------
 
-    def test_create_mesh_to_collection(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_create_mesh_to_collection(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Mesh is linked to named collection when specified."""
         col_linked: List[Any] = []
         fake_col = SimpleNamespace(
@@ -3072,9 +3067,7 @@ class TestSimReadyMethods:
         assert meta["physics"]["mass_kg"] == 0.35
         assert meta["material"]["substrate_type"] == "ceramic"
 
-    def test_get_simready_metadata_empty(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_get_simready_metadata_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Object with no simready_ properties returns has_simready_data=False."""
         obj = FakeObjectWithProps(name="plain_cube")
         fake_bpy = self._make_fake_bpy([obj])
@@ -3086,9 +3079,7 @@ class TestSimReadyMethods:
         assert result["has_simready_data"] is False
         assert result["metadata"] is None
 
-    def test_validate_naming_issue(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_validate_naming_issue(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Uppercase names should produce a naming error."""
         obj = FakeObjectWithProps(
             name="MyBadName",
@@ -3110,15 +3101,11 @@ class TestSimReadyMethods:
 
         assert result["compliant"] is False
         assert result["issue_count"] >= 1
-        naming_issues = [
-            i for i in result["issues"] if i["check"] == "naming"
-        ]
+        naming_issues = [i for i in result["issues"] if i["check"] == "naming"]
         assert len(naming_issues) == 1
         assert "MyBadName" in naming_issues[0]["message"]
 
-    def test_validate_compliant_object(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_validate_compliant_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A well-named, correctly-scaled object with material passes."""
         parent = FakeObjectWithProps(name="root", object_type="EMPTY")
         obj = FakeObjectWithProps(
@@ -3137,14 +3124,10 @@ class TestSimReadyMethods:
         )
 
         assert result["compliant"] is True
-        error_issues = [
-            i for i in result["issues"] if i["severity"] == "error"
-        ]
+        error_issues = [i for i in result["issues"] if i["severity"] == "error"]
         assert len(error_issues) == 0
 
-    def test_validate_no_material_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_validate_no_material_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Object with no material assigned produces material error."""
         parent = FakeObjectWithProps(name="root", object_type="EMPTY")
         obj = FakeObjectWithProps(
@@ -3166,14 +3149,10 @@ class TestSimReadyMethods:
         )
 
         assert result["compliant"] is False
-        mat_issues = [
-            i for i in result["issues"] if i["check"] == "materials"
-        ]
+        mat_issues = [i for i in result["issues"] if i["check"] == "materials"]
         assert len(mat_issues) == 1
 
-    def test_setup_simready_hierarchy(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_setup_simready_hierarchy(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Hierarchy setup creates root empty and parents children."""
         child = FakeObjectWithProps(name="body_mesh")
         fake_bpy = self._make_fake_bpy([child])
