@@ -106,35 +106,17 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         if isinstance(input_data, dict):
             return input_data
 
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-
-            with server.blender_adapter.create_session() as session:
-                objects_payload = session.list_scene_objects(
-                    collection_name=input_data.collection_name,
-                    include_hidden=input_data.include_hidden,
-                    max_items=input_data.max_items,
-                )
-                apply_success_from_error(objects_payload)
-                result = BlenderSceneObjectsResponse(**objects_payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderSceneObjectsResponse, ErrorResponse),
-                    "list_blender_scene_objects",
-                )
-
-        except Exception as e:
-            server.logger.error(f"Error listing Blender scene objects: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderSceneObjectsResponse, ErrorResponse),
-                "list_blender_scene_objects",
-            )
+        return await server._exec_backend(
+            "list_blender_scene_objects",
+            server.blender_adapter,
+            "Blender",
+            BlenderSceneObjectsResponse,
+            lambda session: session.list_scene_objects(
+                collection_name=input_data.collection_name,
+                include_hidden=input_data.include_hidden,
+                max_items=input_data.max_items,
+            ),
+        )
 
     # -- Phase 1: Core Observation tools ----------------------------------
 
@@ -161,29 +143,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_object_info(input_data.object_name)
-                apply_success_from_error(payload)
-                result = BlenderObjectInfoResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderObjectInfoResponse, ErrorResponse),
-                    "get_blender_object_info",
-                )
-        except Exception as e:
-            server.logger.error(f"Error getting Blender object info: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderObjectInfoResponse, ErrorResponse),
-                "get_blender_object_info",
-            )
+        return await server._exec_backend(
+            "get_blender_object_info",
+            server.blender_adapter,
+            "Blender",
+            BlenderObjectInfoResponse,
+            lambda session: session.get_object_info(input_data.object_name),
+        )
 
     @server.mcp.tool(
         name="get_blender_mesh_info",
@@ -208,29 +174,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_mesh_info(input_data.object_name)
-                apply_success_from_error(payload)
-                result = BlenderMeshInfoResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderMeshInfoResponse, ErrorResponse),
-                    "get_blender_mesh_info",
-                )
-        except Exception as e:
-            server.logger.error(f"Error getting Blender mesh info: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderMeshInfoResponse, ErrorResponse),
-                "get_blender_mesh_info",
-            )
+        return await server._exec_backend(
+            "get_blender_mesh_info",
+            server.blender_adapter,
+            "Blender",
+            BlenderMeshInfoResponse,
+            lambda session: session.get_mesh_info(input_data.object_name),
+        )
 
     @server.mcp.tool(
         name="get_blender_bounding_box",
@@ -257,32 +207,16 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_bounding_box(
-                    input_data.object_name,
-                    input_data.world_space,
-                )
-                apply_success_from_error(payload)
-                result = BlenderBoundingBoxResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderBoundingBoxResponse, ErrorResponse),
-                    "get_blender_bounding_box",
-                )
-        except Exception as e:
-            server.logger.error(f"Error getting Blender bounding box: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderBoundingBoxResponse, ErrorResponse),
-                "get_blender_bounding_box",
-            )
+        return await server._exec_backend(
+            "get_blender_bounding_box",
+            server.blender_adapter,
+            "Blender",
+            BlenderBoundingBoxResponse,
+            lambda session: session.get_bounding_box(
+                input_data.object_name,
+                input_data.world_space,
+            ),
+        )
 
     @server.mcp.tool(
         name="search_blender_objects",
@@ -313,33 +247,17 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.search_objects(
-                    input_data.name_pattern,
-                    input_data.object_type,
-                    input_data.max_results,
-                )
-                apply_success_from_error(payload)
-                result = BlenderSearchObjectsResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderSearchObjectsResponse, ErrorResponse),
-                    "search_blender_objects",
-                )
-        except Exception as e:
-            server.logger.error(f"Error searching Blender objects: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderSearchObjectsResponse, ErrorResponse),
-                "search_blender_objects",
-            )
+        return await server._exec_backend(
+            "search_blender_objects",
+            server.blender_adapter,
+            "Blender",
+            BlenderSearchObjectsResponse,
+            lambda session: session.search_objects(
+                input_data.name_pattern,
+                input_data.object_type,
+                input_data.max_results,
+            ),
+        )
 
     @server.mcp.tool(
         name="summarize_blender_scene",
@@ -356,29 +274,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         rate_error = server._check_rate_limit("summarize_blender_scene")
         if rate_error:
             return rate_error
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.summarize_scene()
-                apply_success_from_error(payload)
-                result = BlenderSceneSummaryResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderSceneSummaryResponse, ErrorResponse),
-                    "summarize_blender_scene",
-                )
-        except Exception as e:
-            server.logger.error(f"Error summarizing Blender scene: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderSceneSummaryResponse, ErrorResponse),
-                "summarize_blender_scene",
-            )
+        return await server._exec_backend(
+            "summarize_blender_scene",
+            server.blender_adapter,
+            "Blender",
+            BlenderSceneSummaryResponse,
+            lambda session: session.summarize_scene(),
+        )
 
     @server.mcp.tool(
         name="get_blender_material_info",
@@ -403,31 +305,15 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_material_info(
-                    input_data.material_name,
-                )
-                apply_success_from_error(payload)
-                result = BlenderMaterialInfoResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderMaterialInfoResponse, ErrorResponse),
-                    "get_blender_material_info",
-                )
-        except Exception as e:
-            server.logger.error(f"Error getting Blender material info: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderMaterialInfoResponse, ErrorResponse),
-                "get_blender_material_info",
-            )
+        return await server._exec_backend(
+            "get_blender_material_info",
+            server.blender_adapter,
+            "Blender",
+            BlenderMaterialInfoResponse,
+            lambda session: session.get_material_info(
+                input_data.material_name,
+            ),
+        )
 
     @server.mcp.tool(
         name="get_blender_distance_between",
@@ -454,32 +340,16 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_distance_between(
-                    input_data.object_name_a,
-                    input_data.object_name_b,
-                )
-                apply_success_from_error(payload)
-                result = BlenderDistanceResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderDistanceResponse, ErrorResponse),
-                    "get_blender_distance_between",
-                )
-        except Exception as e:
-            server.logger.error(f"Error measuring Blender distance: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderDistanceResponse, ErrorResponse),
-                "get_blender_distance_between",
-            )
+        return await server._exec_backend(
+            "get_blender_distance_between",
+            server.blender_adapter,
+            "Blender",
+            BlenderDistanceResponse,
+            lambda session: session.get_distance_between(
+                input_data.object_name_a,
+                input_data.object_name_b,
+            ),
+        )
 
     @server.mcp.tool(
         name="check_blender_object_bounds",
@@ -508,33 +378,17 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.check_object_bounds(
-                    input_data.object_name,
-                    input_data.bounds_min,
-                    input_data.bounds_max,
-                )
-                apply_success_from_error(payload)
-                result = BlenderBoundsCheckResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderBoundsCheckResponse, ErrorResponse),
-                    "check_blender_object_bounds",
-                )
-        except Exception as e:
-            server.logger.error(f"Error checking Blender bounds: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderBoundsCheckResponse, ErrorResponse),
-                "check_blender_object_bounds",
-            )
+        return await server._exec_backend(
+            "check_blender_object_bounds",
+            server.blender_adapter,
+            "Blender",
+            BlenderBoundsCheckResponse,
+            lambda session: session.check_object_bounds(
+                input_data.object_name,
+                input_data.bounds_min,
+                input_data.bounds_max,
+            ),
+        )
 
     # -- Phase 2: Visual Observation tools --------------------------------
 
@@ -567,34 +421,18 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.capture_viewport(
-                    input_data.width,
-                    input_data.height,
-                    input_data.jpeg_quality,
-                    input_data.use_render_fallback,
-                )
-                apply_success_from_error(payload)
-                result = BlenderCaptureViewportResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderCaptureViewportResponse, ErrorResponse),
-                    "capture_blender_viewport",
-                )
-        except Exception as e:
-            server.logger.error(f"Error capturing Blender viewport: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderCaptureViewportResponse, ErrorResponse),
-                "capture_blender_viewport",
-            )
+        return await server._exec_backend(
+            "capture_blender_viewport",
+            server.blender_adapter,
+            "Blender",
+            BlenderCaptureViewportResponse,
+            lambda session: session.capture_viewport(
+                input_data.width,
+                input_data.height,
+                input_data.jpeg_quality,
+                input_data.use_render_fallback,
+            ),
+        )
 
     @server.mcp.tool(
         name="set_blender_camera_view",
@@ -623,33 +461,17 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.set_camera_view(
-                    list(input_data.location),
-                    list(input_data.rotation_euler),
-                    input_data.camera_name,
-                )
-                apply_success_from_error(payload)
-                result = BlenderSetCameraViewResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderSetCameraViewResponse, ErrorResponse),
-                    "set_blender_camera_view",
-                )
-        except Exception as e:
-            server.logger.error(f"Error setting Blender camera view: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderSetCameraViewResponse, ErrorResponse),
-                "set_blender_camera_view",
-            )
+        return await server._exec_backend(
+            "set_blender_camera_view",
+            server.blender_adapter,
+            "Blender",
+            BlenderSetCameraViewResponse,
+            lambda session: session.set_camera_view(
+                list(input_data.location),
+                list(input_data.rotation_euler),
+                input_data.camera_name,
+            ),
+        )
 
     @server.mcp.tool(
         name="get_blender_camera_info",
@@ -668,29 +490,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         rate_error = server._check_rate_limit("get_blender_camera_info")
         if rate_error:
             return rate_error
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_camera_info(camera_name)
-                apply_success_from_error(payload)
-                result = BlenderCameraInfoResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderCameraInfoResponse, ErrorResponse),
-                    "get_blender_camera_info",
-                )
-        except Exception as e:
-            server.logger.error(f"Error getting Blender camera info: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderCameraInfoResponse, ErrorResponse),
-                "get_blender_camera_info",
-            )
+        return await server._exec_backend(
+            "get_blender_camera_info",
+            server.blender_adapter,
+            "Blender",
+            BlenderCameraInfoResponse,
+            lambda session: session.get_camera_info(camera_name),
+        )
 
     @server.mcp.tool(
         name="focus_blender_on_object",
@@ -719,33 +525,17 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.focus_on_object(
-                    input_data.object_name,
-                    input_data.distance_factor,
-                    input_data.camera_name,
-                )
-                apply_success_from_error(payload)
-                result = BlenderFocusOnObjectResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderFocusOnObjectResponse, ErrorResponse),
-                    "focus_blender_on_object",
-                )
-        except Exception as e:
-            server.logger.error(f"Error focusing Blender camera: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderFocusOnObjectResponse, ErrorResponse),
-                "focus_blender_on_object",
-            )
+        return await server._exec_backend(
+            "focus_blender_on_object",
+            server.blender_adapter,
+            "Blender",
+            BlenderFocusOnObjectResponse,
+            lambda session: session.focus_on_object(
+                input_data.object_name,
+                input_data.distance_factor,
+                input_data.camera_name,
+            ),
+        )
 
     @server.mcp.tool(
         name="get_blender_viewport_info",
@@ -762,29 +552,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         rate_error = server._check_rate_limit("get_blender_viewport_info")
         if rate_error:
             return rate_error
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_viewport_info()
-                apply_success_from_error(payload)
-                result = BlenderViewportInfoResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderViewportInfoResponse, ErrorResponse),
-                    "get_blender_viewport_info",
-                )
-        except Exception as e:
-            server.logger.error(f"Error getting Blender viewport info: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderViewportInfoResponse, ErrorResponse),
-                "get_blender_viewport_info",
-            )
+        return await server._exec_backend(
+            "get_blender_viewport_info",
+            server.blender_adapter,
+            "Blender",
+            BlenderViewportInfoResponse,
+            lambda session: session.get_viewport_info(),
+        )
 
     @server.mcp.tool(
         name="capture_blender_viewport_sequence",
@@ -821,36 +595,20 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.capture_viewport_sequence(
-                    input_data.start_frame,
-                    input_data.end_frame,
-                    input_data.step,
-                    input_data.width,
-                    input_data.height,
-                    input_data.jpeg_quality,
-                )
-                apply_success_from_error(payload)
-                result = BlenderCaptureSequenceResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderCaptureSequenceResponse, ErrorResponse),
-                    "capture_blender_viewport_sequence",
-                )
-        except Exception as e:
-            server.logger.error(f"Error capturing Blender viewport sequence: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderCaptureSequenceResponse, ErrorResponse),
-                "capture_blender_viewport_sequence",
-            )
+        return await server._exec_backend(
+            "capture_blender_viewport_sequence",
+            server.blender_adapter,
+            "Blender",
+            BlenderCaptureSequenceResponse,
+            lambda session: session.capture_viewport_sequence(
+                input_data.start_frame,
+                input_data.end_frame,
+                input_data.step,
+                input_data.width,
+                input_data.height,
+                input_data.jpeg_quality,
+            ),
+        )
 
     # -- Phase 3: Scene Manipulation tools --------------------------------
 
@@ -885,35 +643,19 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.create_object(
-                    input_data.object_type,
-                    input_data.name,
-                    list(input_data.location),
-                    list(input_data.rotation_euler),
-                    list(input_data.scale),
-                )
-                apply_success_from_error(payload)
-                result = BlenderCreateObjectResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderCreateObjectResponse, ErrorResponse),
-                    "create_blender_object",
-                )
-        except Exception as e:
-            server.logger.error(f"Error creating Blender object: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderCreateObjectResponse, ErrorResponse),
-                "create_blender_object",
-            )
+        return await server._exec_backend(
+            "create_blender_object",
+            server.blender_adapter,
+            "Blender",
+            BlenderCreateObjectResponse,
+            lambda session: session.create_object(
+                input_data.object_type,
+                input_data.name,
+                list(input_data.location),
+                list(input_data.rotation_euler),
+                list(input_data.scale),
+            ),
+        )
 
     @server.mcp.tool(
         name="delete_blender_object",
@@ -939,29 +681,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.delete_object(input_data.object_name)
-                apply_success_from_error(payload)
-                result = BlenderDeleteObjectResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderDeleteObjectResponse, ErrorResponse),
-                    "delete_blender_object",
-                )
-        except Exception as e:
-            server.logger.error(f"Error deleting Blender object: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderDeleteObjectResponse, ErrorResponse),
-                "delete_blender_object",
-            )
+        return await server._exec_backend(
+            "delete_blender_object",
+            server.blender_adapter,
+            "Blender",
+            BlenderDeleteObjectResponse,
+            lambda session: session.delete_object(input_data.object_name),
+        )
 
     @server.mcp.tool(
         name="set_blender_object_transform",
@@ -992,41 +718,18 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                loc = list(input_data.location) if input_data.location else None
-                rot = (
-                    list(input_data.rotation_euler)
-                    if input_data.rotation_euler
-                    else None
-                )
-                sc = list(input_data.scale) if input_data.scale else None
-                payload = session.set_object_transform(
-                    input_data.object_name,
-                    loc,
-                    rot,
-                    sc,
-                )
-                apply_success_from_error(payload)
-                result = BlenderSetTransformResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderSetTransformResponse, ErrorResponse),
-                    "set_blender_object_transform",
-                )
-        except Exception as e:
-            server.logger.error(f"Error setting Blender transform: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderSetTransformResponse, ErrorResponse),
-                "set_blender_object_transform",
-            )
+        return await server._exec_backend(
+            "set_blender_object_transform",
+            server.blender_adapter,
+            "Blender",
+            BlenderSetTransformResponse,
+            lambda session: session.set_object_transform(
+                input_data.object_name,
+                loc,
+                rot,
+                sc,
+            ),
+        )
 
     @server.mcp.tool(
         name="set_blender_object_parent",
@@ -1053,32 +756,16 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.set_object_parent(
-                    input_data.child_name,
-                    input_data.parent_name,
-                )
-                apply_success_from_error(payload)
-                result = BlenderSetParentResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderSetParentResponse, ErrorResponse),
-                    "set_blender_object_parent",
-                )
-        except Exception as e:
-            server.logger.error(f"Error setting Blender parent: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderSetParentResponse, ErrorResponse),
-                "set_blender_object_parent",
-            )
+        return await server._exec_backend(
+            "set_blender_object_parent",
+            server.blender_adapter,
+            "Blender",
+            BlenderSetParentResponse,
+            lambda session: session.set_object_parent(
+                input_data.child_name,
+                input_data.parent_name,
+            ),
+        )
 
     @server.mcp.tool(
         name="clear_blender_object_parent",
@@ -1105,32 +792,16 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.clear_object_parent(
-                    input_data.object_name,
-                    input_data.keep_transform,
-                )
-                apply_success_from_error(payload)
-                result = BlenderClearParentResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderClearParentResponse, ErrorResponse),
-                    "clear_blender_object_parent",
-                )
-        except Exception as e:
-            server.logger.error(f"Error clearing Blender parent: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderClearParentResponse, ErrorResponse),
-                "clear_blender_object_parent",
-            )
+        return await server._exec_backend(
+            "clear_blender_object_parent",
+            server.blender_adapter,
+            "Blender",
+            BlenderClearParentResponse,
+            lambda session: session.clear_object_parent(
+                input_data.object_name,
+                input_data.keep_transform,
+            ),
+        )
 
     @server.mcp.tool(
         name="assign_blender_material",
@@ -1163,35 +834,19 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.assign_material(
-                    input_data.object_name,
-                    input_data.material_name,
-                    list(input_data.base_color),
-                    input_data.metallic,
-                    input_data.roughness,
-                )
-                apply_success_from_error(payload)
-                result = BlenderAssignMaterialResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderAssignMaterialResponse, ErrorResponse),
-                    "assign_blender_material",
-                )
-        except Exception as e:
-            server.logger.error(f"Error assigning Blender material: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderAssignMaterialResponse, ErrorResponse),
-                "assign_blender_material",
-            )
+        return await server._exec_backend(
+            "assign_blender_material",
+            server.blender_adapter,
+            "Blender",
+            BlenderAssignMaterialResponse,
+            lambda session: session.assign_material(
+                input_data.object_name,
+                input_data.material_name,
+                list(input_data.base_color),
+                input_data.metallic,
+                input_data.roughness,
+            ),
+        )
 
     @server.mcp.tool(
         name="add_blender_modifier",
@@ -1222,34 +877,18 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.add_modifier(
-                    input_data.object_name,
-                    input_data.modifier_type,
-                    input_data.modifier_name,
-                    dict(input_data.params),
-                )
-                apply_success_from_error(payload)
-                result = BlenderAddModifierResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderAddModifierResponse, ErrorResponse),
-                    "add_blender_modifier",
-                )
-        except Exception as e:
-            server.logger.error(f"Error adding Blender modifier: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderAddModifierResponse, ErrorResponse),
-                "add_blender_modifier",
-            )
+        return await server._exec_backend(
+            "add_blender_modifier",
+            server.blender_adapter,
+            "Blender",
+            BlenderAddModifierResponse,
+            lambda session: session.add_modifier(
+                input_data.object_name,
+                input_data.modifier_type,
+                input_data.modifier_name,
+                dict(input_data.params),
+            ),
+        )
 
     @server.mcp.tool(
         name="set_blender_light_params",
@@ -1286,38 +925,21 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                col = list(input_data.color) if input_data.color else None
-                payload = session.set_light_params(
-                    input_data.light_name,
-                    input_data.energy,
-                    col,
-                    input_data.use_shadow,
-                    input_data.spot_size,
-                    input_data.spot_blend,
-                    input_data.shadow_soft_size,
-                )
-                apply_success_from_error(payload)
-                result = BlenderSetLightParamsResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderSetLightParamsResponse, ErrorResponse),
-                    "set_blender_light_params",
-                )
-        except Exception as e:
-            server.logger.error(f"Error setting Blender light params: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderSetLightParamsResponse, ErrorResponse),
-                "set_blender_light_params",
-            )
+        return await server._exec_backend(
+            "set_blender_light_params",
+            server.blender_adapter,
+            "Blender",
+            BlenderSetLightParamsResponse,
+            lambda session: session.set_light_params(
+                input_data.light_name,
+                input_data.energy,
+                col,
+                input_data.use_shadow,
+                input_data.spot_size,
+                input_data.spot_blend,
+                input_data.shadow_soft_size,
+            ),
+        )
 
     # -- Phase 4: File I/O tools ------------------------------------------
 
@@ -1345,29 +967,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.open_blend_file(input_data.file_path)
-                apply_success_from_error(payload)
-                result = BlenderOpenFileResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderOpenFileResponse, ErrorResponse),
-                    "open_blender_file",
-                )
-        except Exception as e:
-            server.logger.error(f"Error opening Blender file: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderOpenFileResponse, ErrorResponse),
-                "open_blender_file",
-            )
+        return await server._exec_backend(
+            "open_blender_file",
+            server.blender_adapter,
+            "Blender",
+            BlenderOpenFileResponse,
+            lambda session: session.open_blend_file(input_data.file_path),
+        )
 
     @server.mcp.tool(
         name="save_blender_file",
@@ -1392,29 +998,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.save_blend_file(input_data.file_path)
-                apply_success_from_error(payload)
-                result = BlenderSaveFileResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderSaveFileResponse, ErrorResponse),
-                    "save_blender_file",
-                )
-        except Exception as e:
-            server.logger.error(f"Error saving Blender file: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderSaveFileResponse, ErrorResponse),
-                "save_blender_file",
-            )
+        return await server._exec_backend(
+            "save_blender_file",
+            server.blender_adapter,
+            "Blender",
+            BlenderSaveFileResponse,
+            lambda session: session.save_blend_file(input_data.file_path),
+        )
 
     @server.mcp.tool(
         name="import_blender_file",
@@ -1441,32 +1031,16 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.import_file(
-                    input_data.file_path,
-                    input_data.file_format,
-                )
-                apply_success_from_error(payload)
-                result = BlenderImportFileResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderImportFileResponse, ErrorResponse),
-                    "import_blender_file",
-                )
-        except Exception as e:
-            server.logger.error(f"Error importing Blender file: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderImportFileResponse, ErrorResponse),
-                "import_blender_file",
-            )
+        return await server._exec_backend(
+            "import_blender_file",
+            server.blender_adapter,
+            "Blender",
+            BlenderImportFileResponse,
+            lambda session: session.import_file(
+                input_data.file_path,
+                input_data.file_format,
+            ),
+        )
 
     # -- File I/O tools (export + info) ----------------------------------
 
@@ -1497,33 +1071,17 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.export_file(
-                    file_path=input_data.file_path,
-                    file_format=input_data.file_format,
-                    selected_only=input_data.selected_only,
-                )
-                apply_success_from_error(payload)
-                result = BlenderExportFileResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderExportFileResponse, ErrorResponse),
-                    "export_blender_file",
-                )
-        except Exception as e:
-            server.logger.error("Error exporting Blender file: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderExportFileResponse, ErrorResponse),
-                "export_blender_file",
-            )
+        return await server._exec_backend(
+            "export_blender_file",
+            server.blender_adapter,
+            "Blender",
+            BlenderExportFileResponse,
+            lambda session: session.export_file(
+                file_path=input_data.file_path,
+                file_format=input_data.file_format,
+                selected_only=input_data.selected_only,
+            ),
+        )
 
     @server.mcp.tool(
         name="get_blender_file_info",
@@ -1540,29 +1098,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         rate_error = server._check_rate_limit("get_blender_file_info")
         if rate_error:
             return rate_error
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_file_info()
-                apply_success_from_error(payload)
-                result = BlenderFileInfoResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderFileInfoResponse, ErrorResponse),
-                    "get_blender_file_info",
-                )
-        except Exception as e:
-            server.logger.error("Error getting file info: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderFileInfoResponse, ErrorResponse),
-                "get_blender_file_info",
-            )
+        return await server._exec_backend(
+            "get_blender_file_info",
+            server.blender_adapter,
+            "Blender",
+            BlenderFileInfoResponse,
+            lambda session: session.get_file_info(),
+        )
 
     # -- Animation & Timeline tools ---------------------------------------
 
@@ -1587,29 +1129,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.set_frame(input_data.frame)
-                apply_success_from_error(payload)
-                result = BlenderSetFrameResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderSetFrameResponse, ErrorResponse),
-                    "set_blender_frame",
-                )
-        except Exception as e:
-            server.logger.error("Error setting frame: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderSetFrameResponse, ErrorResponse),
-                "set_blender_frame",
-            )
+        return await server._exec_backend(
+            "set_blender_frame",
+            server.blender_adapter,
+            "Blender",
+            BlenderSetFrameResponse,
+            lambda session: session.set_frame(input_data.frame),
+        )
 
     @server.mcp.tool(
         name="get_blender_frame",
@@ -1626,29 +1152,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         rate_error = server._check_rate_limit("get_blender_frame")
         if rate_error:
             return rate_error
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_frame()
-                apply_success_from_error(payload)
-                result = BlenderGetFrameResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderGetFrameResponse, ErrorResponse),
-                    "get_blender_frame",
-                )
-        except Exception as e:
-            server.logger.error("Error getting frame: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderGetFrameResponse, ErrorResponse),
-                "get_blender_frame",
-            )
+        return await server._exec_backend(
+            "get_blender_frame",
+            server.blender_adapter,
+            "Blender",
+            BlenderGetFrameResponse,
+            lambda session: session.get_frame(),
+        )
 
     @server.mcp.tool(
         name="set_blender_frame_range",
@@ -1675,32 +1185,16 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.set_frame_range(
-                    input_data.frame_start,
-                    input_data.frame_end,
-                )
-                apply_success_from_error(payload)
-                result = BlenderSetFrameRangeResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderSetFrameRangeResponse, ErrorResponse),
-                    "set_blender_frame_range",
-                )
-        except Exception as e:
-            server.logger.error("Error setting frame range: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderSetFrameRangeResponse, ErrorResponse),
-                "set_blender_frame_range",
-            )
+        return await server._exec_backend(
+            "set_blender_frame_range",
+            server.blender_adapter,
+            "Blender",
+            BlenderSetFrameRangeResponse,
+            lambda session: session.set_frame_range(
+                input_data.frame_start,
+                input_data.frame_end,
+            ),
+        )
 
     @server.mcp.tool(
         name="play_blender_animation",
@@ -1725,29 +1219,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.play_animation(input_data.action)
-                apply_success_from_error(payload)
-                result = BlenderPlayAnimationResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderPlayAnimationResponse, ErrorResponse),
-                    "play_blender_animation",
-                )
-        except Exception as e:
-            server.logger.error("Error controlling animation: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderPlayAnimationResponse, ErrorResponse),
-                "play_blender_animation",
-            )
+        return await server._exec_backend(
+            "play_blender_animation",
+            server.blender_adapter,
+            "Blender",
+            BlenderPlayAnimationResponse,
+            lambda session: session.play_animation(input_data.action),
+        )
 
     @server.mcp.tool(
         name="insert_blender_keyframe",
@@ -1778,40 +1256,18 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.insert_keyframe(
-                    input_data.object_name,
-                    input_data.data_path,
-                    input_data.frame,
-                    input_data.index,
-                )
-                apply_success_from_error(payload)
-                result = BlenderInsertKeyframeResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderInsertKeyframeResponse,
-                        ErrorResponse,
-                    ),
-                    "insert_blender_keyframe",
-                )
-        except Exception as e:
-            server.logger.error("Error inserting keyframe: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderInsertKeyframeResponse,
-                    ErrorResponse,
-                ),
-                "insert_blender_keyframe",
-            )
+        return await server._exec_backend(
+            "insert_blender_keyframe",
+            server.blender_adapter,
+            "Blender",
+            BlenderInsertKeyframeResponse,
+            lambda session: session.insert_keyframe(
+                input_data.object_name,
+                input_data.data_path,
+                input_data.frame,
+                input_data.index,
+            ),
+        )
 
     @server.mcp.tool(
         name="delete_blender_keyframe",
@@ -1842,40 +1298,18 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.delete_keyframe(
-                    input_data.object_name,
-                    input_data.data_path,
-                    input_data.frame,
-                    input_data.index,
-                )
-                apply_success_from_error(payload)
-                result = BlenderDeleteKeyframeResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderDeleteKeyframeResponse,
-                        ErrorResponse,
-                    ),
-                    "delete_blender_keyframe",
-                )
-        except Exception as e:
-            server.logger.error("Error deleting keyframe: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderDeleteKeyframeResponse,
-                    ErrorResponse,
-                ),
-                "delete_blender_keyframe",
-            )
+        return await server._exec_backend(
+            "delete_blender_keyframe",
+            server.blender_adapter,
+            "Blender",
+            BlenderDeleteKeyframeResponse,
+            lambda session: session.delete_keyframe(
+                input_data.object_name,
+                input_data.data_path,
+                input_data.frame,
+                input_data.index,
+            ),
+        )
 
     @server.mcp.tool(
         name="get_blender_keyframes",
@@ -1900,37 +1334,15 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_keyframes(
-                    input_data.object_name,
-                )
-                apply_success_from_error(payload)
-                result = BlenderGetKeyframesResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderGetKeyframesResponse,
-                        ErrorResponse,
-                    ),
-                    "get_blender_keyframes",
-                )
-        except Exception as e:
-            server.logger.error("Error getting keyframes: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderGetKeyframesResponse,
-                    ErrorResponse,
-                ),
-                "get_blender_keyframes",
-            )
+        return await server._exec_backend(
+            "get_blender_keyframes",
+            server.blender_adapter,
+            "Blender",
+            BlenderGetKeyframesResponse,
+            lambda session: session.get_keyframes(
+                input_data.object_name,
+            ),
+        )
 
     # -- Physics & Simulation tools ---------------------------------------
 
@@ -1971,44 +1383,22 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.setup_rigid_body(
-                    input_data.object_name,
-                    input_data.body_type,
-                    input_data.mass,
-                    input_data.friction,
-                    input_data.restitution,
-                    input_data.collision_shape,
-                    input_data.linear_damping,
-                    input_data.angular_damping,
-                )
-                apply_success_from_error(payload)
-                result = BlenderSetupRigidBodyResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderSetupRigidBodyResponse,
-                        ErrorResponse,
-                    ),
-                    "setup_blender_rigid_body",
-                )
-        except Exception as e:
-            server.logger.error("Error setting up rigid body: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderSetupRigidBodyResponse,
-                    ErrorResponse,
-                ),
-                "setup_blender_rigid_body",
-            )
+        return await server._exec_backend(
+            "setup_blender_rigid_body",
+            server.blender_adapter,
+            "Blender",
+            BlenderSetupRigidBodyResponse,
+            lambda session: session.setup_rigid_body(
+                input_data.object_name,
+                input_data.body_type,
+                input_data.mass,
+                input_data.friction,
+                input_data.restitution,
+                input_data.collision_shape,
+                input_data.linear_damping,
+                input_data.angular_damping,
+            ),
+        )
 
     @server.mcp.tool(
         name="add_blender_force_field",
@@ -2039,40 +1429,18 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.add_force_field(
-                    input_data.field_type,
-                    input_data.strength,
-                    input_data.location,
-                    input_data.name,
-                )
-                apply_success_from_error(payload)
-                result = BlenderAddForceFieldResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderAddForceFieldResponse,
-                        ErrorResponse,
-                    ),
-                    "add_blender_force_field",
-                )
-        except Exception as e:
-            server.logger.error("Error adding force field: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderAddForceFieldResponse,
-                    ErrorResponse,
-                ),
-                "add_blender_force_field",
-            )
+        return await server._exec_backend(
+            "add_blender_force_field",
+            server.blender_adapter,
+            "Blender",
+            BlenderAddForceFieldResponse,
+            lambda session: session.add_force_field(
+                input_data.field_type,
+                input_data.strength,
+                input_data.location,
+                input_data.name,
+            ),
+        )
 
     @server.mcp.tool(
         name="get_blender_force_field_info",
@@ -2097,37 +1465,15 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_force_field_info(
-                    input_data.object_name,
-                )
-                apply_success_from_error(payload)
-                result = BlenderGetForceFieldInfoResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderGetForceFieldInfoResponse,
-                        ErrorResponse,
-                    ),
-                    "get_blender_force_field_info",
-                )
-        except Exception as e:
-            server.logger.error("Error getting force field info: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderGetForceFieldInfoResponse,
-                    ErrorResponse,
-                ),
-                "get_blender_force_field_info",
-            )
+        return await server._exec_backend(
+            "get_blender_force_field_info",
+            server.blender_adapter,
+            "Blender",
+            BlenderGetForceFieldInfoResponse,
+            lambda session: session.get_force_field_info(
+                input_data.object_name,
+            ),
+        )
 
     @server.mcp.tool(
         name="add_blender_rigid_body_constraint",
@@ -2160,41 +1506,19 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.add_rigid_body_constraint(
-                    input_data.constraint_type,
-                    input_data.object1_name,
-                    input_data.object2_name,
-                    input_data.location,
-                    input_data.disable_collisions,
-                )
-                apply_success_from_error(payload)
-                result = BlenderAddConstraintResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderAddConstraintResponse,
-                        ErrorResponse,
-                    ),
-                    "add_blender_rigid_body_constraint",
-                )
-        except Exception as e:
-            server.logger.error("Error adding rigid body constraint: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderAddConstraintResponse,
-                    ErrorResponse,
-                ),
-                "add_blender_rigid_body_constraint",
-            )
+        return await server._exec_backend(
+            "add_blender_rigid_body_constraint",
+            server.blender_adapter,
+            "Blender",
+            BlenderAddConstraintResponse,
+            lambda session: session.add_rigid_body_constraint(
+                input_data.constraint_type,
+                input_data.object1_name,
+                input_data.object2_name,
+                input_data.location,
+                input_data.disable_collisions,
+            ),
+        )
 
     @server.mcp.tool(
         name="get_blender_constraint_info",
@@ -2219,37 +1543,15 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_constraint_info(
-                    input_data.object_name,
-                )
-                apply_success_from_error(payload)
-                result = BlenderGetConstraintInfoResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderGetConstraintInfoResponse,
-                        ErrorResponse,
-                    ),
-                    "get_blender_constraint_info",
-                )
-        except Exception as e:
-            server.logger.error("Error getting constraint info: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderGetConstraintInfoResponse,
-                    ErrorResponse,
-                ),
-                "get_blender_constraint_info",
-            )
+        return await server._exec_backend(
+            "get_blender_constraint_info",
+            server.blender_adapter,
+            "Blender",
+            BlenderGetConstraintInfoResponse,
+            lambda session: session.get_constraint_info(
+                input_data.object_name,
+            ),
+        )
 
     @server.mcp.tool(
         name="get_blender_physics_state",
@@ -2274,37 +1576,15 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_physics_state(
-                    input_data.object_name,
-                )
-                apply_success_from_error(payload)
-                result = BlenderGetPhysicsStateResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderGetPhysicsStateResponse,
-                        ErrorResponse,
-                    ),
-                    "get_blender_physics_state",
-                )
-        except Exception as e:
-            server.logger.error("Error getting physics state: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderGetPhysicsStateResponse,
-                    ErrorResponse,
-                ),
-                "get_blender_physics_state",
-            )
+        return await server._exec_backend(
+            "get_blender_physics_state",
+            server.blender_adapter,
+            "Blender",
+            BlenderGetPhysicsStateResponse,
+            lambda session: session.get_physics_state(
+                input_data.object_name,
+            ),
+        )
 
     @server.mcp.tool(
         name="get_blender_object_trajectory",
@@ -2335,40 +1615,18 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_object_trajectory(
-                    input_data.object_name,
-                    input_data.start_frame,
-                    input_data.end_frame,
-                    input_data.step,
-                )
-                apply_success_from_error(payload)
-                result = BlenderGetTrajectoryResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderGetTrajectoryResponse,
-                        ErrorResponse,
-                    ),
-                    "get_blender_object_trajectory",
-                )
-        except Exception as e:
-            server.logger.error("Error getting trajectory: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderGetTrajectoryResponse,
-                    ErrorResponse,
-                ),
-                "get_blender_object_trajectory",
-            )
+        return await server._exec_backend(
+            "get_blender_object_trajectory",
+            server.blender_adapter,
+            "Blender",
+            BlenderGetTrajectoryResponse,
+            lambda session: session.get_object_trajectory(
+                input_data.object_name,
+                input_data.start_frame,
+                input_data.end_frame,
+                input_data.step,
+            ),
+        )
 
     @server.mcp.tool(
         name="bake_blender_simulation",
@@ -2395,38 +1653,16 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.bake_simulation(
-                    input_data.frame_start,
-                    input_data.frame_end,
-                )
-                apply_success_from_error(payload)
-                result = BlenderBakeSimulationResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderBakeSimulationResponse,
-                        ErrorResponse,
-                    ),
-                    "bake_blender_simulation",
-                )
-        except Exception as e:
-            server.logger.error("Error baking simulation: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderBakeSimulationResponse,
-                    ErrorResponse,
-                ),
-                "bake_blender_simulation",
-            )
+        return await server._exec_backend(
+            "bake_blender_simulation",
+            server.blender_adapter,
+            "Blender",
+            BlenderBakeSimulationResponse,
+            lambda session: session.bake_simulation(
+                input_data.frame_start,
+                input_data.frame_end,
+            ),
+        )
 
     @server.mcp.tool(
         name="free_blender_bake",
@@ -2509,32 +1745,16 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.execute_script(
-                    input_data.script,
-                    input_data.timeout,
-                )
-                apply_success_from_error(payload)
-                result = BlenderExecuteScriptResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderExecuteScriptResponse, ErrorResponse),
-                    "execute_blender_script",
-                )
-        except Exception as e:
-            server.logger.error("Error executing Blender script: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderExecuteScriptResponse, ErrorResponse),
-                "execute_blender_script",
-            )
+        return await server._exec_backend(
+            "execute_blender_script",
+            server.blender_adapter,
+            "Blender",
+            BlenderExecuteScriptResponse,
+            lambda session: session.execute_script(
+                input_data.script,
+                input_data.timeout,
+            ),
+        )
 
     @server.mcp.tool(
         name="create_blender_mesh_from_data",
@@ -2572,44 +1792,20 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                payload = session.create_mesh_from_data(
-                    name=input_data.name,
-                    vertices=[list(v) for v in input_data.vertices],
-                    edges=[list(e) for e in input_data.edges],
-                    faces=[list(f) for f in input_data.faces],
-                    location=(
-                        list(input_data.location) if input_data.location else None
-                    ),
-                    collection_name=input_data.collection_name,
-                )
-                apply_success_from_error(payload)
-                result = BlenderCreateMeshFromDataResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderCreateMeshFromDataResponse,
-                        ErrorResponse,
-                    ),
-                    "create_blender_mesh_from_data",
-                )
-        except Exception as e:
-            server.logger.error("Error creating mesh from data: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderCreateMeshFromDataResponse,
-                    ErrorResponse,
-                ),
-                "create_blender_mesh_from_data",
-            )
+        return await server._exec_backend(
+            "create_blender_mesh_from_data",
+            server.blender_adapter,
+            "Blender",
+            BlenderCreateMeshFromDataResponse,
+            lambda session: session.create_mesh_from_data(
+                name=input_data.name,
+                vertices=[list(v) for v in input_data.vertices],
+                edges=[list(e) for e in input_data.edges],
+                faces=[list(f) for f in input_data.faces],
+                location=(list(input_data.location) if input_data.location else None),
+                collection_name=input_data.collection_name,
+            ),
+        )
 
     # -- SimReady Asset Format tools ---------------------------------------
 
@@ -2642,27 +1838,16 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            with server.blender_adapter.create_session() as session:
-                payload = session.apply_simready_metadata(
-                    object_name=input_data.object_name,
-                    metadata=input_data.metadata.model_dump(exclude_none=True),
-                )
-                apply_success_from_error(payload)
-                result = SimReadyApplyMetadataResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (SimReadyApplyMetadataResponse, ErrorResponse),
-                    "apply_simready_metadata",
-                )
-        except Exception as e:
-            server.logger.error("Error applying SimReady metadata: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (SimReadyApplyMetadataResponse, ErrorResponse),
-                "apply_simready_metadata",
-            )
+        return await server._exec_backend(
+            "apply_simready_metadata",
+            server.blender_adapter,
+            "Blender",
+            SimReadyApplyMetadataResponse,
+            lambda session: session.apply_simready_metadata(
+                object_name=input_data.object_name,
+                metadata=input_data.metadata.model_dump(exclude_none=True),
+            ),
+        )
 
     @server.mcp.tool(
         name="get_simready_metadata",
@@ -2691,26 +1876,15 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            with server.blender_adapter.create_session() as session:
-                payload = session.get_simready_metadata(
-                    object_name=input_data.object_name,
-                )
-                apply_success_from_error(payload)
-                result = SimReadyGetMetadataResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (SimReadyGetMetadataResponse, ErrorResponse),
-                    "get_simready_metadata",
-                )
-        except Exception as e:
-            server.logger.error("Error getting SimReady metadata: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (SimReadyGetMetadataResponse, ErrorResponse),
-                "get_simready_metadata",
-            )
+        return await server._exec_backend(
+            "get_simready_metadata",
+            server.blender_adapter,
+            "Blender",
+            SimReadyGetMetadataResponse,
+            lambda session: session.get_simready_metadata(
+                object_name=input_data.object_name,
+            ),
+        )
 
     @server.mcp.tool(
         name="validate_simready_compliance",
@@ -2749,31 +1923,20 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            with server.blender_adapter.create_session() as session:
-                payload = session.validate_simready_compliance(
-                    object_names=input_data.object_names,
-                    check_naming=input_data.check_naming,
-                    check_scale=input_data.check_scale,
-                    check_transforms=input_data.check_transforms,
-                    check_materials=input_data.check_materials,
-                    check_hierarchy=input_data.check_hierarchy,
-                )
-                apply_success_from_error(payload)
-                result = SimReadyValidateResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (SimReadyValidateResponse, ErrorResponse),
-                    "validate_simready_compliance",
-                )
-        except Exception as e:
-            server.logger.error("Error validating SimReady compliance: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (SimReadyValidateResponse, ErrorResponse),
-                "validate_simready_compliance",
-            )
+        return await server._exec_backend(
+            "validate_simready_compliance",
+            server.blender_adapter,
+            "Blender",
+            SimReadyValidateResponse,
+            lambda session: session.validate_simready_compliance(
+                object_names=input_data.object_names,
+                check_naming=input_data.check_naming,
+                check_scale=input_data.check_scale,
+                check_transforms=input_data.check_transforms,
+                check_materials=input_data.check_materials,
+                check_hierarchy=input_data.check_hierarchy,
+            ),
+        )
 
     @server.mcp.tool(
         name="export_simready_usd",
@@ -2808,29 +1971,18 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            with server.blender_adapter.create_session() as session:
-                payload = session.export_simready_usd(
-                    file_path=input_data.file_path,
-                    object_names=input_data.object_names,
-                    embed_metadata=input_data.embed_metadata,
-                    validate_before_export=input_data.validate_before_export,
-                )
-                apply_success_from_error(payload)
-                result = SimReadyExportResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (SimReadyExportResponse, ErrorResponse),
-                    "export_simready_usd",
-                )
-        except Exception as e:
-            server.logger.error("Error exporting SimReady USD: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (SimReadyExportResponse, ErrorResponse),
-                "export_simready_usd",
-            )
+        return await server._exec_backend(
+            "export_simready_usd",
+            server.blender_adapter,
+            "Blender",
+            SimReadyExportResponse,
+            lambda session: session.export_simready_usd(
+                file_path=input_data.file_path,
+                object_names=input_data.object_names,
+                embed_metadata=input_data.embed_metadata,
+                validate_before_export=input_data.validate_before_export,
+            ),
+        )
 
     @server.mcp.tool(
         name="setup_simready_hierarchy",
@@ -2863,35 +2015,18 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return input_data
-        try:
-            with server.blender_adapter.create_session() as session:
-                payload = session.setup_simready_hierarchy(
-                    root_name=input_data.root_name,
-                    child_names=input_data.child_names,
-                    semantic=(
-                        input_data.semantic.model_dump(exclude_none=True)
-                        if input_data.semantic
-                        else None
-                    ),
-                )
-                apply_success_from_error(payload)
-                result = SimReadySetupHierarchyResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        SimReadySetupHierarchyResponse,
-                        ErrorResponse,
-                    ),
-                    "setup_simready_hierarchy",
-                )
-        except Exception as e:
-            server.logger.error("Error setting up SimReady hierarchy: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    SimReadySetupHierarchyResponse,
-                    ErrorResponse,
+        return await server._exec_backend(
+            "setup_simready_hierarchy",
+            server.blender_adapter,
+            "Blender",
+            SimReadySetupHierarchyResponse,
+            lambda session: session.setup_simready_hierarchy(
+                root_name=input_data.root_name,
+                child_names=input_data.child_names,
+                semantic=(
+                    input_data.semantic.model_dump(exclude_none=True)
+                    if input_data.semantic
+                    else None
                 ),
-                "setup_simready_hierarchy",
-            )
+            ),
+        )

@@ -174,3 +174,33 @@ def test_rate_limit_short_circuits_before_a_session_opens(
 
     assert result["error_type"] == "RateLimit"
     assert adapter.sessions_opened == 0
+
+
+class _SyncSession:
+    """Blender sessions are synchronous; the envelope must accept both."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def work(self) -> Dict[str, Any]:
+        self.calls += 1
+        return {"value": "sync-ok"}
+
+
+def test_synchronous_session_calls_are_supported(server) -> None:
+    adapter = _Adapter()
+    adapter.session = _SyncSession()  # type: ignore[assignment]
+
+    result = asyncio.run(
+        server._exec_backend(
+            "some_blender_tool",
+            adapter,
+            "Blender",
+            _Response,
+            lambda session: session.work(),
+        )
+    )
+
+    assert result["value"] == "sync-ok"
+    assert result["success"] is True
+    assert adapter.session.calls == 1
