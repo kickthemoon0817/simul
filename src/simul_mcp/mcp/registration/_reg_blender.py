@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from ..schemas.blender import *
 from ..schemas.common import ErrorResponse
 from ..schemas.simready import *
-from ._helpers import apply_success_from_error
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -36,10 +35,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         Returns:
             Blender runtime information or an error response.
         """
-        rate_error = server._check_rate_limit("get_blender_info")
-        if rate_error:
-            return rate_error
-
         return await server._exec_backend(
             "get_blender_info",
             server.blender_adapter,
@@ -75,10 +70,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         Returns:
             Blender object listing response or error response.
         """
-        rate_error = server._check_rate_limit("list_blender_scene_objects")
-        if rate_error:
-            return rate_error
-
         input_data = server._validate_input(
             BlenderSceneObjectsRequest,
             collection_name=collection_name,
@@ -116,9 +107,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def get_blender_object_info(
         object_name: str,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_object_info")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderObjectInfoRequest,
             object_name=object_name,
@@ -147,9 +135,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def get_blender_mesh_info(
         object_name: str,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_mesh_info")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderMeshInfoRequest,
             object_name=object_name,
@@ -179,9 +164,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         object_name: str,
         world_space: bool = True,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_bounding_box")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderBoundingBoxRequest,
             object_name=object_name,
@@ -218,9 +200,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         object_type: Optional[str] = None,
         max_results: int = 50,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("search_blender_objects")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderSearchObjectsRequest,
             name_pattern=name_pattern,
@@ -253,9 +232,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         task=server._task_optional(),
     )
     async def summarize_blender_scene() -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("summarize_blender_scene")
-        if rate_error:
-            return rate_error
         return await server._exec_backend(
             "summarize_blender_scene",
             server.blender_adapter,
@@ -278,9 +254,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def get_blender_material_info(
         material_name: str,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_material_info")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderMaterialInfoRequest,
             material_name=material_name,
@@ -312,9 +285,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         object_name_a: str,
         object_name_b: str,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_distance_between")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderDistanceRequest,
             object_name_a=object_name_a,
@@ -349,9 +319,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         bounds_min: List[float],
         bounds_max: List[float],
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("check_blender_object_bounds")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderBoundsCheckRequest,
             object_name=object_name,
@@ -391,9 +358,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         jpeg_quality: int = 85,
         use_render_fallback: bool = False,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("capture_blender_viewport")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderCaptureViewportRequest,
             width=width,
@@ -432,9 +396,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         rotation_euler: List[float],
         camera_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("set_blender_camera_view")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderSetCameraViewRequest,
             location=location,
@@ -469,9 +430,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def get_blender_camera_info(
         camera_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_camera_info")
-        if rate_error:
-            return rate_error
         return await server._exec_backend(
             "get_blender_camera_info",
             server.blender_adapter,
@@ -496,9 +454,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         distance_factor: float = 2.0,
         camera_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("focus_blender_on_object")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderFocusOnObjectRequest,
             object_name=object_name,
@@ -531,9 +486,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         task=server._task_optional(),
     )
     async def get_blender_viewport_info() -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_viewport_info")
-        if rate_error:
-            return rate_error
         return await server._exec_backend(
             "get_blender_viewport_info",
             server.blender_adapter,
@@ -563,9 +515,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         height: int = 512,
         jpeg_quality: int = 85,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("capture_blender_viewport_sequence")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderCaptureSequenceRequest,
             start_frame=start_frame,
@@ -612,9 +561,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         rotation_euler: List[float] = [0.0, 0.0, 0.0],
         scale: List[float] = [1.0, 1.0, 1.0],
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("create_blender_object")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderCreateObjectRequest,
             object_type=object_type,
@@ -654,9 +600,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def delete_blender_object(
         object_name: str,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("delete_blender_object")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderDeleteObjectRequest,
             object_name=object_name,
@@ -688,9 +631,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         rotation_euler: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("set_blender_object_transform")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderSetTransformRequest,
             object_name=object_name,
@@ -728,9 +668,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         child_name: str,
         parent_name: str,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("set_blender_object_parent")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderSetParentRequest,
             child_name=child_name,
@@ -764,9 +701,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         object_name: str,
         keep_transform: bool = True,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("clear_blender_object_parent")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderClearParentRequest,
             object_name=object_name,
@@ -803,9 +737,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         metallic: float = 0.0,
         roughness: float = 0.5,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("assign_blender_material")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderAssignMaterialRequest,
             object_name=object_name,
@@ -847,9 +778,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         modifier_name: Optional[str] = None,
         params: Dict[str, Any] = {},
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("add_blender_modifier")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderAddModifierRequest,
             object_name=object_name,
@@ -892,9 +820,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         spot_blend: Optional[float] = None,
         shadow_soft_size: Optional[float] = None,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("set_blender_light_params")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderSetLightParamsRequest,
             light_name=light_name,
@@ -940,9 +865,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def open_blender_file(
         file_path: str,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("open_blender_file")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderOpenFileRequest,
             file_path=file_path,
@@ -971,9 +893,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def save_blender_file(
         file_path: Optional[str] = None,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("save_blender_file")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderSaveFileRequest,
             file_path=file_path,
@@ -1003,9 +922,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         file_path: str,
         file_format: str,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("import_blender_file")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderImportFileRequest,
             file_path=file_path,
@@ -1042,9 +958,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         file_format: str,
         selected_only: bool = False,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("export_blender_file")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderExportFileRequest,
             file_path=file_path,
@@ -1077,9 +990,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         task=server._task_optional(),
     )
     async def get_blender_file_info() -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_file_info")
-        if rate_error:
-            return rate_error
         return await server._exec_backend(
             "get_blender_file_info",
             server.blender_adapter,
@@ -1102,9 +1012,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         task=server._task_optional(),
     )
     async def set_blender_frame(frame: int) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("set_blender_frame")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderSetFrameRequest,
             frame=frame,
@@ -1131,9 +1038,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         task=server._task_optional(),
     )
     async def get_blender_frame() -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_frame")
-        if rate_error:
-            return rate_error
         return await server._exec_backend(
             "get_blender_frame",
             server.blender_adapter,
@@ -1157,9 +1061,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         frame_start: int,
         frame_end: int,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("set_blender_frame_range")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderSetFrameRangeRequest,
             frame_start=frame_start,
@@ -1192,9 +1093,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def play_blender_animation(
         action: str = "play",
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("play_blender_animation")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderPlayAnimationRequest,
             action=action,
@@ -1226,9 +1124,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         frame: int,
         index: int = -1,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("insert_blender_keyframe")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderInsertKeyframeRequest,
             object_name=object_name,
@@ -1268,9 +1163,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         frame: int,
         index: int = -1,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("delete_blender_keyframe")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderDeleteKeyframeRequest,
             object_name=object_name,
@@ -1307,9 +1199,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def get_blender_keyframes(
         object_name: str,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_keyframes")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderGetKeyframesRequest,
             object_name=object_name,
@@ -1349,9 +1238,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         linear_damping: float = 0.04,
         angular_damping: float = 0.1,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("setup_blender_rigid_body")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderSetupRigidBodyRequest,
             object_name=object_name,
@@ -1399,9 +1285,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         location: Optional[List[float]] = None,
         name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("add_blender_force_field")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderAddForceFieldRequest,
             field_type=field_type,
@@ -1438,9 +1321,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def get_blender_force_field_info(
         object_name: str,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_force_field_info")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderGetForceFieldInfoRequest,
             object_name=object_name,
@@ -1475,9 +1355,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         location: Optional[List[float]] = None,
         disable_collisions: bool = True,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("add_blender_rigid_body_constraint")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderAddConstraintRequest,
             constraint_type=constraint_type,
@@ -1516,9 +1393,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def get_blender_constraint_info(
         object_name: str,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_constraint_info")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderGetConstraintInfoRequest,
             object_name=object_name,
@@ -1549,9 +1423,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def get_blender_physics_state(
         object_name: str,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_physics_state")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderGetPhysicsStateRequest,
             object_name=object_name,
@@ -1585,9 +1456,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         end_frame: int,
         step: int = 1,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_blender_object_trajectory")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderGetTrajectoryRequest,
             object_name=object_name,
@@ -1625,9 +1493,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         frame_start: int,
         frame_end: int,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("bake_blender_simulation")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderBakeSimulationRequest,
             frame_start=frame_start,
@@ -1717,9 +1582,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         script: str,
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("execute_blender_script")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderExecuteScriptRequest,
             script=script,
@@ -1760,9 +1622,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         location: Optional[List[float]] = None,
         collection_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("create_blender_mesh_from_data")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             BlenderCreateMeshFromDataRequest,
             name=name,
@@ -1810,9 +1669,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         object_name: str,
         metadata: Dict[str, Any],
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("apply_simready_metadata")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             SimReadyApplyMetadataRequest,
             object_name=object_name,
@@ -1849,9 +1705,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def get_simready_metadata(
         object_name: str,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("get_simready_metadata")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             SimReadyGetMetadataRequest,
             object_name=object_name,
@@ -1891,9 +1744,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         check_materials: bool = True,
         check_hierarchy: bool = True,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("validate_simready_compliance")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             SimReadyValidateRequest,
             object_names=object_names,
@@ -1941,9 +1791,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         embed_metadata: bool = True,
         validate_before_export: bool = True,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("export_simready_usd")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             SimReadyExportRequest,
             file_path=file_path,
@@ -1986,9 +1833,6 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         child_names: List[str],
         semantic: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("setup_simready_hierarchy")
-        if rate_error:
-            return rate_error
         input_data = server._validate_input(
             SimReadySetupHierarchyRequest,
             root_name=root_name,

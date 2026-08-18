@@ -106,7 +106,10 @@ def server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServer:
 def _run(server: server_module.SimulMCPServer, adapter: Any) -> Dict[str, Any]:
     return asyncio.run(
         server._exec_backend(
-            "some_unreal_tool", adapter, "Unreal", _Response,
+            "some_unreal_tool",
+            adapter,
+            "Unreal",
+            _Response,
             lambda session: session.work(),
         )
     )
@@ -167,7 +170,11 @@ def test_rate_limit_short_circuits_before_a_session_opens(
     monkeypatch.setattr(
         server,
         "_check_rate_limit",
-        lambda name: {"success": False, "error": "rate limited", "error_type": "RateLimit"},
+        lambda name: {
+            "success": False,
+            "error": "rate limited",
+            "error_type": "RateLimit",
+        },
     )
 
     result = _run(server, adapter)
@@ -204,3 +211,67 @@ def test_synchronous_session_calls_are_supported(server) -> None:
     assert result["value"] == "sync-ok"
     assert result["success"] is True
     assert adapter.session.calls == 1
+
+
+class _RecordingFastMCP(FakeFastMCP):
+    """FakeFastMCP that keeps the registered tool functions addressable."""
+
+    def __init__(self, name: str, version: str, **kwargs: Any):
+        super().__init__(name, version, **kwargs)
+        self.by_name: Dict[str, Any] = {}
+
+    def tool(self, name: str, **kwargs: Any):
+        def decorator(func):
+            self.by_name[name] = func
+            return func
+
+        return decorator
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "kwargs"),
+    [
+        ("get_blender_info", {}),
+        ("get_blender_object_info", {"object_name": "Cube"}),
+        ("search_unreal_assets", {"query": "chair"}),
+    ],
+)
+def test_registered_tool_checks_the_rate_limit_exactly_once(
+    monkeypatch: pytest.MonkeyPatch, tool_name: str, kwargs: Dict[str, Any]
+) -> None:
+    """A converted tool must not keep an outer check on top of the envelope's.
+
+    Two checks per call drain two tokens from the same bucket: the effective
+    rate halves, and at burst_size=1 the tool can never run at all.
+    """
+
+    class _StubAdapter:
+        def __init__(self, settings: Any) -> None:
+            pass
+
+        def is_available(self) -> bool:
+            return True
+
+    monkeypatch.setattr(server_module, "FastMCP", _RecordingFastMCP)
+    monkeypatch.setattr(server_module, "TaskConfig", None)
+    monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
+    monkeypatch.setattr(server_module, "is_blender_available", lambda: True)
+    monkeypatch.setattr(server_module, "BlenderRuntimeAdapter", _StubAdapter)
+    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", _StubAdapter)
+    instance = server_module.SimulMCPServer(settings=Settings())
+
+    # MCP mode registers the thin Unreal set; the converted tools live in
+    # the full set, so register it the way the CLI surface does.
+    from simul_mcp.mcp.registration import register_unreal_tools
+
+    register_unreal_tools(instance, thin=False)
+
+    checks: List[str] = []
+    monkeypatch.setattr(instance, "_check_rate_limit", lambda name: checks.append(name))
+    instance.blender_adapter = _Adapter(available=False)
+    instance.unreal_adapter = _Adapter(available=False)
+
+    func = instance.mcp.by_name[tool_name]
+    asyncio.run(func(**kwargs))
+
+    assert checks == [tool_name]

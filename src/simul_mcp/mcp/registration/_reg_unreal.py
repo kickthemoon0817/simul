@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ..schemas.common import ErrorResponse
 from ..schemas.unreal import *
-from ._helpers import apply_success_from_error
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -489,9 +488,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         Returns:
             Asset search results or error response.
         """
-        rate_error = server._check_rate_limit("search_unreal_assets")
-        if rate_error:
-            return rate_error
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -1016,10 +1012,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         """Set material instance parameters."""
         import json as json_lib
 
-        rate_error = server._check_rate_limit("set_unreal_material_params")
-        if rate_error:
-            return rate_error
-
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
             # return the error payload it always has, not escape as an
@@ -1406,9 +1398,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         convert_to_meters: bool = True,
     ) -> Dict[str, Any]:
         """Export actors to USD."""
-        rate_error = server._check_rate_limit("export_unreal_usd")
-        if rate_error:
-            return rate_error
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -1450,9 +1439,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         semantic_labels: str = "",
     ) -> Dict[str, Any]:
         """Convert actors to SimReady format."""
-        rate_error = server._check_rate_limit("convert_to_simready")
-        if rate_error:
-            return rate_error
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -1498,9 +1484,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         checks: str = "",
     ) -> Dict[str, Any]:
         """Validate asset against SimReady spec."""
-        rate_error = server._check_rate_limit("validate_simready_asset")
-        if rate_error:
-            return rate_error
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -1562,9 +1545,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         operations: str,
     ) -> Dict[str, Any]:
         """Batch multiple operations."""
-        rate_error = server._check_rate_limit("batch_unreal_operations")
-        if rate_error:
-            return rate_error
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -1630,9 +1610,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         actor_filter: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Analyze scene for robotics."""
-        rate_error = server._check_rate_limit("analyze_unreal_scene_for_robotics")
-        if rate_error:
-            return rate_error
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -1674,9 +1651,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         bounds_max: str = "",
     ) -> Dict[str, Any]:
         """Generate procedural scene."""
-        rate_error = server._check_rate_limit("generate_unreal_procedural_scene")
-        if rate_error:
-            return rate_error
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -1754,9 +1728,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         actor_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create mesh primitive."""
-        rate_error = server._check_rate_limit("generate_unreal_mesh_primitive")
-        if rate_error:
-            return rate_error
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -1891,9 +1862,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         count: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Edit mesh topology."""
-        rate_error = server._check_rate_limit("edit_unreal_mesh_topology")
-        if rate_error:
-            return rate_error
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -1998,9 +1966,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         keep_both_sides: bool = False,
     ) -> Dict[str, Any]:
         """Cut mesh with plane."""
-        rate_error = server._check_rate_limit("cut_unreal_mesh_plane")
-        if rate_error:
-            return rate_error
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -2040,9 +2005,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         checks: str = "",
     ) -> Dict[str, Any]:
         """Validate mesh integrity."""
-        rate_error = server._check_rate_limit("validate_unreal_mesh")
-        if rate_error:
-            return rate_error
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -2081,9 +2043,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         tessellation_options: str = "{}",
     ) -> Dict[str, Any]:
         """Convert mesh format."""
-        rate_error = server._check_rate_limit("convert_unreal_mesh_format")
-        if rate_error:
-            return rate_error
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
