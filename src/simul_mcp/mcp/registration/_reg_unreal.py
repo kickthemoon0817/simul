@@ -187,9 +187,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     )
 
             reachable = [i for i in instances if i.reachable]
-            active_name = next(
-                (i.name for i in instances if i.active), None
-            )
+            active_name = next((i.name for i in instances if i.active), None)
             result = UnrealListInstancesResponse(
                 success=True,
                 instances=instances,
@@ -254,40 +252,18 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 error_type="ValidationError",
             ).model_dump()
 
-        rate_error = server._check_rate_limit("capture_unreal_viewport")
-        if rate_error:
-            return rate_error
-
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.capture_viewport(
-                    resolution_x=resolution_x,
-                    resolution_y=resolution_y,
-                    format=format,
-                    inline=inline,
-                )
-                apply_success_from_error(payload)
-                result = UnrealCaptureViewportResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealCaptureViewportResponse, ErrorResponse),
-                    "capture_unreal_viewport",
-                )
-
-        except Exception as e:
-            server.logger.error("Error capturing Unreal viewport: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealCaptureViewportResponse, ErrorResponse),
-                "capture_unreal_viewport",
-            )
+        return await server._exec_backend(
+            "capture_unreal_viewport",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealCaptureViewportResponse,
+            lambda session: session.capture_viewport(
+                resolution_x=resolution_x,
+                resolution_y=resolution_y,
+                format=format,
+                inline=inline,
+            ),
+        )
 
     @server.mcp.tool(
         name="execute_unreal_script",
@@ -443,39 +419,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         Returns:
             Actor listing or error response.
         """
-        rate_error = server._check_rate_limit("list_unreal_actors")
-        if rate_error:
-            return rate_error
-
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.list_actors(
-                    class_filter=class_filter or None,
-                    tag_filter=tag_filter or None,
-                    max_results=max_results,
-                )
-                apply_success_from_error(payload)
-                result = UnrealListActorsResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealListActorsResponse, ErrorResponse),
-                    "list_unreal_actors",
-                )
-
-        except Exception as e:
-            server.logger.error("Error listing Unreal actors: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealListActorsResponse, ErrorResponse),
-                "list_unreal_actors",
-            )
+        return await server._exec_backend(
+            "list_unreal_actors",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealListActorsResponse,
+            lambda session: session.list_actors(
+                class_filter=class_filter or None,
+                tag_filter=tag_filter or None,
+                max_results=max_results,
+            ),
+        )
 
     @server.mcp.tool(
         name="get_unreal_actor_info",
@@ -637,37 +591,15 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         Returns:
             Thumbnail data or error response.
         """
-        rate_error = server._check_rate_limit("get_unreal_actor_thumbnail")
-        if rate_error:
-            return rate_error
-
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.get_actor_thumbnail(
-                    asset_path=asset_path, width=width, height=height
-                )
-                apply_success_from_error(payload)
-                result = UnrealGetThumbnailResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealGetThumbnailResponse, ErrorResponse),
-                    "get_unreal_actor_thumbnail",
-                )
-
-        except Exception as e:
-            server.logger.error("Error getting Unreal thumbnail: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealGetThumbnailResponse, ErrorResponse),
-                "get_unreal_actor_thumbnail",
-            )
+        return await server._exec_backend(
+            "get_unreal_actor_thumbnail",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealGetThumbnailResponse,
+            lambda session: session.get_actor_thumbnail(
+                asset_path=asset_path, width=width, height=height
+            ),
+        )
 
     @server.mcp.tool(
         name="summarize_unreal_scene",
@@ -758,39 +690,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         Returns:
             Applied camera state or error response.
         """
-        rate_error = server._check_rate_limit("set_unreal_camera_view")
-        if rate_error:
-            return rate_error
-
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.set_camera_view(
-                    location=(location_x, location_y, location_z),
-                    rotation=(rotation_pitch, rotation_yaw, rotation_roll),
-                    fov=fov,
-                )
-                apply_success_from_error(payload)
-                result = UnrealSetCameraViewResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSetCameraViewResponse, ErrorResponse),
-                    "set_unreal_camera_view",
-                )
-
-        except Exception as e:
-            server.logger.error("Error setting Unreal camera view: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSetCameraViewResponse, ErrorResponse),
-                "set_unreal_camera_view",
-            )
+        return await server._exec_backend(
+            "set_unreal_camera_view",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSetCameraViewResponse,
+            lambda session: session.set_camera_view(
+                location=(location_x, location_y, location_z),
+                rotation=(rotation_pitch, rotation_yaw, rotation_roll),
+                fov=fov,
+            ),
+        )
 
     @server.mcp.tool(
         name="focus_unreal_on_actor",
@@ -817,37 +727,15 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         Returns:
             Focus result or error response.
         """
-        rate_error = server._check_rate_limit("focus_unreal_on_actor")
-        if rate_error:
-            return rate_error
-
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.focus_on_actor(
-                    actor_path=actor_path, distance=distance
-                )
-                apply_success_from_error(payload)
-                result = UnrealFocusActorResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealFocusActorResponse, ErrorResponse),
-                    "focus_unreal_on_actor",
-                )
-
-        except Exception as e:
-            server.logger.error("Error focusing on Unreal actor: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealFocusActorResponse, ErrorResponse),
-                "focus_unreal_on_actor",
-            )
+        return await server._exec_backend(
+            "focus_unreal_on_actor",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealFocusActorResponse,
+            lambda session: session.focus_on_actor(
+                actor_path=actor_path, distance=distance
+            ),
+        )
 
     # -- Phase 3: Scene Manipulation --
 
@@ -873,37 +761,18 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         label: str = "",
     ) -> Dict[str, Any]:
         """Spawn an actor from class or asset path."""
-        rate_error = server._check_rate_limit("spawn_unreal_actor")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.spawn_actor(
-                    asset_path=asset_path,
-                    location=(location_x, location_y, location_z),
-                    rotation=(rotation_pitch, rotation_yaw, rotation_roll),
-                    label=label or None,
-                )
-                apply_success_from_error(payload)
-                result = UnrealSpawnActorResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSpawnActorResponse, ErrorResponse),
-                    "spawn_unreal_actor",
-                )
-        except Exception as e:
-            server.logger.error("Error spawning Unreal actor: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSpawnActorResponse, ErrorResponse),
-                "spawn_unreal_actor",
-            )
+        return await server._exec_backend(
+            "spawn_unreal_actor",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSpawnActorResponse,
+            lambda session: session.spawn_actor(
+                asset_path=asset_path,
+                location=(location_x, location_y, location_z),
+                rotation=(rotation_pitch, rotation_yaw, rotation_roll),
+                label=label or None,
+            ),
+        )
 
     @server.mcp.tool(
         name="delete_unreal_actor",
@@ -921,32 +790,13 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         actor_path: str,
     ) -> Dict[str, Any]:
         """Delete an actor from the level."""
-        rate_error = server._check_rate_limit("delete_unreal_actor")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.delete_actor(actor_path=actor_path)
-                apply_success_from_error(payload)
-                result = UnrealDeleteActorResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealDeleteActorResponse, ErrorResponse),
-                    "delete_unreal_actor",
-                )
-        except Exception as e:
-            server.logger.error("Error deleting Unreal actor: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealDeleteActorResponse, ErrorResponse),
-                "delete_unreal_actor",
-            )
+        return await server._exec_backend(
+            "delete_unreal_actor",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealDeleteActorResponse,
+            lambda session: session.delete_actor(actor_path=actor_path),
+        )
 
     @server.mcp.tool(
         name="set_unreal_actor_transform",
@@ -972,37 +822,18 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         scale_z: float = 1.0,
     ) -> Dict[str, Any]:
         """Set an actor's transform."""
-        rate_error = server._check_rate_limit("set_unreal_actor_transform")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.set_actor_transform(
-                    actor_path=actor_path,
-                    location=(location_x, location_y, location_z),
-                    rotation=(rotation_pitch, rotation_yaw, rotation_roll),
-                    scale=(scale_x, scale_y, scale_z),
-                )
-                apply_success_from_error(payload)
-                result = UnrealSetActorTransformResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSetActorTransformResponse, ErrorResponse),
-                    "set_unreal_actor_transform",
-                )
-        except Exception as e:
-            server.logger.error("Error setting Unreal actor transform: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSetActorTransformResponse, ErrorResponse),
-                "set_unreal_actor_transform",
-            )
+        return await server._exec_backend(
+            "set_unreal_actor_transform",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSetActorTransformResponse,
+            lambda session: session.set_actor_transform(
+                actor_path=actor_path,
+                location=(location_x, location_y, location_z),
+                rotation=(rotation_pitch, rotation_yaw, rotation_roll),
+                scale=(scale_x, scale_y, scale_z),
+            ),
+        )
 
     @server.mcp.tool(
         name="set_unreal_actor_property",
@@ -1022,37 +853,18 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         generate_transaction: bool = True,
     ) -> Dict[str, Any]:
         """Set a property on an actor."""
-        rate_error = server._check_rate_limit("set_unreal_actor_property")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.set_actor_property(
-                    actor_path=actor_path,
-                    property_name=property_name,
-                    property_value=property_value,
-                    generate_transaction=generate_transaction,
-                )
-                apply_success_from_error(payload)
-                result = UnrealSetActorPropertyResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSetActorPropertyResponse, ErrorResponse),
-                    "set_unreal_actor_property",
-                )
-        except Exception as e:
-            server.logger.error("Error setting Unreal actor property: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSetActorPropertyResponse, ErrorResponse),
-                "set_unreal_actor_property",
-            )
+        return await server._exec_backend(
+            "set_unreal_actor_property",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSetActorPropertyResponse,
+            lambda session: session.set_actor_property(
+                actor_path=actor_path,
+                property_name=property_name,
+                property_value=property_value,
+                generate_transaction=generate_transaction,
+            ),
+        )
 
     @server.mcp.tool(
         name="call_unreal_actor_function",
@@ -1071,36 +883,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         parameters: str = "",
     ) -> Dict[str, Any]:
         """Call a UFUNCTION on an actor."""
-        rate_error = server._check_rate_limit("call_unreal_actor_function")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.call_actor_function(
-                    actor_path=actor_path,
-                    function_name=function_name,
-                    parameters=parameters or None,
-                )
-                apply_success_from_error(payload)
-                result = UnrealCallActorFunctionResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealCallActorFunctionResponse, ErrorResponse),
-                    "call_unreal_actor_function",
-                )
-        except Exception as e:
-            server.logger.error("Error calling Unreal actor function: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealCallActorFunctionResponse, ErrorResponse),
-                "call_unreal_actor_function",
-            )
+        return await server._exec_backend(
+            "call_unreal_actor_function",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealCallActorFunctionResponse,
+            lambda session: session.call_actor_function(
+                actor_path=actor_path,
+                function_name=function_name,
+                parameters=parameters or None,
+            ),
+        )
 
     @server.mcp.tool(
         name="set_unreal_actor_parent",
@@ -1118,35 +911,16 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         parent_path: str = "",
     ) -> Dict[str, Any]:
         """Attach or detach an actor."""
-        rate_error = server._check_rate_limit("set_unreal_actor_parent")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.set_actor_parent(
-                    actor_path=actor_path,
-                    parent_path=parent_path or None,
-                )
-                apply_success_from_error(payload)
-                result = UnrealSetActorParentResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSetActorParentResponse, ErrorResponse),
-                    "set_unreal_actor_parent",
-                )
-        except Exception as e:
-            server.logger.error("Error setting Unreal actor parent: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSetActorParentResponse, ErrorResponse),
-                "set_unreal_actor_parent",
-            )
+        return await server._exec_backend(
+            "set_unreal_actor_parent",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSetActorParentResponse,
+            lambda session: session.set_actor_parent(
+                actor_path=actor_path,
+                parent_path=parent_path or None,
+            ),
+        )
 
     @server.mcp.tool(
         name="add_unreal_component",
@@ -1165,36 +939,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         component_name: str = "",
     ) -> Dict[str, Any]:
         """Add a component to an actor."""
-        rate_error = server._check_rate_limit("add_unreal_component")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.add_component(
-                    actor_path=actor_path,
-                    component_class=component_class,
-                    component_name=component_name or None,
-                )
-                apply_success_from_error(payload)
-                result = UnrealAddComponentResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealAddComponentResponse, ErrorResponse),
-                    "add_unreal_component",
-                )
-        except Exception as e:
-            server.logger.error("Error adding Unreal component: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealAddComponentResponse, ErrorResponse),
-                "add_unreal_component",
-            )
+        return await server._exec_backend(
+            "add_unreal_component",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealAddComponentResponse,
+            lambda session: session.add_component(
+                actor_path=actor_path,
+                component_class=component_class,
+                component_name=component_name or None,
+            ),
+        )
 
     @server.mcp.tool(
         name="set_unreal_actor_visibility",
@@ -1213,36 +968,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         propagate: bool = True,
     ) -> Dict[str, Any]:
         """Set actor visibility."""
-        rate_error = server._check_rate_limit("set_unreal_actor_visibility")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.set_actor_visibility(
-                    actor_path=actor_path,
-                    visible=visible,
-                    propagate=propagate,
-                )
-                apply_success_from_error(payload)
-                result = UnrealSetActorVisibilityResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSetActorVisibilityResponse, ErrorResponse),
-                    "set_unreal_actor_visibility",
-                )
-        except Exception as e:
-            server.logger.error("Error setting Unreal actor visibility: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSetActorVisibilityResponse, ErrorResponse),
-                "set_unreal_actor_visibility",
-            )
+        return await server._exec_backend(
+            "set_unreal_actor_visibility",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSetActorVisibilityResponse,
+            lambda session: session.set_actor_visibility(
+                actor_path=actor_path,
+                visible=visible,
+                propagate=propagate,
+            ),
+        )
 
     # ---------------------------------------------------------------
     # Phase 4 — Materials, Lighting & Rendering
@@ -1263,34 +999,15 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         material_path: str,
     ) -> Dict[str, Any]:
         """Get material info."""
-        rate_error = server._check_rate_limit("get_unreal_material_info")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.get_material_info(
-                    material_path=material_path,
-                )
-                apply_success_from_error(payload)
-                result = UnrealGetMaterialInfoResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealGetMaterialInfoResponse, ErrorResponse),
-                    "get_unreal_material_info",
-                )
-        except Exception as e:
-            server.logger.error("Error getting Unreal material info: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealGetMaterialInfoResponse, ErrorResponse),
-                "get_unreal_material_info",
-            )
+        return await server._exec_backend(
+            "get_unreal_material_info",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealGetMaterialInfoResponse,
+            lambda session: session.get_material_info(
+                material_path=material_path,
+            ),
+        )
 
     @server.mcp.tool(
         name="set_unreal_material_params",
@@ -1372,36 +1089,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         save_path: str = "",
     ) -> Dict[str, Any]:
         """Create a material instance."""
-        rate_error = server._check_rate_limit("create_unreal_material_instance")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.create_material_instance(
-                    parent_path=parent_path,
-                    instance_name=instance_name,
-                    save_path=save_path,
-                )
-                apply_success_from_error(payload)
-                result = UnrealCreateMaterialInstanceResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealCreateMaterialInstanceResponse, ErrorResponse),
-                    "create_unreal_material_instance",
-                )
-        except Exception as e:
-            server.logger.error("Error creating Unreal material instance: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealCreateMaterialInstanceResponse, ErrorResponse),
-                "create_unreal_material_instance",
-            )
+        return await server._exec_backend(
+            "create_unreal_material_instance",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealCreateMaterialInstanceResponse,
+            lambda session: session.create_material_instance(
+                parent_path=parent_path,
+                instance_name=instance_name,
+                save_path=save_path,
+            ),
+        )
 
     @server.mcp.tool(
         name="assign_unreal_material",
@@ -1420,36 +1118,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         slot_index: int = 0,
     ) -> Dict[str, Any]:
         """Assign material to actor."""
-        rate_error = server._check_rate_limit("assign_unreal_material")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.assign_material(
-                    actor_path=actor_path,
-                    material_path=material_path,
-                    slot_index=slot_index,
-                )
-                apply_success_from_error(payload)
-                result = UnrealAssignMaterialResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealAssignMaterialResponse, ErrorResponse),
-                    "assign_unreal_material",
-                )
-        except Exception as e:
-            server.logger.error("Error assigning Unreal material: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealAssignMaterialResponse, ErrorResponse),
-                "assign_unreal_material",
-            )
+        return await server._exec_backend(
+            "assign_unreal_material",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealAssignMaterialResponse,
+            lambda session: session.assign_material(
+                actor_path=actor_path,
+                material_path=material_path,
+                slot_index=slot_index,
+            ),
+        )
 
     @server.mcp.tool(
         name="set_unreal_light_params",
@@ -1474,42 +1153,23 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         cast_shadows: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Set light parameters."""
-        rate_error = server._check_rate_limit("set_unreal_light_params")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.set_light_params(
-                    actor_path=actor_path,
-                    intensity=intensity,
-                    color_r=color_r,
-                    color_g=color_g,
-                    color_b=color_b,
-                    temperature=temperature,
-                    use_temperature=use_temperature,
-                    attenuation_radius=attenuation_radius,
-                    cast_shadows=cast_shadows,
-                )
-                apply_success_from_error(payload)
-                result = UnrealSetLightParamsResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSetLightParamsResponse, ErrorResponse),
-                    "set_unreal_light_params",
-                )
-        except Exception as e:
-            server.logger.error("Error setting Unreal light params: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSetLightParamsResponse, ErrorResponse),
-                "set_unreal_light_params",
-            )
+        return await server._exec_backend(
+            "set_unreal_light_params",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSetLightParamsResponse,
+            lambda session: session.set_light_params(
+                actor_path=actor_path,
+                intensity=intensity,
+                color_r=color_r,
+                color_g=color_g,
+                color_b=color_b,
+                temperature=temperature,
+                use_temperature=use_temperature,
+                attenuation_radius=attenuation_radius,
+                cast_shadows=cast_shadows,
+            ),
+        )
 
     @server.mcp.tool(
         name="set_unreal_render_settings",
@@ -1527,35 +1187,16 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         setting_value: str,
     ) -> Dict[str, Any]:
         """Set render settings."""
-        rate_error = server._check_rate_limit("set_unreal_render_settings")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.set_render_settings(
-                    setting_name=setting_name,
-                    setting_value=setting_value,
-                )
-                apply_success_from_error(payload)
-                result = UnrealSetRenderSettingsResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSetRenderSettingsResponse, ErrorResponse),
-                    "set_unreal_render_settings",
-                )
-        except Exception as e:
-            server.logger.error("Error setting Unreal render settings: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSetRenderSettingsResponse, ErrorResponse),
-                "set_unreal_render_settings",
-            )
+        return await server._exec_backend(
+            "set_unreal_render_settings",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSetRenderSettingsResponse,
+            lambda session: session.set_render_settings(
+                setting_name=setting_name,
+                setting_value=setting_value,
+            ),
+        )
 
     # ---- Phase 5: Physics & Simulation Control ----
 
@@ -1574,32 +1215,13 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         action: str,
     ) -> Dict[str, Any]:
         """Control PIE session."""
-        rate_error = server._check_rate_limit("control_unreal_simulation")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.control_simulation(action=action)
-                apply_success_from_error(payload)
-                result = UnrealControlSimulationResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealControlSimulationResponse, ErrorResponse),
-                    "control_unreal_simulation",
-                )
-        except Exception as e:
-            server.logger.error("Error controlling Unreal simulation: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealControlSimulationResponse, ErrorResponse),
-                "control_unreal_simulation",
-            )
+        return await server._exec_backend(
+            "control_unreal_simulation",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealControlSimulationResponse,
+            lambda session: session.control_simulation(action=action),
+        )
 
     @server.mcp.tool(
         name="get_unreal_simulation_status",
@@ -1614,32 +1236,13 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     )
     async def get_unreal_simulation_status() -> Dict[str, Any]:
         """Get PIE simulation status."""
-        rate_error = server._check_rate_limit("get_unreal_simulation_status")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.get_simulation_status()
-                apply_success_from_error(payload)
-                result = UnrealGetSimulationStatusResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealGetSimulationStatusResponse, ErrorResponse),
-                    "get_unreal_simulation_status",
-                )
-        except Exception as e:
-            server.logger.error("Error getting Unreal simulation status: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealGetSimulationStatusResponse, ErrorResponse),
-                "get_unreal_simulation_status",
-            )
+        return await server._exec_backend(
+            "get_unreal_simulation_status",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealGetSimulationStatusResponse,
+            lambda session: session.get_simulation_status(),
+        )
 
     @server.mcp.tool(
         name="enable_unreal_physics",
@@ -1658,36 +1261,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         simulate_physics: bool = True,
     ) -> Dict[str, Any]:
         """Enable physics on actor."""
-        rate_error = server._check_rate_limit("enable_unreal_physics")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.enable_physics(
-                    actor_path=actor_path,
-                    enable=enable,
-                    simulate_physics=simulate_physics,
-                )
-                apply_success_from_error(payload)
-                result = UnrealEnablePhysicsResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealEnablePhysicsResponse, ErrorResponse),
-                    "enable_unreal_physics",
-                )
-        except Exception as e:
-            server.logger.error("Error enabling Unreal physics: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealEnablePhysicsResponse, ErrorResponse),
-                "enable_unreal_physics",
-            )
+        return await server._exec_backend(
+            "enable_unreal_physics",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealEnablePhysicsResponse,
+            lambda session: session.enable_physics(
+                actor_path=actor_path,
+                enable=enable,
+                simulate_physics=simulate_physics,
+            ),
+        )
 
     @server.mcp.tool(
         name="set_unreal_collision",
@@ -1706,36 +1290,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         collision_enabled: bool = True,
     ) -> Dict[str, Any]:
         """Set collision configuration."""
-        rate_error = server._check_rate_limit("set_unreal_collision")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.set_collision(
-                    actor_path=actor_path,
-                    collision_preset=collision_preset,
-                    collision_enabled=collision_enabled,
-                )
-                apply_success_from_error(payload)
-                result = UnrealSetCollisionResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSetCollisionResponse, ErrorResponse),
-                    "set_unreal_collision",
-                )
-        except Exception as e:
-            server.logger.error("Error setting Unreal collision: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSetCollisionResponse, ErrorResponse),
-                "set_unreal_collision",
-            )
+        return await server._exec_backend(
+            "set_unreal_collision",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSetCollisionResponse,
+            lambda session: session.set_collision(
+                actor_path=actor_path,
+                collision_preset=collision_preset,
+                collision_enabled=collision_enabled,
+            ),
+        )
 
     @server.mcp.tool(
         name="apply_unreal_force",
@@ -1759,41 +1324,22 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         location_z: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Apply force or impulse."""
-        rate_error = server._check_rate_limit("apply_unreal_force")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.apply_force(
-                    actor_path=actor_path,
-                    force_x=force_x,
-                    force_y=force_y,
-                    force_z=force_z,
-                    is_impulse=is_impulse,
-                    location_x=location_x,
-                    location_y=location_y,
-                    location_z=location_z,
-                )
-                apply_success_from_error(payload)
-                result = UnrealApplyForceResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealApplyForceResponse, ErrorResponse),
-                    "apply_unreal_force",
-                )
-        except Exception as e:
-            server.logger.error("Error applying Unreal force: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealApplyForceResponse, ErrorResponse),
-                "apply_unreal_force",
-            )
+        return await server._exec_backend(
+            "apply_unreal_force",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealApplyForceResponse,
+            lambda session: session.apply_force(
+                actor_path=actor_path,
+                force_x=force_x,
+                force_y=force_y,
+                force_z=force_z,
+                is_impulse=is_impulse,
+                location_x=location_x,
+                location_y=location_y,
+                location_z=location_z,
+            ),
+        )
 
     @server.mcp.tool(
         name="set_unreal_physics_params",
@@ -1814,38 +1360,19 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         enable_gravity: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Set physics parameters."""
-        rate_error = server._check_rate_limit("set_unreal_physics_params")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.set_physics_params(
-                    actor_path=actor_path,
-                    mass=mass,
-                    linear_damping=linear_damping,
-                    angular_damping=angular_damping,
-                    enable_gravity=enable_gravity,
-                )
-                apply_success_from_error(payload)
-                result = UnrealSetPhysicsParamsResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSetPhysicsParamsResponse, ErrorResponse),
-                    "set_unreal_physics_params",
-                )
-        except Exception as e:
-            server.logger.error("Error setting Unreal physics params: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSetPhysicsParamsResponse, ErrorResponse),
-                "set_unreal_physics_params",
-            )
+        return await server._exec_backend(
+            "set_unreal_physics_params",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSetPhysicsParamsResponse,
+            lambda session: session.set_physics_params(
+                actor_path=actor_path,
+                mass=mass,
+                linear_damping=linear_damping,
+                angular_damping=angular_damping,
+                enable_gravity=enable_gravity,
+            ),
+        )
 
     # ----------------------------------------------------------
     # Phase 6: USD / SimReady Bridge
@@ -1870,38 +1397,19 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         scale_factor: float = 1.0,
     ) -> Dict[str, Any]:
         """Import USD file into Unreal."""
-        rate_error = server._check_rate_limit("import_unreal_usd")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.import_usd(
-                    usd_path=usd_path,
-                    target_path=target_path,
-                    import_animations=import_animations,
-                    import_materials=import_materials,
-                    scale_factor=scale_factor,
-                )
-                apply_success_from_error(payload)
-                result = UnrealImportUsdResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealImportUsdResponse, ErrorResponse),
-                    "import_unreal_usd",
-                )
-        except Exception as e:
-            server.logger.error("Error importing USD to Unreal: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealImportUsdResponse, ErrorResponse),
-                "import_unreal_usd",
-            )
+        return await server._exec_backend(
+            "import_unreal_usd",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealImportUsdResponse,
+            lambda session: session.import_usd(
+                usd_path=usd_path,
+                target_path=target_path,
+                import_animations=import_animations,
+                import_materials=import_materials,
+                scale_factor=scale_factor,
+            ),
+        )
 
     @server.mcp.tool(
         name="export_unreal_usd",
@@ -2037,9 +1545,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             return rate_error
         try:
             check_list = (
-                [c.strip() for c in checks.split(",") if c.strip()]
-                if checks
-                else None
+                [c.strip() for c in checks.split(",") if c.strip()] if checks else None
             )
             if not server.unreal_adapter or not server.unreal_adapter.is_available():
                 return ErrorResponse(
@@ -2080,32 +1586,13 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     )
     async def get_unreal_interchange_info() -> Dict[str, Any]:
         """Get Interchange Framework info."""
-        rate_error = server._check_rate_limit("get_unreal_interchange_info")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.get_interchange_info()
-                apply_success_from_error(payload)
-                result = UnrealGetInterchangeInfoResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealGetInterchangeInfoResponse, ErrorResponse),
-                    "get_unreal_interchange_info",
-                )
-        except Exception as e:
-            server.logger.error("Error getting interchange info: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealGetInterchangeInfoResponse, ErrorResponse),
-                "get_unreal_interchange_info",
-            )
+        return await server._exec_backend(
+            "get_unreal_interchange_info",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealGetInterchangeInfoResponse,
+            lambda session: session.get_interchange_info(),
+        )
 
     # ----------------------------------------------------------
     # Phase 7: Advanced Agent Tools
@@ -2174,37 +1661,18 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         class_filter: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Query scene graph hierarchy."""
-        rate_error = server._check_rate_limit("query_unreal_scene_graph")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.query_scene_graph(
-                    root_path=root_path,
-                    max_depth=max_depth,
-                    include_components=include_components,
-                    class_filter=class_filter,
-                )
-                apply_success_from_error(payload)
-                result = UnrealQuerySceneGraphResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealQuerySceneGraphResponse, ErrorResponse),
-                    "query_unreal_scene_graph",
-                )
-        except Exception as e:
-            server.logger.error("Error querying scene graph: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealQuerySceneGraphResponse, ErrorResponse),
-                "query_unreal_scene_graph",
-            )
+        return await server._exec_backend(
+            "query_unreal_scene_graph",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealQuerySceneGraphResponse,
+            lambda session: session.query_scene_graph(
+                root_path=root_path,
+                max_depth=max_depth,
+                include_components=include_components,
+                class_filter=class_filter,
+            ),
+        )
 
     @server.mcp.tool(
         name="analyze_unreal_scene_for_robotics",
@@ -2329,36 +1797,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         max_results: int = 100,
     ) -> Dict[str, Any]:
         """Find actors by semantic label."""
-        rate_error = server._check_rate_limit("get_unreal_actor_by_semantic_label")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.get_actor_by_semantic_label(
-                    label=label,
-                    match_mode=match_mode,
-                    max_results=max_results,
-                )
-                apply_success_from_error(payload)
-                result = UnrealGetActorBySemanticLabelResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealGetActorBySemanticLabelResponse, ErrorResponse),
-                    "get_unreal_actor_by_semantic_label",
-                )
-        except Exception as e:
-            server.logger.error("Error finding actors by label: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealGetActorBySemanticLabelResponse, ErrorResponse),
-                "get_unreal_actor_by_semantic_label",
-            )
+        return await server._exec_backend(
+            "get_unreal_actor_by_semantic_label",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealGetActorBySemanticLabelResponse,
+            lambda session: session.get_actor_by_semantic_label(
+                label=label,
+                match_mode=match_mode,
+                max_results=max_results,
+            ),
+        )
 
     # ----------------------------------------------------------
     # Phase 8: Geometry & Modeling (GeometryScript)
@@ -2437,36 +1886,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         operation: str,
     ) -> Dict[str, Any]:
         """Apply mesh boolean."""
-        rate_error = server._check_rate_limit("apply_unreal_mesh_boolean")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.apply_mesh_boolean(
-                    target_mesh_path=target_mesh_path,
-                    tool_mesh_path=tool_mesh_path,
-                    operation=operation,
-                )
-                apply_success_from_error(payload)
-                result = UnrealApplyMeshBooleanResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealApplyMeshBooleanResponse, ErrorResponse),
-                    "apply_unreal_mesh_boolean",
-                )
-        except Exception as e:
-            server.logger.error("Error applying mesh boolean: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealApplyMeshBooleanResponse, ErrorResponse),
-                "apply_unreal_mesh_boolean",
-            )
+        return await server._exec_backend(
+            "apply_unreal_mesh_boolean",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealApplyMeshBooleanResponse,
+            lambda session: session.apply_mesh_boolean(
+                target_mesh_path=target_mesh_path,
+                tool_mesh_path=tool_mesh_path,
+                operation=operation,
+            ),
+        )
 
     @server.mcp.tool(
         name="compute_unreal_convex_hull",
@@ -2483,34 +1913,15 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         mesh_path: str,
     ) -> Dict[str, Any]:
         """Compute convex hull."""
-        rate_error = server._check_rate_limit("compute_unreal_convex_hull")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.compute_convex_hull(
-                    mesh_path=mesh_path,
-                )
-                apply_success_from_error(payload)
-                result = UnrealComputeConvexHullResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealComputeConvexHullResponse, ErrorResponse),
-                    "compute_unreal_convex_hull",
-                )
-        except Exception as e:
-            server.logger.error("Error computing convex hull: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealComputeConvexHullResponse, ErrorResponse),
-                "compute_unreal_convex_hull",
-            )
+        return await server._exec_backend(
+            "compute_unreal_convex_hull",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealComputeConvexHullResponse,
+            lambda session: session.compute_convex_hull(
+                mesh_path=mesh_path,
+            ),
+        )
 
     @server.mcp.tool(
         name="decompose_unreal_convex_hull",
@@ -2531,38 +1942,19 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         resolution: int = 100000,
     ) -> Dict[str, Any]:
         """V-HACD convex decomposition."""
-        rate_error = server._check_rate_limit("decompose_unreal_convex_hull")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.decompose_convex_hull(
-                    mesh_path=mesh_path,
-                    max_hulls=max_hulls,
-                    max_vertices_per_hull=max_vertices_per_hull,
-                    min_cluster_size=min_cluster_size,
-                    resolution=resolution,
-                )
-                apply_success_from_error(payload)
-                result = UnrealDecomposeConvexHullResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealDecomposeConvexHullResponse, ErrorResponse),
-                    "decompose_unreal_convex_hull",
-                )
-        except Exception as e:
-            server.logger.error("Error decomposing convex hull: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealDecomposeConvexHullResponse, ErrorResponse),
-                "decompose_unreal_convex_hull",
-            )
+        return await server._exec_backend(
+            "decompose_unreal_convex_hull",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealDecomposeConvexHullResponse,
+            lambda session: session.decompose_convex_hull(
+                mesh_path=mesh_path,
+                max_hulls=max_hulls,
+                max_vertices_per_hull=max_vertices_per_hull,
+                min_cluster_size=min_cluster_size,
+                resolution=resolution,
+            ),
+        )
 
     @server.mcp.tool(
         name="edit_unreal_mesh_topology",
@@ -2640,36 +2032,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         scheme: str = "catmull_clark",
     ) -> Dict[str, Any]:
         """Subdivide mesh."""
-        rate_error = server._check_rate_limit("subdivide_unreal_mesh")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.subdivide_mesh(
-                    mesh_path=mesh_path,
-                    level=level,
-                    scheme=scheme,
-                )
-                apply_success_from_error(payload)
-                result = UnrealSubdivideMeshResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSubdivideMeshResponse, ErrorResponse),
-                    "subdivide_unreal_mesh",
-                )
-        except Exception as e:
-            server.logger.error("Error subdividing mesh: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSubdivideMeshResponse, ErrorResponse),
-                "subdivide_unreal_mesh",
-            )
+        return await server._exec_backend(
+            "subdivide_unreal_mesh",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSubdivideMeshResponse,
+            lambda session: session.subdivide_mesh(
+                mesh_path=mesh_path,
+                level=level,
+                scheme=scheme,
+            ),
+        )
 
     @server.mcp.tool(
         name="simplify_unreal_mesh",
@@ -2689,37 +2062,18 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         max_error: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Simplify mesh."""
-        rate_error = server._check_rate_limit("simplify_unreal_mesh")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.simplify_mesh(
-                    mesh_path=mesh_path,
-                    target_triangle_count=target_triangle_count,
-                    target_percentage=target_percentage,
-                    max_error=max_error,
-                )
-                apply_success_from_error(payload)
-                result = UnrealSimplifyMeshResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSimplifyMeshResponse, ErrorResponse),
-                    "simplify_unreal_mesh",
-                )
-        except Exception as e:
-            server.logger.error("Error simplifying mesh: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSimplifyMeshResponse, ErrorResponse),
-                "simplify_unreal_mesh",
-            )
+        return await server._exec_backend(
+            "simplify_unreal_mesh",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSimplifyMeshResponse,
+            lambda session: session.simplify_mesh(
+                mesh_path=mesh_path,
+                target_triangle_count=target_triangle_count,
+                target_percentage=target_percentage,
+                max_error=max_error,
+            ),
+        )
 
     @server.mcp.tool(
         name="cut_unreal_mesh_plane",
@@ -2796,9 +2150,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             return rate_error
         try:
             check_list = (
-                [c.strip() for c in checks.split(",") if c.strip()]
-                if checks
-                else None
+                [c.strip() for c in checks.split(",") if c.strip()] if checks else None
             )
             if not server.unreal_adapter or not server.unreal_adapter.is_available():
                 return ErrorResponse(
@@ -2898,38 +2250,19 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         smoothing_iterations: int = 3,
     ) -> Dict[str, Any]:
         """Remesh mesh."""
-        rate_error = server._check_rate_limit("remesh_unreal_mesh")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.remesh_mesh(
-                    mesh_path=mesh_path,
-                    mode=mode,
-                    target_edge_length=target_edge_length,
-                    target_triangle_count=target_triangle_count,
-                    smoothing_iterations=smoothing_iterations,
-                )
-                apply_success_from_error(payload)
-                result = UnrealRemeshMeshResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealRemeshMeshResponse, ErrorResponse),
-                    "remesh_unreal_mesh",
-                )
-        except Exception as e:
-            server.logger.error("Error remeshing: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealRemeshMeshResponse, ErrorResponse),
-                "remesh_unreal_mesh",
-            )
+        return await server._exec_backend(
+            "remesh_unreal_mesh",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealRemeshMeshResponse,
+            lambda session: session.remesh_mesh(
+                mesh_path=mesh_path,
+                mode=mode,
+                target_edge_length=target_edge_length,
+                target_triangle_count=target_triangle_count,
+                smoothing_iterations=smoothing_iterations,
+            ),
+        )
 
     @server.mcp.tool(
         name="compute_unreal_mesh_uv",
@@ -2949,34 +2282,15 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         island_padding: float = 2.0,
     ) -> Dict[str, Any]:
         """Compute mesh UVs."""
-        rate_error = server._check_rate_limit("compute_unreal_mesh_uv")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.compute_mesh_uv(
-                    mesh_path=mesh_path,
-                    method=method,
-                    uv_channel=uv_channel,
-                    island_padding=island_padding,
-                )
-                apply_success_from_error(payload)
-                result = UnrealComputeMeshUvResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealComputeMeshUvResponse, ErrorResponse),
-                    "compute_unreal_mesh_uv",
-                )
-        except Exception as e:
-            server.logger.error("Error computing mesh UVs: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealComputeMeshUvResponse, ErrorResponse),
-                "compute_unreal_mesh_uv",
-            )
+        return await server._exec_backend(
+            "compute_unreal_mesh_uv",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealComputeMeshUvResponse,
+            lambda session: session.compute_mesh_uv(
+                mesh_path=mesh_path,
+                method=method,
+                uv_channel=uv_channel,
+                island_padding=island_padding,
+            ),
+        )
