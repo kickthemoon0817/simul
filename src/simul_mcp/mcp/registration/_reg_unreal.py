@@ -493,13 +493,10 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         if rate_error:
             return rate_error
 
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-
+        def _call(session):
+            # Parsing stays inside the envelope: malformed input must
+            # return the error payload it always has, not escape as an
+            # unhandled exception.
             parsed_classes = (
                 [c.strip() for c in class_names.split(",") if c.strip()]
                 if class_names
@@ -510,30 +507,20 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 if package_paths
                 else None
             )
-
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.search_assets(
-                    query=query,
-                    class_names=parsed_classes,
-                    package_paths=parsed_paths,
-                    max_results=max_results,
-                )
-                apply_success_from_error(payload)
-                result = UnrealSearchAssetsResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSearchAssetsResponse, ErrorResponse),
-                    "search_unreal_assets",
-                )
-
-        except Exception as e:
-            server.logger.error("Error searching Unreal assets: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSearchAssetsResponse, ErrorResponse),
-                "search_unreal_assets",
+            return session.search_assets(
+                query=query,
+                class_names=parsed_classes,
+                package_paths=parsed_paths,
+                max_results=max_results,
             )
+
+        return await server._exec_backend(
+            "search_unreal_assets",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSearchAssetsResponse,
+            _call,
+        )
 
     @server.mcp.tool(
         name="describe_unreal_object",
@@ -1032,13 +1019,11 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rate_error = server._check_rate_limit("set_unreal_material_params")
         if rate_error:
             return rate_error
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
 
+        def _call(session):
+            # Parsing stays inside the envelope: malformed input must
+            # return the error payload it always has, not escape as an
+            # unhandled exception.
             scalar_params = (
                 json_lib.loads(scalar_params_json) if scalar_params_json else None
             )
@@ -1048,29 +1033,20 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             texture_params = (
                 json_lib.loads(texture_params_json) if texture_params_json else None
             )
-
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.set_material_params(
-                    material_path=material_path,
-                    scalar_params=scalar_params,
-                    vector_params=vector_params,
-                    texture_params=texture_params,
-                )
-                apply_success_from_error(payload)
-                result = UnrealSetMaterialParamsResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealSetMaterialParamsResponse, ErrorResponse),
-                    "set_unreal_material_params",
-                )
-        except Exception as e:
-            server.logger.error("Error setting Unreal material params: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealSetMaterialParamsResponse, ErrorResponse),
-                "set_unreal_material_params",
+            return session.set_material_params(
+                material_path=material_path,
+                scalar_params=scalar_params,
+                vector_params=vector_params,
+                texture_params=texture_params,
             )
+
+        return await server._exec_backend(
+            "set_unreal_material_params",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealSetMaterialParamsResponse,
+            _call,
+        )
 
     @server.mcp.tool(
         name="create_unreal_material_instance",
@@ -1433,36 +1409,27 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rate_error = server._check_rate_limit("export_unreal_usd")
         if rate_error:
             return rate_error
-        try:
+
+        def _call(session):
+            # Parsing stays inside the envelope: malformed input must
+            # return the error payload it always has, not escape as an
+            # unhandled exception.
             paths = [p.strip() for p in actor_paths.split(",")]
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.export_usd(
-                    actor_paths=paths,
-                    output_path=output_path,
-                    export_materials=export_materials,
-                    export_animations=export_animations,
-                    convert_to_meters=convert_to_meters,
-                )
-                apply_success_from_error(payload)
-                result = UnrealExportUsdResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealExportUsdResponse, ErrorResponse),
-                    "export_unreal_usd",
-                )
-        except Exception as e:
-            server.logger.error("Error exporting Unreal USD: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealExportUsdResponse, ErrorResponse),
-                "export_unreal_usd",
+            return session.export_usd(
+                actor_paths=paths,
+                output_path=output_path,
+                export_materials=export_materials,
+                export_animations=export_animations,
+                convert_to_meters=convert_to_meters,
             )
+
+        return await server._exec_backend(
+            "export_unreal_usd",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealExportUsdResponse,
+            _call,
+        )
 
     @server.mcp.tool(
         name="convert_to_simready",
@@ -1486,7 +1453,11 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rate_error = server._check_rate_limit("convert_to_simready")
         if rate_error:
             return rate_error
-        try:
+
+        def _call(session):
+            # Parsing stays inside the envelope: malformed input must
+            # return the error payload it always has, not escape as an
+            # unhandled exception.
             paths = [p.strip() for p in actor_paths.split(",")]
             labels = None
             if semantic_labels:
@@ -1495,34 +1466,21 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                     for pair in semantic_labels.split(",")
                     if "=" in pair
                 )
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.convert_to_simready(
-                    actor_paths=paths,
-                    output_directory=output_directory,
-                    add_physics=add_physics,
-                    add_collision=add_collision,
-                    semantic_labels=labels,
-                )
-                apply_success_from_error(payload)
-                result = UnrealConvertToSimreadyResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealConvertToSimreadyResponse, ErrorResponse),
-                    "convert_to_simready",
-                )
-        except Exception as e:
-            server.logger.error("Error converting to SimReady: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealConvertToSimreadyResponse, ErrorResponse),
-                "convert_to_simready",
+            return session.convert_to_simready(
+                actor_paths=paths,
+                output_directory=output_directory,
+                add_physics=add_physics,
+                add_collision=add_collision,
+                semantic_labels=labels,
             )
+
+        return await server._exec_backend(
+            "convert_to_simready",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealConvertToSimreadyResponse,
+            _call,
+        )
 
     @server.mcp.tool(
         name="validate_simready_asset",
@@ -1543,35 +1501,26 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rate_error = server._check_rate_limit("validate_simready_asset")
         if rate_error:
             return rate_error
-        try:
+
+        def _call(session):
+            # Parsing stays inside the envelope: malformed input must
+            # return the error payload it always has, not escape as an
+            # unhandled exception.
             check_list = (
                 [c.strip() for c in checks.split(",") if c.strip()] if checks else None
             )
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.validate_simready_asset(
-                    asset_path=asset_path,
-                    checks=check_list,
-                )
-                apply_success_from_error(payload)
-                result = UnrealValidateSimreadyResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealValidateSimreadyResponse, ErrorResponse),
-                    "validate_simready_asset",
-                )
-        except Exception as e:
-            server.logger.error("Error validating SimReady asset: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealValidateSimreadyResponse, ErrorResponse),
-                "validate_simready_asset",
+            return session.validate_simready_asset(
+                asset_path=asset_path,
+                checks=check_list,
             )
+
+        return await server._exec_backend(
+            "validate_simready_asset",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealValidateSimreadyResponse,
+            _call,
+        )
 
     @server.mcp.tool(
         name="get_unreal_interchange_info",
@@ -1616,32 +1565,23 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rate_error = server._check_rate_limit("batch_unreal_operations")
         if rate_error:
             return rate_error
-        try:
+
+        def _call(session):
+            # Parsing stays inside the envelope: malformed input must
+            # return the error payload it always has, not escape as an
+            # unhandled exception.
             import json as _json
 
             ops = _json.loads(operations)
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.batch_operations(operations=ops)
-                apply_success_from_error(payload)
-                result = UnrealBatchOperationsResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealBatchOperationsResponse, ErrorResponse),
-                    "batch_unreal_operations",
-                )
-        except Exception as e:
-            server.logger.error("Error in batch Unreal operations: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealBatchOperationsResponse, ErrorResponse),
-                "batch_unreal_operations",
-            )
+            return session.batch_operations(operations=ops)
+
+        return await server._exec_backend(
+            "batch_unreal_operations",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealBatchOperationsResponse,
+            _call,
+        )
 
     @server.mcp.tool(
         name="query_unreal_scene_graph",
@@ -1693,37 +1633,28 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rate_error = server._check_rate_limit("analyze_unreal_scene_for_robotics")
         if rate_error:
             return rate_error
-        try:
+
+        def _call(session):
+            # Parsing stays inside the envelope: malformed input must
+            # return the error payload it always has, not escape as an
+            # unhandled exception.
             types_list = (
                 [t.strip() for t in analysis_types.split(",") if t.strip()]
                 if analysis_types
                 else None
             )
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.analyze_scene_for_robotics(
-                    analysis_types=types_list,
-                    actor_filter=actor_filter,
-                )
-                apply_success_from_error(payload)
-                result = UnrealAnalyzeSceneForRoboticsResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealAnalyzeSceneForRoboticsResponse, ErrorResponse),
-                    "analyze_unreal_scene_for_robotics",
-                )
-        except Exception as e:
-            server.logger.error("Error analyzing scene for robotics: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealAnalyzeSceneForRoboticsResponse, ErrorResponse),
-                "analyze_unreal_scene_for_robotics",
+            return session.analyze_scene_for_robotics(
+                analysis_types=types_list,
+                actor_filter=actor_filter,
             )
+
+        return await server._exec_backend(
+            "analyze_unreal_scene_for_robotics",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealAnalyzeSceneForRoboticsResponse,
+            _call,
+        )
 
     @server.mcp.tool(
         name="generate_unreal_procedural_scene",
@@ -1746,39 +1677,30 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rate_error = server._check_rate_limit("generate_unreal_procedural_scene")
         if rate_error:
             return rate_error
-        try:
+
+        def _call(session):
+            # Parsing stays inside the envelope: malformed input must
+            # return the error payload it always has, not escape as an
+            # unhandled exception.
             import json as _json
 
             params = _json.loads(parameters) if parameters else None
             bmin = [float(v) for v in bounds_min.split(",")] if bounds_min else None
             bmax = [float(v) for v in bounds_max.split(",")] if bounds_max else None
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.generate_procedural_scene(
-                    scene_type=scene_type,
-                    parameters=params,
-                    bounds_min=bmin,
-                    bounds_max=bmax,
-                )
-                apply_success_from_error(payload)
-                result = UnrealGenerateProceduralSceneResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealGenerateProceduralSceneResponse, ErrorResponse),
-                    "generate_unreal_procedural_scene",
-                )
-        except Exception as e:
-            server.logger.error("Error generating procedural scene: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealGenerateProceduralSceneResponse, ErrorResponse),
-                "generate_unreal_procedural_scene",
+            return session.generate_procedural_scene(
+                scene_type=scene_type,
+                parameters=params,
+                bounds_min=bmin,
+                bounds_max=bmax,
             )
+
+        return await server._exec_backend(
+            "generate_unreal_procedural_scene",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealGenerateProceduralSceneResponse,
+            _call,
+        )
 
     @server.mcp.tool(
         name="get_unreal_actor_by_semantic_label",
@@ -1835,39 +1757,30 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rate_error = server._check_rate_limit("generate_unreal_mesh_primitive")
         if rate_error:
             return rate_error
-        try:
+
+        def _call(session):
+            # Parsing stays inside the envelope: malformed input must
+            # return the error payload it always has, not escape as an
+            # unhandled exception.
             import json as _json
 
             dims = _json.loads(dimensions) if dimensions else None
             loc = [float(v) for v in location.split(",")] if location else None
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.generate_mesh_primitive(
-                    primitive_type=primitive_type,
-                    dimensions=dims,
-                    segments=segments,
-                    location=loc,
-                    actor_label=actor_label,
-                )
-                apply_success_from_error(payload)
-                result = UnrealGenerateMeshPrimitiveResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealGenerateMeshPrimitiveResponse, ErrorResponse),
-                    "generate_unreal_mesh_primitive",
-                )
-        except Exception as e:
-            server.logger.error("Error generating mesh primitive: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealGenerateMeshPrimitiveResponse, ErrorResponse),
-                "generate_unreal_mesh_primitive",
+            return session.generate_mesh_primitive(
+                primitive_type=primitive_type,
+                dimensions=dims,
+                segments=segments,
+                location=loc,
+                actor_label=actor_label,
             )
+
+        return await server._exec_backend(
+            "generate_unreal_mesh_primitive",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealGenerateMeshPrimitiveResponse,
+            _call,
+        )
 
     @server.mcp.tool(
         name="apply_unreal_mesh_boolean",
@@ -1981,39 +1894,30 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rate_error = server._check_rate_limit("edit_unreal_mesh_topology")
         if rate_error:
             return rate_error
-        try:
+
+        def _call(session):
+            # Parsing stays inside the envelope: malformed input must
+            # return the error payload it always has, not escape as an
+            # unhandled exception.
             scale_list = [float(v) for v in scale.split(",")] if scale else None
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.edit_mesh_topology(
-                    mesh_path=mesh_path,
-                    operation=operation,
-                    face_selection=face_selection,
-                    edge_selection=edge_selection,
-                    distance=distance,
-                    offset=offset,
-                    scale=scale_list,
-                    count=count,
-                )
-                apply_success_from_error(payload)
-                result = UnrealEditMeshTopologyResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealEditMeshTopologyResponse, ErrorResponse),
-                    "edit_unreal_mesh_topology",
-                )
-        except Exception as e:
-            server.logger.error("Error editing mesh topology: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealEditMeshTopologyResponse, ErrorResponse),
-                "edit_unreal_mesh_topology",
+            return session.edit_mesh_topology(
+                mesh_path=mesh_path,
+                operation=operation,
+                face_selection=face_selection,
+                edge_selection=edge_selection,
+                distance=distance,
+                offset=offset,
+                scale=scale_list,
+                count=count,
             )
+
+        return await server._exec_backend(
+            "edit_unreal_mesh_topology",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealEditMeshTopologyResponse,
+            _call,
+        )
 
     @server.mcp.tool(
         name="subdivide_unreal_mesh",
@@ -2097,37 +2001,28 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rate_error = server._check_rate_limit("cut_unreal_mesh_plane")
         if rate_error:
             return rate_error
-        try:
+
+        def _call(session):
+            # Parsing stays inside the envelope: malformed input must
+            # return the error payload it always has, not escape as an
+            # unhandled exception.
             origin = [float(v) for v in plane_origin.split(",")]
             normal = [float(v) for v in plane_normal.split(",")]
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.cut_mesh_plane(
-                    mesh_path=mesh_path,
-                    plane_origin=origin,
-                    plane_normal=normal,
-                    fill_holes=fill_holes,
-                    keep_both_sides=keep_both_sides,
-                )
-                apply_success_from_error(payload)
-                result = UnrealCutMeshPlaneResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealCutMeshPlaneResponse, ErrorResponse),
-                    "cut_unreal_mesh_plane",
-                )
-        except Exception as e:
-            server.logger.error("Error cutting mesh with plane: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealCutMeshPlaneResponse, ErrorResponse),
-                "cut_unreal_mesh_plane",
+            return session.cut_mesh_plane(
+                mesh_path=mesh_path,
+                plane_origin=origin,
+                plane_normal=normal,
+                fill_holes=fill_holes,
+                keep_both_sides=keep_both_sides,
             )
+
+        return await server._exec_backend(
+            "cut_unreal_mesh_plane",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealCutMeshPlaneResponse,
+            _call,
+        )
 
     @server.mcp.tool(
         name="validate_unreal_mesh",
@@ -2148,35 +2043,26 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rate_error = server._check_rate_limit("validate_unreal_mesh")
         if rate_error:
             return rate_error
-        try:
+
+        def _call(session):
+            # Parsing stays inside the envelope: malformed input must
+            # return the error payload it always has, not escape as an
+            # unhandled exception.
             check_list = (
                 [c.strip() for c in checks.split(",") if c.strip()] if checks else None
             )
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.validate_mesh(
-                    mesh_path=mesh_path,
-                    checks=check_list,
-                )
-                apply_success_from_error(payload)
-                result = UnrealValidateMeshResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealValidateMeshResponse, ErrorResponse),
-                    "validate_unreal_mesh",
-                )
-        except Exception as e:
-            server.logger.error("Error validating mesh: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealValidateMeshResponse, ErrorResponse),
-                "validate_unreal_mesh",
+            return session.validate_mesh(
+                mesh_path=mesh_path,
+                checks=check_list,
             )
+
+        return await server._exec_backend(
+            "validate_unreal_mesh",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealValidateMeshResponse,
+            _call,
+        )
 
     @server.mcp.tool(
         name="convert_unreal_mesh_format",
@@ -2198,38 +2084,29 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rate_error = server._check_rate_limit("convert_unreal_mesh_format")
         if rate_error:
             return rate_error
-        try:
+
+        def _call(session):
+            # Parsing stays inside the envelope: malformed input must
+            # return the error payload it always has, not escape as an
+            # unhandled exception.
             import json as _json
 
             tess_opts = (
                 _json.loads(tessellation_options) if tessellation_options else None
             )
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.unreal_adapter.create_session() as session:
-                payload = await session.convert_mesh_format(
-                    mesh_path=mesh_path,
-                    target_format=target_format,
-                    tessellation_options=tess_opts,
-                )
-                apply_success_from_error(payload)
-                result = UnrealConvertMeshFormatResponse(**payload).model_dump()
-                return server._validate_output(
-                    result,
-                    (UnrealConvertMeshFormatResponse, ErrorResponse),
-                    "convert_unreal_mesh_format",
-                )
-        except Exception as e:
-            server.logger.error("Error converting mesh format: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealConvertMeshFormatResponse, ErrorResponse),
-                "convert_unreal_mesh_format",
+            return session.convert_mesh_format(
+                mesh_path=mesh_path,
+                target_format=target_format,
+                tessellation_options=tess_opts,
             )
+
+        return await server._exec_backend(
+            "convert_unreal_mesh_format",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealConvertMeshFormatResponse,
+            _call,
+        )
 
     @server.mcp.tool(
         name="remesh_unreal_mesh",

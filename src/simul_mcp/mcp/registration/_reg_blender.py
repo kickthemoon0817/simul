@@ -40,31 +40,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         if rate_error:
             return rate_error
 
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-
-            with server.blender_adapter.create_session() as session:
-                runtime_info = session.get_runtime_info()
-                apply_success_from_error(runtime_info)
-                result = BlenderInfoResponse(**runtime_info).model_dump()
-                return server._validate_output(
-                    result,
-                    (BlenderInfoResponse, ErrorResponse),
-                    "get_blender_info",
-                )
-
-        except Exception as e:
-            server.logger.error(f"Error getting Blender runtime info: {e}")
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (BlenderInfoResponse, ErrorResponse),
-                "get_blender_info",
-            )
+        return await server._exec_backend(
+            "get_blender_info",
+            server.blender_adapter,
+            "Blender",
+            BlenderInfoResponse,
+            lambda session: session.get_runtime_info(),
+        )
 
     @server.mcp.tool(
         name="list_blender_scene_objects",
