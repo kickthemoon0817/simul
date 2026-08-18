@@ -438,7 +438,7 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 ### Isaac Sim — Scene Inspection
 
-`get_isaac_stage_info`, `list_isaac_prims`, `get_isaac_prim_info`, `get_isaac_prim_transform`, `search_isaac_prims`, `get_isaac_scene_summary`, `get_isaac_subtree`, `get_isaac_prim_ancestors`, `get_isaac_prim_relationships`, `get_isaac_prim_variants`, `get_isaac_scene_stats`
+`get_isaac_stage_info`, `list_isaac_prims`, `get_isaac_prim_detail` (aspect-based single-prim reads: info, transform, ancestors, relationships, variants, bounding_box, mesh, light, material, rigid_body, collision, joint, mass, animation), `search_isaac_prims`, `get_isaac_scene_summary`, `get_isaac_subtree`, `get_isaac_scene_stats`
 
 ### Isaac Sim — Prim Manipulation
 
@@ -450,7 +450,7 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 ### Isaac Sim — Physics
 
-`get_isaac_physics_scene`, `create_isaac_physics_scene`, `get_isaac_rigid_body_info`, `add_isaac_rigid_body`, `add_isaac_collision`, `get_isaac_collision_info`, `get_isaac_joint_info`, `get_isaac_mass_properties`, `set_isaac_mass_properties`, `set_isaac_physics_material`, `list_isaac_physics_objects`
+`get_isaac_physics_scene`, `create_isaac_physics_scene`, `add_isaac_rigid_body`, `add_isaac_collision`, `set_isaac_mass_properties`, `set_isaac_physics_material`, `list_isaac_physics_objects`
 
 ### Isaac Sim — Simulation Control
 
@@ -458,7 +458,7 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 ### Isaac Sim — Materials
 
-`get_isaac_material_info`, `list_isaac_materials`, `assign_isaac_material`, `set_isaac_material_property`, `create_isaac_material`
+`list_isaac_materials`, `assign_isaac_material`, `set_isaac_material_property`, `create_isaac_material`
 
 ### Isaac Sim — Rendering & AOVs
 
@@ -474,7 +474,7 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 ### Isaac Sim — Advanced
 
-`execute_isaac_script` (custom Python), `ping_isaac`, `raycast_isaac_scene`, `find_isaac_prims_in_area`, `get_isaac_texture_dependencies`, `list_isaac_instances`, `set_active_isaac_instance`
+`execute_isaac_script` (custom Python), `ping_isaac`, `raycast_isaac_scene`, `find_isaac_prims_in_area`, `list_isaac_instances`, `set_active_isaac_instance`
 
 ### Observability
 

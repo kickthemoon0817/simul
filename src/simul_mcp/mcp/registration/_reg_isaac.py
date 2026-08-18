@@ -160,44 +160,6 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         )
 
     @server.mcp.tool(
-        name="get_isaac_prim_info",
-        description=(
-            "Get detailed information about a specific prim: type, attributes, "
-            "applied schemas, children, references, and relationships."
-            "Deprecated: use get_isaac_prim_detail with aspects=['info']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_prim_info(prim_path: str) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_prim_info",
-            server._isaac_tools.get_isaac_prim_info(prim_path=prim_path),
-        )
-
-    @server.mcp.tool(
-        name="get_isaac_prim_transform",
-        description=(
-            "Get the local and world transform of a prim including "
-            "translation, rotation, and scale."
-            "Deprecated: use get_isaac_prim_detail with aspects=['transform']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_prim_transform(
-        prim_path: str, world_space: bool = True
-    ) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_prim_transform",
-            server._isaac_tools.get_isaac_prim_transform(
-                prim_path=prim_path, world_space=world_space
-            ),
-        )
-
-    @server.mcp.tool(
         name="search_isaac_prims",
         description=(
             "Search prims by type name or name pattern. "
@@ -475,25 +437,6 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         )
 
     @server.mcp.tool(
-        name="get_isaac_rigid_body_info",
-        description=(
-            "Get rigid body physics properties: mass, velocity, "
-            "angular velocity, and kinematic state."
-            "Deprecated: use get_isaac_prim_detail with aspects=['rigid_body']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_rigid_body_info(
-        prim_path: str,
-    ) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_rigid_body_info",
-            server._isaac_tools.get_isaac_rigid_body_info(prim_path=prim_path),
-        )
-
-    @server.mcp.tool(
         name="list_isaac_physics_objects",
         description=(
             "List all prims with physics APIs: rigid bodies, colliders, "
@@ -509,63 +452,6 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         return await server._exec_isaac(
             "list_isaac_physics_objects",
             server._isaac_tools.list_isaac_physics_objects(root_path=root_path),
-        )
-
-    @server.mcp.tool(
-        name="get_isaac_collision_info",
-        description=(
-            "Get collision properties of a prim: enabled state "
-            "and mesh approximation type."
-            "Deprecated: use get_isaac_prim_detail with aspects=['collision']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_collision_info(
-        prim_path: str,
-    ) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_collision_info",
-            server._isaac_tools.get_isaac_collision_info(prim_path=prim_path),
-        )
-
-    @server.mcp.tool(
-        name="get_isaac_joint_info",
-        description=(
-            "Get joint information: type, connected bodies, limits, "
-            "and break force/torque."
-            "Deprecated: use get_isaac_prim_detail with aspects=['joint']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_joint_info(
-        prim_path: str,
-    ) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_joint_info",
-            server._isaac_tools.get_isaac_joint_info(prim_path=prim_path),
-        )
-
-    @server.mcp.tool(
-        name="get_isaac_mass_properties",
-        description=(
-            "Get mass properties: mass, density, center of mass, "
-            "and diagonal inertia tensor."
-            "Deprecated: use get_isaac_prim_detail with aspects=['mass']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_mass_properties(
-        prim_path: str,
-    ) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_mass_properties",
-            server._isaac_tools.get_isaac_mass_properties(prim_path=prim_path),
         )
 
     # -- Physics Configuration tools --------------------------------------
@@ -788,25 +674,6 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     # -- Materials & Appearance tools -------------------------------------
 
     @server.mcp.tool(
-        name="get_isaac_material_info",
-        description=(
-            "Get material properties: shader type, bound inputs, "
-            "and connected textures for a material prim."
-            "Deprecated: use get_isaac_prim_detail with aspects=['material']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_material_info(
-        material_path: str,
-    ) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_material_info",
-            server._isaac_tools.get_isaac_material_info(material_path=material_path),
-        )
-
-    @server.mcp.tool(
         name="list_isaac_materials",
         description="List all material prims in the current stage.",
         annotations=server._tool_annotations(
@@ -1014,40 +881,6 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     # -- Scene Inspection & Exploration tools -----------------------------
 
     @server.mcp.tool(
-        name="get_isaac_bounding_box",
-        description=(
-            "Get the world-space axis-aligned bounding box of a prim "
-            "including min, max, size, and center coordinates."
-            "Deprecated: use get_isaac_prim_detail with aspects=['bounding_box']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_bounding_box(prim_path: str) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_bounding_box",
-            server._isaac_tools.get_isaac_bounding_box(prim_path=prim_path),
-        )
-
-    @server.mcp.tool(
-        name="get_isaac_mesh_info",
-        description=(
-            "Get mesh geometry details: vertex count, face count, "
-            "has normals, has UVs, and subdivision scheme."
-            "Deprecated: use get_isaac_prim_detail with aspects=['mesh']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_mesh_info(prim_path: str) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_mesh_info",
-            server._isaac_tools.get_isaac_mesh_info(prim_path=prim_path),
-        )
-
-    @server.mcp.tool(
         name="list_isaac_lights",
         description=(
             "List all light prims in the scene with type, "
@@ -1061,23 +894,6 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         return await server._exec_isaac(
             "list_isaac_lights",
             server._isaac_tools.list_isaac_lights(root_path=root_path),
-        )
-
-    @server.mcp.tool(
-        name="get_isaac_light_info",
-        description=(
-            "Get detailed light properties: intensity, color, "
-            "temperature, radius, shadow settings, and shaping."
-            "Deprecated: use get_isaac_prim_detail with aspects=['light']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_light_info(prim_path: str) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_light_info",
-            server._isaac_tools.get_isaac_light_info(prim_path=prim_path),
         )
 
     @server.mcp.tool(
@@ -1115,23 +931,6 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         )
 
     @server.mcp.tool(
-        name="get_isaac_prim_ancestors",
-        description=(
-            "Get the ancestor chain from root to a prim, showing "
-            "the full hierarchy path with types."
-            "Deprecated: use get_isaac_prim_detail with aspects=['ancestors']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_prim_ancestors(prim_path: str) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_prim_ancestors",
-            server._isaac_tools.get_isaac_prim_ancestors(prim_path=prim_path),
-        )
-
-    @server.mcp.tool(
         name="get_isaac_subtree",
         description=(
             "Get a full subtree as a flat list with depth info, "
@@ -1153,23 +952,6 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 max_depth=max_depth,
                 max_prims=max_prims,
             ),
-        )
-
-    @server.mcp.tool(
-        name="get_isaac_prim_relationships",
-        description=(
-            "Get a prim's relationships: material binding, references, "
-            "payloads, variant sets, and USD relationships."
-            "Deprecated: use get_isaac_prim_detail with aspects=['relationships']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_prim_relationships(prim_path: str) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_prim_relationships",
-            server._isaac_tools.get_isaac_prim_relationships(prim_path=prim_path),
         )
 
     @server.mcp.tool(
@@ -1202,40 +984,6 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         return await server._exec_isaac(
             "get_isaac_scene_stats",
             server._isaac_tools.get_isaac_scene_stats(root_path=root_path),
-        )
-
-    @server.mcp.tool(
-        name="get_isaac_texture_dependencies",
-        description=(
-            "List all external texture files referenced by scene materials "
-            "with their referencing material paths."
-            "Deprecated: use get_isaac_prim_detail with aspects=['textures']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_texture_dependencies(root_path: str = "/") -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_texture_dependencies",
-            server._isaac_tools.get_isaac_texture_dependencies(root_path=root_path),
-        )
-
-    @server.mcp.tool(
-        name="get_isaac_prim_variants",
-        description=(
-            "Get variant sets on a prim: available variants "
-            "and current selections for each set."
-            "Deprecated: use get_isaac_prim_detail with aspects=['variants']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_prim_variants(prim_path: str) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_prim_variants",
-            server._isaac_tools.get_isaac_prim_variants(prim_path=prim_path),
         )
 
     @server.mcp.tool(
@@ -1312,23 +1060,6 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 max_depth=max_depth,
                 max_widgets=max_widgets,
             ),
-        )
-
-    @server.mcp.tool(
-        name="get_isaac_animation_info",
-        description=(
-            "Get animation information for a prim: which attributes "
-            "have time samples, sample counts, and time ranges."
-            "Deprecated: use get_isaac_prim_detail with aspects=['animation']."
-        ),
-        annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
-        ),
-    )
-    async def get_isaac_animation_info(prim_path: str) -> ToolResult:
-        return await server._exec_isaac(
-            "get_isaac_animation_info",
-            server._isaac_tools.get_isaac_animation_info(prim_path=prim_path),
         )
 
     @server.mcp.tool(
