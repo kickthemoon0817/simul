@@ -1,14 +1,21 @@
 """GUI/state observability tools for Isaac Sim.
 
-Both tools degrade gracefully on headless runs (``--no-window``): sections
-that need ``omni.ui`` report ``available: False`` with the reason instead of
-failing the whole call.
+Sections degrade independently: a run without ``omni.ui`` (or with a
+destroyed window in the workspace) reports what it can and marks what it
+cannot, instead of failing the whole call. Note that Kit ``--no-window``
+usually still loads ``omni.ui`` — the common headless shape is
+``ui_available: true`` with an empty window list, not an import failure.
 """
 
 import textwrap
 from typing import Any, Dict
 
 from ._shared import _pyval
+
+# Caps for the widget-tree walk, mirroring the max(1, min(x, N)) clamp the
+# other bounded tools use. The depth cap doubles as the recursion bound.
+MAX_UI_TREE_DEPTH = 32
+MAX_UI_TREE_WIDGETS = 2000
 
 
 class UiObservabilityMixin:
@@ -25,13 +32,21 @@ class UiObservabilityMixin:
         timeline state, and open-stage status in one call.
 
         Returns:
-            Dict with app_window, ui, viewport, selection, timeline, and
-            stage sections; failed sections carry an error note instead.
+            Dict with app_window, windows, viewport, selection_paths,
+            timeline, and stage sections; failed sections carry an error
+            note instead. ``windows`` and ``selection_paths`` sit at the
+            top level so the result budget can trim them.
         """
         script = textwrap.dedent("""\
             import json
+            import math
 
             state = {}
+
+            def _finite(value):
+                if isinstance(value, float) and not math.isfinite(value):
+                    return str(value)
+                return value
 
             try:
                 import carb.settings
@@ -49,26 +64,32 @@ class UiObservabilityMixin:
                 windows = []
                 focused = None
                 for win in ui.Workspace.get_windows():
-                    entry = {
-                        "title": win.title,
-                        "visible": bool(win.visible),
-                        "focused": bool(getattr(win, "focused", False)),
-                        "docked": bool(getattr(win, "docked", False)),
-                        "width": getattr(win, "width", None),
-                        "height": getattr(win, "height", None),
-                    }
+                    # A destroyed window can still hand out a live handle
+                    # whose properties raise; report it, keep the rest.
+                    try:
+                        entry = {
+                            "title": str(win.title),
+                            "visible": bool(win.visible),
+                            "focused": bool(getattr(win, "focused", False)),
+                            "docked": bool(getattr(win, "docked", False)),
+                            "width": _finite(getattr(win, "width", None)),
+                            "height": _finite(getattr(win, "height", None)),
+                        }
+                    except Exception as we:
+                        windows.append({"error": str(we)})
+                        continue
                     if entry["focused"]:
                         focused = entry["title"]
                     windows.append(entry)
-                windows.sort(key=lambda w: (w["title"] is None, w["title"]))
-                state["ui"] = {
-                    "available": True,
-                    "window_count": len(windows),
-                    "focused_window": focused,
-                    "windows": windows,
-                }
+                windows.sort(key=lambda w: w.get("title") or "")
+                state["ui_available"] = True
+                state["window_count"] = len(windows)
+                state["focused_window"] = focused
+                state["windows"] = windows
             except Exception as e:
-                state["ui"] = {"available": False, "reason": str(e)}
+                state["ui_available"] = False
+                state["ui_error"] = str(e)
+                state["windows"] = []
 
             try:
                 from omni.kit.viewport.utility import get_active_viewport
@@ -87,7 +108,8 @@ class UiObservabilityMixin:
                 import omni.usd
                 ctx = omni.usd.get_context()
                 paths = list(ctx.get_selection().get_selected_prim_paths())
-                state["selection"] = {"count": len(paths), "paths": paths}
+                state["selection_count"] = len(paths)
+                state["selection_paths"] = paths
             except Exception as e:
                 state["selection_error"] = str(e)
 
@@ -142,14 +164,17 @@ class UiObservabilityMixin:
         Args:
             window_title: Exact title of the window to inspect (as listed
                 by get_isaac_ui_state).
-            max_depth: Maximum tree depth to descend.
+            max_depth: Maximum tree depth to descend (clamped to 1..32; the
+                clamp also bounds recursion).
             max_widgets: Maximum number of widgets to describe before
-                truncating.
+                truncating (clamped to 1..2000).
 
         Returns:
             Dict with window metadata and the (possibly truncated) widget
             tree, or an error listing the available window titles.
         """
+        max_depth = max(1, min(max_depth, MAX_UI_TREE_DEPTH))
+        max_widgets = max(1, min(max_widgets, MAX_UI_TREE_WIDGETS))
         _window_title = _pyval(window_title)
         _max_depth = _pyval(max_depth)
         _max_widgets = _pyval(max_widgets)
@@ -160,6 +185,7 @@ class UiObservabilityMixin:
         """)
         script = prelude + textwrap.dedent("""\
             import json
+            import math
 
             try:
                 import omni.ui as ui
@@ -181,17 +207,36 @@ class UiObservabilityMixin:
                 else:
                     budget = {"left": _MAX_WIDGETS, "truncated": False}
 
+                    def _finite(value):
+                        if isinstance(value, float) and not math.isfinite(value):
+                            return str(value)
+                        return value
+
                     def describe(widget, depth):
                         if budget["left"] <= 0:
                             budget["truncated"] = True
                             return None
                         budget["left"] -= 1
+                        # A single widget with a raising property must cost
+                        # one node, not the whole tree.
+                        try:
+                            return _describe(widget, depth)
+                        except Exception as e:
+                            return {"type": "<unreadable>", "error": str(e)}
+
+                    def _describe(widget, depth):
                         node = {"type": type(widget).__name__}
                         for key in ("identifier", "name"):
-                            value = getattr(widget, key, "")
+                            try:
+                                value = getattr(widget, key, "")
+                            except Exception:
+                                continue
                             if value:
                                 node[key] = value
-                        text = getattr(widget, "text", None)
+                        try:
+                            text = getattr(widget, "text", None)
+                        except Exception:
+                            text = None
                         if isinstance(text, str) and text:
                             node["text"] = text
                         for flag in ("visible", "enabled", "checked",
@@ -200,13 +245,17 @@ class UiObservabilityMixin:
                                 value = getattr(widget, flag)
                             except Exception:
                                 continue
-                            # Default-true flags are only worth reporting
-                            # when off; checked/selected always carry state.
+                            # Report only the informative state: default-true
+                            # flags when off, default-false flags when on.
                             if isinstance(value, bool) and (
-                                not value or flag in ("checked", "selected")
+                                (flag in ("visible", "enabled") and not value)
+                                or (flag in ("checked", "selected") and value)
                             ):
                                 node[flag] = value
-                        model = getattr(widget, "model", None)
+                        try:
+                            model = getattr(widget, "model", None)
+                        except Exception:
+                            model = None
                         if model is not None:
                             for getter in ("get_value_as_string",
                                            "get_value_as_float",
@@ -216,7 +265,7 @@ class UiObservabilityMixin:
                                 if read is None:
                                     continue
                                 try:
-                                    node["value"] = read()
+                                    node["value"] = _finite(read())
                                 except Exception:
                                     continue
                                 break
@@ -243,8 +292,8 @@ class UiObservabilityMixin:
                         "window": _TARGET,
                         "visible": bool(window.visible),
                         "docked": bool(getattr(window, "docked", False)),
-                        "width": getattr(window, "width", None),
-                        "height": getattr(window, "height", None),
+                        "width": _finite(getattr(window, "width", None)),
+                        "height": _finite(getattr(window, "height", None)),
                         "frame_available": frame is not None,
                         "widget_count": _MAX_WIDGETS - budget["left"],
                         "truncated": budget["truncated"],

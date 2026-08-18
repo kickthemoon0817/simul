@@ -75,8 +75,11 @@ class TestUiStateScript:
         asyncio.run(tools.get_isaac_ui_state())
 
         script = captured[0]
-        # The ui section reports unavailability instead of dying.
-        assert '"available": False' in script
+        # The ui section reports unavailability instead of dying, and the
+        # trimmable lists sit at the top level for the result budget.
+        assert 'state["ui_available"] = False' in script
+        assert 'state["windows"]' in script
+        assert 'state["selection_paths"]' in script
 
 
 class TestUiWindowScript:
@@ -101,6 +104,23 @@ class TestUiWindowScript:
         ast.parse(script)
         assert "_MAX_DEPTH = 2" in script
         assert "_MAX_WIDGETS = 10" in script
+
+    def test_caps_are_clamped(self, tools: IsaacTools, captured: List[str]) -> None:
+        """Oversized caps clamp instead of walking (or recursing) unbounded."""
+        asyncio.run(
+            tools.get_isaac_ui_window(
+                window_title="Stage", max_depth=5000, max_widgets=10**9
+            )
+        )
+        assert "_MAX_DEPTH = 32" in captured[0]
+        assert "_MAX_WIDGETS = 2000" in captured[0]
+
+        captured.clear()
+        asyncio.run(
+            tools.get_isaac_ui_window(window_title="Stage", max_depth=-3, max_widgets=0)
+        )
+        assert "_MAX_DEPTH = 1" in captured[0]
+        assert "_MAX_WIDGETS = 1" in captured[0]
 
     def test_hostile_title_embeds_safely(
         self, tools: IsaacTools, captured: List[str]
