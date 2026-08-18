@@ -74,6 +74,7 @@ class IsaacSocketClient:
         timeout_seconds: float = 30.0,
         bridge_host: Optional[str] = None,
         bridge_port: Optional[int] = None,
+        bridge_socket_path: Optional[str] = None,
         bridge_timeout_seconds: Optional[float] = None,
         prefer_bridge: bool = False,
         fallback_to_vscode: bool = True,
@@ -90,6 +91,9 @@ class IsaacSocketClient:
             timeout_seconds: Timeout for the full send+receive cycle.
             bridge_host: Host for the custom Isaac Sim bridge extension.
             bridge_port: Port for the custom Isaac Sim bridge extension.
+            bridge_socket_path: Unix socket to the bridge. Preferred over
+                TCP when set — for a containerised Isaac Sim it crosses the
+                shared volume directly, with no published port involved.
             bridge_timeout_seconds: Timeout for bridge requests.
             prefer_bridge: Attempt the custom bridge transport before VS Code.
             fallback_to_vscode: Use the VS Code socket when bridge is unavailable.
@@ -102,10 +106,14 @@ class IsaacSocketClient:
         self._timeout_seconds = timeout_seconds
         self._bridge_host = bridge_host
         self._bridge_port = bridge_port
+        self._bridge_socket_path = bridge_socket_path
         self._bridge_timeout_seconds = (
             bridge_timeout_seconds if bridge_timeout_seconds is not None else timeout_seconds
         )
-        self._prefer_bridge = prefer_bridge and bridge_host is not None and bridge_port is not None
+        self._prefer_bridge = prefer_bridge and (
+            bridge_socket_path is not None
+            or (bridge_host is not None and bridge_port is not None)
+        )
         self._fallback_to_vscode = fallback_to_vscode
         self._read_buffer_size = read_buffer_size
         self._max_request_bytes = max_request_bytes
@@ -124,8 +132,10 @@ class IsaacSocketClient:
 
     @property
     def _bridge_configured(self) -> bool:
-        """Return True when both bridge host and port are set."""
-        return self._bridge_host is not None and self._bridge_port is not None
+        """Return True when a bridge transport (socket or host:port) is set."""
+        return self._bridge_socket_path is not None or (
+            self._bridge_host is not None and self._bridge_port is not None
+        )
 
     @property
     def address(self) -> str:
@@ -352,19 +362,24 @@ class IsaacSocketClient:
             )
         frame = struct.pack(">I", len(request_bytes)) + request_bytes
 
+        if self._bridge_socket_path is not None:
+            connect = asyncio.open_unix_connection(self._bridge_socket_path)
+            endpoint = self._bridge_socket_path
+        else:
+            connect = asyncio.open_connection(self._bridge_host, self._bridge_port)
+            endpoint = self.bridge_address
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(self._bridge_host, self._bridge_port),
-                timeout=self._bridge_timeout_seconds,
+                connect, timeout=self._bridge_timeout_seconds
             )
         except asyncio.TimeoutError:
             raise TimeoutError(
-                f"Connection to Isaac bridge at {self.bridge_address} timed out after "
+                f"Connection to Isaac bridge at {endpoint} timed out after "
                 f"{self._bridge_timeout_seconds}s."
             )
         except (ConnectionRefusedError, OSError) as exc:
             raise ConnectionRefusedError(
-                f"Cannot connect to Isaac bridge at {self.bridge_address}."
+                f"Cannot connect to Isaac bridge at {endpoint}."
             ) from exc
 
         try:

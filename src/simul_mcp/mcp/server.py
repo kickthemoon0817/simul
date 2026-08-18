@@ -758,6 +758,7 @@ class SimulMCPServer(LoggerMixin):
         bridge_port: Optional[int] = None,
         bridge_timeout: Optional[float] = None,
         bridge_fallback_to_vscode: Optional[bool] = None,
+        bridge_socket_path: Optional[str] = None,
     ) -> IsaacSocketClient:
         """Create one bridge-aware Isaac client from default or per-instance config."""
         resolved_bridge_port = (
@@ -780,6 +781,7 @@ class SimulMCPServer(LoggerMixin):
             port=socket_port,
             bridge_host=bridge_host or socket_host,
             bridge_port=resolved_bridge_port,
+            bridge_socket_path=bridge_socket_path,
             bridge_timeout_seconds=resolved_bridge_timeout,
             prefer_bridge=bridge_enabled,
             fallback_to_vscode=resolved_fallback,
@@ -819,6 +821,29 @@ class SimulMCPServer(LoggerMixin):
             host = data.get("host", "127.0.0.1")
             port = data.get("port")
             vscode_port = data.get("vscode_port")
+            socket_path = data.get("socket_path")
+
+            # The discovery dir is the trust boundary for sockets, exactly as
+            # loopback is for TCP: a hostile or corrupted entry must not point
+            # the client at an arbitrary socket elsewhere on the filesystem.
+            if socket_path is not None:
+                resolved = os.path.realpath(str(socket_path))
+                boundary = os.path.realpath(discovery_dir) + os.sep
+                if not resolved.startswith(boundary):
+                    # A containerised bridge advertises its own mount point
+                    # (/tmp/simul-mcp/...), not the host's. The socket must
+                    # live in the discovery dir anyway, so try its basename
+                    # inside the local dir — inside the boundary by
+                    # construction.
+                    resolved = os.path.realpath(
+                        os.path.join(
+                            discovery_dir, os.path.basename(str(socket_path))
+                        )
+                    )
+                if not resolved.startswith(boundary) or not os.path.exists(resolved):
+                    socket_path = None
+                else:
+                    socket_path = resolved
 
             # Only trust loopback addresses from discovery files
             if host not in ("127.0.0.1", "::1", "localhost"):
@@ -856,6 +881,7 @@ class SimulMCPServer(LoggerMixin):
                 bridge_port=port,
                 bridge_timeout=min(self.settings.isaac_sim.bridge_timeout, 3.0),
                 bridge_fallback_to_vscode=self.settings.isaac_sim.bridge_fallback_to_vscode,
+                bridge_socket_path=socket_path,
             )
 
             candidates.append((f"isaac-{port}", client))

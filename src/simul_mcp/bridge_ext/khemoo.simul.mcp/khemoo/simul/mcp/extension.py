@@ -209,6 +209,12 @@ class IsaacMCPServerExtension(OmniExtBase):
         self._discovery_dir = str(
             settings.get("/exts/khemoo.simul.mcp/discovery_dir") or "/tmp/simul-mcp"
         )
+        # Empty string disables the Unix socket; TCP always serves. On the
+        # shared discovery volume the socket reaches the host with no
+        # published port at all.
+        self._socket_path = str(
+            settings.get("/exts/khemoo.simul.mcp/socket_path") or ""
+        )
 
     def _schedule_task(self, coro: asyncio.Future) -> None:
         """Schedule a bridge lifecycle task on Kit's event loop."""
@@ -246,6 +252,7 @@ class IsaacMCPServerExtension(OmniExtBase):
             max_response_bytes=self._max_response_bytes,
             max_port_retries=self._max_port_retries,
             vscode_handler=self._handle_vscode_script,
+            socket_path=self._socket_path or None,
         )
         await self._server.start()
         # Write actual bound port back to Carb settings
@@ -263,6 +270,8 @@ class IsaacMCPServerExtension(OmniExtBase):
             os.getpid(),
             vscode_port=self._vscode_port,
         )
+        if self._socket_path and self._server._unix_server is not None:
+            carb.log_info(f"Simul MCP bridge also serving on unix socket {self._socket_path}")
         carb.log_info(f"Simul MCP bridge serving at {self._server.address}")
         self._refresh_ui()
 
