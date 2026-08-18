@@ -31,7 +31,7 @@ mcp__simul__set_isaac_prim_transform
 
 ### Adding ArticulationRoot Manually
 
-If `get_isaac_joint_info` returns an empty joint list, the ArticulationRoot schema may be missing. Add it via `execute_isaac_script`:
+If `get_isaac_prim_detail` with `aspects=["joint"]` returns an empty joint list, the ArticulationRoot schema may be missing. Add it via `execute_isaac_script`:
 
 ```python
 import json
@@ -77,7 +77,7 @@ mcp__simul__add_isaac_reference
   reference_path: "omniverse://localhost/NVIDIA/Assets/Isaac/4.2/Isaac/Robots/Franka/franka.usd"
 
 # 3. Verify
-mcp__simul__get_isaac_prim_info
+mcp__simul__get_isaac_prim_detail  aspects: ["info"]
   prim_path: "/World/Robot"
 ```
 
@@ -111,9 +111,9 @@ After conversion, use `import_isaac_asset` with `asset_type: "usd"` on the gener
 
 After any robot import, verify these items in order:
 
-1. `get_isaac_prim_info` — confirm prim exists and type is correct
+1. `get_isaac_prim_detail` with `aspects=["info"]` — confirm prim exists and type is correct
 2. `get_isaac_subtree` — inspect link/joint hierarchy, note exact prim paths
-3. `get_isaac_joint_info` — verify joints were created with correct types and limits
-4. `get_isaac_rigid_body_info` — confirm physics bodies on links
+3. `get_isaac_prim_detail` with `aspects=["joint"]` — verify joints were created with correct types and limits
+4. `get_isaac_prim_detail` with `aspects=["rigid_body"]` — confirm physics bodies on links
 5. `set_isaac_prim_transform` — position the robot above the ground plane (z > 0)
 6. Start simulation briefly (`start_isaac_simulation` → `step_isaac_simulation` × 5 → `pause_isaac_simulation`) and check robot does not explode or fall through the floor

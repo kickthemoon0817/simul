@@ -122,5 +122,5 @@ Use `/World/Lights/` as a parent prim to keep lights organised in the stage hier
 
 ```
 mcp__simul__list_isaac_lights
-mcp__simul__get_isaac_light_info  prim_path: "/World/Lights/Sun"
+mcp__simul__get_isaac_prim_detail  prim_path: "/World/Lights/Sun"  aspects: ["light"]
 ```

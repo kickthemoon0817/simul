@@ -474,7 +474,7 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 ### Isaac Sim — Advanced
 
-`execute_isaac_script` (custom Python), `ping_isaac`, `raycast_isaac_scene`, `find_isaac_prims_in_area`, `list_isaac_instances`, `set_active_isaac_instance`
+`execute_isaac_script` (custom Python), `ping_isaac`, `raycast_isaac_scene`, `find_isaac_prims_in_area`, `get_isaac_texture_dependencies`, `list_isaac_instances`, `set_active_isaac_instance`
 
 ### Observability
 

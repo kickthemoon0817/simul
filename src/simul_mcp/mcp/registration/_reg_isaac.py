@@ -987,6 +987,22 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         )
 
     @server.mcp.tool(
+        name="get_isaac_texture_dependencies",
+        description=(
+            "List all external texture files referenced by scene materials "
+            "with their referencing material paths."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=True
+        ),
+    )
+    async def get_isaac_texture_dependencies(root_path: str = "/") -> ToolResult:
+        return await server._exec_isaac(
+            "get_isaac_texture_dependencies",
+            server._isaac_tools.get_isaac_texture_dependencies(root_path=root_path),
+        )
+
+    @server.mcp.tool(
         name="focus_isaac_viewport",
         description=(
             "Frame the viewport camera to focus on a specific prim, "

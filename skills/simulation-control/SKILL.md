@@ -102,8 +102,8 @@ Poll state while a simulation is running to track progress or wait for a conditi
 ```
 mcp__simul__get_isaac_simulation_state   # check playing/paused/stopped
 mcp__simul__get_isaac_simulation_time    # check elapsed time
-mcp__simul__get_isaac_prim_transform     # read object positions
-mcp__simul__get_isaac_rigid_body_info    # read velocities
+mcp__simul__get_isaac_prim_detail  aspects: ["transform"]  # read object positions
+mcp__simul__get_isaac_prim_detail  aspects: ["rigid_body"]  # read velocities
 ```
 
 For reading physics quantities mid-simulation, prefer `execute_isaac_script` with direct USD attribute access (e.g. `physics:velocity`) as it is lower-latency than chained tool calls.
@@ -157,7 +157,7 @@ See `references/timeline-vs-world.md` for detailed comparison.
 1. mcp__simul__start_isaac_simulation
 2. mcp__simul__step_isaac_simulation  num_steps: 300   # 5 sec at 60 Hz
 3. mcp__simul__pause_isaac_simulation
-4. mcp__simul__get_isaac_prim_transform  prim_path: "/World/MyRobot"
+4. mcp__simul__get_isaac_prim_detail  prim_path: "/World/MyRobot"  aspects: ["transform"]
 ```
 
 ### Check state before starting (safe start)
