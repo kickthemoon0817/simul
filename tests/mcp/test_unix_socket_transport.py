@@ -336,9 +336,9 @@ def test_discovery_rejects_a_socket_outside_the_discovery_dir(
         srv = _server(monkeypatch, inside)
         found = await srv._discover_from_files()
         for client in found.values():
-            assert getattr(client, "_bridge_socket_path", None) is None, (
-                "discovery accepted a socket path outside the discovery dir"
-            )
+            assert (
+                getattr(client, "_bridge_socket_path", None) is None
+            ), "discovery accepted a socket path outside the discovery dir"
         return {}
 
     asyncio.run(_exercise())
