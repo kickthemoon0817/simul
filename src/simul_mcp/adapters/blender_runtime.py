@@ -77,18 +77,27 @@ class BlenderRuntimeSession(LoggerMixin):
         )
         self._path_policy = PathPolicy.from_settings(self.settings)
 
-    def _deny_outside_sandbox(self, path: Optional[str]) -> None:
+    def _deny_outside_sandbox(self, path: Optional[str]) -> Optional[str]:
         """Refuse a filesystem path the sandbox policy does not allow.
 
         Enforced here, in the session layer, so every caller — MCP
         registration, a future CLI, tests — sits above the check. Raising
         keeps the void and dict-returning methods on one idiom; the shared
         envelope turns it into the standard error payload.
+
+        Returns the policy-resolved path, which the caller must use for
+        every later filesystem and ``bpy`` operation: the policy resolves
+        ``~``/``$VAR``/relative prefixes before the containment test, so the
+        raw string can name a different file than the one that was checked.
+        With the sandbox disabled the raw path passes through untouched.
         """
         if path is None:
-            return
+            return None
+        if not self._path_policy.enabled:
+            return path
         if not self._path_policy.is_allowed(path):
             raise PermissionError(f"File path is not allowed by sandbox policy: {path}")
+        return str(self._path_policy.resolve(path))
 
     @property
     def blender_version(self) -> Tuple[int, int, int]:
@@ -1074,10 +1083,11 @@ class BlenderRuntimeSession(LoggerMixin):
             Dict with file_path and object_count.
 
         Raises:
+            PermissionError: If the path is outside the sandbox policy.
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is not a .blend file.
         """
-        self._deny_outside_sandbox(file_path)
+        file_path = self._deny_outside_sandbox(file_path)
         if not os.path.isfile(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
         if not file_path.lower().endswith(".blend"):
@@ -1105,9 +1115,10 @@ class BlenderRuntimeSession(LoggerMixin):
             Dict with file_path.
 
         Raises:
+            PermissionError: If the path is outside the sandbox policy.
             ValueError: If no path given and file was never saved.
         """
-        self._deny_outside_sandbox(file_path)
+        file_path = self._deny_outside_sandbox(file_path)
         blender_module: Any = bpy
 
         if file_path is not None:
@@ -1143,10 +1154,11 @@ class BlenderRuntimeSession(LoggerMixin):
             Dict with file_path, file_format, and imported_objects list.
 
         Raises:
+            PermissionError: If the path is outside the sandbox policy.
             FileNotFoundError: If the file does not exist.
             ValueError: If the format is unsupported.
         """
-        self._deny_outside_sandbox(file_path)
+        file_path = self._deny_outside_sandbox(file_path)
         fmt = file_format.upper()
         if fmt not in self._SUPPORTED_FORMATS:
             raise ValueError(
@@ -1194,9 +1206,10 @@ class BlenderRuntimeSession(LoggerMixin):
             Dict with file_path and file_format.
 
         Raises:
+            PermissionError: If the path is outside the sandbox policy.
             ValueError: If the format is unsupported.
         """
-        self._deny_outside_sandbox(file_path)
+        file_path = self._deny_outside_sandbox(file_path)
         fmt = file_format.upper()
         if fmt not in self._SUPPORTED_FORMATS:
             raise ValueError(
@@ -2325,8 +2338,11 @@ class BlenderRuntimeSession(LoggerMixin):
 
         Returns:
             Dict with file_path, object_count, validation_passed, issues.
+
+        Raises:
+            PermissionError: If the path is outside the sandbox policy.
         """
-        self._deny_outside_sandbox(file_path)
+        file_path = self._deny_outside_sandbox(file_path)
         blender_module: Any = bpy
         issues: Optional[List[Dict[str, Any]]] = None
         validation_passed = True

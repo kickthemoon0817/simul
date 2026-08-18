@@ -35,7 +35,7 @@ class PathPolicy:
     ) -> None:
         self._enabled = enabled
         self._project_root = project_root or _DEFAULT_PROJECT_ROOT
-        self._allowed_roots = [self._resolve(p) for p in allowed_paths]
+        self._allowed_roots = [self.resolve(p) for p in allowed_paths]
 
     @classmethod
     def from_settings(
@@ -56,7 +56,14 @@ class PathPolicy:
     def allowed_roots(self) -> List[Path]:
         return list(self._allowed_roots)
 
-    def _resolve(self, path_str: str) -> Path:
+    def resolve(self, path_str: str) -> Path:
+        """Normalize a path exactly the way the containment test sees it.
+
+        Callers that pass a checked path onward must pass this value, not the
+        raw string — otherwise the checked path and the used path can name
+        different files (``~``/``$VAR``/relative prefixes resolve here but are
+        literal path components to the receiving application).
+        """
         expanded = os.path.expandvars(path_str)
         candidate = Path(expanded).expanduser()
         if not candidate.is_absolute():
@@ -76,7 +83,7 @@ class PathPolicy:
             return True
         if not path_str:
             return False
-        candidate = self._resolve(path_str)
+        candidate = self.resolve(path_str)
         for allowed_root in self._allowed_roots:
             try:
                 candidate.relative_to(allowed_root)
