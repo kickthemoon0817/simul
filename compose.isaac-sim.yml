@@ -50,6 +50,11 @@ services:
       - --/exts/khemoo.simul.mcp/allow_unsafe_execution=true
       - --/exts/khemoo.simul.mcp/max_port_retries=${ISAAC_MAX_PORT_RETRIES:-10}
       - --/exts/khemoo.simul.mcp/discovery_dir=/tmp/simul-mcp
+      # Unix socket on the shared discovery volume: the host connects through
+      # the bind mount with no published port and no docker-proxy hop. The TCP
+      # publishes below stay for the VS Code fallback and for clients that do
+      # not speak the socket; with socket-only use they can be removed.
+      - --/exts/khemoo.simul.mcp/socket_path=${SIMUL_DISCOVERY_DIR:-/tmp/simul-mcp}/bridge.sock
       - --/exts/isaacsim.code_editor.vscode/host=${ISAAC_BIND_HOST:-0.0.0.0}
       - --/exts/isaacsim.code_editor.vscode/port=${ISAAC_VSCODE_PORT:-8226}
     environment:

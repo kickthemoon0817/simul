@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import struct
 import tempfile
 from typing import Any, Awaitable, Callable
+
+# Stdlib on purpose: this module must stay importable without Kit, and inside
+# Kit these records land in the app log through the root handlers.
+logger = logging.getLogger(__name__)
 
 from .protocol import BridgeRequest, BridgeResponse
 
@@ -30,6 +35,7 @@ class BridgeServerLifecycle:
         max_port_retries: int = 10,
         vscode_handler: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
         request_timeout: float = 120.0,
+        socket_path: str | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -39,7 +45,9 @@ class BridgeServerLifecycle:
         self._max_port_retries = max_port_retries
         self._vscode_handler = vscode_handler
         self._request_timeout = request_timeout
+        self._socket_path = socket_path
         self._server: asyncio.AbstractServer | None = None
+        self._unix_server: asyncio.AbstractServer | None = None
         self._actual_port: int = port
         self._discovery_file: str | None = None
 
@@ -70,7 +78,9 @@ class BridgeServerLifecycle:
                     family=socket.AF_INET,
                 )
                 await self._server.start_serving()
-                self._actual_port = candidate_port
+                # For port 0 the OS picks; report what was actually bound.
+                self._actual_port = self._server.sockets[0].getsockname()[1]
+                await self._start_unix()
                 return
             except OSError as exc:
                 last_error = exc
@@ -78,6 +88,35 @@ class BridgeServerLifecycle:
         raise OSError(
             f"Failed to bind bridge on ports {self._port}\u2013{self._port + self._max_port_retries - 1}: {last_error}"
         )
+
+    async def _start_unix(self) -> None:
+        """Serve the same protocol on a Unix socket, when one is configured.
+
+        The socket sits on the discovery volume, which container and host
+        already share, so the host reaches the bridge without a published
+        port. Failure here is logged and non-fatal: the TCP listener is
+        already up, and a container without the volume mounted should not
+        lose its working transport over the optional one.
+        """
+        if not self._socket_path or self._unix_server is not None:
+            return
+        try:
+            # A previous crash leaves the socket inode behind and bind() would
+            # fail EADDRINUSE; there is one bridge per path, so replace it.
+            if os.path.exists(self._socket_path):
+                os.unlink(self._socket_path)
+            self._unix_server = await asyncio.start_unix_server(
+                self._handle_client, path=self._socket_path
+            )
+            await self._unix_server.start_serving()
+            # connect(2) needs write permission on the socket inode. In a
+            # container this process is root, so the default mode would leave
+            # the host user unable to connect — the 0600 discovery-file
+            # failure again, one layer down.
+            os.chmod(self._socket_path, 0o666)
+        except OSError as exc:
+            logger.warning("Bridge Unix socket %s unavailable: %s", self._socket_path, exc)
+            self._unix_server = None
 
     async def stop(self) -> None:
         """Stop the bridge TCP server."""
@@ -87,6 +126,15 @@ class BridgeServerLifecycle:
         self._server.close()
         await self._server.wait_closed()
         self._server = None
+        if self._unix_server is not None:
+            self._unix_server.close()
+            await self._unix_server.wait_closed()
+            self._unix_server = None
+        if self._socket_path and os.path.exists(self._socket_path):
+            try:
+                os.unlink(self._socket_path)
+            except OSError:
+                pass
 
     # A wildcard bind covers every interface, loopback included, but it is not
     # an address anything can connect to — and the reader drops a discovery
@@ -118,6 +166,8 @@ class BridgeServerLifecycle:
         }
         if vscode_port is not None:
             data["vscode_port"] = vscode_port
+        if self._socket_path and self._unix_server is not None:
+            data["socket_path"] = self._socket_path
         fd, tmp = tempfile.mkstemp(dir=discovery_dir, suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
