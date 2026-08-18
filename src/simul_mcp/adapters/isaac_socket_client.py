@@ -108,7 +108,9 @@ class IsaacSocketClient:
         self._bridge_port = bridge_port
         self._bridge_socket_path = bridge_socket_path
         self._bridge_timeout_seconds = (
-            bridge_timeout_seconds if bridge_timeout_seconds is not None else timeout_seconds
+            bridge_timeout_seconds
+            if bridge_timeout_seconds is not None
+            else timeout_seconds
         )
         self._prefer_bridge = prefer_bridge and (
             bridge_socket_path is not None
@@ -206,7 +208,13 @@ class IsaacSocketClient:
             if self._prefer_bridge:
                 try:
                     return await self._execute_bridge_script(code)
-                except (ConnectionRefusedError, ConnectionError, OSError, TimeoutError, ValueError) as exc:
+                except (
+                    ConnectionRefusedError,
+                    ConnectionError,
+                    OSError,
+                    TimeoutError,
+                    ValueError,
+                ) as exc:
                     # Log the first failure per (bridge, vscode) pair at WARNING.
                     # Subsequent failures with the same destinations drop to DEBUG
                     # so a long-lived process running without the bridge does not
@@ -351,12 +359,16 @@ class IsaacSocketClient:
             except (ConnectionRefusedError, TimeoutError, OSError):
                 return False
 
-    async def bridge_request(self, action: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def bridge_request(
+        self, action: str, payload: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Send a typed request to the bridge transport without fallback."""
         async with self._lock:
             return await self._bridge_request(action, payload or {})
 
-    async def _bridge_request(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _bridge_request(
+        self, action: str, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """Send a typed request to the custom bridge extension."""
         if not self._bridge_configured:
             raise ConnectionRefusedError("Bridge transport is not configured.")
@@ -432,7 +444,8 @@ class IsaacSocketClient:
             if response.get("request_id") != expected_id:
                 logger.warning(
                     "Bridge response request_id mismatch: expected %s, got %s",
-                    expected_id, response.get("request_id"),
+                    expected_id,
+                    response.get("request_id"),
                 )
 
             return response
@@ -457,14 +470,24 @@ class IsaacSocketClient:
             Parsed ScriptResult.
         """
         if not raw.strip():
-            return ScriptResult(success=False, output="", error_name="EmptyResponse",
-                                error_value="No response from Isaac Sim", transport="vscode")
+            return ScriptResult(
+                success=False,
+                output="",
+                error_name="EmptyResponse",
+                error_value="No response from Isaac Sim",
+                transport="vscode",
+            )
 
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            return ScriptResult(success=False, output=raw, error_name="JSONDecodeError",
-                                error_value=str(exc), transport="vscode")
+            return ScriptResult(
+                success=False,
+                output=raw,
+                error_name="JSONDecodeError",
+                error_value=str(exc),
+                transport="vscode",
+            )
 
         status = data.get("status", "error")
         output = data.get("output", "")
@@ -473,7 +496,11 @@ class IsaacSocketClient:
             return ScriptResult(success=True, output=output, transport="vscode")
 
         traceback_lines = data.get("traceback", [])
-        traceback_str = "\n".join(traceback_lines) if isinstance(traceback_lines, list) else str(traceback_lines)
+        traceback_str = (
+            "\n".join(traceback_lines)
+            if isinstance(traceback_lines, list)
+            else str(traceback_lines)
+        )
 
         return ScriptResult(
             success=False,
