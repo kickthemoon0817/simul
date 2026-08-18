@@ -13,7 +13,7 @@ This skill teaches you how to load, inspect, analyze, and modify USD files using
 | Tool set | When to use | Identifier |
 |---|---|---|
 | `load_usd_file`, `get_prim_info`, `search_prims`, `get_mesh_info`, `get_bounding_box`, `summarize_scene`, `create_prim`, `update_prim_attributes`, `delete_prim` | Offline/headless USD file analysis and editing | `stage_id` |
-| `get_isaac_prim_info`, `search_isaac_prims`, `get_isaac_mesh_info`, etc. | Live Isaac Sim scene (running instance) | prim path only |
+| `get_isaac_prim_detail` (aspects: info, mesh, ...), `search_isaac_prims`, etc. | Live Isaac Sim scene (running instance) | prim path only |
 
 **Never mix these two sets.** If Isaac Sim is not running, use the headless tools with `stage_id`. If Isaac Sim is running with a stage open, use the `isaac_*` tools.
 
@@ -203,7 +203,7 @@ mcp__simul__delete_prim
 
 ## Common Pitfalls
 
-- **Using headless tools on a live stage**: Do not use `get_prim_info` (headless) when Isaac Sim is running and you want live data — use `get_isaac_prim_info` instead.
+- **Using headless tools on a live stage**: Do not use `get_prim_info` (headless) when Isaac Sim is running and you want live data — use `get_isaac_prim_detail` with `aspects=["info"]` instead.
 - **Forgetting `stage_id`**: Every headless call requires the `stage_id` from `load_usd_file`. Calling `get_prim_info` without it will fail.
 - **Stage ID is session-scoped**: The `stage_id` is not persistent across tool sessions. If the session resets, call `load_usd_file` again.
 - **Large scenes**: `summarize_scene` with `include_meshes: true` on a scene with thousands of meshes can be slow. Use `include_meshes: false` for a quick overview first.

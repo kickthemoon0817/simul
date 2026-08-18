@@ -5,8 +5,8 @@ the prim they read. Measured against the real ``tools/list`` payload they cost
 ~1,779 tokens of every session's listing, and an agent had to discriminate
 between fifteen entries whose descriptions are one clause apart.
 
-``get_isaac_prim_detail`` replaces them. The originals stay registered as
-deprecated aliases for one release, so nothing breaks on upgrade.
+``get_isaac_prim_detail`` replaces them; 0.1.0 removed the deprecated
+alias registrations, leaving the mixin methods as its implementation.
 """
 
 from __future__ import annotations

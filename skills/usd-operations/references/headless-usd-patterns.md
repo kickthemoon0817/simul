@@ -124,10 +124,10 @@ For `by_name`, the prim name is the last component of the path. Searching for `"
 | Operation | Headless (file) | Live Isaac Sim |
 |---|---|---|
 | Load/open | `load_usd_file` | `open_isaac_stage` |
-| Prim info | `get_prim_info(stage_id, path)` | `get_isaac_prim_info(path)` |
+| Prim info | `get_prim_info(stage_id, path)` | `get_isaac_prim_detail(path, aspects=["info"])` |
 | Search | `search_prims(stage_id, ...)` | `search_isaac_prims(...)` |
-| Mesh info | `get_mesh_info(stage_id, path)` | `get_isaac_mesh_info(path)` |
-| Bounding box | `get_bounding_box(stage_id, path)` | `get_isaac_bounding_box(path)` |
+| Mesh info | `get_mesh_info(stage_id, path)` | `get_isaac_prim_detail(path, aspects=["mesh"])` |
+| Bounding box | `get_bounding_box(stage_id, path)` | `get_isaac_prim_detail(path, aspects=["bounding_box"])` |
 | Scene summary | `summarize_scene(stage_id)` | `get_isaac_scene_summary()` |
 | Create prim | `create_prim(stage_id, path, type)` | `create_isaac_prim(path, type)` |
 | Delete prim | `delete_prim(stage_id, path)` | `delete_isaac_prim(path)` |

@@ -19,7 +19,7 @@ version: 0.1.0
 | Add collision | `add_isaac_collision` |
 | Physics material | `set_isaac_physics_material` |
 | Start/stop sim | `start_isaac_simulation`, `stop_isaac_simulation` |
-| Query scene | `get_isaac_scene_summary`, `get_isaac_prim_info` |
+| Query scene | `get_isaac_scene_summary`, `get_isaac_prim_detail` with `aspects=["info"]` |
 
 **Use `execute_isaac_script` when:**
 - The required API is not exposed by any granular tool (e.g. creating lights, querying rigid body velocities, custom material shaders, bounding box computations, raycasting)

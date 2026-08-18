@@ -153,7 +153,7 @@ print(json.dumps(result))
 ## Querying Joints
 
 ```
-mcp__simul__get_isaac_joint_info
+mcp__simul__get_isaac_prim_detail  aspects: ["joint"]
   prim_path: "/World/Joints/ElbowJoint"
 ```
 

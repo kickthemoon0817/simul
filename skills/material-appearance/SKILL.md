@@ -12,7 +12,7 @@ This skill teaches you how to create, inspect, assign, and modify materials in a
 
 ```
 list_isaac_materials
-    → get_isaac_material_info         (inspect existing material)
+    → get_isaac_prim_detail (aspects=["material"])         (inspect existing material)
     → set_isaac_material_property     (modify a property)
     → assign_isaac_material           (bind to a prim)
 
@@ -37,7 +37,7 @@ Returns material prim paths (e.g. `/World/Looks/RedPlastic`, `/World/Looks/Metal
 Get the current properties of an existing material.
 
 ```
-mcp__simul__get_isaac_material_info
+mcp__simul__get_isaac_prim_detail  aspects: ["material"]
   material_path: "/World/Looks/RedPlastic"
 ```
 
@@ -149,7 +149,7 @@ shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.0,
 | User Intent | Tool to Use |
 |---|---|
 | "What materials are in the scene?" | `list_isaac_materials` |
-| "What color is that material?" | `get_isaac_material_info` |
+| "What color is that material?" | `get_isaac_prim_detail` with `aspects=["material"]` |
 | "Create a red material" | `execute_isaac_script` with UsdPreviewSurface |
 | "Make this object red" | `execute_isaac_script` to create + `assign_isaac_material` |
 | "Change roughness of existing material" | `set_isaac_material_property` |
@@ -159,6 +159,6 @@ shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.0,
 
 - **No dedicated create-material tool**: You must use `execute_isaac_script`. Do not look for a `create_isaac_material` tool — it does not exist.
 - **Property name prefix**: Always include `inputs:` when calling `set_isaac_material_property` (e.g. `inputs:roughness`, not `roughness`).
-- **Material path vs shader path**: The material lives at `/World/Looks/Mat`. The shader is at `/World/Looks/Mat/Shader`. Use the material path for `assign_isaac_material` and `get_isaac_material_info`. Use the shader path only in scripts.
+- **Material path vs shader path**: The material lives at `/World/Looks/Mat`. The shader is at `/World/Looks/Mat/Shader`. Use the material path for `assign_isaac_material` and `get_isaac_prim_detail` with `aspects=["material"]`. Use the shader path only in scripts.
 - **Opacity requires translucency enabled**: Setting `inputs:opacity` below 1.0 via `set_isaac_material_property` may not render correctly unless the material was created with opacity support. Create the material with the opacity input defined from the start.
 - **Color values are 0–1 floats**: Not 0–255. `[1.0, 0.0, 0.0]` is red.

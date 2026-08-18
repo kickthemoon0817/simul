@@ -52,7 +52,7 @@ mcp__simul__add_isaac_rigid_body
 This applies `UsdPhysics.RigidBodyAPI` to the prim. The prim must already exist. After adding, verify:
 
 ```
-mcp__simul__get_isaac_rigid_body_info
+mcp__simul__get_isaac_prim_detail  aspects: ["rigid_body"]
   prim_path: "/World/Box"
 ```
 
@@ -83,7 +83,7 @@ For articulated robots with per-link geometry, apply collision to each link prim
 Verify collision was applied:
 
 ```
-mcp__simul__get_isaac_collision_info
+mcp__simul__get_isaac_prim_detail  aspects: ["collision"]
   prim_path: "/World/Box"
 ```
 
@@ -103,7 +103,7 @@ mcp__simul__set_isaac_mass_properties
 Read back the applied values:
 
 ```
-mcp__simul__get_isaac_mass_properties
+mcp__simul__get_isaac_prim_detail  aspects: ["mass"]
   prim_path: "/World/Box"
 ```
 
@@ -152,7 +152,7 @@ mcp__simul__set_isaac_material_property
 Read current material settings:
 
 ```
-mcp__simul__get_isaac_material_info
+mcp__simul__get_isaac_prim_detail  aspects: ["material"]
   prim_path: "/World/Box"
 ```
 
@@ -233,7 +233,7 @@ print(json.dumps(result))
 Query joint state after creation:
 
 ```
-mcp__simul__get_isaac_joint_info
+mcp__simul__get_isaac_prim_detail  aspects: ["joint"]
   prim_path: "/World/Joints/HingeJoint"
 ```
 
@@ -245,7 +245,7 @@ mcp__simul__get_isaac_joint_info
 4. `mcp__simul__add_isaac_collision` — add `convexHull` collider to `/World/Box`
 5. `mcp__simul__set_isaac_mass_properties` — set mass to known value
 6. `mcp__simul__set_isaac_physics_material` — set friction and restitution
-7. `mcp__simul__get_isaac_rigid_body_info` — verify everything applied
+7. `mcp__simul__get_isaac_prim_detail` with `aspects=["rigid_body"]` — verify everything applied
 8. `mcp__simul__start_isaac_simulation` — run and observe
 
 ## Reference Files

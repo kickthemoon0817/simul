@@ -15,10 +15,10 @@ import_isaac_asset            (USD or URDF from file path)
     OR
 add_isaac_reference           (attach USD as a reference on an existing prim)
 
-→ get_isaac_prim_info         (confirm prim exists)
+→ get_isaac_prim_detail (aspects=["info"])         (confirm prim exists)
 → get_isaac_subtree           (inspect imported hierarchy)
 → set_isaac_prim_transform    (position, rotate, scale)
-→ get_isaac_joint_info        (verify robot articulation)
+→ get_isaac_prim_detail (aspects=["joint"])        (verify robot articulation)
 ```
 
 ## Step-by-Step Workflow
@@ -71,7 +71,7 @@ mcp__simul__add_isaac_reference
 Confirm the prim was created and has the expected type.
 
 ```
-mcp__simul__get_isaac_prim_info
+mcp__simul__get_isaac_prim_detail  aspects: ["info"]
   prim_path: "/World/Robot"
 ```
 
@@ -111,7 +111,7 @@ mcp__simul__set_isaac_prim_transform
 For robots, confirm joints were imported correctly.
 
 ```
-mcp__simul__get_isaac_joint_info
+mcp__simul__get_isaac_prim_detail  aspects: ["joint"]
   prim_path: "/World/Robot"
 ```
 
@@ -159,15 +159,15 @@ mcp__simul__set_isaac_prim_transform
 | "Import robot from file" | `import_isaac_asset` with `asset_type: "usd"` or `"urdf"` |
 | "Add Nucleus asset" | `import_isaac_asset` with Nucleus path |
 | "Attach USD as reference" | `add_isaac_reference` |
-| "Did the import work?" | `get_isaac_prim_info` |
+| "Did the import work?" | `get_isaac_prim_detail` with `aspects=["info"]` |
 | "Show me the robot structure" | `get_isaac_subtree` |
 | "Move the robot to position X" | `set_isaac_prim_transform` |
-| "What joints does it have?" | `get_isaac_joint_info` |
+| "What joints does it have?" | `get_isaac_prim_detail` with `aspects=["joint"]` |
 
 ## Common Pitfalls
 
-- **Prim path already exists**: If the prim path is occupied, `import_isaac_asset` may overwrite or fail. Check with `get_isaac_prim_info` first and use a unique path.
+- **Prim path already exists**: If the prim path is occupied, `import_isaac_asset` may overwrite or fail. Check with `get_isaac_prim_detail` with `aspects=["info"]` first and use a unique path.
 - **Nucleus server not running**: Nucleus paths (`omniverse://localhost/...`) require the Nucleus service to be active. Local file paths (`/home/...`) work without Nucleus.
 - **URDF scale mismatch**: URDF robots that appear oversized likely need `scale: [0.01, 0.01, 0.01]`.
 - **No articulation joints found**: The URDF import may not have created an ArticulationRoot automatically. See `references/urdf-usd-workflow.md` for the script to add one.
-- **Checking the wrong prim**: `get_isaac_joint_info` on a non-root prim may return incomplete results. Use the root prim path returned by `get_isaac_subtree`.
+- **Checking the wrong prim**: `get_isaac_prim_detail` with `aspects=["joint"]` on a non-root prim may return incomplete results. Use the root prim path returned by `get_isaac_subtree`.
