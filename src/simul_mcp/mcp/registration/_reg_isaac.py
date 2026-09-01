@@ -272,6 +272,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     async def capture_isaac_viewport(
         width: int = 1280,
         height: int = 720,
+        inline: bool = False,
     ) -> ToolResult:
         return await server._exec_isaac(
             "capture_isaac_viewport",

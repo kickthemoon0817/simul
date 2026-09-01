@@ -822,17 +822,28 @@ def capture(
             raise typer.Exit(1)
         _run(tools.set_isaac_camera(position=eye_list, target=target_list))
 
-    data = _run(tools.capture_isaac_viewport(width=width, height=height))
+    data = _run(tools.capture_isaac_viewport(width=width, height=height, inline=True))
 
-    # Decode base64 image and write to disk
+    # The tool returns the capture as a path on the Isaac Sim host, plus
+    # inline base64 for files under the inline cap. Prefer the base64 body;
+    # fall back to copying the host-side file, which works whenever the CLI
+    # runs on the same machine as the editor.
     image_b64 = data.get("image_base64") or data.get("image", "")
+    capture_path = data.get("path", "")
     if image_b64:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(base64.b64decode(image_b64))
+    elif capture_path and Path(capture_path).is_file():
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(Path(capture_path).read_bytes())
     else:
+        detail = data.get("inline_skipped") or data.get("error") or ""
+        message = "Viewport capture returned no image data"
+        if detail:
+            message = f"{message}: {detail}"
         if is_json_mode():
-            emit_error("Viewport capture returned no image data", "CaptureError")
-        console.print("[red]Viewport capture returned no image data[/red]")
+            emit_error(message, "CaptureError")
+        console.print(f"[red]{message}[/red]")
         raise typer.Exit(1)
 
     if is_json_mode():
