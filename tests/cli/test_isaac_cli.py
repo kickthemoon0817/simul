@@ -633,3 +633,88 @@ def test_bridge_up_enable_succeeds_but_bridge_stays_down(monkeypatch) -> None:
     assert payload["bridge_reachable"] is False
     assert payload["success"] is False
     assert payload["extension_enabled"] is True
+
+
+def test_capture_requests_inline_and_writes_base64(monkeypatch, tmp_path) -> None:
+    """A capture under the inline cap arrives as base64 and lands on disk."""
+    import base64 as b64
+
+    png = b"\x89PNG-fake-bytes"
+    tools = _make_tools()
+    tools.capture_isaac_viewport = AsyncMock(
+        return_value={
+            "path": "/tmp/simul_capture_ab.png",
+            "width": 320,
+            "height": 180,
+            "format": "png",
+            "size_bytes": len(png),
+            "image_base64": b64.b64encode(png).decode("ascii"),
+            "success": True,
+        }
+    )
+    monkeypatch.setattr(isaac_cli, "_tools", lambda *args, **kwargs: tools)
+
+    out = tmp_path / "cap.png"
+    result = runner.invoke(app, ["--json", "isaac", "capture", str(out)])
+
+    assert result.exit_code == 0
+    assert tools.capture_isaac_viewport.call_args.kwargs["inline"] is True
+    assert out.read_bytes() == png
+    payload = json.loads(result.stdout)
+    assert payload["file_path"] == str(out.resolve())
+    assert "image_base64" not in payload
+
+
+def test_capture_falls_back_to_host_path_copy(monkeypatch, tmp_path) -> None:
+    """Above the inline cap the tool returns only a path; the CLI copies it.
+
+    The CLI previously required ``image_base64`` and reported "no image data"
+    for every path-only response, which is the tool's default shape.
+    """
+    png = b"\x89PNG-big-fake-bytes"
+    host_file = tmp_path / "simul_capture_cd.png"
+    host_file.write_bytes(png)
+
+    tools = _make_tools()
+    tools.capture_isaac_viewport = AsyncMock(
+        return_value={
+            "path": str(host_file),
+            "width": 1920,
+            "height": 1080,
+            "format": "png",
+            "size_bytes": len(png),
+            "inline_skipped": "above cap",
+            "success": True,
+        }
+    )
+    monkeypatch.setattr(isaac_cli, "_tools", lambda *args, **kwargs: tools)
+
+    out = tmp_path / "out" / "cap.png"
+    result = runner.invoke(app, ["--json", "isaac", "capture", str(out)])
+
+    assert result.exit_code == 0
+    assert out.read_bytes() == png
+    payload = json.loads(result.stdout)
+    assert payload["file_path"] == str(out.resolve())
+
+
+def test_capture_reports_missing_image_with_detail(monkeypatch, tmp_path) -> None:
+    """No base64 and no readable path is a hard error naming the reason."""
+    tools = _make_tools()
+    tools.capture_isaac_viewport = AsyncMock(
+        return_value={
+            "path": str(tmp_path / "does-not-exist.png"),
+            "inline_skipped": "above cap",
+            "success": True,
+        }
+    )
+    monkeypatch.setattr(isaac_cli, "_tools", lambda *args, **kwargs: tools)
+
+    result = runner.invoke(
+        app, ["--json", "isaac", "capture", str(tmp_path / "cap.png")]
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["error_type"] == "CaptureError"
+    assert "above cap" in payload["error"]

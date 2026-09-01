@@ -231,3 +231,38 @@ def test_bridge_lifecycle_returns_structured_error_for_oversize_response() -> No
     assert response["request_id"] == "req-1"
     assert response["error"]["name"] == "ResponseTooLarge"
     assert "exceeded 256 bytes" in response["error"]["message"]
+
+
+def test_capture_viewport_tool_accepts_and_forwards_inline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The registered capture tool must expose ``inline`` and forward it.
+
+    The wrapper's body passes ``inline=inline`` to the tools layer, so a
+    signature that omits the parameter raises ``NameError`` on every call.
+    """
+    server = _make_server(monkeypatch, Settings())
+    tool = next(
+        t for t in server.mcp.tools if t.name == "capture_isaac_viewport"
+    )
+
+    forwarded: dict[str, Any] = {}
+
+    async def _capture(**kwargs: Any) -> dict[str, Any]:
+        forwarded.update(kwargs)
+        return {"success": True}
+
+    async def _exec(name: str, coro: Any) -> Any:
+        return await coro
+
+    monkeypatch.setattr(
+        server, "_isaac_tools", SimpleNamespace(capture_isaac_viewport=_capture)
+    )
+    monkeypatch.setattr(server, "_exec_isaac", _exec)
+
+    asyncio.run(tool.func())
+    assert forwarded == {"width": 1280, "height": 720, "inline": False}
+
+    forwarded.clear()
+    asyncio.run(tool.func(width=640, height=360, inline=True))
+    assert forwarded == {"width": 640, "height": 360, "inline": True}
