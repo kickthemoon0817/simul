@@ -55,7 +55,6 @@ extscache/
 .sisyphus/
 plan-*.md
 .omc/
-.omx/
 
 # Exploration dumps (prevent context flood)
 DIRECTORY_TREE.txt

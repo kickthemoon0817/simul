@@ -1,10 +1,9 @@
 """Regression: --log-level and --verbose must apply, not crash.
 
 The server command assigned ``settings.logging.level`` directly, but
-``LoggingConfig`` is declared ``frozen=True`` — added deliberately as M7 in
-``docs/plans/2026-03-29-review-fixes.md`` — so pydantic v2 raises
-``ValidationError: Instance is frozen`` on assignment. Both flags therefore
-crashed the command they were meant to configure.
+``LoggingConfig`` is deliberately declared ``frozen=True``, so pydantic v2
+raises ``ValidationError: Instance is frozen`` on assignment. Both flags
+therefore crashed the command they were meant to configure.
 
 The fix rebuilds the section rather than unfreezing it, so the immutability that
 review asked for stays in place.
