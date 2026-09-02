@@ -128,12 +128,15 @@ For multi-instance on one host (no remote exposure), separate the ports:
 simul unreal setup <.uproject> --port 30011 --websocket-port 30021 --yes
 ```
 
-## Isaac workflow — `install-bridge` once per Isaac install, then `bridge-up` per launch
+## Isaac workflow — `install-bridge` once per Isaac install, then `launch` (or `bridge-up`) per launch
 
-Isaac Sim 5.1 ships with a working VS Code transport on port 8226, but
-simul's preferred transport is the `khemoo.simul.mcp` bridge extension
-on port 8229 (typed protocol, faster, fewer round-trips). Two
-post-clone steps wire it up cleanly:
+Supported: Isaac Sim 5.1.0, 6.0.0, 6.0.1. Isaac Sim 5.1 ships with the
+VS Code transport (`isaacsim.code_editor.vscode`) auto-enabled on port
+8226; Isaac Sim 6.0 moved that socket into
+`isaacsim.code_editor.python_server` and enables **nothing** at startup.
+simul's preferred transport on every version is the `khemoo.simul.mcp`
+bridge extension on port 8229 (typed protocol, faster, fewer
+round-trips). Two post-clone steps wire it up cleanly:
 
 ### 1. One-time per Isaac install: `simul-mcp isaac install-bridge`
 
@@ -160,14 +163,38 @@ if Isaac runs as a different user from the repo owner.
 switching copy ↔ symlink mode). Without `--force` the command no-ops
 when the dest version already matches the source.
 
-### 2. Per Isaac launch: `simul-mcp isaac bridge-up`
+### 2. Per Isaac launch: `simul-mcp isaac launch` (all versions) or `bridge-up` (5.x, editor already running)
 
 A fresh `isaac-sim.sh` start leaves the bridge extension
 **registered but disabled** — port 8229 silently doesn't bind, even
-though the ext is present in `extsUser`. `simul-mcp isaac bridge-up`
-auto-enables it via the VS Code fallback transport (8226), then
-re-probes the bridge with a 6×0.5s retry loop (UE needs a frame to
-bind the socket).
+though the ext is present in `extsUser`. On 6.0 the Python socket on
+8226 is disabled too, so nothing can enable the bridge after the fact.
+
+`simul-mcp isaac launch` is the version-agnostic answer: it reads
+`<isaac-root>/VERSION`, starts `isaac-sim.sh` detached with
+`--enable <python socket ext> --enable khemoo.simul.mcp` (plus
+`--no-window` unless `--no-headless`), and polls both ports until they
+answer or `--wait-timeout` (default 180 s) expires. Its JSON output
+carries `pid`, `log_file`, `version`, `transport_extension`,
+`socket_reachable`, `bridge_reachable`, and `socket_protocol`.
+
+```
+ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac launch
+simul-mcp isaac launch --isaac-root ~/isaac-sim-5.1.0 --no-headless
+simul-mcp isaac launch --dry-run        # show the command, start nothing
+```
+
+Useful flags: `--socket-port`, `--bridge-port`, `--auth-token` (6.0+
+only, turns on python_server `require_auth`; pair it with
+`ISAAC_SIM__SOCKET_AUTH_TOKEN` on the MCP side), `--kit-arg` (repeatable
+passthrough), `--log-file`. When the bridge ext isn't published under
+`extsUser/`, the command still starts Isaac with the Python socket only
+and prints the `install-bridge` hint.
+
+When the user already has a **5.x** editor running, `simul-mcp isaac
+bridge-up` auto-enables the bridge via the VS Code transport (8226),
+then re-probes the bridge with a 6×0.5s retry loop (Kit needs a frame
+to bind the socket).
 
 ```
 simul-mcp isaac bridge-up
@@ -175,7 +202,9 @@ simul-mcp isaac bridge-up
 
 The command's JSON output reports `action: "already-up" | "auto-enabled"`,
 `success: bool`, `bridge_reachable: bool`, etc. Idempotent — re-running
-when the bridge is already up returns `already-up` instantly.
+when the bridge is already up returns `already-up` instantly. On a 6.0
+editor started without `--enable` flags it reports `NotRunning` with the
+launch hint; restart the editor through `launch` instead.
 
 ### Hard rules
 
@@ -183,10 +212,18 @@ when the bridge is already up returns `already-up` instantly.
   go through `install-bridge` so the version is read + verified at the
   end (the command catches a partial extraction or a wrong-version
   source up front).
-- After updating the repo (e.g. via `git pull`), re-run `bridge-up`
-  but NOT `install-bridge` if you used `--symlink` last time. The
-  symlink already tracks the repo; only the per-launch enable step
-  needs to repeat.
+- After updating the repo (e.g. via `git pull`), re-run `launch` /
+  `bridge-up` but NOT `install-bridge` if you used `--symlink` last
+  time. The symlink already tracks the repo; only the per-launch enable
+  step needs to repeat.
+- Don't hand-assemble `--enable` flags for `isaac-sim.sh` when
+  `launch` can do it; the socket extension name differs between 5.x
+  and 6.0 and `launch` picks it from the install's `VERSION` file.
+- The stock socket client auto-detects 5.x vs 6.0 wire behaviour
+  (6.0's python_server only executes after a TCP half-close, 5.x's VS
+  Code ext closes the connection on half-close). Set
+  `ISAAC_SIM__SOCKET_PROTOCOL=python_server|vscode` only to skip the
+  probe; never send EOF unconditionally.
 - Never tell the user to manually run
   `simul-mcp isaac enable-extension khemoo.simul.mcp` — that was the
   pre-iter10 workaround. `bridge-up` does the same thing plus the
@@ -197,12 +234,16 @@ when the bridge is already up returns `already-up` instantly.
 Simul is a Model Context Protocol (MCP) server that gives Claude Code and
 other MCP clients live control over 3D simulation and DCC backends:
 
-- **Isaac Sim 5.1.0** — granular tools over a TCP socket bridge: scene/prim
-  inspection, physics, materials, viewport/camera, simulation control,
-  rendering, asset/stage ops, extension management. Falls back to
-  `execute_isaac_script` for anything not covered by a granular tool.
-  Default ports: 8226 (VS Code plugin transport), 8229 (optional bridge
-  extension). Set `ISAAC_SIM_PATH` to the Isaac install root.
+- **Isaac Sim 5.1.0 / 6.0.0 / 6.0.1** — granular tools over a TCP socket
+  bridge: scene/prim inspection, physics, materials, viewport/camera,
+  simulation control, rendering, asset/stage ops, extension management.
+  Falls back to `execute_isaac_script` for anything not covered by a
+  granular tool. Default ports: 8226 (stock Python socket:
+  `isaacsim.code_editor.vscode` on 5.x, `isaacsim.code_editor.python_server`
+  on 6.0), 8229 (optional bridge extension). Set `ISAAC_SIM_PATH` to the
+  Isaac install root. 6.0 deprecates `isaacsim.core.{api,prims,utils}` in
+  favour of `isaacsim.core.experimental.*` and drops the `omni.isaac.*`
+  shims — scripts must not rely on either.
 - **Unreal Engine 5** — Remote Control HTTP/WebSocket plus
   `PythonScriptPlugin`; always set up via `simul unreal setup` (see above).
 - **Blender** — connected adapter when a Blender runtime is up.
@@ -350,11 +391,14 @@ available, run the live tier — don't stop at unit-tests-passed.**
 
 How to detect "the machine has it":
 
-- **Isaac Sim** — local install at `~/isaac-sim-5.1.0/` (or
-  `$ISAAC_SIM_PATH`). Launcher is `isaac-sim.sh`. Live socket on 8226
-  (VS Code transport) and optional 8229 (bridge). If the binary exists
-  but isn't running, **start it in the background, poll until the port
-  listens, then run the live test**. Don't claim a fix works without it.
+- **Isaac Sim** — local installs at `~/isaac-sim-5.1.0/`,
+  `~/isaac-sim-6.0.0/`, `~/isaac-sim-6.0.1/` (or `$ISAAC_SIM_PATH`).
+  Launcher is `isaac-sim.sh`. Live socket on 8226 (stock Python socket)
+  and optional 8229 (bridge). If the binary exists but isn't running,
+  **start it with `ISAAC_SIM_PATH=<root> simul-mcp isaac launch`** (it
+  enables the right transports per version and waits for the ports),
+  then run the live test. A transport change must be verified on both a
+  5.1 and a 6.0 install. Don't claim a fix works without it.
 - **Unreal Engine** — installed engines under `~/apps/unreal-*/` or
   `~/UnrealEngine/`, with `Engine/Binaries/<OS>/UnrealEditor`. For
   per-OS detection, also check `which UnrealEditor`. The live test

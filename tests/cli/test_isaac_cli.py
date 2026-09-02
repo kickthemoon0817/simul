@@ -718,3 +718,96 @@ def test_capture_reports_missing_image_with_detail(monkeypatch, tmp_path) -> Non
     payload = json.loads(result.stdout)
     assert payload["error_type"] == "CaptureError"
     assert "above cap" in payload["error"]
+
+
+# ---------------------------------------------------------------------------
+# launch --dry-run: version-aware transport extension selection
+# ---------------------------------------------------------------------------
+def _write_isaac_root(tmp_path: Path, version: str, *, with_bridge: bool) -> Path:
+    root = tmp_path / f"isaac-sim-{version}"
+    root.mkdir()
+    (root / "VERSION").write_text(f"{version}-rc.1+release.1.abc.gl\n")
+    (root / "isaac-sim.sh").write_text("#!/bin/sh\n")
+    exts_user = root / "extsUser"
+    exts_user.mkdir()
+    if with_bridge:
+        (exts_user / "khemoo.simul.mcp" / "config").mkdir(parents=True)
+        (exts_user / "khemoo.simul.mcp" / "config" / "extension.toml").write_text(
+            '[package]\nversion = "0.1.0"\n'
+        )
+    return root
+
+
+def test_launch_dry_run_isaac_six_enables_python_server(tmp_path: Path) -> None:
+    root = _write_isaac_root(tmp_path, "6.0.1", with_bridge=True)
+
+    result = runner.invoke(app, ["--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["version"] == "6.0.1"
+    assert payload["transport_extension"] == "isaacsim.code_editor.python_server"
+    assert payload["bridge_extension_present"] is True
+    command = payload["command"]
+    assert command[0] == str(root / "isaac-sim.sh")
+    assert command[1:3] == ["--enable", "isaacsim.code_editor.python_server"]
+    assert "--/exts/isaacsim.code_editor.python_server/port=8226" in command
+    assert "khemoo.simul.mcp" in command
+    assert "--/exts/khemoo.simul.mcp/port=8229" in command
+    assert "--no-window" in command
+
+
+def test_launch_dry_run_isaac_five_enables_vscode(tmp_path: Path, monkeypatch) -> None:
+    root = _write_isaac_root(tmp_path, "5.1.0", with_bridge=False)
+    monkeypatch.setenv("ISAAC_SIM_PATH", str(root))
+
+    result = runner.invoke(
+        app,
+        ["--json", "isaac", "launch", "--dry-run", "--no-headless", "--socket-port", "8300", "--kit-arg", "--verbose"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["transport_extension"] == "isaacsim.code_editor.vscode"
+    assert payload["bridge_extension_present"] is False
+    assert "install-bridge" in payload["hint"]
+    command = payload["command"]
+    assert "--/exts/isaacsim.code_editor.vscode/port=8300" in command
+    assert "khemoo.simul.mcp" not in command
+    assert "--no-window" not in command
+    assert command[-1] == "--verbose"
+
+
+def test_launch_auth_token_requires_isaac_six(tmp_path: Path) -> None:
+    root = _write_isaac_root(tmp_path, "5.1.0", with_bridge=True)
+
+    result = runner.invoke(
+        app, ["--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run", "--auth-token", "t"]
+    )
+
+    assert result.exit_code != 0
+    assert "InvalidArgument" in result.stdout
+
+
+def test_launch_auth_token_configures_python_server(tmp_path: Path) -> None:
+    root = _write_isaac_root(tmp_path, "6.0.0", with_bridge=True)
+
+    result = runner.invoke(
+        app, ["--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run", "--auth-token", "t0k"]
+    )
+
+    assert result.exit_code == 0, result.stdout
+    command = json.loads(result.stdout)["command"]
+    assert "--/exts/isaacsim.code_editor.python_server/require_auth=true" in command
+    assert "--/exts/isaacsim.code_editor.python_server/auth_token=t0k" in command
+
+
+def test_launch_rejects_root_without_version_file(tmp_path: Path) -> None:
+    root = tmp_path / "not-isaac"
+    root.mkdir()
+    (root / "isaac-sim.sh").write_text("#!/bin/sh\n")
+
+    result = runner.invoke(app, ["--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run"])
+
+    assert result.exit_code != 0
+    assert "UnsupportedInstall" in result.stdout

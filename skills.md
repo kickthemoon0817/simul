@@ -1,14 +1,17 @@
-# Isaac Sim 5.1.0 — Agent Skills Reference
+# Isaac Sim 5.1 / 6.0 — Agent Skills Reference
 
 > **Purpose**: This document teaches AI agents how to write Python scripts for
-> execution inside a running Isaac Sim 5.1.0 instance via the
-> `execute_isaac_script` MCP tool.
+> execution inside a running Isaac Sim 5.1.0, 6.0.0, or 6.0.1 instance via the
+> `execute_isaac_script` MCP tool. Check `get_isaac_runtime_info` →
+> `app.isaac_version` before choosing an API namespace (see the migration note
+> at the end).
 
 ## Execution Model
 
 Simul MCP prefers the repo-owned `khemoo.simul.mcp` bridge on port 8229 for
-typed tool traffic. Raw `execute_isaac_script` execution still uses the
-`isaacsim.code_editor.vscode` compatibility path on port 8226 when available.
+typed tool traffic. Raw `execute_isaac_script` execution falls back to the stock
+Python socket on port 8226 (`isaacsim.code_editor.python_server` on 6.0,
+`isaacsim.code_editor.vscode` on 5.x) when the bridge is unavailable.
 The executor runs your code with `compile() + eval()` inside Kit's Python
 process, with **full access to the global namespace** including `omni.*`,
 `pxr.*`, and `isaacsim.*`.
@@ -519,3 +522,19 @@ Isaac Sim 5.1.0 migrated from `omni.isaac.*` to `isaacsim.*`:
 - `omni.isaac.core` → `isaacsim.core.api`
 - `omni.isaac.core.utils` → `isaacsim.core.utils`
 - Kit-level APIs (`omni.usd`, `omni.timeline`, `pxr.*`) remain unchanged
+
+Isaac Sim 6.0 (Kit 110, Python 3.12) goes one step further:
+- The `omni.isaac.*` compatibility shims are removed — those imports raise `ModuleNotFoundError`.
+- `isaacsim.core.api`, `isaacsim.core.prims`, and `isaacsim.core.utils` still import but are
+  deprecated (they live in `extsDeprecated/`); new code should use `isaacsim.core.experimental.*`
+  (`isaacsim.core.experimental.utils.stage`, `.prims`, `.objects`, `.materials`) and
+  `isaacsim.core.simulation_manager`.
+- `isaacsim.sensors.camera` / `.rtx` / `.physics` / `.physx` are deprecated in favour of
+  `isaacsim.sensors.experimental.rtx` / `.physics`.
+- `omni.physx.get_physx_interface()` no longer exposes `get_physics_stats()` or
+  `is_cuda_lib_present()`.
+- `asyncio.wait_for` / `asyncio.timeout` raise `RuntimeError: Timeout should be used inside a task`
+  in scripts, because the socket servers drive top-level `await` outside an asyncio Task. Await
+  `omni.kit.app.get_app().next_update_async()` in a bounded loop instead.
+- Pure USD (`pxr.*`), `omni.usd`, `omni.timeline`, `omni.kit.app`, and `omni.replicator.core`
+  are unchanged and are what simul's granular tools use, so those tools work on every version.

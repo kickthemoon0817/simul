@@ -1,10 +1,41 @@
-# Isaac Sim 5.1.0 Namespace Migration
+# Isaac Sim Namespace Migration (5.1 → 6.0)
 
-Isaac Sim 5.1.0 migrated the core simulation package from `omni.isaac.*` to `isaacsim.*`. The old names raise `ModuleNotFoundError`. Always use the new names.
+Isaac Sim 5.1.0 migrated the core simulation package from `omni.isaac.*` to `isaacsim.*`. On 5.1 the old names still resolve through deprecation shims; on 6.0 the shims are gone and the old names raise `ModuleNotFoundError`. Always use the new names.
+
+Isaac Sim 6.0.0 / 6.0.1 (Kit 110.1, Python 3.12) then deprecated the 5.1 core layer itself. Check the running version first:
+
+```python
+import json, omni.kit.app
+print(json.dumps({"isaac": omni.kit.app.get_app().get_app_version()}))   # "6.0.1"
+```
+
+## 6.0 deprecations (still importable, but scheduled for removal)
+
+| Deprecated in 6.0 | Use instead |
+|-------------------|-------------|
+| `isaacsim.core.api` (`World`, `SimulationContext`) | `isaacsim.core.simulation_manager`, `isaacsim.core.experimental.*` |
+| `isaacsim.core.prims` (`XFormPrim`, `RigidPrim`, `Articulation`) | `isaacsim.core.experimental.prims` |
+| `isaacsim.core.utils.stage` | `isaacsim.core.experimental.utils.stage` (`create_new_stage_async(template="empty")`, `open_stage`, `add_reference_to_stage`) |
+| `isaacsim.core.utils.prims` | `isaacsim.core.experimental.utils.prim` or plain `pxr.Usd` |
+| `isaacsim.core.utils.xforms`, `.rotations`, `.bounds` | `isaacsim.core.experimental.utils.xform` / `.ops`, or `pxr.Gf` / `UsdGeom.BBoxCache` |
+| `isaacsim.sensors.camera`, `isaacsim.sensors.rtx` | `isaacsim.sensors.experimental.rtx` |
+| `isaacsim.sensors.physics`, `isaacsim.sensors.physx` | `isaacsim.sensors.experimental.physics` |
+| `isaacsim.robot.wheeled_robots`, `isaacsim.robot.manipulators` | `isaacsim.robot.experimental.wheeled_robots`, manipulator experimental APIs |
+| `isaacsim.replicator.domain_randomization`, `isaacsim.replicator.mobility_gen` | `isaacsim.replicator.experimental.*` |
+| `isaacsim.util.merge_mesh` | `omni.scene.optimizer.core` |
+| `omni.physx.get_physx_interface().get_physics_stats()` / `.is_cuda_lib_present()` | removed; read `/physics/*` Carb settings instead |
+
+Removed outright in 6.0: every `omni.isaac.*` shim, `isaacsim.asset.browser` (use `omni.simready.content.browser`), `isaacsim.replicator.scene_blox`, `isaacsim.app.selector`.
+
+## Version-independent choices
+
+`pxr.*`, `omni.usd`, `omni.timeline`, `omni.kit.app`, `omni.kit.commands`, `omni.kit.viewport.utility`, and `omni.replicator.core` behave the same on 5.1 and 6.0. Prefer them over `isaacsim.core.*` when a script must run on both; simul's granular tools are written that way.
+
+Do not use `asyncio.wait_for` or `asyncio.timeout` inside a script: the 6.0 `isaacsim.code_editor.python_server` drives top-level `await` outside an asyncio Task and both raise `RuntimeError: Timeout should be used inside a task`. Bound waits with a counted `await omni.kit.app.get_app().next_update_async()` loop.
 
 ## Package Renames
 
-| Old import (pre-5.1) | New import (5.1.0+) |
+| Old import (pre-5.1) | New import (5.1.0+, deprecated again in 6.0 — see above) |
 |----------------------|----------------------|
 | `omni.isaac.core` | `isaacsim.core.api` |
 | `omni.isaac.core.utils` | `isaacsim.core.utils` |

@@ -9,7 +9,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 from functools import lru_cache
 
 import yaml
@@ -75,6 +75,14 @@ class IsaacInstanceConfig(BaseModel):
         default=True,
         description="Allow fallback to the VS Code socket for this instance",
     )
+    socket_protocol: Optional[Literal["auto", "python_server", "vscode"]] = Field(
+        default=None,
+        description="Override the stock Python socket flavour for this instance",
+    )
+    socket_auth_token: Optional[str] = Field(
+        default=None,
+        description="Override the python_server auth token for this instance",
+    )
 
 
 class IsaacSimConfig(BaseModel):
@@ -98,14 +106,15 @@ class IsaacSimConfig(BaseModel):
     width: int = Field(default=1920, description="Viewport width", ge=640)
     height: int = Field(default=1080, description="Viewport height", ge=480)
 
-    # TCP socket connection to the isaacsim.code_editor.vscode extension
+    # TCP socket connection to the stock Isaac Sim Python socket server:
+    # isaacsim.code_editor.python_server on 6.0+, isaacsim.code_editor.vscode on 5.x
     socket_host: str = Field(
         default="127.0.0.1",
-        description="Host for the Isaac Sim VS Code extension TCP socket",
+        description="Host for the Isaac Sim Python socket server",
     )
     socket_port: int = Field(
         default=8226,
-        description="Port for the Isaac Sim VS Code extension TCP socket",
+        description="Port for the Isaac Sim Python socket server",
         ge=1024,
         le=65535,
     )
@@ -113,6 +122,20 @@ class IsaacSimConfig(BaseModel):
         default=30.0,
         description="Timeout in seconds for Isaac Sim TCP socket operations",
         gt=0.0,
+    )
+    socket_protocol: Literal["auto", "python_server", "vscode"] = Field(
+        default="auto",
+        description=(
+            "Stock socket flavour: 'python_server' (Isaac Sim 6.0+, executes after "
+            "TCP half-close), 'vscode' (Isaac Sim 5.x), or 'auto' to probe once"
+        ),
+    )
+    socket_auth_token: Optional[str] = Field(
+        default=None,
+        description=(
+            "Auth token for an Isaac Sim 6.0+ python_server started with "
+            "require_auth=true; sent as the '# isaacsim-python-server-token:' header"
+        ),
     )
     bridge_enabled: bool = Field(
         default=True,
@@ -560,6 +583,8 @@ def _normalise_isaac_instances(value: Any) -> Optional[List[Dict[str, Any]]]:
                         item.get("bridge_fallback_to_vscode"),
                         bridge.get("fallback_to_vscode"),
                     ),
+                    "socket_protocol": item.get("socket_protocol"),
+                    "socket_auth_token": item.get("socket_auth_token"),
                 }
             )
         )
@@ -630,6 +655,8 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     "socket_host": isaac.get("socket_host"),
                     "socket_port": isaac.get("socket_port"),
                     "socket_timeout": isaac.get("socket_timeout"),
+                    "socket_protocol": isaac.get("socket_protocol"),
+                    "socket_auth_token": isaac.get("socket_auth_token"),
                     "bridge_enabled": _coalesce(
                         isaac.get("bridge_enabled"), isaac_bridge.get("enabled")
                     ),

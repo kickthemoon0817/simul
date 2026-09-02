@@ -202,6 +202,8 @@ class SimulMCPServer(LoggerMixin):
                 bridge_port=inst.bridge_port,
                 bridge_timeout=inst.bridge_timeout,
                 bridge_fallback_to_vscode=inst.bridge_fallback_to_vscode,
+                socket_protocol=inst.socket_protocol,
+                socket_auth_token=inst.socket_auth_token,
             )
         self.client = default_client
         self._isaac_tools = IsaacTools(
@@ -666,7 +668,7 @@ class SimulMCPServer(LoggerMixin):
             "simul://isaac-sim/skills",
             name="Isaac Sim Scripting Skills",
             description=(
-                "Isaac Sim 5.1.0 scripting reference: API patterns, "
+                "Isaac Sim 5.1 / 6.0 scripting reference: API patterns, "
                 "namespace migration notes, and quick-reference table. "
                 "Only consult this when no granular tool exists for your task."
             ),
@@ -777,6 +779,8 @@ class SimulMCPServer(LoggerMixin):
         bridge_timeout: Optional[float] = None,
         bridge_fallback_to_vscode: Optional[bool] = None,
         bridge_socket_path: Optional[str] = None,
+        socket_protocol: Optional[str] = None,
+        socket_auth_token: Optional[str] = None,
     ) -> IsaacSocketClient:
         """Create one bridge-aware Isaac client from default or per-instance config."""
         resolved_bridge_port = (
@@ -804,6 +808,12 @@ class SimulMCPServer(LoggerMixin):
             prefer_bridge=bridge_enabled,
             fallback_to_vscode=resolved_fallback,
             timeout_seconds=socket_timeout,
+            socket_protocol=socket_protocol or self.settings.isaac_sim.socket_protocol,
+            auth_token=(
+                socket_auth_token
+                if socket_auth_token is not None
+                else self.settings.isaac_sim.socket_auth_token
+            ),
         )
 
     async def _discover_from_files(self) -> Dict[str, IsaacSocketClient]:

@@ -32,7 +32,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "always import modules at the top of every script. "
             "Call ping_isaac first to verify connectivity before sending scripts. "
             "Read the 'simul://isaac-sim/skills' resource for scripting patterns, "
-            "API quick reference, and Isaac Sim 5.1.0 namespace migration notes."
+            "API quick reference, and Isaac Sim 5.1 / 6.0 namespace migration notes."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=True, destructive=True

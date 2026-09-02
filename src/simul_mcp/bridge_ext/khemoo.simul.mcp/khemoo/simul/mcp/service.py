@@ -481,6 +481,11 @@ class BridgeCommandService:
                 "python_version": sys.version.split()[0],
                 "update_number": int(app.get_update_number()),
             }
+            # Kit build string above is what get_build_version returns; the
+            # Isaac Sim release (5.1.0, 6.0.1, ...) is what callers need to
+            # pick API namespaces.
+            if hasattr(app, "get_app_version"):
+                info["app"]["isaac_version"] = str(app.get_app_version())
         except Exception as exc:
             info["app_error"] = str(exc)
 
@@ -503,9 +508,16 @@ class BridgeCommandService:
             import omni.physx
 
             physx = omni.physx.get_physx_interface()
-            stats = physx.get_physics_stats()
-            info["physics"] = stats if isinstance(stats, dict) else {}
-            info["physics"]["cuda_available"] = physx.is_cuda_lib_present()
+            # Isaac Sim 6.0 (PhysX in Kit 110) dropped get_physics_stats and
+            # is_cuda_lib_present from the interface; report what exists.
+            physics: dict[str, Any] = {}
+            if hasattr(physx, "get_physics_stats"):
+                stats = physx.get_physics_stats()
+                if isinstance(stats, dict):
+                    physics.update(stats)
+            if hasattr(physx, "is_cuda_lib_present"):
+                physics["cuda_available"] = physx.is_cuda_lib_present()
+            info["physics"] = physics
         except Exception as exc:
             info["physics_error"] = str(exc)
 
