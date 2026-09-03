@@ -314,14 +314,35 @@ class IsaacSocketClient:
         """
         if self._detected_socket_protocol is None:
             self._detected_socket_protocol = await self._detect_socket_protocol()
-        half_close = self._detected_socket_protocol == "python_server"
         payload = code
         if self._auth_token:
             payload = f"{PYTHON_SERVER_TOKEN_HEADER} {self._auth_token}\n{code}"
-        raw_response = await self._socket_round_trip(
-            payload.encode("utf-8"), half_close=half_close
-        )
-        return self._parse_response(raw_response)
+        try:
+            raw_response = await self._socket_round_trip(
+                payload.encode("utf-8"),
+                half_close=self._detected_socket_protocol == "python_server",
+            )
+        except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
+            self._forget_detected_protocol()
+            raise
+        result = self._parse_response(raw_response)
+        if result.error_name == "EmptyResponse":
+            # A 5.x server that received EOF closes without replying. That is
+            # what a stale "python_server" flavour looks like, so re-probe.
+            self._forget_detected_protocol()
+        return result
+
+    def _forget_detected_protocol(self) -> None:
+        """Drop a probed flavour so the next call detects it again.
+
+        Isaac Sim restarted on the other major version does not announce
+        itself: a wrong cached flavour surfaces as a timeout (6.0 buffers
+        forever without EOF) or an empty reply (5.x closes on EOF), never as a
+        connection error. Without this the first mismatch would repeat until
+        the process restarts.
+        """
+        if self._socket_protocol == "auto":
+            self._detected_socket_protocol = None
 
     async def _detect_socket_protocol(self) -> str:
         """Fingerprint the stock socket server with one side-effect-free request.
@@ -377,8 +398,6 @@ class IsaacSocketClient:
                 f"after {self._timeout_seconds}s."
             )
         except (ConnectionRefusedError, OSError) as exc:
-            if self._socket_protocol == "auto":
-                self._detected_socket_protocol = None
             raise ConnectionRefusedError(
                 f"Cannot connect to Isaac Sim at {self.vscode_address}. "
                 "Ensure Isaac Sim is running with its Python socket server enabled "

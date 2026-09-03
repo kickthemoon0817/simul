@@ -24,8 +24,10 @@ isaac_sim:
   socket_host: "127.0.0.1"
   socket_port: 8226
   socket_timeout: 30.0
-  # auto probes the server once; python_server / vscode pin the flavour
-  socket_protocol: "auto"
+  # Stock socket flavour: auto probes the server once; python_server / vscode
+  # pin it. Left commented so ISAAC_SIM__SOCKET_PROTOCOL works — a key present
+  # here is passed to Settings() explicitly and wins over the environment.
+  # socket_protocol: "auto"
   # Only for a 6.0 python_server started with require_auth=true
   # socket_auth_token: ""
 

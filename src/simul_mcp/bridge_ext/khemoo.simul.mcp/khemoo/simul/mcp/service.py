@@ -508,15 +508,26 @@ class BridgeCommandService:
             import omni.physx
 
             physx = omni.physx.get_physx_interface()
-            # Isaac Sim 6.0 (PhysX in Kit 110) dropped get_physics_stats and
-            # is_cuda_lib_present from the interface; report what exists.
+            # get_physics_stats and is_cuda_lib_present live on PhysXUnitTests,
+            # not on the PhysX object acquire_physx_interface returns, in both
+            # Kit 107 (Isaac Sim 5.1) and Kit 110 (6.0). Probe rather than call
+            # blind, and say so when neither is reachable — an empty dict alone
+            # reads like an empty physics scene.
             physics: dict[str, Any] = {}
+            available = False
             if hasattr(physx, "get_physics_stats"):
                 stats = physx.get_physics_stats()
                 if isinstance(stats, dict):
                     physics.update(stats)
+                available = True
             if hasattr(physx, "is_cuda_lib_present"):
                 physics["cuda_available"] = physx.is_cuda_lib_present()
+                available = True
+            if not available:
+                physics["stats_unavailable"] = (
+                    "omni.physx interface exposes no get_physics_stats or "
+                    "is_cuda_lib_present on this build"
+                )
             info["physics"] = physics
         except Exception as exc:
             info["physics_error"] = str(exc)

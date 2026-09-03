@@ -789,7 +789,8 @@ def test_launch_auth_token_requires_isaac_six(tmp_path: Path) -> None:
     assert "InvalidArgument" in result.stdout
 
 
-def test_launch_auth_token_configures_python_server(tmp_path: Path) -> None:
+def test_launch_auth_token_configures_python_server_without_echoing_it(tmp_path: Path) -> None:
+    """The token must reach Kit but never the CLI's own output."""
     root = _write_isaac_root(tmp_path, "6.0.0", with_bridge=True)
 
     result = runner.invoke(
@@ -799,7 +800,18 @@ def test_launch_auth_token_configures_python_server(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.stdout
     command = json.loads(result.stdout)["command"]
     assert "--/exts/isaacsim.code_editor.python_server/require_auth=true" in command
-    assert "--/exts/isaacsim.code_editor.python_server/auth_token=t0k" in command
+    assert "--/exts/isaacsim.code_editor.python_server/auth_token=***" in command
+    assert "t0k" not in result.stdout
+
+
+def test_launch_rejects_year_scheme_install(tmp_path: Path) -> None:
+    """Isaac Sim 2023.1.1 has neither transport extension simul knows about."""
+    root = _write_isaac_root(tmp_path, "2023.1.1", with_bridge=False)
+
+    result = runner.invoke(app, ["--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run"])
+
+    assert result.exit_code != 0
+    assert "UnsupportedInstall" in result.stdout
 
 
 def test_launch_rejects_root_without_version_file(tmp_path: Path) -> None:

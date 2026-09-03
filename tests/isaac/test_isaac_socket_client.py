@@ -192,6 +192,64 @@ def test_invalid_socket_protocol_is_rejected() -> None:
         IsaacSocketClient(socket_protocol="telnet")  # type: ignore[arg-type]
 
 
+def test_timeout_resets_detected_protocol() -> None:
+    """Isaac restarted on the other major version times out, it does not refuse.
+
+    6.0 buffers forever when no EOF arrives, so a stale "vscode" flavour hangs
+    until the read deadline. Caching that would break every later call too.
+    """
+
+    async def scenario() -> IsaacSocketClient:
+        client = IsaacSocketClient(host="127.0.0.1", port=1, timeout_seconds=5.0)
+        client._detected_socket_protocol = "vscode"
+        client._socket_round_trip = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=TimeoutError("read timed out")
+        )
+        try:
+            await client.execute_vscode_only("print('pong')")
+        except TimeoutError:
+            pass
+        return client
+
+    client = asyncio.run(scenario())
+    assert client.socket_protocol == "auto"
+
+
+def test_empty_reply_resets_detected_protocol() -> None:
+    """A 5.x server that receives EOF closes without replying; re-probe on that."""
+
+    async def scenario() -> tuple[IsaacSocketClient, ScriptResult]:
+        client = IsaacSocketClient(host="127.0.0.1", port=1, timeout_seconds=5.0)
+        client._detected_socket_protocol = "python_server"
+        client._socket_round_trip = AsyncMock(return_value="")  # type: ignore[attr-defined]
+        result = await client.execute_vscode_only("print('pong')")
+        return client, result
+
+    client, result = asyncio.run(scenario())
+    assert result.error_name == "EmptyResponse"
+    assert client.socket_protocol == "auto"
+
+
+def test_pinned_protocol_survives_a_failure() -> None:
+    """An explicit protocol is the operator's choice; a failure must not undo it."""
+
+    async def scenario() -> IsaacSocketClient:
+        client = IsaacSocketClient(
+            host="127.0.0.1", port=1, timeout_seconds=5.0, socket_protocol="python_server"
+        )
+        client._socket_round_trip = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=TimeoutError("read timed out")
+        )
+        try:
+            await client.execute_vscode_only("print('pong')")
+        except TimeoutError:
+            pass
+        return client
+
+    client = asyncio.run(scenario())
+    assert client.socket_protocol == "python_server"
+
+
 def test_connection_refused_resets_detected_protocol() -> None:
     """An Isaac Sim restarted on another version must be re-probed."""
 

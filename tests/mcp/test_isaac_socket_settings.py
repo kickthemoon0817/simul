@@ -30,3 +30,26 @@ def test_env_overrides_protocol_and_token(monkeypatch: pytest.MonkeyPatch) -> No
 def test_unknown_protocol_is_rejected() -> None:
     with pytest.raises(ValueError):
         IsaacSimConfig(socket_protocol="telnet")  # type: ignore[arg-type]
+
+
+def test_socket_protocol_env_override_survives_the_shipped_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The documented escape hatch must actually work against config/isaac/default.yaml.
+
+    pydantic-settings lets an explicitly passed value beat the environment, and
+    the loader passes every key the YAML defines. A key added to the shipped
+    config therefore silently disables its own env var.
+    """
+    import simul_mcp.config as config_module
+
+    config_path = (
+        Path(__file__).resolve().parents[2] / "config" / "isaac" / "default.yaml"
+    )
+    monkeypatch.setenv("CONFIG_FILE", str(config_path))
+    monkeypatch.setenv("ISAAC_SIM__SOCKET_PROTOCOL", "vscode")
+    config_module._get_cached_settings.cache_clear()
+    try:
+        assert config_module.get_settings().isaac_sim.socket_protocol == "vscode"
+    finally:
+        config_module._get_cached_settings.cache_clear()

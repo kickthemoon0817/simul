@@ -28,6 +28,12 @@ PYTHON_SOCKET_PORT_SETTINGS: tuple[str, ...] = (
 
 _VERSION_PATTERN = re.compile(r"^\s*(\d+)\.(\d+)\.(\d+)")
 
+#: Majors simul knows how to launch. Isaac Sim 2022.x / 2023.x parse as
+#: major 2023, so an open-ended ">= 6" would hand those installs an extension
+#: name that has not existed yet and time out waiting for a port.
+MIN_SUPPORTED_MAJOR: int = 5
+MAX_SUPPORTED_MAJOR: int = 6
+
 
 @dataclass(frozen=True)
 class IsaacVersion:
@@ -41,9 +47,23 @@ class IsaacVersion:
         return f"{self.major}.{self.minor}.{self.patch}"
 
     @property
+    def is_supported(self) -> bool:
+        """Return whether simul knows which transport extensions this version ships."""
+        return MIN_SUPPORTED_MAJOR <= self.major <= MAX_SUPPORTED_MAJOR
+
+    @property
     def python_transport_extension(self) -> str:
-        """Extension that serves raw Python on the socket port for this version."""
-        return PYTHON_SERVER_EXTENSION if self.major >= 6 else VSCODE_EXTENSION
+        """Extension that serves raw Python on the socket port for this version.
+
+        Raises:
+            ValueError: If the version is outside the supported major range.
+        """
+        if not self.is_supported:
+            raise ValueError(
+                f"Isaac Sim {self} is not supported; expected major "
+                f"{MIN_SUPPORTED_MAJOR}-{MAX_SUPPORTED_MAJOR}"
+            )
+        return PYTHON_SERVER_EXTENSION if self.major == 6 else VSCODE_EXTENSION
 
     @classmethod
     def parse(cls, text: str) -> "IsaacVersion":

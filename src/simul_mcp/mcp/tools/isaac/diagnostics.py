@@ -55,6 +55,12 @@ class DiagnosticsMixin:
                     "python_version": sys.version.split()[0],
                     "update_number": int(app.get_update_number()),
                 }
+                # The Kit build string above is not the Isaac Sim release, and
+                # the release is what callers key API namespaces off. The
+                # bridge reports the same field; agents must not have to know
+                # which transport answered.
+                if hasattr(app, "get_app_version"):
+                    info["app"]["isaac_version"] = str(app.get_app_version())
             except Exception as e:
                 info["app_error"] = str(e)
 
@@ -77,9 +83,25 @@ class DiagnosticsMixin:
             try:
                 import omni.physx
                 physx = omni.physx.get_physx_interface()
-                stats = physx.get_physics_stats()
-                info["physics"] = stats if isinstance(stats, dict) else {}
-                info["physics"]["cuda_available"] = physx.is_cuda_lib_present()
+                # These live on PhysXUnitTests, not on the PhysX object this
+                # returns, in both Kit 107 (5.1) and Kit 110 (6.0). Probe
+                # rather than call blind, and say when neither is reachable.
+                physics = {}
+                available = False
+                if hasattr(physx, "get_physics_stats"):
+                    stats = physx.get_physics_stats()
+                    if isinstance(stats, dict):
+                        physics.update(stats)
+                    available = True
+                if hasattr(physx, "is_cuda_lib_present"):
+                    physics["cuda_available"] = physx.is_cuda_lib_present()
+                    available = True
+                if not available:
+                    physics["stats_unavailable"] = (
+                        "omni.physx interface exposes no get_physics_stats or "
+                        "is_cuda_lib_present on this build"
+                    )
+                info["physics"] = physics
             except Exception as e:
                 info["physics_error"] = str(e)
 

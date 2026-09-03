@@ -52,3 +52,18 @@ def test_read_isaac_version_missing_or_unparseable(tmp_path: Path) -> None:
     assert read_isaac_version(tmp_path) is None
     (tmp_path / "VERSION").write_text("not a version")
     assert read_isaac_version(tmp_path) is None
+
+
+def test_year_scheme_versions_are_not_treated_as_six_or_newer() -> None:
+    """Isaac Sim 2023.1.1 parses as major 2023; it must not select python_server."""
+    legacy = IsaacVersion.parse("2023.1.1")
+    assert legacy.is_supported is False
+    with pytest.raises(ValueError):
+        legacy.python_transport_extension
+
+
+def test_supported_range_covers_five_and_six_only() -> None:
+    assert IsaacVersion(5, 1, 0).is_supported is True
+    assert IsaacVersion(6, 0, 1).is_supported is True
+    assert IsaacVersion(4, 5, 0).is_supported is False
+    assert IsaacVersion(7, 0, 0).is_supported is False

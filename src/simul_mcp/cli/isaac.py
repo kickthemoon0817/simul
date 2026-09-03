@@ -292,7 +292,9 @@ def launch(
         "--auth-token",
         help=(
             "Require this token on the python_server socket (Isaac Sim 6.0+ only). "
-            "Set the same value as ISAAC_SIM__SOCKET_AUTH_TOKEN for the MCP server."
+            "Set the same value as ISAAC_SIM__SOCKET_AUTH_TOKEN for the MCP server. "
+            "Kit takes settings on argv, so the token is visible to other local "
+            "users via the process list for the editor's lifetime."
         ),
     ),
     wait_timeout: float = typer.Option(
@@ -354,6 +356,14 @@ def launch(
             2,
         )
         return
+    if not version.is_supported:
+        _fail(
+            f"Isaac Sim {version} is not supported; simul knows the transport "
+            "extensions of the 5.x and 6.x series only.",
+            "UnsupportedInstall",
+            2,
+        )
+        return
     if auth_token and version.major < 6:
         _fail(
             f"--auth-token needs Isaac Sim 6.0+ ({PYTHON_SERVER_EXTENSION}); found {version}.",
@@ -384,6 +394,13 @@ def launch(
         command.append("--no-window")
     command += list(kit_args)
 
+    # The token reaches Kit on argv because that is the only way to set a Carb
+    # value at launch, but it must not also land in stdout, agent transcripts,
+    # or CI logs.
+    redacted_command = [
+        f"--/exts/{transport_ext}/auth_token=***" if auth_token and item.endswith(f"auth_token={auth_token}") else item
+        for item in command
+    ]
     result: Dict[str, Any] = {
         "isaac_root": str(root),
         "version": str(version),
@@ -391,7 +408,7 @@ def launch(
         "bridge_extension_present": bridge_present,
         "socket_address": f"{settings.isaac_sim.socket_host}:{resolved_socket_port}",
         "bridge_address": f"{settings.isaac_sim.bridge_host}:{resolved_bridge_port}",
-        "command": command,
+        "command": redacted_command,
     }
     if not bridge_present:
         result["hint"] = (
@@ -404,7 +421,7 @@ def launch(
         if is_json_mode():
             emit(result)
             return
-        console.print("[cyan]Would run:[/cyan] " + " ".join(command))
+        console.print("[cyan]Would run:[/cyan] " + " ".join(redacted_command))
         return
 
     resolved_log = log_file or (
