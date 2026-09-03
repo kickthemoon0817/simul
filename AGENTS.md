@@ -48,7 +48,7 @@ pytest tests/ -v -m unreal_live                               # Unreal live (req
 
 ## Runtime Notes
 
-- Isaac Sim tools require a running Isaac Sim instance (TCP socket on port 8226).
+- Isaac Sim tools require a running Isaac Sim instance (5.1.0, 6.0.0, or 6.0.1) with the bridge on port 8229 or the stock Python socket on port 8226. `simul-mcp isaac launch` starts one with both enabled.
 - Headless USD tools work without Omniverse.
 - Some tests are marked `@pytest.mark.isaac` and need Isaac Sim runtime.
-- `skills.md` documents Isaac Sim 5.1.0 scripting patterns for `execute_isaac_script`.
+- `skills.md` documents Isaac Sim 5.1 / 6.0 scripting patterns for `execute_isaac_script`.

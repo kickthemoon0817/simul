@@ -16,8 +16,14 @@
 # network. For remote access use an SSH tunnel or an authenticating proxy.
 #
 # The bridge handles both typed JSON and raw Python (VS Code compat)
-# protocols on a single port. The VS Code extension is kept as a
+# protocols on a single port. The stock Python socket extension is kept as a
 # fallback but is not required for normal operation.
+#
+# Isaac Sim 6.0 moved that socket into isaacsim.code_editor.python_server.
+# For a 6.x image set both variables, e.g.
+#   ISAAC_SIM_IMAGE=nvcr.io/nvidia/isaac-sim:6.0.1 \
+#   ISAAC_PYTHON_SERVER_EXT=isaacsim.code_editor.python_server \
+#   docker compose -f compose.isaac-sim.yml up
 
 services:
   isaac-sim:
@@ -44,7 +50,7 @@ services:
       - --enable
       - khemoo.simul.mcp
       - --enable
-      - isaacsim.code_editor.vscode
+      - ${ISAAC_PYTHON_SERVER_EXT:-isaacsim.code_editor.vscode}
       - --/exts/khemoo.simul.mcp/host=${ISAAC_BIND_HOST:-0.0.0.0}
       - --/exts/khemoo.simul.mcp/port=${ISAAC_BRIDGE_PORT:-8229}
       - --/exts/khemoo.simul.mcp/allow_unsafe_execution=true
@@ -64,8 +70,8 @@ services:
       # directory the volume points at. The TCP publishes stay for the VS Code
       # fallback; remove them only if that trade is understood.
       - --/exts/khemoo.simul.mcp/socket_path=/tmp/simul-mcp/bridge.sock
-      - --/exts/isaacsim.code_editor.vscode/host=${ISAAC_BIND_HOST:-0.0.0.0}
-      - --/exts/isaacsim.code_editor.vscode/port=${ISAAC_VSCODE_PORT:-8226}
+      - --/exts/${ISAAC_PYTHON_SERVER_EXT:-isaacsim.code_editor.vscode}/host=${ISAAC_BIND_HOST:-0.0.0.0}
+      - --/exts/${ISAAC_PYTHON_SERVER_EXT:-isaacsim.code_editor.vscode}/port=${ISAAC_VSCODE_PORT:-8226}
     environment:
       ACCEPT_EULA: "Y"
       PRIVACY_CONSENT: "Y"

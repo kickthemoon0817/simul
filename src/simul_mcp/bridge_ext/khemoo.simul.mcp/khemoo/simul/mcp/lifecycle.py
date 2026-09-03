@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 from .protocol import BridgeRequest, BridgeResponse
 
 
+#: Raw-source auth header of Isaac Sim 6.0's isaacsim.code_editor.python_server.
+PYTHON_SERVER_TOKEN_HEADER = "# isaacsim-python-server-token:"
+
+
 class _RequestReadTimeout(Exception):
     """The client stalled mid-request; not the in-sim handler's fault."""
 
@@ -352,6 +356,11 @@ class BridgeServerLifecycle:
                 chunks.append(chunk)
 
             code = b"".join(chunks).decode("utf-8", errors="replace")
+            # A client configured for the 6.0 python_server prefixes a token
+            # header; the bridge has no token check, so drop the line rather
+            # than hand it to the executor as a stray comment.
+            if code.startswith(PYTHON_SERVER_TOKEN_HEADER):
+                _, _, code = code.partition("\n")
 
             if self._vscode_handler is not None:
                 result = await self._vscode_handler(code)

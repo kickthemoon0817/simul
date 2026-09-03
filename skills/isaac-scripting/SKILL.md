@@ -60,9 +60,9 @@ print(json.dumps(result))
 
 Always wrap in try/except. Always end with `print(json.dumps(result))`. This ensures the tool always returns parseable JSON even when the script raises an exception.
 
-## Namespace: Isaac Sim 5.1.0
+## Namespace: Isaac Sim 5.1 and 6.0
 
-Isaac Sim 5.1.0 migrated the core package namespace. Use the new names — the old `omni.isaac.*` imports will fail:
+Isaac Sim 5.1.0 migrated the core package namespace. Use the new names — the old `omni.isaac.*` imports will fail (5.1 keeps shims, 6.0 removes them):
 
 | Old (pre-5.1) | New (5.1.0+) |
 |---------------|--------------|
@@ -77,6 +77,8 @@ Isaac Sim 5.1.0 migrated the core package namespace. Use the new names — the o
 | `omni.isaac.core.utils.viewports` | `isaacsim.core.utils.viewports` |
 
 Kit-level APIs are **unchanged**: `omni.usd`, `omni.timeline`, `pxr.*` (Usd, UsdGeom, UsdPhysics, UsdShade, UsdLux, Gf, Sdf, etc.) all import normally.
+
+On **Isaac Sim 6.0** (`get_isaac_runtime_info` → `app.isaac_version` starts with `6.`), `isaacsim.core.api`, `isaacsim.core.prims`, and `isaacsim.core.utils` are deprecated; prefer `isaacsim.core.experimental.*` and `isaacsim.core.simulation_manager`, or plain `pxr` + `omni.usd`, which work identically on both versions. Never use `asyncio.wait_for` in a script — the 6.0 socket server runs top-level `await` outside a Task and it raises. See `references/namespace-migration.md` for the full table.
 
 ## Common Script Patterns
 

@@ -2,8 +2,21 @@
 Isaac Sim bridge-aware client for remote command execution.
 
 Prefers the repo-owned `khemoo.simul.mcp` bridge when configured, and can
-fall back to the stock `isaacsim.code_editor.vscode` socket for compatibility.
+fall back to the stock Isaac Sim Python socket on port 8226 for compatibility.
 Both transports execute inside a running Isaac Sim application.
+
+The stock socket has two flavours that share one reply format:
+
+- Isaac Sim 5.x: `isaacsim.code_editor.vscode` executes on the first packet
+  and closes the connection if the client half-closes while an async script
+  is still awaiting frames.
+- Isaac Sim 6.0+: `isaacsim.code_editor.python_server` buffers until the
+  client half-closes (TCP EOF) and only then executes; it also accepts a
+  JSON envelope and an optional auth token.
+
+The client probes once per process with a side-effect-free introspection
+envelope to learn which flavour it is talking to, then sends EOF only where
+the server needs it.
 
 Bridge protocol:
     1. Open TCP connection to bridge host:port
@@ -11,11 +24,12 @@ Bridge protocol:
     3. Receive a length-prefixed JSON response envelope
     4. Connection closes after each request
 
-VS Code compatibility protocol:
+Python socket protocol (5.x VS Code ext and 6.0+ python_server ext):
     1. Open TCP connection to host:port
-    2. Send Python code as UTF-8 bytes
-    3. Receive JSON response: {"status":"ok"|"error","output":"..."}
-    4. Connection closes after each execution
+    2. Send Python code as UTF-8 bytes (optionally prefixed by a token header)
+    3. python_server only: half-close the socket so the server executes
+    4. Receive JSON response: {"status":"ok"|"error","output":"..."}
+    5. Connection closes after each execution
 """
 
 import asyncio
@@ -25,9 +39,21 @@ import struct
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
+
+from .isaac_install import PYTHON_SERVER_EXTENSION, VSCODE_EXTENSION
 
 logger = logging.getLogger(__name__)
+
+SocketProtocol = Literal["auto", "python_server", "vscode"]
+SOCKET_PROTOCOLS: tuple[str, ...] = ("auto", "python_server", "vscode")
+
+#: Raw-source header the 6.0 python_server extension reads a token from.
+PYTHON_SERVER_TOKEN_HEADER: str = "# isaacsim-python-server-token:"
+#: Introspection envelope used to fingerprint the server. On the 5.x VS Code
+#: extension it is evaluated as a harmless dict literal; on python_server it
+#: is answered without executing anything.
+_FLAVOR_PROBE: Dict[str, Any] = {"introspect": "status"}
 
 MAX_RESPONSE_BYTES: int = 10 * 1024 * 1024  # 10 MB cap on response size
 MAX_REQUEST_BYTES: int = 1024 * 1024  # 1 MB cap on outgoing bridge payloads
@@ -61,7 +87,9 @@ class IsaacSocketClient:
 
     The client can use two transports:
     - the repo-owned typed bridge extension
-    - the stock ``isaacsim.code_editor.vscode`` extension on ``127.0.0.1:8226``
+    - the stock Isaac Sim Python socket on ``127.0.0.1:8226``
+      (``isaacsim.code_editor.python_server`` on 6.0+,
+      ``isaacsim.code_editor.vscode`` on 5.x)
 
     Thread-safe: an ``asyncio.Lock`` serialises concurrent requests so transport
     interactions never interleave.
@@ -81,6 +109,8 @@ class IsaacSocketClient:
         read_buffer_size: int = 1024 * 1024,
         max_request_bytes: int = MAX_REQUEST_BYTES,
         max_response_bytes: int = MAX_RESPONSE_BYTES,
+        socket_protocol: SocketProtocol = "auto",
+        auth_token: Optional[str] = None,
     ) -> None:
         """
         Initialize the socket client.
@@ -100,6 +130,11 @@ class IsaacSocketClient:
             read_buffer_size: Max bytes to read per recv call.
             max_request_bytes: Upper bound on bridge request size.
             max_response_bytes: Upper bound on total response size.
+            socket_protocol: Which stock socket flavour to speak. "auto"
+                probes the server once; "python_server" (Isaac Sim 6.0+)
+                half-closes after sending; "vscode" (Isaac Sim 5.x) does not.
+            auth_token: Token for a python_server configured with
+                ``require_auth``. Sent as a raw-source header; ignored by 5.x.
         """
         self._host = host
         self._port = port
@@ -120,6 +155,17 @@ class IsaacSocketClient:
         self._read_buffer_size = read_buffer_size
         self._max_request_bytes = max_request_bytes
         self._max_response_bytes = max_response_bytes
+        if socket_protocol not in SOCKET_PROTOCOLS:
+            raise ValueError(
+                f"socket_protocol must be one of {SOCKET_PROTOCOLS}, got {socket_protocol!r}"
+            )
+        self._socket_protocol: SocketProtocol = socket_protocol
+        self._auth_token = auth_token or None
+        # Resolved flavour once "auto" has probed; reset when the server goes away
+        # so an Isaac Sim restarted on a different version is re-detected.
+        self._detected_socket_protocol: Optional[str] = (
+            None if socket_protocol == "auto" else socket_protocol
+        )
         self.__lock: Optional[asyncio.Lock] = None
         # Tracks "{bridge}->{vscode}" pairs that have already produced a
         # WARNING-level fallback log so subsequent failures stay at DEBUG.
@@ -185,6 +231,11 @@ class IsaacSocketClient:
         """Return True when VS Code fallback is enabled."""
         return self._fallback_to_vscode
 
+    @property
+    def socket_protocol(self) -> str:
+        """Return the stock socket flavour in use: python_server, vscode, or auto."""
+        return self._detected_socket_protocol or self._socket_protocol
+
     async def execute(self, code: str) -> ScriptResult:
         """
         Execute Python code inside the running Isaac Sim process.
@@ -249,7 +300,7 @@ class IsaacSocketClient:
 
     async def _execute_vscode_unlocked(self, code: str) -> ScriptResult:
         """
-        Execute Python code through the stock VS Code extension socket.
+        Execute Python code through the stock Isaac Sim Python socket.
 
         Args:
             code: Python source code to execute.
@@ -260,6 +311,81 @@ class IsaacSocketClient:
         Raises:
             ConnectionRefusedError: Cannot reach Isaac Sim.
             TimeoutError: Connection or read timed out.
+        """
+        if self._detected_socket_protocol is None:
+            self._detected_socket_protocol = await self._detect_socket_protocol()
+        payload = code
+        if self._auth_token:
+            payload = f"{PYTHON_SERVER_TOKEN_HEADER} {self._auth_token}\n{code}"
+        try:
+            raw_response = await self._socket_round_trip(
+                payload.encode("utf-8"),
+                half_close=self._detected_socket_protocol == "python_server",
+            )
+        except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
+            self._forget_detected_protocol()
+            raise
+        result = self._parse_response(raw_response)
+        if result.error_name == "EmptyResponse":
+            # A 5.x server that received EOF closes without replying. That is
+            # what a stale "python_server" flavour looks like, so re-probe.
+            self._forget_detected_protocol()
+        return result
+
+    def _forget_detected_protocol(self) -> None:
+        """Drop a probed flavour so the next call detects it again.
+
+        Isaac Sim restarted on the other major version does not announce
+        itself: a wrong cached flavour surfaces as a timeout (6.0 buffers
+        forever without EOF) or an empty reply (5.x closes on EOF), never as a
+        connection error. Without this the first mismatch would repeat until
+        the process restarts.
+        """
+        if self._socket_protocol == "auto":
+            self._detected_socket_protocol = None
+
+    async def _detect_socket_protocol(self) -> str:
+        """Fingerprint the stock socket server with one side-effect-free request.
+
+        Returns:
+            "python_server" when the reply carries the introspection status
+            payload, otherwise "vscode".
+        """
+        probe: Dict[str, Any] = dict(_FLAVOR_PROBE)
+        if self._auth_token:
+            probe["auth_token"] = self._auth_token
+        raw = await self._socket_round_trip(
+            json.dumps(probe).encode("utf-8"), half_close=True
+        )
+        flavor = "vscode"
+        try:
+            reply = json.loads(raw)
+        except json.JSONDecodeError:
+            reply = None
+        if isinstance(reply, dict):
+            result = reply.get("result")
+            if isinstance(result, dict) and "uptime_seconds" in result:
+                flavor = "python_server"
+            elif reply.get("ename") == "AuthenticationError":
+                # Only python_server knows this error; the token is wrong or
+                # missing, which the real request will report verbatim.
+                flavor = "python_server"
+        logger.info(
+            "Isaac Sim socket at %s speaks the %s protocol", self.vscode_address, flavor
+        )
+        return flavor
+
+    async def _socket_round_trip(self, payload: bytes, *, half_close: bool) -> str:
+        """Send one request on the stock socket and read the reply until close.
+
+        Args:
+            payload: Bytes to send.
+            half_close: Send TCP EOF after the payload. Required by the 6.0
+                python_server, which buffers until EOF; fatal on the 5.x VS Code
+                extension for scripts that await across frames.
+
+        Returns:
+            The raw UTF-8 reply.
         """
         try:
             reader, writer = await asyncio.wait_for(
@@ -274,12 +400,15 @@ class IsaacSocketClient:
         except (ConnectionRefusedError, OSError) as exc:
             raise ConnectionRefusedError(
                 f"Cannot connect to Isaac Sim at {self.vscode_address}. "
-                f"Ensure Isaac Sim is running with isaacsim.code_editor.vscode enabled."
+                "Ensure Isaac Sim is running with its Python socket server enabled "
+                f"({PYTHON_SERVER_EXTENSION} on 6.0+, {VSCODE_EXTENSION} on 5.x)."
             ) from exc
 
         try:
-            writer.write(code.encode("utf-8"))
+            writer.write(payload)
             await writer.drain()
+            if half_close and writer.can_write_eof():
+                writer.write_eof()
 
             chunks: list[bytes] = []
             total_bytes: int = 0
@@ -304,8 +433,7 @@ class IsaacSocketClient:
                     )
                 chunks.append(chunk)
 
-            raw_response = b"".join(chunks).decode("utf-8")
-            return self._parse_response(raw_response)
+            return b"".join(chunks).decode("utf-8")
 
         finally:
             writer.close()

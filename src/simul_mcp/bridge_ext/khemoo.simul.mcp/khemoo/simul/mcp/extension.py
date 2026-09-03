@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import traceback
-from typing import Any
+from typing import Any, Callable
 
 from .executor import ScriptExecutor
 from .lifecycle import BridgeServerLifecycle
@@ -24,6 +24,32 @@ except Exception:  # pragma: no cover - exercised by import smoke tests
     omni = None
     OMNI_AVAILABLE = False
     OmniExtBase = object
+
+
+#: Carb settings that hold the stock Python socket port, newest flavour first:
+#: Isaac Sim 6.0 serves it from isaacsim.code_editor.python_server, 5.x from
+#: isaacsim.code_editor.vscode. Only the flavour present in this install is set.
+PYTHON_SOCKET_PORT_SETTINGS: tuple[str, ...] = (
+    "/exts/isaacsim.code_editor.python_server/port",
+    "/exts/isaacsim.code_editor.vscode/port",
+)
+DEFAULT_PYTHON_SOCKET_PORT = 8226
+
+
+def resolve_python_socket_port(get_setting: Callable[[str], Any]) -> int:
+    """Return the port of the stock Python socket server this Isaac Sim ships.
+
+    Args:
+        get_setting: Reader for Carb settings, typically ``carb.settings.get_settings().get``.
+
+    Returns:
+        The first configured port among the known flavours, else 8226.
+    """
+    for key in PYTHON_SOCKET_PORT_SETTINGS:
+        value = get_setting(key)
+        if value:
+            return int(value)
+    return DEFAULT_PYTHON_SOCKET_PORT
 
 
 class IsaacMCPServerExtension(OmniExtBase):
@@ -203,9 +229,7 @@ class IsaacMCPServerExtension(OmniExtBase):
         self._max_port_retries = int(
             settings.get("/exts/khemoo.simul.mcp/max_port_retries") or 10
         )
-        self._vscode_port = int(
-            settings.get("/exts/isaacsim.code_editor.vscode/port") or 8226
-        )
+        self._vscode_port = resolve_python_socket_port(settings.get)
         self._discovery_dir = str(
             settings.get("/exts/khemoo.simul.mcp/discovery_dir") or "/tmp/simul-mcp"
         )

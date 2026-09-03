@@ -25,6 +25,12 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from simul_mcp.adapters import IsaacSocketClient
+from simul_mcp.adapters.isaac_install import (
+    BRIDGE_EXTENSION,
+    PYTHON_SERVER_EXTENSION,
+    IsaacVersion,
+    read_isaac_version,
+)
 from simul_mcp.cli.output import emit, emit_error, is_json_mode
 from simul_mcp.config import get_settings
 from simul_mcp.mcp.tools.isaac_tools import IsaacTools
@@ -53,6 +59,8 @@ def _tools(
         prefer_bridge=settings.isaac_sim.bridge_enabled,
         fallback_to_vscode=settings.isaac_sim.bridge_fallback_to_vscode,
         timeout_seconds=timeout if timeout is not None else settings.isaac_sim.socket_timeout,
+        socket_protocol=settings.isaac_sim.socket_protocol,
+        auth_token=settings.isaac_sim.socket_auth_token,
     )
     return IsaacTools(client, settings)
 
@@ -193,8 +201,11 @@ def bridge_up(
     vscode_ok = asyncio.run(_probe_vscode())
     if not vscode_ok:
         msg = (
-            f"Neither bridge ({bridge_addr}) nor VS Code transport "
-            f"({vscode_addr}) reachable — is Isaac Sim running?"
+            f"Neither bridge ({bridge_addr}) nor Python socket transport "
+            f"({vscode_addr}) reachable — is Isaac Sim running? Isaac Sim 6.0+ "
+            "enables neither at startup; launch it with `simul-mcp isaac launch` "
+            f"or pass `--enable {PYTHON_SERVER_EXTENSION} --enable {BRIDGE_EXTENSION}` "
+            "to isaac-sim.sh."
         )
         if is_json_mode():
             emit_error(msg, "NotRunning")
@@ -252,6 +263,267 @@ def bridge_up(
         f"answering[/yellow] — extension may need a frame to bind"
     )
     raise typer.Exit(1)
+
+
+@app.command("launch")
+def launch(
+    isaac_root: Optional[Path] = typer.Option(
+        None,
+        "--isaac-root",
+        help="Isaac Sim install root (the directory holding isaac-sim.sh). Defaults to $ISAAC_SIM_PATH.",
+    ),
+    headless: bool = typer.Option(
+        True,
+        "--headless/--no-headless",
+        help="Start without a window (--no-window). Rendering and captures still work.",
+    ),
+    socket_port: Optional[int] = typer.Option(
+        None,
+        "--socket-port",
+        help="Port for the stock Python socket server. Defaults to isaac_sim.socket_port (8226).",
+    ),
+    bridge_port: Optional[int] = typer.Option(
+        None,
+        "--bridge-port",
+        help="Port for the khemoo.simul.mcp bridge. Defaults to isaac_sim.bridge_port (8229).",
+    ),
+    auth_token: Optional[str] = typer.Option(
+        None,
+        "--auth-token",
+        help=(
+            "Require this token on the python_server socket (Isaac Sim 6.0+ only). "
+            "Set the same value as ISAAC_SIM__SOCKET_AUTH_TOKEN for the MCP server. "
+            "Kit takes settings on argv, so the token is visible to other local "
+            "users via the process list for the editor's lifetime."
+        ),
+    ),
+    wait_timeout: float = typer.Option(
+        180.0, "--wait-timeout", help="Seconds to wait for a transport to answer."
+    ),
+    poll_interval: float = typer.Option(
+        2.0, "--poll-interval", help="Seconds between readiness probes."
+    ),
+    kit_args: List[str] = typer.Option(
+        [], "--kit-arg", help="Extra argument passed through to isaac-sim.sh (repeatable)."
+    ),
+    log_file: Optional[Path] = typer.Option(
+        None,
+        "--log-file",
+        help="Where to write the editor's stdout/stderr. Defaults to <discovery_dir>/launch-<timestamp>.log.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the resolved launch command and exit without starting anything."
+    ),
+) -> None:
+    """Start Isaac Sim with simul's transports enabled and wait until one answers.
+
+    Isaac Sim 5.x started the VS Code socket on its own; 6.0 ships the
+    socket in ``isaacsim.code_editor.python_server`` and leaves it, and the
+    bridge, disabled unless ``--enable`` names them at launch. This command
+    reads ``<isaac-root>/VERSION``, enables the right socket extension for
+    that version, enables the bridge when ``install-bridge`` has published it
+    into ``extsUser/``, spawns the editor detached, and polls both ports.
+    """
+    import os
+    import subprocess
+    import time
+
+    settings = get_settings()
+    root = isaac_root or (
+        Path(os.environ["ISAAC_SIM_PATH"]) if os.environ.get("ISAAC_SIM_PATH") else None
+    )
+    if root is None:
+        _fail(
+            "Isaac install root not set. Pass --isaac-root <path> or export ISAAC_SIM_PATH=<path>.",
+            "InvalidArgument",
+            2,
+        )
+        return
+    root = root.expanduser().resolve()
+    launcher = root / ("isaac-sim.bat" if sys.platform == "win32" else "isaac-sim.sh")
+    if not launcher.is_file():
+        _fail(
+            f"{launcher.name} not found under {root} — is this an Isaac Sim install root?",
+            "InvalidArgument",
+            2,
+        )
+        return
+    version: Optional[IsaacVersion] = read_isaac_version(root)
+    if version is None:
+        _fail(
+            f"Cannot read {root / 'VERSION'}; expected an Isaac Sim 5.x or 6.x install.",
+            "UnsupportedInstall",
+            2,
+        )
+        return
+    if not version.is_supported:
+        _fail(
+            f"Isaac Sim {version} is not supported; simul knows the transport "
+            "extensions of the 5.x and 6.x series only.",
+            "UnsupportedInstall",
+            2,
+        )
+        return
+    if auth_token and version.major < 6:
+        _fail(
+            f"--auth-token needs Isaac Sim 6.0+ ({PYTHON_SERVER_EXTENSION}); found {version}.",
+            "InvalidArgument",
+            2,
+        )
+        return
+
+    transport_ext = version.python_transport_extension
+    bridge_present = (root / "extsUser" / BRIDGE_EXTENSION / "config" / "extension.toml").is_file()
+    resolved_socket_port = socket_port if socket_port is not None else settings.isaac_sim.socket_port
+    resolved_bridge_port = bridge_port if bridge_port is not None else settings.isaac_sim.bridge_port
+
+    command: List[str] = [
+        str(launcher),
+        "--enable",
+        transport_ext,
+        f"--/exts/{transport_ext}/port={resolved_socket_port}",
+    ]
+    if auth_token:
+        command += [
+            f"--/exts/{transport_ext}/require_auth=true",
+            f"--/exts/{transport_ext}/auth_token={auth_token}",
+        ]
+    if bridge_present:
+        command += ["--enable", BRIDGE_EXTENSION, f"--/exts/{BRIDGE_EXTENSION}/port={resolved_bridge_port}"]
+    if headless:
+        command.append("--no-window")
+    command += list(kit_args)
+
+    # The token reaches Kit on argv because that is the only way to set a Carb
+    # value at launch, but it must not also land in stdout, agent transcripts,
+    # or CI logs.
+    redacted_command = [
+        f"--/exts/{transport_ext}/auth_token=***" if auth_token and item.endswith(f"auth_token={auth_token}") else item
+        for item in command
+    ]
+    result: Dict[str, Any] = {
+        "isaac_root": str(root),
+        "version": str(version),
+        "transport_extension": transport_ext,
+        "bridge_extension_present": bridge_present,
+        "socket_address": f"{settings.isaac_sim.socket_host}:{resolved_socket_port}",
+        "bridge_address": f"{settings.isaac_sim.bridge_host}:{resolved_bridge_port}",
+        "command": redacted_command,
+    }
+    if not bridge_present:
+        result["hint"] = (
+            f"{BRIDGE_EXTENSION} is not published under {root / 'extsUser'}; run "
+            f"`ISAAC_SIM_PATH={root} simul-mcp isaac install-bridge --symlink` for the typed bridge."
+        )
+    if dry_run:
+        result["success"] = True
+        result["dry_run"] = True
+        if is_json_mode():
+            emit(result)
+            return
+        console.print("[cyan]Would run:[/cyan] " + " ".join(redacted_command))
+        return
+
+    resolved_log = log_file or (
+        Path(settings.isaac_sim.discovery_dir) / f"launch-{time.strftime('%Y%m%d-%H%M%S')}.log"
+    )
+    resolved_log.parent.mkdir(parents=True, exist_ok=True)
+    with open(resolved_log, "ab") as log_handle:
+        process = subprocess.Popen(
+            command,
+            cwd=str(root),
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    result["pid"] = process.pid
+    result["log_file"] = str(resolved_log)
+    if not is_json_mode():
+        console.print(f"Started Isaac Sim {version} (pid {process.pid}), log: {resolved_log}")
+
+    client = IsaacSocketClient(
+        host=settings.isaac_sim.socket_host,
+        port=resolved_socket_port,
+        bridge_host=settings.isaac_sim.bridge_host,
+        bridge_port=resolved_bridge_port,
+        prefer_bridge=True,
+        fallback_to_vscode=True,
+        timeout_seconds=5.0,
+        bridge_timeout_seconds=5.0,
+        socket_protocol=settings.isaac_sim.socket_protocol,
+        auth_token=auth_token or settings.isaac_sim.socket_auth_token,
+    )
+
+    async def _probe() -> tuple[bool, bool]:
+        bridge_ok = False
+        socket_ok = False
+        if bridge_present:
+            try:
+                bridge_ok = (await client.bridge_request("ping", {})).get("status") == "ok"
+            except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
+                bridge_ok = False
+        try:
+            reply = await client.execute_vscode_only("print('pong')")
+            socket_ok = bool(reply.success) and "pong" in (reply.output or "")
+        except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
+            socket_ok = False
+        return bridge_ok, socket_ok
+
+    started = time.monotonic()
+    bridge_ok = socket_ok = False
+    while time.monotonic() - started < wait_timeout:
+        if process.poll() is not None:
+            result.update(
+                success=False,
+                exit_code=process.returncode,
+                socket_reachable=False,
+                bridge_reachable=False,
+            )
+            _fail(
+                f"Isaac Sim exited with code {process.returncode} before answering; see {resolved_log}",
+                "LaunchFailed",
+                1,
+                result,
+            )
+            return
+        bridge_ok, socket_ok = asyncio.run(_probe())
+        if socket_ok and (bridge_ok or not bridge_present):
+            break
+        time.sleep(poll_interval)
+
+    result.update(
+        success=socket_ok and (bridge_ok or not bridge_present),
+        socket_reachable=socket_ok,
+        bridge_reachable=bridge_ok,
+        socket_protocol=client.socket_protocol,
+        elapsed_seconds=round(time.monotonic() - started, 1),
+    )
+    if is_json_mode():
+        emit(result)
+        if not result["success"]:
+            raise typer.Exit(1)
+        return
+    if result["success"]:
+        console.print(
+            f"[green]Isaac Sim {version} ready[/green] socket={result['socket_address']} "
+            f"bridge={'up' if bridge_ok else 'n/a'}"
+        )
+        return
+    console.print(
+        f"[red]Timed out after {wait_timeout}s[/red] socket={'up' if socket_ok else 'down'} "
+        f"bridge={'up' if bridge_ok else 'down'}; see {resolved_log}"
+    )
+    raise typer.Exit(1)
+
+
+def _fail(message: str, error_type: str, exit_code: int, details: Optional[Dict[str, Any]] = None) -> None:
+    """Report a CLI failure in JSON or Rich mode and exit."""
+    if is_json_mode():
+        emit_error(message, error_type, details)
+        return
+    console.print(f"[red]{message}[/red]")
+    raise typer.Exit(exit_code)
 
 
 @app.command("install-bridge")

@@ -137,6 +137,7 @@ def test_server_builds_named_instance_clients_with_bridge_settings(
 
 def test_scan_isaac_instances_builds_bridge_aware_candidates(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Auto-discovered instances should probe the matching derived bridge port."""
     settings = Settings(
@@ -151,6 +152,9 @@ def test_scan_isaac_instances_builds_bridge_aware_candidates(
             "bridge_fallback_to_vscode": True,
             "scan_port_start": 8226,
             "scan_port_end": 8229,
+            # An empty discovery dir keeps a bridge running on this machine
+            # from adding a third, file-discovered candidate to the count.
+            "discovery_dir": str(tmp_path),
         }
     )
     instance = _make_server(monkeypatch, settings)

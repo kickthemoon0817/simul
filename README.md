@@ -26,7 +26,7 @@ Simul-MCP is designed for multi-engine workflows. Isaac Sim is the primary runti
 
 - Python 3.11, 3.12, or 3.13
 - USD Python bindings (`usd-core`) — installed automatically
-- NVIDIA Isaac Sim 5.1.0+ (optional — for live simulation control)
+- NVIDIA Isaac Sim 5.1.0, 6.0.0, or 6.0.1 (optional — for live simulation control)
 - Unreal Engine 5.x with Remote Control plugin (optional)
 - Blender via `bpy` package (optional — Python 3.11 or 3.13 only)
 
@@ -97,9 +97,11 @@ pip install -e ".[dev]"
 
 | Python | USD | Isaac Sim | Unreal | Blender |
 |--------|-----|-----------|--------|---------|
-| 3.11 | Yes | Yes (5.1) | Yes | Yes (bpy 4.x/5.0) |
-| 3.12 | Yes | Yes | Yes | **No** (no bpy wheels) |
-| 3.13 | Yes | TBD | Yes | Yes (bpy 5.1) |
+| 3.11 | Yes | Yes (5.1, 6.0) | Yes | Yes (bpy 4.x/5.0) |
+| 3.12 | Yes | Yes (5.1, 6.0) | Yes | **No** (no bpy wheels) |
+| 3.13 | Yes | Yes (5.1, 6.0) | Yes | Yes (bpy 5.1) |
+
+The MCP server talks to Isaac Sim over TCP, so its Python version is independent of the one Isaac Sim ships (3.11 for 5.1, 3.12 for 6.0).
 
 **Recommended:** Python 3.11 for maximum compatibility across all backends.
 
@@ -190,7 +192,9 @@ for example:
 
 ### Prerequisites for Isaac Sim Tools
 
-Isaac Sim tools prefer a running Isaac Sim instance with the repo-owned `khemoo.simul.mcp` bridge extension enabled on TCP port 8229. When that bridge is unavailable, the client falls back to `isaacsim.code_editor.vscode` on TCP port 8226. Use `ping_isaac` to verify connectivity.
+Isaac Sim tools prefer a running Isaac Sim instance with the repo-owned `khemoo.simul.mcp` bridge extension enabled on TCP port 8229. When that bridge is unavailable, the client falls back to the stock Python socket on TCP port 8226: `isaacsim.code_editor.python_server` on Isaac Sim 6.0+, `isaacsim.code_editor.vscode` on 5.x. The client detects which one it is talking to; set `ISAAC_SIM__SOCKET_PROTOCOL` to pin it. Use `ping_isaac` to verify connectivity.
+
+Isaac Sim 6.0 enables neither extension at startup. `simul-mcp isaac launch` starts the editor with the right ones enabled for the install it finds under `$ISAAC_SIM_PATH`; see [Isaac Sim 6.0](#isaac-sim-60) below.
 
 When Isaac Sim runs in Docker, Simul MCP connects to the host-published ports, not the container-internal ports. With the included Compose file, the host-facing ports are controlled by `ISAAC_BRIDGE_PORT` and `ISAAC_VSCODE_PORT`, so the MCP server and agents should target those host values.
 
@@ -221,12 +225,30 @@ simul-mcp stats
 
 ### 3. Use with Isaac Sim
 
-1. Launch Isaac Sim with the `khemoo.simul.mcp` bridge extension enabled
-2. Keep `isaacsim.code_editor.vscode` enabled if you want transport fallback
+1. Publish the bridge once per install: `ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac install-bridge --symlink`
+2. Launch Isaac Sim with the transports enabled: `ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac launch`
+   (or start `isaac-sim.sh` yourself and run `simul-mcp isaac bridge-up` on 5.x, where the VS Code socket is on by default)
 3. Start your AI agent (Claude Code, Codex, or OpenCode) with simul MCP configured
 4. The agent can now use 75+ Isaac Sim tools for scene control, rendering, physics, and more
 
-### Containerized Isaac Sim 5.1.0
+### Isaac Sim 6.0
+
+Isaac Sim 6.0.0 and 6.0.1 (Kit 110, Python 3.12) are supported alongside 5.1.0. What changed on the Isaac side:
+
+- The Python socket on port 8226 moved from `isaacsim.code_editor.vscode` into `isaacsim.code_editor.python_server`, and it now executes only after the client half-closes the connection. simul's client detects the flavour with one introspection request, so no configuration is needed.
+- Neither the socket server nor the `khemoo.simul.mcp` bridge is enabled by default, so `bridge-up` has nothing to talk to after a plain `isaac-sim.sh` start. Use `simul-mcp isaac launch`, which reads `<isaac-root>/VERSION` and passes the right `--enable` flags.
+- The python_server can require a token. Start it with `simul-mcp isaac launch --auth-token <secret>` and set `ISAAC_SIM__SOCKET_AUTH_TOKEN=<secret>` for the MCP server.
+- `isaacsim.core.api`, `isaacsim.core.prims`, and `isaacsim.core.utils` are deprecated in favour of `isaacsim.core.experimental.*`, and the `omni.isaac.*` shims are gone. See `skills/isaac-scripting/references/namespace-migration.md` before writing `execute_isaac_script` code.
+
+```bash
+ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac launch            # headless, waits for both ports
+ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac launch --no-headless
+simul-mcp isaac launch --isaac-root ~/isaac-sim-5.1.0 --dry-run    # print the command only
+```
+
+Equivalent manual launch: `isaac-sim.sh --enable isaacsim.code_editor.python_server --enable khemoo.simul.mcp --no-window`.
+
+### Containerized Isaac Sim
 
 For Linux hosts, the repo includes a Docker Compose file that runs the official
 `nvcr.io/nvidia/isaac-sim:5.1.0` image with the bridge extension mounted from
@@ -264,6 +286,14 @@ Override ports or the image tag with standard Compose environment variables, for
 
 ```bash
 ISAAC_BRIDGE_PORT=8829 ISAAC_VSCODE_PORT=8826 docker compose -f compose.isaac-sim.yml up -d
+```
+
+For an Isaac Sim 6.x image also name the extension that serves the Python socket:
+
+```bash
+ISAAC_SIM_IMAGE=nvcr.io/nvidia/isaac-sim:6.0.1 \
+ISAAC_PYTHON_SERVER_EXT=isaacsim.code_editor.python_server \
+docker compose -f compose.isaac-sim.yml up -d
 ```
 
 ## Usage
@@ -426,6 +456,8 @@ You can override configuration using environment variables:
 export LOGGING__LEVEL=DEBUG
 export USD__CACHE_ENABLED=false
 export VIEWPORT__MAX_SIZE=4096
+export ISAAC_SIM__SOCKET_PROTOCOL=python_server   # auto | python_server (6.0+) | vscode (5.x)
+export ISAAC_SIM__SOCKET_AUTH_TOKEN=secret        # only for a python_server started with require_auth
 ```
 
 ## MCP Tools
@@ -666,9 +698,12 @@ the package (or pulling new repo commits) once per Isaac install:
 
 ```bash
 # Publish the bundled bridge ext into Isaac's extsUser dir
-ISAAC_SIM_PATH=~/isaac-sim-5.1.0 simul-mcp isaac install-bridge --symlink
+ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac install-bridge --symlink
 
-# Then once per Isaac launch — auto-enables the ext + waits for port
+# Then per Isaac launch, either start it through simul (any supported version) ...
+ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac launch
+
+# ... or, on 5.x with isaac-sim.sh already running, auto-enable the ext + wait for the port
 simul-mcp isaac bridge-up
 ```
 

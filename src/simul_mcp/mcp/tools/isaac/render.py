@@ -87,9 +87,25 @@ class RenderMixin:
                 except Exception as e:
                     attach_errors[name] = str(e)
 
+            # Replicator only publishes annotator data on orchestrator steps.
+            # Kit 110 (Isaac Sim 6.0) stopped flushing them on plain app
+            # updates, so pumping frames leaves every annotator empty; the
+            # explicit step also works on Kit 107 (Isaac Sim 5.1). Reading AOVs
+            # must not disturb playback, so hold the timeline still:
+            # delta_time=0 stops the step advancing it and pause_timeline=False
+            # leaves a playing timeline playing. The frame loop stays as a
+            # fallback for builds without the orchestrator.
             app = omni.kit.app.get_app()
-            for _ in range(num_frames + 10):
-                app.update()
+            frame_strategy = "orchestrator"
+            try:
+                for _ in range(num_frames):
+                    await rep.orchestrator.step_async(
+                        pause_timeline=False, delta_time=0.0
+                    )
+            except Exception as e:
+                frame_strategy = f"app_update ({{e}})"
+                for _ in range(num_frames + 10):
+                    app.update()
 
             import math
             def _sf(v):
@@ -186,6 +202,7 @@ class RenderMixin:
                 pass  # Destroy is best-effort cleanup.
 
             output = {{
+                "frame_strategy": frame_strategy,
                 "aovs": results,
                 "attached": attached,
                 "camera": camera,

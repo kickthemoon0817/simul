@@ -19,12 +19,19 @@ isaac_sim:
   # Path to Isaac Sim installation (can be overridden by environment variable)
   path: "${ISAAC_SIM_PATH}"
 
-  # TCP socket connection to the isaacsim.code_editor.vscode extension
+  # TCP socket connection to the stock Isaac Sim Python socket:
+  # isaacsim.code_editor.python_server on 6.0+, isaacsim.code_editor.vscode on 5.x
   socket_host: "127.0.0.1"
   socket_port: 8226
   socket_timeout: 30.0
+  # Stock socket flavour: auto probes the server once; python_server / vscode
+  # pin it. Left commented so ISAAC_SIM__SOCKET_PROTOCOL works — a key present
+  # here is passed to Settings() explicitly and wins over the environment.
+  # socket_protocol: "auto"
+  # Only for a 6.0 python_server started with require_auth=true
+  # socket_auth_token: ""
 
-  # Preferred bridge extension transport. Falls back to VS Code when unavailable.
+  # Preferred bridge extension transport. Falls back to the stock socket when unavailable.
   bridge:
     enabled: true
     host: "127.0.0.1"
