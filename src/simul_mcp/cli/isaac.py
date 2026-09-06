@@ -265,6 +265,14 @@ def bridge_up(
     raise typer.Exit(1)
 
 
+#: Answers "app-ready" only after Kit has finished starting every extension,
+#: so a caller that sees the sockets bind cannot race the editor's own startup.
+_APP_READY_PROBE = (
+    "import omni.kit.app\n"
+    "print('app-ready' if omni.kit.app.get_app().is_app_ready() else 'app-starting')"
+)
+
+
 @app.command("launch")
 def launch(
     isaac_root: Optional[Path] = typer.Option(
@@ -483,8 +491,11 @@ def launch(
             except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
                 bridge_ok = False
         try:
-            reply = await client.execute_vscode_only("print('pong')")
-            socket_ok = bool(reply.success) and "pong" in (reply.output or "")
+            # The sockets bind while Kit is still starting extensions, and a
+            # stage operation during that window can crash the editor. Only
+            # count the socket as ready once Kit itself reports the app ready.
+            reply = await client.execute_vscode_only(_APP_READY_PROBE)
+            socket_ok = bool(reply.success) and "app-ready" in (reply.output or "")
         except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
             socket_ok = False
         return bridge_ok, socket_ok

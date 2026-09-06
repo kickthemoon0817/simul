@@ -858,3 +858,10 @@ def test_launch_rejects_root_without_version_file(tmp_path: Path) -> None:
 
     assert result.exit_code != 0
     assert "UnsupportedInstall" in result.stdout
+
+
+def test_launch_readiness_probe_waits_for_kit_app_ready() -> None:
+    """The sockets bind before Kit finishes starting; readiness must ask Kit itself."""
+    compile(isaac_cli._APP_READY_PROBE, "<probe>", "exec")
+    assert "is_app_ready()" in isaac_cli._APP_READY_PROBE
+    assert "app-ready" in isaac_cli._APP_READY_PROBE
