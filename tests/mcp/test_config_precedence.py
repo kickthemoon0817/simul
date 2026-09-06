@@ -35,6 +35,7 @@ _DOCUMENTED_OVERRIDES: tuple[tuple[str, str, tuple[str, str], object], ...] = (
     ("ISAAC_SIM__BRIDGE_ENABLED", "false", ("isaac_sim", "bridge_enabled"), False),
     ("ISAAC_SIM__SOCKET_PROTOCOL", "vscode", ("isaac_sim", "socket_protocol"), "vscode"),
     ("SECURITY__SANDBOX_ENABLED", "false", ("security", "sandbox_enabled"), False),
+    ("SECURITY__ALLOW_SCRIPT_EXECUTION", "false", ("security", "allow_script_execution"), False),
     ("USD__CACHE_ENABLED", "false", ("usd", "cache_enabled"), False),
 )
 

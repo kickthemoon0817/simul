@@ -266,7 +266,9 @@ This Compose file:
 - binds the bridge inside the container on `0.0.0.0:${ISAAC_BRIDGE_PORT:-8229}` —
   a container-loopback bind cannot receive a published port, so the host would
   connect and then be closed on with no data
-- enables bridge `execute_script` by default for easy local use
+- enables the bridge transport's raw `execute_script` action by default; this
+  flag only gates the bridge, not the stock Kit socket, and is not a security
+  boundary (see `security.allow_script_execution` under Configuration)
 - binds the VS Code fallback inside the container on `0.0.0.0:${ISAAC_VSCODE_PORT:-8226}`
 - publishes those ports back to the host on the same numbers
 - keeps the container stateless by default so validation runs start cleanly
@@ -455,6 +457,30 @@ isaac_sim:
     fallback_to_vscode: true
 ```
 
+### Operator controls
+
+- `security.allow_script_execution` (env `SECURITY__ALLOW_SCRIPT_EXECUTION`,
+  default `true`): when `false`, the server does not register
+  `execute_isaac_script`, `execute_unreal_script`, or `execute_blender_script`,
+  and `simul-mcp isaac exec` returns a `ScriptExecutionDisabled` error. Granular
+  tools keep working. This is the only switch that removes the agent-authored
+  code surface; the bridge extension's `allow_unsafe_execution` setting (and
+  `simul-mcp isaac bridge-set-unsafe`) only gates raw scripts sent over the
+  bridge transport on 8229. Raw scripts and every generated tool script still
+  run over the stock Kit Python socket on 8226, so that flag is not a security
+  boundary.
+- Self-sabotage and data-loss refusals: `delete_isaac_prim` refuses `/` and
+  refuses `/World` unless `allow_root_delete=true`; `disable_isaac_extension`
+  refuses the transport extensions (`khemoo.simul.mcp`,
+  `isaacsim.code_editor.python_server`, `isaacsim.code_editor.vscode`);
+  `set_isaac_carb_settings` refuses keys under `/exts/khemoo.simul.mcp/` and
+  `/exts/isaacsim.code_editor.python_server/`; `save_isaac_stage` needs
+  `overwrite=true` to replace an existing file; `new_isaac_stage` and
+  `open_isaac_stage` need `discard_unsaved=true` when the current stage has
+  unsaved edits. Each refusal is a structured `RefusedOperation` error.
+- Tool usage statistics are read via `get_tool_usage_stats`; clearing the log is
+  operator-only via `simul-mcp stats --reset`.
+
 ### Environment Variables
 
 You can override configuration using environment variables:
@@ -521,7 +547,7 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 ### Observability
 
-`get_tool_usage_stats`, `reset_tool_usage_stats` — per-tool call counts, success rates, and durations via persistent JSONL log
+`get_tool_usage_stats` — per-tool call counts, success rates, and durations via persistent JSONL log; clear it with `simul-mcp stats --reset`
 
 ### Blender (when runtime connected)
 

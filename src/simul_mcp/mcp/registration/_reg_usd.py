@@ -51,7 +51,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "the configured sandbox (security.allowed_paths)."
         ),
         annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
+            read_only=True, idempotent=True, open_world=False
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -113,7 +113,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "configured sandbox (security.allowed_paths)."
         ),
         annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
+            read_only=True, idempotent=True, open_world=False
         ),
         output_schema=None,
     )

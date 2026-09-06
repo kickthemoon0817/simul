@@ -124,7 +124,11 @@ def test_no_tool_declares_the_dead_permissive_output_schema(
 
 
 def test_annotations_drop_constant_noise(monkeypatch: pytest.MonkeyPatch) -> None:
-    """destructiveHint=false rode on 84 tools while saying nothing."""
+    """Hints equal to a client's assumed default are omitted, never emitted.
+
+    destructiveHint=false rode on 84 tools while saying nothing; the same goes
+    for idempotentHint=false and openWorldHint=true.
+    """
     instance = _make_server(monkeypatch)
 
     annotated = [
@@ -136,8 +140,9 @@ def test_annotations_drop_constant_noise(monkeypatch: pytest.MonkeyPatch) -> Non
 
     for annotations in annotated:
         dumped = annotations.model_dump(exclude_none=True)
-        assert "idempotentHint" not in dumped
-        assert "openWorldHint" not in dumped
+        assert "readOnlyHint" in dumped
+        assert dumped.get("idempotentHint") is not False
+        assert dumped.get("openWorldHint") is not True
         assert dumped.get("destructiveHint") is not False
 
 
@@ -191,7 +196,7 @@ def test_every_registered_tool_is_single_transmission(
     instance.blender_adapter = SimpleNamespace(is_available=lambda: False)
     instance.unreal_adapter = SimpleNamespace(is_available=lambda: False)
 
-    async def _exec_isaac(name: str, coro: Any, params: Any = None) -> ToolResult:
+    async def _exec_isaac(name: str, coro: Any, **kwargs: Any) -> ToolResult:
         coro.close()
         return instance._as_text_result({"success": True, "tool": name})
 

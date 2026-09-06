@@ -208,7 +208,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             "inline size cap return the path alone."
         ),
         annotations=server._tool_annotations(
-            read_only=True,
+            read_only=False,
             idempotent=False,
             open_world=True,
         ),
@@ -261,7 +261,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             },
         )
 
-    @server.mcp.tool(
+    @server._script_tool(
         name="execute_unreal_script",
         description=(
             "Execute arbitrary Python code inside the Unreal Engine editor. "
@@ -339,7 +339,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def get_unreal_engine_info() -> Dict[str, Any]:
+    async def get_unreal_engine_info() -> ToolResult:
         """
         Get Unreal Engine runtime information.
 
@@ -365,7 +365,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def get_unreal_loaded_map() -> Dict[str, Any]:
+    async def get_unreal_loaded_map() -> ToolResult:
         """
         Get the currently loaded persistent level path.
 
@@ -399,7 +399,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         class_filter: str = "",
         tag_filter: str = "",
         max_results: int = 200,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         List actors in the current Unreal Engine level.
 
@@ -434,7 +434,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def get_unreal_actor_info(actor_path: str) -> Dict[str, Any]:
+    async def get_unreal_actor_info(actor_path: str) -> ToolResult:
         """
         Get detailed information about a specific actor.
 
@@ -468,7 +468,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         class_names: str = "",
         package_paths: str = "",
         max_results: int = 100,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         Search the Unreal Asset Registry.
 
@@ -522,7 +522,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def describe_unreal_object(object_path: str) -> Dict[str, Any]:
+    async def describe_unreal_object(object_path: str) -> ToolResult:
         """
         Describe a UObject's properties and functions.
 
@@ -555,7 +555,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         asset_path: str,
         width: int = 256,
         height: int = 256,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         Get a thumbnail image for an asset.
 
@@ -588,7 +588,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def summarize_unreal_scene() -> Dict[str, Any]:
+    async def summarize_unreal_scene() -> ToolResult:
         """
         Generate an LLM-friendly scene digest.
 
@@ -616,7 +616,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def get_unreal_viewport_info() -> Dict[str, Any]:
+    async def get_unreal_viewport_info() -> ToolResult:
         """
         Get viewport camera and render settings.
 
@@ -650,7 +650,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rotation_yaw: float = 0.0,
         rotation_roll: float = 0.0,
         fov: float = 90.0,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         Set the editor viewport camera.
 
@@ -692,7 +692,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     async def focus_unreal_on_actor(
         actor_path: str,
         distance: float = 0.0,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         Focus viewport camera on a specific actor.
 
@@ -735,7 +735,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rotation_yaw: float = 0.0,
         rotation_roll: float = 0.0,
         label: str = "",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Spawn an actor from class or asset path."""
         return await server._exec_backend(
             "spawn_unreal_actor",
@@ -764,7 +764,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     )
     async def delete_unreal_actor(
         actor_path: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Delete an actor from the level."""
         return await server._exec_backend(
             "delete_unreal_actor",
@@ -781,6 +781,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -796,7 +797,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         scale_x: float = 1.0,
         scale_y: float = 1.0,
         scale_z: float = 1.0,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Set an actor's transform."""
         return await server._exec_backend(
             "set_unreal_actor_transform",
@@ -818,6 +819,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -827,7 +829,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         property_name: str,
         property_value: str,
         generate_transaction: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Set a property on an actor."""
         return await server._exec_backend(
             "set_unreal_actor_property",
@@ -849,6 +851,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -857,7 +860,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         actor_path: str,
         function_name: str,
         parameters: str = "",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Call a UFUNCTION on an actor."""
         return await server._exec_backend(
             "call_unreal_actor_function",
@@ -878,6 +881,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -885,7 +889,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     async def set_unreal_actor_parent(
         actor_path: str,
         parent_path: str = "",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Attach or detach an actor."""
         return await server._exec_backend(
             "set_unreal_actor_parent",
@@ -913,7 +917,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         actor_path: str,
         component_class: str,
         component_name: str = "",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Add a component to an actor."""
         return await server._exec_backend(
             "add_unreal_component",
@@ -934,6 +938,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -942,7 +947,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         actor_path: str,
         visible: bool = True,
         propagate: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Set actor visibility."""
         return await server._exec_backend(
             "set_unreal_actor_visibility",
@@ -973,7 +978,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     )
     async def get_unreal_material_info(
         material_path: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Get material info."""
         return await server._exec_backend(
             "get_unreal_material_info",
@@ -992,6 +997,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1001,7 +1007,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         scalar_params_json: str = "",
         vector_params_json: str = "",
         texture_params_json: str = "",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Set material instance parameters."""
         import json as json_lib
 
@@ -1048,7 +1054,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         parent_path: str,
         instance_name: str,
         save_path: str = "",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Create a material instance."""
         return await server._exec_backend(
             "create_unreal_material_instance",
@@ -1069,6 +1075,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1077,7 +1084,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         actor_path: str,
         material_path: str,
         slot_index: int = 0,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Assign material to actor."""
         return await server._exec_backend(
             "assign_unreal_material",
@@ -1098,6 +1105,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1112,7 +1120,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         use_temperature: Optional[bool] = None,
         attenuation_radius: Optional[float] = None,
         cast_shadows: Optional[bool] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Set light parameters."""
         return await server._exec_backend(
             "set_unreal_light_params",
@@ -1139,6 +1147,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1146,7 +1155,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     async def set_unreal_render_settings(
         setting_name: str,
         setting_value: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Set render settings."""
         return await server._exec_backend(
             "set_unreal_render_settings",
@@ -1174,7 +1183,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     )
     async def control_unreal_simulation(
         action: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Control PIE session."""
         return await server._exec_backend(
             "control_unreal_simulation",
@@ -1195,7 +1204,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def get_unreal_simulation_status() -> Dict[str, Any]:
+    async def get_unreal_simulation_status() -> ToolResult:
         """Get PIE simulation status."""
         return await server._exec_backend(
             "get_unreal_simulation_status",
@@ -1212,6 +1221,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1220,7 +1230,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         actor_path: str,
         enable: bool = True,
         simulate_physics: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Enable physics on actor."""
         return await server._exec_backend(
             "enable_unreal_physics",
@@ -1241,6 +1251,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1249,7 +1260,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         actor_path: str,
         collision_preset: str = "",
         collision_enabled: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Set collision configuration."""
         return await server._exec_backend(
             "set_unreal_collision",
@@ -1283,7 +1294,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         location_x: Optional[float] = None,
         location_y: Optional[float] = None,
         location_z: Optional[float] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Apply force or impulse."""
         return await server._exec_backend(
             "apply_unreal_force",
@@ -1309,6 +1320,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1319,7 +1331,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         linear_damping: Optional[float] = None,
         angular_damping: Optional[float] = None,
         enable_gravity: Optional[bool] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Set physics parameters."""
         return await server._exec_backend(
             "set_unreal_physics_params",
@@ -1356,7 +1368,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         import_animations: bool = True,
         import_materials: bool = True,
         scale_factor: float = 1.0,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Import USD file into Unreal."""
         return await server._exec_backend(
             "import_unreal_usd",
@@ -1379,6 +1391,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1389,7 +1402,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         export_materials: bool = True,
         export_animations: bool = True,
         convert_to_meters: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Export actors to USD."""
 
         def _call(session):
@@ -1420,6 +1433,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1430,7 +1444,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         add_physics: bool = True,
         add_collision: bool = True,
         semantic_labels: str = "",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Convert actors to SimReady format."""
 
         def _call(session):
@@ -1475,7 +1489,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     async def validate_simready_asset(
         asset_path: str,
         checks: str = "",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Validate asset against SimReady spec."""
 
         def _call(session):
@@ -1509,7 +1523,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def get_unreal_interchange_info() -> Dict[str, Any]:
+    async def get_unreal_interchange_info() -> ToolResult:
         """Get Interchange Framework info."""
         return await server._exec_backend(
             "get_unreal_interchange_info",
@@ -1530,13 +1544,14 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
     )
     async def batch_unreal_operations(
         operations: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Batch multiple operations."""
 
         def _call(session):
@@ -1572,7 +1587,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         max_depth: int = 10,
         include_components: bool = False,
         class_filter: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Query scene graph hierarchy."""
         return await server._exec_backend(
             "query_unreal_scene_graph",
@@ -1601,7 +1616,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     async def analyze_unreal_scene_for_robotics(
         analysis_types: str = "",
         actor_filter: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Analyze scene for robotics."""
 
         def _call(session):
@@ -1642,7 +1657,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         parameters: str = "{}",
         bounds_min: str = "",
         bounds_max: str = "",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Generate procedural scene."""
 
         def _call(session):
@@ -1684,7 +1699,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         label: str,
         match_mode: str = "exact",
         max_results: int = 100,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Find actors by semantic label."""
         return await server._exec_backend(
             "get_unreal_actor_by_semantic_label",
@@ -1719,7 +1734,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         segments: int = 32,
         location: str = "",
         actor_label: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Create mesh primitive."""
 
         def _call(session):
@@ -1753,6 +1768,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1761,7 +1777,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         target_mesh_path: str,
         tool_mesh_path: str,
         operation: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Apply mesh boolean."""
         return await server._exec_backend(
             "apply_unreal_mesh_boolean",
@@ -1788,7 +1804,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     )
     async def compute_unreal_convex_hull(
         mesh_path: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Compute convex hull."""
         return await server._exec_backend(
             "compute_unreal_convex_hull",
@@ -1807,6 +1823,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1817,7 +1834,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         max_vertices_per_hull: int = 32,
         min_cluster_size: int = 256,
         resolution: int = 100000,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """V-HACD convex decomposition."""
         return await server._exec_backend(
             "decompose_unreal_convex_hull",
@@ -1840,6 +1857,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1853,7 +1871,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         offset: Optional[float] = None,
         scale: str = "",
         count: Optional[int] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Edit mesh topology."""
 
         def _call(session):
@@ -1887,6 +1905,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1895,7 +1914,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         mesh_path: str,
         level: int = 2,
         scheme: str = "catmull_clark",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Subdivide mesh."""
         return await server._exec_backend(
             "subdivide_unreal_mesh",
@@ -1916,6 +1935,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1925,7 +1945,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         target_triangle_count: Optional[int] = None,
         target_percentage: Optional[float] = None,
         max_error: Optional[float] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Simplify mesh."""
         return await server._exec_backend(
             "simplify_unreal_mesh",
@@ -1947,6 +1967,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1957,7 +1978,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         plane_normal: str,
         fill_holes: bool = True,
         keep_both_sides: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Cut mesh with plane."""
 
         def _call(session):
@@ -1996,7 +2017,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     async def validate_unreal_mesh(
         mesh_path: str,
         checks: str = "",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Validate mesh integrity."""
 
         def _call(session):
@@ -2026,6 +2047,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -2034,7 +2056,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         mesh_path: str,
         target_format: str,
         tessellation_options: str = "{}",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Convert mesh format."""
 
         def _call(session):
@@ -2067,6 +2089,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -2077,7 +2100,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         target_edge_length: Optional[float] = None,
         target_triangle_count: Optional[int] = None,
         smoothing_iterations: int = 3,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Remesh mesh."""
         return await server._exec_backend(
             "remesh_unreal_mesh",
@@ -2100,6 +2123,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -2109,7 +2133,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         method: str = "auto_uv",
         uv_channel: int = 0,
         island_padding: float = 2.0,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """Compute mesh UVs."""
         return await server._exec_backend(
             "compute_unreal_mesh_uv",
