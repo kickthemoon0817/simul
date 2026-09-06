@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +54,16 @@ class UnrealHealthCheckResponse(BaseModel):
     """Response for Unreal Engine Remote Control API health check."""
 
     success: bool = Field(..., description="Whether request was successful")
-    connected: bool = Field(..., description="Whether the engine is reachable")
+    reachable: bool = Field(
+        ..., description="Whether the Remote Control API responded"
+    )
+    connected: bool = Field(
+        ...,
+        description=(
+            "Deprecated alias of reachable, kept for one release; read "
+            "reachable instead"
+        ),
+    )
     engine_version: Optional[str] = Field(
         None, description="Unreal Engine version string"
     )
@@ -63,6 +72,22 @@ class UnrealHealthCheckResponse(BaseModel):
         None, description="Whether the engine is running in editor mode"
     )
     error: Optional[str] = Field(None, description="Error message when success is False")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _mirror_reachable_and_connected(cls, data: Any) -> Any:
+        """Fill whichever of ``reachable``/``connected`` a payload left out.
+
+        The adapter emits both; a caller that built the payload from the
+        older shape still validates, and the reply always carries both names
+        for the alias period.
+        """
+        if isinstance(data, dict):
+            if "reachable" not in data and "connected" in data:
+                data = {**data, "reachable": data["connected"]}
+            elif "connected" not in data and "reachable" in data:
+                data = {**data, "connected": data["reachable"]}
+        return data
 
 
 class UnrealEngineInfoResponse(BaseModel):

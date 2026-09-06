@@ -43,6 +43,12 @@ isaac_sim:
     port: 8229
     timeout: 30.0
     fallback_to_vscode: true
+    # Circuit breaker: after this many consecutive transport failures the
+    # bridge is skipped for cooldown_seconds and calls go straight to the
+    # stock socket. A filtered or half-open port otherwise costs the full
+    # timeout on every call.
+    failure_threshold: 3
+    cooldown_seconds: 30.0
 
   # Discovery directory for bridge extension port files
   discovery_dir: "/tmp/simul-mcp"

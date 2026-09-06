@@ -75,7 +75,8 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         Ping Isaac Sim to verify connectivity.
 
         Returns:
-            Dict with reachable status, address, and timeout.
+            Dict with reachable status, address, and timeout. ``success``
+            tracks ``reachable``: an unreachable instance is a failed ping.
         """
         rate_error = server._check_rate_limit("ping_isaac")
         if rate_error:
@@ -84,13 +85,47 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         reachable = await client.ping()
         return server._as_text_result(
             {
+                "success": reachable,
                 "reachable": reachable,
                 "address": client.address,
                 "bridge_address": client.bridge_address,
+                "bridge_circuit_open": client.bridge_circuit_open,
                 "vscode_address": client.vscode_address,
                 "timeout_seconds": client.timeout_seconds,
             }
         )
+
+    @server.mcp.tool(
+        name="interrupt_isaac_script",
+        description=(
+            "Stop the script the Isaac Sim bridge is currently running, so a "
+            "runaway execute_isaac_script does not hold the instance for every "
+            "agent. Reaches a coroutine script or one suspended at an await; a "
+            "synchronous script that never yields also blocks the bridge's "
+            "event loop, so that one is stopped by the per-request timeout sent "
+            "with every script instead. Requires the bridge extension; the "
+            "stock Python socket has no interrupt path. Check "
+            "get_isaac_runtime_info's bridge section (busy, busy_since, "
+            "current_action) first to tell a busy instance from a hung one."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=True, open_world=True
+        ),
+    )
+    async def interrupt_isaac_script() -> ToolResult:
+        """
+        Interrupt the script running on the active Isaac Sim instance.
+
+        Bypasses the per-instance lock on purpose: the call being interrupted
+        is usually the one holding it.
+
+        Returns:
+            Dict with interrupted, was_busy, phase and current_action.
+        """
+        rate_error = server._check_rate_limit("interrupt_isaac_script")
+        if rate_error:
+            return server._as_text_result(rate_error)
+        return server._as_text_result(await server._isaac_tools.interrupt_script())
 
     # -- Scene Inspection tools -------------------------------------------
 
@@ -1165,7 +1200,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "List extensions registered in the running Isaac Sim instance. "
             "Returns each extension's ID (version-suffixed, e.g. "
-            "'worv.env.sun-0.3.0'), version, and enabled status. Lists enabled "
+            "'omni.physx-107.3.7'), version, and enabled status. Lists enabled "
             "extensions by default; pass enabled_only=false with "
             "search='<substring>' to scope a wider query."
         ),
@@ -1190,8 +1225,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Enable an extension immediately in the running Isaac Sim instance. "
             "Accepts EITHER the bare canonical Kit extension name (e.g. "
-            "'worv.env.sun', 'omni.physx') OR the version-suffixed ID returned "
-            "by list_isaac_extensions (e.g. 'worv.env.sun-0.3.0'). The bare "
+            "'omni.physx', 'isaacsim.replicator.behavior') OR the "
+            "version-suffixed ID returned by list_isaac_extensions (e.g. "
+            "'omni.physx-107.3.7'). The bare "
             "name is preferred — it is what the underlying Kit "
             "set_extension_enabled_immediate API takes and keeps callers "
             "decoupled from the installed version."
@@ -1213,8 +1249,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Disable an extension immediately in the running Isaac Sim instance. "
             "Accepts EITHER the bare canonical Kit extension name (e.g. "
-            "'worv.env.sun', 'omni.physx') OR the version-suffixed ID returned "
-            "by list_isaac_extensions (e.g. 'worv.env.sun-0.3.0'). The bare "
+            "'omni.physx', 'isaacsim.replicator.behavior') OR the "
+            "version-suffixed ID returned by list_isaac_extensions (e.g. "
+            "'omni.physx-107.3.7'). The bare "
             "name is preferred — it keeps callers decoupled from the installed "
             "version. Refuses the transport extensions simul-mcp speaks through "
             "(khemoo.simul.mcp, isaacsim.code_editor.python_server, "
@@ -1292,7 +1329,8 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "reads numpy data, computes stats (shape, min, max, mean, "
             "rgb_max, rgb_mean, nonzero_pixels for color AOVs), and cleans up. "
             "Common AOVs: HdrColor, DirectDiffuse, DirectSpecular, "
-            "IndirectDiffuse, Reflections, AmbientOcclusion, Depth, Normal."
+            "IndirectDiffuse, Reflections, AmbientOcclusion, Depth, "
+            "SmoothNormal, normals. Use list_isaac_aovs for the registered set."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=True

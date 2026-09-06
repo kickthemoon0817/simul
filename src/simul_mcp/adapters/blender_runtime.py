@@ -1868,16 +1868,24 @@ class BlenderRuntimeSession(LoggerMixin):
         Captured ``print()`` output is returned in *output* (capped at 4 KiB
         to keep response sizes agent-friendly).
 
+        With a ``timeout`` the script runs on a worker thread and this call
+        returns a structured error once the budget is spent. Python offers
+        no safe way to kill that thread, so the script keeps running in the
+        background until it finishes on its own; it just no longer blocks
+        the MCP server. Its output is discarded. Without a timeout the
+        script runs inline, exactly as before.
+
         Args:
             script: Python source code to execute.
-            timeout: Maximum wall-clock seconds (unused in synchronous
-                Blender; reserved for future async support).
+            timeout: Maximum wall-clock seconds to wait for the script;
+                ``None`` waits for it to finish.
 
         Returns:
             Dict with output, return_value, duration_seconds, and
-            optionally error.
+            optionally error. A timeout adds ``timed_out: True``.
         """
         import contextlib
+        import threading
         import time
 
         blender_module: Any = bpy
@@ -1888,38 +1896,65 @@ class BlenderRuntimeSession(LoggerMixin):
             "__builtins__": __builtins__,
             "__result__": None,
         }
+        max_output_bytes = 4096
 
-        start = time.monotonic()
-        try:
-            with contextlib.redirect_stdout(stdout_capture):
-                exec(script, namespace)  # noqa: S102
+        def _run() -> Dict[str, Any]:
+            start = time.monotonic()
+            try:
+                with contextlib.redirect_stdout(stdout_capture):
+                    exec(script, namespace)  # noqa: S102
+            except Exception as exc:
+                return {
+                    "output": stdout_capture.getvalue() or None,
+                    "return_value": None,
+                    "duration_seconds": round(time.monotonic() - start, 4),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
             elapsed = time.monotonic() - start
-
             raw_output = stdout_capture.getvalue()
-            max_output_bytes = 4096
             output = (
                 raw_output[:max_output_bytes]
                 if len(raw_output) > max_output_bytes
                 else raw_output
             ) or None
-
             return_value: Optional[str] = None
             if namespace.get("__result__") is not None:
                 return_value = repr(namespace["__result__"])
-
             return {
                 "output": output,
                 "return_value": return_value,
                 "duration_seconds": round(elapsed, 4),
             }
-        except Exception as exc:
-            elapsed = time.monotonic() - start
-            return {
-                "output": stdout_capture.getvalue() or None,
-                "return_value": None,
-                "duration_seconds": round(elapsed, 4),
-                "error": f"{type(exc).__name__}: {exc}",
-            }
+
+        if timeout is None:
+            return _run()
+
+        outcome: List[Dict[str, Any]] = []
+        worker = threading.Thread(
+            target=lambda: outcome.append(_run()),
+            name="blender-execute-script",
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout)
+        if outcome:
+            return outcome[0]
+        self.logger.warning(
+            "Blender script exceeded its %.1fs timeout; the worker thread keeps "
+            "running until the script returns on its own.",
+            timeout,
+        )
+        return {
+            "output": None,
+            "return_value": None,
+            "duration_seconds": round(float(timeout), 4),
+            "timed_out": True,
+            "error": (
+                f"TimeoutError: script did not finish within {timeout:g}s. "
+                "It is still running on a background thread and cannot be "
+                "stopped; its output is discarded."
+            ),
+        }
 
     def create_mesh_from_data(
         self,

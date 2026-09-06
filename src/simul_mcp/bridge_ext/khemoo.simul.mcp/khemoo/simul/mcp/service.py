@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
 
 from .executor import ScriptExecutor
@@ -11,7 +12,9 @@ from .protocol import BridgeRequest, BridgeResponse
 # Actions that only read state. They are safe to dispatch without the request
 # lock: Kit is single-threaded, so they cannot interleave mid-operation with a
 # mutating action, and holding them behind a long-running step is what made a
-# health-check ping look like an unreachable instance.
+# health-check ping look like an unreachable instance. get_runtime_info is
+# here so its busy report can be read while the lock is held by the very
+# action it reports on.
 READ_ONLY_ACTIONS = frozenset(
     {
         "ping",
@@ -20,8 +23,14 @@ READ_ONLY_ACTIONS = frozenset(
         "get_simulation_state",
         "get_prim_info",
         "list_prims",
+        "get_runtime_info",
     }
 )
+
+# Actions dispatched without the request lock. interrupt changes nothing in
+# the scene but exists to reach a script that is holding the lock, so it must
+# not queue behind it.
+LOCK_FREE_ACTIONS = READ_ONLY_ACTIONS | frozenset({"interrupt"})
 
 # Array attributes big enough that pulling their value is the cost being
 # avoided. Gating on names rather than on isArray keeps small arrays such as
@@ -50,6 +59,10 @@ class BridgeCommandService:
     ) -> None:
         self._executor = executor
         self._allow_unsafe_execution = allow_unsafe_execution
+        # The mutating action in flight, if any. Reads run concurrently and
+        # are not tracked: they cannot be what a client is waiting behind.
+        self._current_action: str | None = None
+        self._busy_since: float | None = None
 
     @property
     def capabilities(self) -> dict[str, Any]:
@@ -60,6 +73,7 @@ class BridgeCommandService:
                 "ping",
                 "capabilities",
                 "execute_script",
+                "interrupt",
                 "get_stage_info",
                 "list_prims",
                 "get_prim_info",
@@ -72,8 +86,54 @@ class BridgeCommandService:
             "allow_unsafe_execution": self._allow_unsafe_execution,
         }
 
+    @property
+    def activity(self) -> dict[str, Any]:
+        """Describe what the bridge is doing right now.
+
+        Lets a client tell a busy bridge from a hung one: a mutating action
+        holds the request lock for as long as it runs, and a script may keep
+        running after its own client gave up waiting.
+
+        Returns:
+            ``busy``, ``busy_since`` (epoch seconds or None),
+            ``busy_for_seconds`` and ``current_action``. A script still
+            executing outside a tracked action (the VS Code compat path)
+            reports as ``execute_script``.
+        """
+        action = self._current_action
+        since = self._busy_since
+        if action is None:
+            executor_state = self._executor.state
+            if executor_state["busy"]:
+                action = "execute_script"
+                since = executor_state["busy_since"]
+        return {
+            "busy": action is not None,
+            "busy_since": since,
+            "busy_for_seconds": (
+                round(time.time() - since, 3) if since is not None else None
+            ),
+            "current_action": action,
+        }
+
     async def dispatch(self, request: BridgeRequest) -> BridgeResponse:
-        """Dispatch a bridge request to the matching typed handler."""
+        """Dispatch a bridge request to the matching typed handler.
+
+        Mutating actions are recorded in ``activity`` for the duration of the
+        call; lock-free actions are not.
+        """
+        if request.action in LOCK_FREE_ACTIONS:
+            return await self._dispatch_action(request)
+        self._current_action = request.action
+        self._busy_since = time.time()
+        try:
+            return await self._dispatch_action(request)
+        finally:
+            self._current_action = None
+            self._busy_since = None
+
+    async def _dispatch_action(self, request: BridgeRequest) -> BridgeResponse:
+        """Route one request to its typed handler."""
         if request.action == "ping":
             return BridgeResponse.success(
                 request.request_id,
@@ -85,6 +145,8 @@ class BridgeCommandService:
             return BridgeResponse.success(request.request_id, payload)
         if request.action == "execute_script":
             return await self._handle_execute_script(request)
+        if request.action == "interrupt":
+            return self._handle_interrupt(request)
         if request.action == "get_stage_info":
             return self._handle_get_stage_info(request)
         if request.action == "list_prims":
@@ -122,7 +184,22 @@ class BridgeCommandService:
                 "InvalidRequest",
                 "execute_script requires a non-empty string payload.code.",
             )
-        output, exception, trace = await self._executor.execute(code)
+        raw_timeout = request.payload.get("timeout")
+        timeout_seconds: float | None = None
+        if raw_timeout is not None:
+            try:
+                timeout_seconds = float(raw_timeout)
+            except (TypeError, ValueError):
+                return BridgeResponse.failure(
+                    request.request_id,
+                    "InvalidRequest",
+                    "execute_script payload.timeout must be a number of seconds.",
+                )
+            if timeout_seconds <= 0:
+                timeout_seconds = None
+        output, exception, trace = await self._executor.execute(
+            code, timeout_seconds=timeout_seconds
+        )
         if output.endswith("\n"):
             output = output[:-1]
         if exception is not None:
@@ -135,6 +212,29 @@ class BridgeCommandService:
         return BridgeResponse.success(
             request.request_id,
             {"output": output, "transport": "simul_bridge"},
+        )
+
+    def _handle_interrupt(self, request: BridgeRequest) -> BridgeResponse:
+        """Stop the script currently running in the executor, if any.
+
+        Only a coroutine script, or one suspended at an await, can be reached
+        this way: a synchronous script that never yields also blocks the loop
+        this request arrives on, so for it the per-request timeout sent with
+        execute_script is the stop that works.
+        """
+        activity = self.activity
+        phase = self._executor.state["phase"]
+        interrupted = self._executor.interrupt("interrupted by request")
+        return BridgeResponse.success(
+            request.request_id,
+            {
+                "transport": "simul_bridge",
+                "interrupted": interrupted,
+                "was_busy": activity["busy"],
+                "phase": phase,
+                "current_action": activity["current_action"],
+                "busy_for_seconds": activity["busy_for_seconds"],
+            },
         )
 
     def _handle_get_stage_info(self, request: BridgeRequest) -> BridgeResponse:
@@ -470,7 +570,7 @@ class BridgeCommandService:
         """Return consolidated runtime diagnostics."""
         import sys
 
-        info: dict[str, Any] = {"transport": "simul_bridge"}
+        info: dict[str, Any] = {"transport": "simul_bridge", "bridge": self.activity}
 
         try:
             import omni.kit.app
