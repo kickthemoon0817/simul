@@ -122,14 +122,18 @@ def test_timeout_names_the_configured_timeout() -> None:
     assert "30.0" in result["error"]
 
 
-def test_bridge_enabled_keeps_raw_scripts_on_the_vscode_socket() -> None:
-    """The typed bridge stays on the typed control path."""
+def test_bridge_enabled_sends_raw_scripts_through_the_bridge() -> None:
+    """Only the bridge executor can bound or interrupt a script.
+
+    Pinning raw scripts to the stock socket left a runaway loop with no stop
+    and wedged Kit for every client, which is the failure this guards.
+    """
     tools, client = _tools(ScriptResult(success=True, output="{}"), bridge_enabled=True)
 
     asyncio.run(tools.execute_script("print(1)"))
 
-    assert client.execute_vscode_only.await_count == 1
-    assert client.execute.await_count == 0
+    assert client.execute.await_count == 1
+    assert client.execute_vscode_only.await_count == 0
 
 
 def test_a_script_error_payload_is_not_stamped_successful() -> None:

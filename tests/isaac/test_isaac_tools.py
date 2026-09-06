@@ -272,10 +272,10 @@ class TestSceneInspection:
         tools._client.execute.assert_not_called()
         tools._client.execute_vscode_only.assert_not_called()
 
-    def test_get_isaac_stage_info_falls_back_to_vscode_when_typed_bridge_is_unavailable(
+    def test_get_isaac_stage_info_falls_back_to_script_transport_when_typed_bridge_is_unavailable(
         self,
     ) -> None:
-        """Typed bridge fallbacks should use the VS Code socket, not raw bridge exec."""
+        """Typed bridge fallbacks use the script transport, which prefers the bridge executor."""
         tools = _make_tools(
             execute_return=_make_result(
                 {
@@ -297,7 +297,7 @@ class TestSceneInspection:
         assert result["success"] is True
         assert result["stage_url"] == "file:///fallback.usd"
         tools._client.bridge_request.assert_awaited_once_with("get_stage_info", {})
-        tools._client.execute_vscode_only.assert_awaited_once()
+        tools._client.execute.assert_awaited_once()
         tools._client.execute_bridge_script_only.assert_not_called()
 
     def test_raw_script_only_tools_use_vscode_when_bridge_mode_is_enabled(self) -> None:
