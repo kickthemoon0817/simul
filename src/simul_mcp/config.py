@@ -9,17 +9,25 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union, cast
 from functools import lru_cache
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    YamlConfigSettingsSource,
+)
+
+from .resources import find_checkout_root, resource_filesystem_path
 
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_CONFIG_FILE = "config/isaac/default.yaml"
+_CHECKOUT_ROOT: Optional[Path] = find_checkout_root()
+_DEFAULT_CONFIG_FILE: Path = resource_filesystem_path("config", "default.yaml")
 _ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{([^}]+)\}")
+_LOGGER = logging.getLogger(__name__)
 
 
 class ServerConfig(BaseModel):
@@ -183,17 +191,27 @@ class IsaacSimConfig(BaseModel):
         description="Directory where bridge extensions write port discovery files",
     )
 
-    @field_validator("path")
-    @classmethod
-    def validate_isaac_path(cls, v: Optional[str]) -> Optional[str]:
-        """Validate Isaac Sim path if provided."""
-        if v is not None:
-            path = Path(v)
-            if not path.exists():
-                raise ValueError(f"Isaac Sim path does not exist: {v}")
-            if not (path / "python.sh").exists() and not (path / "python.bat").exists():
-                raise ValueError(f"Isaac Sim python executable not found in: {v}")
-        return v
+    @property
+    def path_error(self) -> Optional[str]:
+        """Explain why ``path`` is not a usable Isaac Sim install root.
+
+        A stale ``ISAAC_SIM_PATH`` must not stop the other backends from
+        loading, so the problem is reported here instead of rejecting the
+        model. Callers that actually need the install (``simul-mcp isaac
+        launch``, ``install-bridge``) surface it when they resolve the root.
+
+        Returns:
+            A human-readable problem description, or ``None`` when the path is
+            unset or names a directory holding ``python.sh``/``python.bat``.
+        """
+        if self.path is None:
+            return None
+        root = Path(self.path).expanduser()
+        if not root.exists():
+            return f"Isaac Sim path does not exist: {self.path}"
+        if not (root / "python.sh").exists() and not (root / "python.bat").exists():
+            return f"Isaac Sim python executable not found in: {self.path}"
+        return None
 
     @model_validator(mode="after")
     def _validate_port_range(self) -> "IsaacSimConfig":
@@ -464,8 +482,47 @@ class SecurityConfig(BaseModel):
     burst_size: int = Field(
         default=10, description="Burst size for rate limiting", ge=1
     )
+
+
+class NormalisedYamlSettingsSource(YamlConfigSettingsSource):
+    """YAML settings source that flattens the repo's nested layout first.
+
+    The shipped ``default.yaml`` groups keys the way operators read them
+    (``isaac_sim.bridge.port``) while the Settings model is flat within each
+    section (``isaac_sim.bridge_port``). ``_normalise_settings_payload``
+    bridges the two before pydantic-settings merges this source below the
+    environment.
+    """
+
+    def _read_file(self, file_path: Path) -> Dict[str, Any]:
+        """Load one YAML file and return it in the Settings model shape.
+
+        Args:
+            file_path: YAML file to read; pydantic-settings only calls this for
+                files that exist.
+
+        Returns:
+            The normalised payload, or ``{}`` when the file is unreadable or
+            does not hold a mapping. Unreadable files are logged as warnings.
+        """
+        try:
+            with file_path.open(encoding=self.yaml_file_encoding or "utf-8") as handle:
+                raw = yaml.safe_load(handle)
+        except (OSError, yaml.YAMLError) as exc:
+            _LOGGER.warning("Failed to load config file %s: %s", file_path, exc)
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        return _normalise_settings_payload(raw)
+
+
 class Settings(BaseSettings):
-    """Main settings class that combines all configuration sections."""
+    """Main settings class that combines all configuration sections.
+
+    Value precedence per leaf, highest first: constructor arguments, process
+    environment, ``.env`` file, the YAML file named by ``model_config["yaml_file"]``
+    (set through :meth:`from_yaml`), model defaults.
+    """
 
     # Configuration sections
     server: ServerConfig = Field(default_factory=ServerConfig)
@@ -485,6 +542,66 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> Tuple[PydanticBaseSettingsSource, ...]:
+        """Rank the YAML file below the environment and ``.env``.
+
+        Args:
+            settings_cls: The concrete settings class being built.
+            init_settings: Constructor-argument source.
+            env_settings: Process-environment source.
+            dotenv_settings: ``.env`` file source.
+            file_secret_settings: Secrets-directory source.
+
+        Returns:
+            The sources in priority order, highest first.
+        """
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            NormalisedYamlSettingsSource(settings_cls),
+            file_secret_settings,
+        )
+
+    @classmethod
+    def from_yaml(cls, config_path: Union[str, Path]) -> "Settings":
+        """Build settings backed by a YAML file that the environment still overrides.
+
+        Args:
+            config_path: YAML file in the repo's nested layout. A missing file
+                contributes nothing; callers decide whether that is an error.
+
+        Returns:
+            Settings merged from defaults, the YAML file, ``.env`` and the
+            environment, in increasing precedence.
+        """
+        yaml_backed_config = SettingsConfigDict(**cls.model_config)
+        yaml_backed_config["yaml_file"] = str(config_path)
+        yaml_backed_cls = cast(
+            type[Settings],
+            type(f"{cls.__name__}FromYaml", (cls,), {"model_config": yaml_backed_config}),
+        )
+        return yaml_backed_cls()
+
+    @model_validator(mode="after")
+    def _warn_about_unusable_isaac_path(self) -> "Settings":
+        """Log a stale Isaac Sim install path instead of failing every backend."""
+        if self.isaac_sim.path_error is not None:
+            _LOGGER.warning(
+                "%s. Isaac Sim tools and `simul-mcp isaac launch` report this when they "
+                "need the install; other backends are unaffected.",
+                self.isaac_sim.path_error,
+            )
+        return self
+
 
 def _compact_dict(values: Dict[str, Any]) -> Dict[str, Any]:
     """Drop None values so Settings can keep model defaults."""
@@ -500,13 +617,13 @@ def _coalesce(*values: Any) -> Any:
 
 
 def _resolve_config_file(config_file: Union[str, Path]) -> Path:
-    """Resolve config paths relative to cwd first, then the repo root."""
+    """Resolve config paths relative to cwd first, then the source checkout if any."""
     candidate = Path(os.path.expandvars(str(config_file))).expanduser()
     if candidate.is_absolute():
         return candidate
-    if candidate.exists():
+    if candidate.exists() or _CHECKOUT_ROOT is None:
         return candidate.resolve()
-    return (_PROJECT_ROOT / candidate).resolve()
+    return (_CHECKOUT_ROOT / candidate).resolve()
 
 
 def _expand_string(value: str, env: Dict[str, str]) -> str:
@@ -594,7 +711,8 @@ def _normalise_isaac_instances(value: Any) -> Optional[List[Dict[str, Any]]]:
 def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
     """Flatten the repo's nested YAML layout into the Settings model shape."""
     env = dict(os.environ)
-    env.setdefault("PROJECT_ROOT", str(_PROJECT_ROOT))
+    if _CHECKOUT_ROOT is not None:
+        env.setdefault("PROJECT_ROOT", str(_CHECKOUT_ROOT))
     raw = _expand_placeholders(config_data, env)
 
     server = raw.get("server") or {}
@@ -607,7 +725,6 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
     usd_cache = usd.get("cache") or {}
     usd_files = usd.get("files") or {}
     usd_performance = usd.get("performance") or {}
-    mesh = raw.get("mesh") or {}
     viewport = raw.get("viewport") or {}
     viewport_capture = viewport.get("capture") or {}
     viewport_rendering = viewport.get("rendering") or {}
@@ -615,11 +732,11 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
     logging_cfg = raw.get("logging") or {}
     logging_file = logging_cfg.get("file") or {}
     logging_console = logging_cfg.get("console") or {}
+    logging_audit = logging_cfg.get("audit") or {}
+    logging_structured = logging_cfg.get("structured") or {}
     security = raw.get("security") or {}
     security_sandbox = security.get("sandbox") or {}
     security_rate = security.get("rate_limiting") or {}
-    performance = raw.get("performance") or {}
-    development = raw.get("development") or {}
 
     return _compact_dict(
         {
@@ -772,6 +889,19 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                         logging_cfg.get("console_colored"), logging_console.get("colored")
                     ),
                     "components": logging_cfg.get("components"),
+                    "per_instance": _coalesce(
+                        logging_cfg.get("per_instance"), logging_file.get("per_instance")
+                    ),
+                    "retention_days": _coalesce(
+                        logging_cfg.get("retention_days"), logging_file.get("retention_days")
+                    ),
+                    "audit_enabled": _coalesce(
+                        logging_cfg.get("audit_enabled"), logging_audit.get("enabled")
+                    ),
+                    "audit_path": _coalesce(logging_cfg.get("audit_path"), logging_audit.get("path")),
+                    "structured_enabled": _coalesce(
+                        logging_cfg.get("structured_enabled"), logging_structured.get("enabled")
+                    ),
                 }
             ),
             "security": _compact_dict(
@@ -799,51 +929,37 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-def _load_yaml_settings(config_file: Union[str, Path]) -> Dict[str, Any]:
-    """Load YAML settings from file path and return dict payload."""
-    config_path = _resolve_config_file(config_file)
-    if not config_path.exists():
-        return {}
-
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            config_data = yaml.safe_load(f)
-        if isinstance(config_data, dict):
-            return _normalise_settings_payload(config_data)
-        return {}
-    except Exception as e:
-        logging.getLogger(__name__).warning("Failed to load config file %s: %s", config_path, e)
-        return {}
-
-
 @lru_cache(maxsize=1)
 def _get_cached_settings(cache_key: Tuple[str, Optional[float]]) -> Settings:
     """Load settings with a cache key that changes with path or mtime."""
     config_path, _mtime = cache_key
-    config_data = _load_yaml_settings(config_path)
-    return Settings(**config_data)
+    return Settings.from_yaml(config_path)
 
 
 def get_settings() -> Settings:
-    """Get settings keyed by the resolved config path and file mtime."""
-    config_file = os.getenv("CONFIG_FILE", _DEFAULT_CONFIG_FILE)
+    """Get settings keyed by the resolved config path and file mtime.
+
+    The file is ``$CONFIG_FILE`` when set, otherwise the ``default.yaml``
+    shipped inside the package.
+    """
+    config_file: Union[str, Path] = os.getenv("CONFIG_FILE") or _DEFAULT_CONFIG_FILE
     resolved = _resolve_config_file(config_file)
     try:
-        mtime = resolved.stat().st_mtime
+        mtime: Optional[float] = resolved.stat().st_mtime
     except OSError:
         mtime = None
+        _LOGGER.warning("Config file %s not found; using defaults and the environment", resolved)
     return _get_cached_settings((str(resolved), mtime))
 
 
 def load_config_from_file(config_path: Union[str, Path]) -> Settings:
     """Load configuration from a specific YAML file."""
-    config_path = _resolve_config_file(config_path)
+    resolved = _resolve_config_file(config_path)
 
-    if not config_path.exists():
-        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    if not resolved.exists():
+        raise FileNotFoundError(f"Configuration file not found: {resolved}")
 
-    config_data = _load_yaml_settings(config_path)
-    return Settings(**config_data)
+    return Settings.from_yaml(resolved)
 
 
 def load_settings(config_path: Union[str, Path]) -> Settings:
@@ -853,13 +969,14 @@ def load_settings(config_path: Union[str, Path]) -> Settings:
 
 def validate_settings(settings: Settings) -> List[str]:
     """Validate settings and return list of validation errors."""
-    errors = []
+    errors: List[str] = []
+    relative_root = _CHECKOUT_ROOT or Path.cwd()
 
     # Validate log file directory
     if settings.logging.file_enabled:
         log_path = Path(settings.logging.file_path).expanduser()
         if not log_path.is_absolute():
-            log_path = _PROJECT_ROOT / log_path
+            log_path = relative_root / log_path
         log_dir = log_path.parent
         if not log_dir.exists():
             try:
@@ -867,11 +984,14 @@ def validate_settings(settings: Settings) -> List[str]:
             except Exception as e:
                 errors.append(f"Cannot create log directory {log_dir}: {e}")
 
-    # Validate allowed paths exist
+    # Validate allowed paths exist. Relative entries only name something inside a
+    # source checkout; the sandbox policy drops them everywhere else.
     for path_str in settings.security.allowed_paths:
         path = Path(path_str)
         if not path.is_absolute():
-            path = _PROJECT_ROOT / path
+            if _CHECKOUT_ROOT is None:
+                continue
+            path = _CHECKOUT_ROOT / path
         if not path.exists() and not path_str.startswith("/tmp"):
             errors.append(f"Allowed path does not exist: {path_str}")
 

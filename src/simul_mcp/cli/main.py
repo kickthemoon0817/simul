@@ -436,10 +436,18 @@ def info(
             else:
                 categories["USD / Headless"].append(name)
 
+        isaac_install_path = settings.isaac_sim.path
+        isaac_install_error = settings.isaac_sim.path_error
+
         if is_json_mode():
             data = {
                 "backends": {
-                    "isaac_sim": {"reachable": isaac_reachable, "port": isaac_port},
+                    "isaac_sim": {
+                        "reachable": isaac_reachable,
+                        "port": isaac_port,
+                        "install_path": isaac_install_path,
+                        "install_path_error": isaac_install_error,
+                    },
                     "blender": {"available": blender_available},
                     "usd_headless": {"available": usd_available},
                 },
@@ -462,6 +470,12 @@ def info(
                 else "Isaac Sim tools will retry at call time"
             ),
         )
+        if isaac_install_path is not None:
+            system_table.add_row(
+                "Isaac Sim install",
+                "Unusable" if isaac_install_error else "Found",
+                isaac_install_error or isaac_install_path,
+            )
         system_table.add_row(
             "Blender Runtime",
             "Available" if blender_available else "Not Available",

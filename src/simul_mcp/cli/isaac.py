@@ -340,6 +340,13 @@ def launch(
         )
         return
     root = root.expanduser().resolve()
+    if not root.is_dir():
+        _fail(
+            f"Isaac install root {root} does not exist. Update ISAAC_SIM_PATH or pass --isaac-root.",
+            "InvalidArgument",
+            2,
+        )
+        return
     launcher = root / ("isaac-sim.bat" if sys.platform == "win32" else "isaac-sim.sh")
     if not launcher.is_file():
         _fail(

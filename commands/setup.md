@@ -236,7 +236,9 @@ with NVIDIA RTX GPU).
 5. Verify: `ls "$ISAAC_SIM_PATH/python.sh"` (or `.bat`) succeeds.
 
 6. Tell the user the bridge socket is `localhost:8226`; if they
-   need to change ports, point them at `config/isaac/default.yaml`.
+   need to change ports, set `ISAAC_SIM__SOCKET_PORT` / `ISAAC_SIM__BRIDGE_PORT`
+   in the environment (the environment overrides the packaged default config
+   at `src/simul_mcp/resources/config/default.yaml`).
 
 #### Unreal Engine (selected)
 

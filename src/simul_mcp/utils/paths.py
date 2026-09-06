@@ -8,19 +8,26 @@ next caller forgets.
 Path resolution deliberately matches what the server did before this module
 existed — expand ``$VARS``, expand ``~``, resolve relative paths against the
 project root, then require the result to sit under an allowed root.
+
+The project root is the source checkout when simul runs from one. A wheel
+install has no such root: relative allowlist entries such as ``examples`` name
+nothing there and are dropped, and relative paths passed to tools resolve
+against the working directory instead.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, List, Optional
 
+from ..resources import find_checkout_root
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..config import Settings
 
-# src/simul_mcp/utils/paths.py -> repo root
-_DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_LOGGER = logging.getLogger(__name__)
 
 
 class PathPolicy:
@@ -34,8 +41,16 @@ class PathPolicy:
         project_root: Optional[Path] = None,
     ) -> None:
         self._enabled = enabled
-        self._project_root = project_root or _DEFAULT_PROJECT_ROOT
-        self._allowed_roots = [self.resolve(p) for p in allowed_paths]
+        self._project_root: Optional[Path] = project_root or find_checkout_root()
+        self._allowed_roots: List[Path] = []
+        for allowed_path in allowed_paths:
+            if self._project_root is None and not Path(os.path.expandvars(allowed_path)).expanduser().is_absolute():
+                _LOGGER.info(
+                    "Dropping relative sandbox path %r: no source checkout to resolve it against",
+                    allowed_path,
+                )
+                continue
+            self._allowed_roots.append(self.resolve(allowed_path))
 
     @classmethod
     def from_settings(
@@ -67,7 +82,7 @@ class PathPolicy:
         expanded = os.path.expandvars(path_str)
         candidate = Path(expanded).expanduser()
         if not candidate.is_absolute():
-            candidate = self._project_root / candidate
+            candidate = (self._project_root or Path.cwd()) / candidate
         try:
             return candidate.resolve()
         except Exception:

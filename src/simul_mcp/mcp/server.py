@@ -45,6 +45,7 @@ from ..adapters import (
 )
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
+from ..resources import find_checkout_root, resource
 from ..utils.paths import PathPolicy
 from ..utils.timing import RateLimiter
 from .registration._helpers import apply_success_from_error
@@ -153,9 +154,8 @@ class SimulMCPServer(LoggerMixin):
         """
         self.settings = settings or get_settings()
         self._backends = backends  # None means "all available"
-        self._project_root = Path(__file__).resolve().parents[3]
         self._path_policy = PathPolicy.from_settings(
-            self.settings, project_root=self._project_root
+            self.settings, project_root=find_checkout_root()
         )
         self._allowed_paths = self._resolve_allowed_paths()
 
@@ -654,17 +654,26 @@ class SimulMCPServer(LoggerMixin):
         return None
 
     def _register_resources(self) -> None:
-        """Register MCP resources for agent context."""
-        skills_path = self._project_root / "skills.md"
-        docs_api_dir = self._project_root / "docs" / "api"
-        resource = getattr(self.mcp, "resource", None)
-        if not callable(resource):
+        """Register MCP resources for agent context.
+
+        The documents ship inside the package (``simul_mcp/resources``) so a
+        wheel install serves them the same way an editable checkout does.
+        """
+        register_resource = getattr(self.mcp, "resource", None)
+        if not callable(register_resource):
             self.logger.debug(
                 "FastMCP resource API unavailable; skipping resource registration"
             )
             return
 
-        @resource(
+        def _read_packaged_doc(*parts: str) -> str:
+            """Return a packaged Markdown document, or a note naming what is missing."""
+            document = resource(*parts)
+            if document.is_file():
+                return document.read_text(encoding="utf-8")
+            return f"{'/'.join(parts)} is missing from the simul_mcp package."
+
+        @register_resource(
             "simul://isaac-sim/skills",
             name="Isaac Sim Scripting Skills",
             description=(
@@ -674,71 +683,63 @@ class SimulMCPServer(LoggerMixin):
             ),
         )
         def isaac_sim_skills() -> str:
-            if skills_path.is_file():
-                return skills_path.read_text(encoding="utf-8")
-            return "skills.md not found at project root."
+            return _read_packaged_doc("skills.md")
 
-        def _make_api_reader(fpath: Path) -> str:
-            """Read an API reference doc from docs/api/."""
-            if fpath.is_file():
-                return fpath.read_text(encoding="utf-8")
-            return f"{fpath.name} not found."
-
-        @resource(
+        @register_resource(
             "simul://isaac-sim/api/core",
             name="Isaac Sim Core API",
             description="SimulationContext, PhysicsContext, Articulation, RigidPrim, XFormPrim reference.",
         )
         def api_core() -> str:
-            return _make_api_reader(docs_api_dir / "core.md")
+            return _read_packaged_doc("docs", "api", "core.md")
 
-        @resource(
+        @register_resource(
             "simul://isaac-sim/api/sensors",
             name="Isaac Sim Sensors API",
             description="Camera, IMU, Contact, LiDAR (PhysX/RTX), Proximity sensor reference.",
         )
         def api_sensors() -> str:
-            return _make_api_reader(docs_api_dir / "sensors.md")
+            return _read_packaged_doc("docs", "api", "sensors.md")
 
-        @resource(
+        @register_resource(
             "simul://isaac-sim/api/physics",
             name="Isaac Sim Physics API",
             description="PhysX interface, tensor API, collision queries, CCT, vehicle physics reference.",
         )
         def api_physics() -> str:
-            return _make_api_reader(docs_api_dir / "physics.md")
+            return _read_packaged_doc("docs", "api", "physics.md")
 
-        @resource(
+        @register_resource(
             "simul://isaac-sim/api/replicator",
             name="Isaac Sim Replicator API",
             description="Annotators, Writers, Orchestrator, domain randomization reference.",
         )
         def api_replicator() -> str:
-            return _make_api_reader(docs_api_dir / "replicator.md")
+            return _read_packaged_doc("docs", "api", "replicator.md")
 
-        @resource(
+        @register_resource(
             "simul://isaac-sim/api/robots",
             name="Isaac Sim Robots API",
             description="Manipulators, grippers, IK, motion planning, wheeled robots reference.",
         )
         def api_robots() -> str:
-            return _make_api_reader(docs_api_dir / "robots.md")
+            return _read_packaged_doc("docs", "api", "robots.md")
 
-        @resource(
+        @register_resource(
             "simul://isaac-sim/api/rendering",
             name="Isaac Sim Rendering API",
             description="Viewport, HydraTexture, RTX post-processing, capture reference.",
         )
         def api_rendering() -> str:
-            return _make_api_reader(docs_api_dir / "rendering.md")
+            return _read_packaged_doc("docs", "api", "rendering.md")
 
-        @resource(
+        @register_resource(
             "simul://isaac-sim/api/assets",
             name="Isaac Sim Assets API",
             description="URDF/MJCF import, Cloner, OmniGraph nodes reference.",
         )
         def api_assets() -> str:
-            return _make_api_reader(docs_api_dir / "assets.md")
+            return _read_packaged_doc("docs", "api", "assets.md")
 
     def _switch_active_instance(self, name: str) -> None:
         """

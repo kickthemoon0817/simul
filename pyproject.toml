@@ -55,9 +55,9 @@ blender = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/khemoo/simul-mcp"
-Repository = "https://github.com/khemoo/simul-mcp"
-Issues = "https://github.com/khemoo/simul-mcp/issues"
+Homepage = "https://github.com/kickthemoon0817/simul"
+Repository = "https://github.com/kickthemoon0817/simul"
+Issues = "https://github.com/kickthemoon0817/simul/issues"
 
 [project.scripts]
 simul = "simul_mcp.cli.main:app"
@@ -69,6 +69,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "simul_mcp" = ["py.typed"]
 "simul_mcp.bridge_ext" = ["khemoo.simul.mcp/**/*"]
+"simul_mcp.resources" = ["skills.md", "config/*.yaml", "docs/api/*.md"]
 
 [tool.setuptools.exclude-package-data]
 # Bytecode lives only inside __pycache__/ on Python 3 — one glob covers

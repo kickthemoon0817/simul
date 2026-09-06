@@ -121,8 +121,8 @@ uv --directory /abs/path/to/simul run simul-mcp server
 If you prefer a globally installed entrypoint, `simul-mcp server` also works
 after installing the package into your environment.
 
-The `skills.md` file in this repo is exposed automatically by the MCP server as
-the `simul://isaac-sim/skills` resource. You do not need to install a separate
+The `src/simul_mcp/resources/skills.md` file ships inside the package and is exposed
+automatically by the MCP server as the `simul://isaac-sim/skills` resource. You do not need to install a separate
 agent-side skill package to use it.
 
 ### Claude Code
@@ -185,7 +185,7 @@ for example:
   "args": [
     "--directory", "/abs/path/to/simul",
     "run", "simul-mcp", "server",
-    "--config", "config/isaac/default.yaml"
+    "--config", "/abs/path/to/your-config.yaml"
   ]
 }
 ```
@@ -308,8 +308,8 @@ simul-mcp server
 simul-mcp server --backends unreal
 simul-mcp server --backends isaac,usd
 
-# Start with custom configuration
-simul-mcp server --config config/isaac/default.yaml
+# Start with custom configuration (copy src/simul_mcp/resources/config/default.yaml to start)
+simul-mcp server --config /path/to/your-config.yaml
 
 # Start with verbose logging
 simul-mcp server --verbose
@@ -321,7 +321,7 @@ simul-mcp info
 simul-mcp usd info /path/to/scene.usd
 
 # Validate configuration file
-simul-mcp validate-config config/isaac/default.yaml
+simul-mcp validate-config /path/to/your-config.yaml
 
 # Show version information
 simul-mcp version
@@ -402,7 +402,11 @@ with adapter.create_session() as session:
 
 ## Configuration
 
-The server uses YAML configuration files. See `config/isaac/default.yaml` for all available options:
+The server loads the `default.yaml` shipped inside the package
+(`src/simul_mcp/resources/config/default.yaml`) unless `CONFIG_FILE` or `--config`
+names another file. Every key can be overridden per leaf by a `SECTION__KEY`
+environment variable, and the environment always wins over the file. See the
+packaged file for all available options:
 
 ```yaml
 server:
@@ -661,11 +665,8 @@ simul-mcp/
 ├── .env.example           # Environment variables template
 ├── .gitignore            # Git ignore rules
 ├── Makefile              # Development tasks
-├── config/               # Configuration files
-│   └── isaac/            # Isaac Sim configuration
-│       ├── default.yaml  # Default configuration
-│       ├── logging.yaml  # Logging configuration
-│       └── kits/         # Isaac Sim Kit configurations
+├── config/               # Repo-only configuration
+│   └── isaac/kits/       # Isaac Sim Kit configurations
 ├── scripts/              # Shell scripts
 │   └── isaac/            # Isaac Sim helpers
 │       ├── run_kit_mcp.sh   # Linux/macOS launcher
@@ -675,6 +676,10 @@ simul-mcp/
 │   ├── __init__.py       # Package initialization
 │   ├── config.py         # Configuration management
 │   ├── logging.py        # Logging setup
+│   ├── resources/        # Data shipped in the wheel
+│   │   ├── skills.md     # Isaac Sim scripting reference (MCP resource)
+│   │   ├── docs/api/     # Isaac Sim API references (MCP resources)
+│   │   └── config/       # default.yaml + logging.yaml
 │   ├── usd/             # USD operations
 │   ├── adapters/        # Runtime adapters
 │   ├── mcp/             # MCP server implementation

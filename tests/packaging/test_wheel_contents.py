@@ -29,6 +29,8 @@ too slow for the fast unit loop. Release CI should run
 from __future__ import annotations
 
 import functools
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -229,3 +231,111 @@ def test_wheel_extension_toml_version_matches_package(tmp_path: Path) -> None:
         f"This is exactly the iter11 lockstep failure mode the bundling "
         f"was supposed to make impossible."
     )
+
+
+_API_DOCS = ("core", "sensors", "physics", "replicator", "robots", "rendering", "assets")
+
+
+def test_wheel_ships_packaged_resources(tmp_path: Path) -> None:
+    """The MCP resources and default config must travel inside the wheel.
+
+    ``skills.md``, the ``docs/api`` references and the two YAML files are
+    read through ``importlib.resources`` at runtime; a wheel missing any of
+    them serves "not found" resources and default-only settings to every
+    pip user without a build-time signal.
+    """
+    wheel = _run_build(tmp_path)
+
+    with zipfile.ZipFile(wheel) as zf:
+        names = zf.namelist()
+
+    required = [
+        "simul_mcp/resources/__init__.py",
+        "simul_mcp/resources/skills.md",
+        "simul_mcp/resources/config/default.yaml",
+        "simul_mcp/resources/config/logging.yaml",
+    ] + [f"simul_mcp/resources/docs/api/{doc}.md" for doc in _API_DOCS]
+    missing = [r for r in required if r not in names]
+    assert not missing, (
+        f"Packaged resources are incomplete in wheel {wheel.name}. "
+        f"Missing entries: {missing}\n"
+        f"Got resources entries: {sorted(n for n in names if '/resources/' in n)}"
+    )
+
+
+def _install_wheel_into_fresh_venv(tmp_path: Path, wheel: Path) -> Path:
+    """Create a venv holding only the wheel and the imports ``simul_mcp`` needs.
+
+    Returns the venv's python executable. Uses uv when present (no network
+    once the cache is warm), otherwise stdlib venv plus pip.
+    """
+    venv_dir = tmp_path / "venv"
+    python = venv_dir / "bin" / "python"
+    runtime_deps = ["pydantic", "pydantic-settings", "pyyaml", "numpy"]
+    if shutil.which("uv"):
+        subprocess.run(["uv", "venv", str(venv_dir)], check=True, capture_output=True, text=True, timeout=120)
+        pip_install = ["uv", "pip", "install", "--python", str(python)]
+    else:
+        subprocess.run(
+            ["python", "-m", "venv", str(venv_dir)], check=True, capture_output=True, text=True, timeout=120
+        )
+        pip_install = [str(python), "-m", "pip", "install"]
+    # The wheel goes in without its dependency closure (usd-core, fastmcp, ...)
+    # so the venv stays small; only what ``import simul_mcp`` touches follows.
+    for install_cmd in (pip_install + ["--no-deps", str(wheel)], pip_install + runtime_deps):
+        proc = subprocess.run(install_cmd, capture_output=True, text=True, timeout=600)
+        assert proc.returncode == 0, _build_error_msg("wheel install", proc)
+    return python
+
+
+_WHEEL_SMOKE_SCRIPT = """
+import json
+from simul_mcp.config import Settings, get_settings
+from simul_mcp.resources import find_checkout_root, resource
+from simul_mcp.utils.paths import PathPolicy
+
+settings = get_settings()
+checkout_root = find_checkout_root()
+print(json.dumps({
+    "checkout_root": None if checkout_root is None else str(checkout_root),
+    "skills_head": resource("skills.md").read_text(encoding="utf-8")[:400],
+    "api_core_is_file": resource("docs", "api", "core.md").is_file(),
+    "socket_protocol": settings.isaac_sim.socket_protocol,
+    "cors_origins": settings.server.cors_origins,
+    "allowed_roots": [str(root) for root in PathPolicy.from_settings(settings).allowed_roots],
+    "bare_settings_ok": isinstance(Settings(), Settings),
+}))
+"""
+
+
+def test_wheel_install_serves_settings_and_resources(tmp_path: Path) -> None:
+    """Install the wheel into an empty venv and use it away from the checkout.
+
+    Runs from ``tmp_path`` so no repo file is reachable by accident: the
+    packaged default YAML must load, the environment must still override
+    it, ``skills.md`` must be readable through ``importlib.resources`` and
+    the sandbox allowlist must not point at ``lib/python3.x``.
+    """
+    wheel = _run_build(tmp_path)
+    python = _install_wheel_into_fresh_venv(tmp_path, wheel)
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ISAAC_SIM", "CONFIG_FILE", "SERVER__"))}
+    env["ISAAC_SIM__SOCKET_PROTOCOL"] = "vscode"
+    proc = subprocess.run(
+        [str(python), "-c", _WHEEL_SMOKE_SCRIPT],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, f"wheel smoke script failed:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert payload["checkout_root"] is None
+    assert "execute_isaac_script" in payload["skills_head"]
+    assert payload["api_core_is_file"] is True
+    assert payload["socket_protocol"] == "vscode"
+    assert payload["cors_origins"][-1] == "http://localhost:8229", "packaged default.yaml was not loaded"
+    assert payload["allowed_roots"] == ["/tmp/simul_mcp"]
+    assert payload["bare_settings_ok"] is True
