@@ -152,7 +152,8 @@ class SimulationMixin:
         Step the simulation forward by N physics steps.
 
         Args:
-            num_steps: Number of simulation steps to advance.
+            num_steps: Number of app update frames to advance (one physics
+                step each at the default physics rate).
 
         Returns:
             Dict with current time after stepping.

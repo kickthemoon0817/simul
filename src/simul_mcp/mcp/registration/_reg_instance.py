@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 from fastmcp.tools.tool import ToolResult
 
 from ..schemas.common import ErrorResponse
+from ._helpers import with_param_descriptions
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -51,6 +52,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions()
     async def list_isaac_instances(
         scan: bool = True,
         my_purpose: Optional[str] = None,
@@ -143,6 +145,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions()
     async def set_active_isaac_instance(
         instance_name: str,
         purpose: Optional[str] = None,
@@ -250,6 +253,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions()
     async def claim_isaac_instance(
         purpose: str,
         agent_id: Optional[str] = None,
@@ -327,6 +331,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions()
     async def release_isaac_instance(
         agent_id: Optional[str] = None,
     ) -> ToolResult:

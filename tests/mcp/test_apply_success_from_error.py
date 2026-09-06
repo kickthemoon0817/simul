@@ -103,3 +103,24 @@ def test_parse_python_json_error_only_shape_marks_false() -> None:
     apply_success_from_error(payload)
     assert payload["success"] is False
     assert payload["error"] == "No JSON output from Python execution"
+
+
+def test_suffixed_error_key_marks_success_false() -> None:
+    """A script that reports a partial failure under ``<section>_error``
+    while returning the sections that worked is not a success."""
+    payload = {"render_var_templates": ["LdrColor"], "syntheticdata_error": "boom"}
+    apply_success_from_error(payload)
+    assert payload["success"] is False
+
+
+def test_suffixed_error_key_set_to_none_marks_success_true() -> None:
+    payload = {"timeline": {"is_playing": False}, "timeline_error": None}
+    apply_success_from_error(payload)
+    assert payload["success"] is True
+
+
+def test_plural_errors_key_does_not_demote() -> None:
+    """``attach_errors`` is a per-item report, not a failure of the call."""
+    payload = {"aovs": {"HdrColor": {}}, "attach_errors": {"Bogus": "unknown annotator"}}
+    apply_success_from_error(payload)
+    assert payload["success"] is True

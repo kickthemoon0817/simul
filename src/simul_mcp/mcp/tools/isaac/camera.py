@@ -90,32 +90,44 @@ class CameraMixin:
         """)
         return await self._execute_json_script(script)
 
-    async def list_isaac_cameras(self) -> Dict[str, Any]:
+    async def list_isaac_cameras(
+        self, max_results: int = 200, offset: int = 0
+    ) -> Dict[str, Any]:
         """
         List all camera prims in the current Isaac Sim stage.
 
+        Args:
+            max_results: Maximum number of cameras to return per page.
+                Clamped to [1, 1000]; the effective cap is reported as
+                applied_limit.
+            offset: Number of cameras to skip before the page starts; pass
+                the previous page's next_offset to continue.
+
         Returns:
-            Dict with list of cameras with paths and basic parameters.
+            Dict with a page of cameras (path, focal length, projection), the
+            total count, and the active viewport camera.
         """
-        script = textwrap.dedent("""\
+        max_results = max(1, min(max_results, 1000))
+        offset = max(0, offset)
+        script = textwrap.dedent(f"""\
             import json
             import omni.usd
             from pxr import Usd, UsdGeom
 
             stage = omni.usd.get_context().get_stage()
             if stage is None:
-                print(json.dumps({"error": "No stage is currently open"}))
+                print(json.dumps({{"error": "No stage is currently open"}}))
             else:
                 cameras = []
                 for p in stage.Traverse():
                     if p.IsA(UsdGeom.Camera):
                         cam = UsdGeom.Camera(p)
-                        cameras.append({
+                        cameras.append({{
                             "path": str(p.GetPath()),
                             "name": p.GetName(),
                             "focal_length": cam.GetFocalLengthAttr().Get(),
                             "projection": cam.GetProjectionAttr().Get(),
-                        })
+                        }})
                 active_cam = None
                 try:
                     import omni.kit.viewport.utility as vp_util
@@ -124,11 +136,20 @@ class CameraMixin:
                         active_cam = str(vp_api.camera_path)
                 except Exception:
                     pass
-                print(json.dumps({
-                    "count": len(cameras),
+                offset = {offset}
+                limit = {max_results}
+                page = cameras[offset:offset + limit]
+                truncated = offset + len(page) < len(cameras)
+                print(json.dumps({{
+                    "count": len(page),
+                    "total": len(cameras),
+                    "offset": offset,
+                    "applied_limit": limit,
+                    "truncated": truncated,
+                    "next_offset": offset + len(page) if truncated else None,
                     "active_camera": active_cam,
-                    "cameras": cameras,
-                }))
+                    "cameras": page,
+                }}))
         """)
         return await self._execute_json_script(script)
 
@@ -142,8 +163,9 @@ class CameraMixin:
         Set camera position and/or look-at target.
 
         Args:
-            position: Camera position as [x, y, z].
-            target: Look-at target position as [x, y, z].
+            position: Camera position as [x, y, z] in world-space stage units
+                (metres by default; Isaac Sim stages are Z-up).
+            target: Look-at target as [x, y, z] in world-space stage units.
             camera_path: Path to camera prim. None uses active viewport camera.
 
         Returns:

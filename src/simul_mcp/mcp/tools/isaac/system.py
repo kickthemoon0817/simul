@@ -30,22 +30,45 @@ class SystemMixin:
         self,
         enabled_only: bool = True,
         search: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
         List extensions registered in the running Isaac Sim instance.
 
         Args:
             enabled_only: If True, return only enabled extensions.
-            search: Optional substring filter on extension ID.
+            search: Optional case-insensitive substring filter on the
+                extension ID.
+            limit: Maximum number of extensions to return per page. Clamped
+                to [1, 1000]; the effective cap is reported as applied_limit.
+            offset: Number of matching extensions to skip before the page
+                starts; pass the previous page's next_offset to continue.
 
         Returns:
-            Dict with extensions list, each containing id and enabled status.
+            Dict with a page of extensions (id, enabled, version string),
+            sorted by id, plus the total number of matches.
         """
         _enabled_only = repr(enabled_only)
         _search = repr(search)
+        limit = max(1, min(limit, 1000))
+        offset = max(0, offset)
         script = textwrap.dedent(f"""\
             import json
             import omni.kit.app
+
+            def _version_string(version):
+                # Kit reports versions as [major, minor, patch, prerelease, build];
+                # render them the way the id suffix spells them.
+                if isinstance(version, (list, tuple)):
+                    parts = list(version)
+                    text = ".".join(str(part) for part in parts[:3])
+                    if len(parts) > 3 and parts[3]:
+                        text += "-" + str(parts[3])
+                    if len(parts) > 4 and parts[4]:
+                        text += "+" + str(parts[4])
+                    return text
+                return str(version) if version is not None else ""
 
             ext_manager = omni.kit.app.get_app().get_extension_manager()
             raw = ext_manager.get_extensions()
@@ -63,13 +86,22 @@ class SystemMixin:
                 extensions.append({{
                     "id": ext_id,
                     "enabled": enabled,
-                    "version": ext.get("version", ""),
+                    "version": _version_string(ext.get("version", "")),
                 }})
 
             extensions.sort(key=lambda e: e["id"])
+            offset = {offset}
+            limit = {limit}
+            page = extensions[offset:offset + limit]
+            truncated = offset + len(page) < len(extensions)
             print(json.dumps({{
-                "count": len(extensions),
-                "extensions": extensions,
+                "count": len(page),
+                "total": len(extensions),
+                "offset": offset,
+                "applied_limit": limit,
+                "truncated": truncated,
+                "next_offset": offset + len(page) if truncated else None,
+                "extensions": page,
             }}))
         """)
         return await self._execute_json_script(script)

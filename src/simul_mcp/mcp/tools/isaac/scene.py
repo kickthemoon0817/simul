@@ -20,6 +20,28 @@ from ._shared import (
 )
 
 
+# Prefix for every generated script that counts prims. get_isaac_scene_summary
+# and get_isaac_scene_stats embed the same generator so their totals and type
+# labels agree: every prim Usd.PrimRange visits under the root with the default
+# predicate (active, defined, loaded, non-abstract), minus the pseudo-root,
+# which is a container and not a scene prim.
+COUNTED_PRIMS_HELPER = textwrap.dedent("""\
+    from pxr import Usd as _CountUsd
+
+    def _counted_prims(stage, root_path):
+        root = stage.GetPrimAtPath(root_path)
+        if not root.IsValid():
+            return
+        for prim in _CountUsd.PrimRange(root):
+            if prim.IsPseudoRoot():
+                continue
+            yield prim
+
+    def _prim_type_label(prim):
+        return prim.GetTypeName() or "Typeless"
+""")
+
+
 class SceneInspectionMixin:
     # ------------------------------------------------------------------
     # Phase 1: Scene Inspection (Read-only)
@@ -82,32 +104,44 @@ class SceneInspectionMixin:
         self,
         root_path: str = "/",
         prim_type: Optional[str] = None,
-        max_depth: int = -1,
-        max_items: int = 100,
+        max_depth: int = 5,
+        max_results: int = 100,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
         List prims in the current Isaac Sim stage with optional filtering.
 
         Args:
-            root_path: Root prim path to start traversal from.
+            root_path: USD prim path to start the traversal from.
             prim_type: Filter by USD prim type name (e.g. "Mesh", "Xform").
-            max_depth: Maximum traversal depth (-1 for unlimited).
-            max_items: Maximum number of prims to return (1–10000).
+            max_depth: Maximum traversal depth below root_path; -1 for
+                unlimited.
+            max_results: Maximum number of prims to return per page. Clamped
+                to [1, 1000]; the effective cap is reported as applied_limit.
+            offset: Number of matching prims to skip before the page starts;
+                pass the previous page's next_offset to continue.
 
         Returns:
-            Dict with list of prim entries (path, type, name, active).
+            Dict with a page of prim entries (path, type, name, active).
         """
-        max_items = max(1, min(max_items, 1000))
+        max_results = max(1, min(max_results, 1000))
+        offset = max(0, offset)
         bridge_result = await self._execute_bridge_action(
             "list_prims",
             {
                 "root_path": root_path,
                 "prim_type": prim_type,
                 "max_depth": max_depth,
-                "max_items": max_items,
+                "max_results": max_results,
+                # A bridge published before paging reads this key and ignores
+                # the two above; sending it keeps the cap honoured there.
+                "max_items": max_results,
+                "offset": offset,
             },
         )
-        if bridge_result is not None:
+        # That older bridge also drops the offset, so its answer only stands
+        # for the first page; later pages fall through to the script path.
+        if bridge_result is not None and (offset == 0 or "offset" in bridge_result):
             return bridge_result
 
         _root_path = _pyval(root_path)
@@ -128,7 +162,10 @@ class SceneInspectionMixin:
                     prims = []
                     type_filter = {_prim_type}
                     max_d = {max_depth}
-                    max_n = {max_items}
+                    max_n = {max_results}
+                    offset = {offset}
+                    matched = 0
+                    truncated = False
                     root_depth = len(str(root.GetPath()).rstrip("/").split("/"))
 
                     # continue skips emitting a prim but still descends its
@@ -145,19 +182,27 @@ class SceneInspectionMixin:
                         ptype = p.GetTypeName()
                         if type_filter and ptype != type_filter:
                             continue
+                        matched += 1
+                        if matched <= offset:
+                            continue
+                        if len(prims) >= max_n:
+                            truncated = True
+                            break
                         prims.append({{
                             "path": path_str,
                             "type": ptype,
                             "name": p.GetName(),
                             "active": p.IsActive(),
                         }})
-                        if len(prims) >= max_n:
-                            break
                     print(json.dumps({{
                         "root_path": {_root_path},
                         "type_filter": type_filter or None,
+                        "max_depth": max_d,
                         "count": len(prims),
-                        "truncated": len(prims) >= max_n,
+                        "offset": offset,
+                        "applied_limit": max_n,
+                        "truncated": truncated,
+                        "next_offset": offset + len(prims) if truncated else None,
                         "prims": prims,
                     }}))
         """)
@@ -375,24 +420,39 @@ class SceneInspectionMixin:
 
     async def search_isaac_prims(
         self,
+        query: str,
         search_type: str = "type",
-        query: str = "Mesh",
         root_path: str = "/",
         max_results: int = 100,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
-        Search for prims by type name or name pattern.
+        Search for prims by type name or name substring.
 
         Args:
-            search_type: "type" to match prim type, "name" to match prim name.
-            query: Type name (e.g. "Mesh") or name substring to search for.
-            root_path: Root path to search under.
-            max_results: Maximum results to return.
+            query: Exact prim type name (e.g. "Mesh") when search_type is
+                "type", or a case-insensitive name substring when it is
+                "name".
+            search_type: "type" to match the prim type, "name" to match the
+                prim name.
+            root_path: USD prim path to search under.
+            max_results: Maximum number of matches to return per page.
+                Clamped to [1, 1000]; the effective cap is reported as
+                applied_limit.
+            offset: Number of matches to skip before the page starts; pass
+                the previous page's next_offset to continue.
 
         Returns:
-            Dict with matching prim paths and types.
+            Dict with a page of matching prim paths and types.
         """
-        max_results = max(1, min(max_results, 10000))
+        if not query or not query.strip():
+            return ErrorResponse(
+                error="query is required: a prim type name for search_type='type' "
+                "or a name substring for search_type='name'",
+                error_type="ValueError",
+            ).model_dump()
+        max_results = max(1, min(max_results, 1000))
+        offset = max(0, offset)
         bridge_result = await self._execute_bridge_action(
             "search_prims",
             {
@@ -400,9 +460,12 @@ class SceneInspectionMixin:
                 "query": query,
                 "root_path": root_path,
                 "max_results": max_results,
+                "offset": offset,
             },
         )
-        if bridge_result is not None:
+        # A bridge published before paging drops the offset, so its answer
+        # only stands for the first page; later pages use the script path.
+        if bridge_result is not None and (offset == 0 or "offset" in bridge_result):
             return bridge_result
 
         _root_path = _pyval(root_path)
@@ -425,21 +488,34 @@ class SceneInspectionMixin:
                     search_type = {_search_type}
                     query = {_query}
                     max_r = {max_results}
+                    offset = {offset}
+                    matched = 0
+                    truncated = False
                     for p in Usd.PrimRange(root):
                         if search_type == "type":
-                            if p.GetTypeName() == query:
-                                matches.append({{"path": str(p.GetPath()), "type": p.GetTypeName(), "name": p.GetName()}})
+                            hit = p.GetTypeName() == query
                         elif search_type == "name":
-                            if query.lower() in p.GetName().lower():
-                                matches.append({{"path": str(p.GetPath()), "type": p.GetTypeName(), "name": p.GetName()}})
+                            hit = query.lower() in p.GetName().lower()
+                        else:
+                            hit = False
+                        if not hit:
+                            continue
+                        matched += 1
+                        if matched <= offset:
+                            continue
                         if len(matches) >= max_r:
+                            truncated = True
                             break
+                        matches.append({{"path": str(p.GetPath()), "type": p.GetTypeName(), "name": p.GetName()}})
                     print(json.dumps({{
                         "search_type": search_type,
                         "query": query,
                         "root_path": {_root_path},
                         "count": len(matches),
-                        "truncated": len(matches) >= max_r,
+                        "offset": offset,
+                        "applied_limit": max_r,
+                        "truncated": truncated,
+                        "next_offset": offset + len(matches) if truncated else None,
                         "matches": matches,
                     }}))
         """)
@@ -452,8 +528,9 @@ class SceneInspectionMixin:
 
         Returns:
             Dict with prim counts by type, total prims, hierarchy depth, etc.
+            Prims are counted the same way as get_isaac_scene_stats.
         """
-        script = textwrap.dedent("""\
+        script = COUNTED_PRIMS_HELPER + textwrap.dedent("""\
             import json
             import omni.usd
             from pxr import Usd, UsdGeom, UsdPhysics
@@ -468,9 +545,9 @@ class SceneInspectionMixin:
                 has_physics = False
                 has_animation = stage.GetEndTimeCode() > stage.GetStartTimeCode()
 
-                for p in stage.Traverse():
+                for p in _counted_prims(stage, "/"):
                     total += 1
-                    t = p.GetTypeName() or "Typeless"
+                    t = _prim_type_label(p)
                     type_counts[t] = type_counts.get(t, 0) + 1
                     depth = len(str(p.GetPath()).split("/")) - 1
                     if depth > max_depth:

@@ -8,6 +8,7 @@ from ....adapters import IsaacSocketClient, ScriptResult
 from ....config import Settings, get_settings
 from ....logging import LoggerMixin
 from ....utils.paths import PathPolicy
+from ...registration._helpers import apply_success_from_error
 from ...schemas.common import ErrorResponse
 from ._shared import (
     BULK_GEOMETRY_ATTRIBUTES,
@@ -167,22 +168,16 @@ class IsaacScriptBase(LoggerMixin):
 
         try:
             data: Dict[str, Any] = json.loads(output)
-            # Wrapper-level success-flag normalization. If the script
-            # already set `success` explicitly, honour it. Otherwise:
-            # presence of `error` ⇒ failure (this closes the issue #35
-            # shape across every Isaac tool whose script emits only an
-            # error key — pre-fix, ~30+ such sites all returned the
-            # misleading `{"error": "...", "success": true}` payload).
-            # No `error` and no explicit `success` ⇒ success.
-            if "success" not in data:
-                data["success"] = "error" not in data
-            return data
         except json.JSONDecodeError as exc:
             return ErrorResponse(
                 error=f"Failed to parse script output as JSON: {exc}",
                 error_type="JSONDecodeError",
                 details={"raw_output": output[:2000]},
             ).model_dump()
+        # A script that sets `success` itself is trusted; otherwise `error`
+        # or any `*_error` key marks the call failed, so a partial result
+        # (`syntheticdata_error` beside a valid listing) is not reported green.
+        return apply_success_from_error(data)
 
     async def _execute_bridge_action(
         self, action: str, payload: Optional[Dict[str, Any]] = None
@@ -232,8 +227,9 @@ class IsaacScriptBase(LoggerMixin):
                     error="Bridge response payload must be an object.",
                     error_type="BridgeProtocolError",
                 ).model_dump()
-            result_payload.setdefault("success", True)
-            return result_payload
+            # Same envelope rule as the script path: a typed action that
+            # reports `timeline_error` beside its other sections is a failure.
+            return apply_success_from_error(result_payload)
 
         error = response.get("error", {})
         error_name = str(error.get("name", "BridgeError"))
