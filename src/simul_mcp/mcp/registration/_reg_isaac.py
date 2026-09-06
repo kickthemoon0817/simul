@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from fastmcp.tools.tool import ToolResult
 
-from ..schemas.common import ErrorResponse
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -262,11 +261,15 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         name="capture_isaac_viewport",
         description=(
             "Capture the current viewport to a PNG on the Isaac Sim host and "
-            "return its path. Pass inline=true to also receive base64 image "
-            "data, which is only included for small captures."
+            "return its path. Writes the PNG under the capture directory "
+            "(viewport.capture_dir, default <allowed root>/captures) and reclaims "
+            "the oldest captures there; the directory must be inside the "
+            "configured sandbox (security.allowed_paths). Pass inline=true to "
+            "also receive base64 image data, which is only included for small "
+            "captures."
         ),
         annotations=server._tool_annotations(
-            read_only=True, idempotent=True, open_world=True
+            read_only=False, idempotent=True, open_world=True
         ),
     )
     async def capture_isaac_viewport(
@@ -367,11 +370,11 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="set_isaac_prim_attribute",
         description=(
-            "Set an arbitrary attribute value on a prim. "
-            "The attribute must already exist."
+            "Set an arbitrary attribute value on a prim, overwriting its "
+            "current value. The attribute must already exist."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True
+            read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
     async def set_isaac_prim_attribute(
@@ -767,7 +770,11 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="open_isaac_stage",
-        description="Open a USD stage file in Isaac Sim.",
+        description=(
+            "Open a USD stage file in Isaac Sim. Paths must be inside the "
+            "configured sandbox (security.allowed_paths); omniverse:// URLs are "
+            "allowed when their scheme is in security.allowed_url_schemes."
+        ),
         annotations=server._tool_annotations(
             read_only=False,
             idempotent=True,
@@ -776,12 +783,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         ),
     )
     async def open_isaac_stage(file_path: str) -> ToolResult:
-        if not server._is_path_allowed(file_path):
-            return ErrorResponse(
-                error="File path is not allowed by sandbox policy",
-                error_type="SandboxError",
-                details={"file_path": file_path},
-            ).model_dump()
+        denial = server._sandbox_denial(file_path)
+        if denial is not None:
+            return denial
         return await server._exec_isaac(
             "open_isaac_stage",
             server._isaac_tools.open_isaac_stage(file_path=file_path),
@@ -790,22 +794,22 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="save_isaac_stage",
         description=(
-            "Save the current stage. Optionally provide a file path "
-            "to save-as to a new location."
+            "Save the current stage, overwriting the file on disk. Optionally "
+            "provide a file path to save-as to a new location. Paths must be "
+            "inside the configured sandbox (security.allowed_paths); writes to "
+            "URLs are refused unless the scheme is in "
+            "security.allowed_write_url_schemes."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True
+            read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
     async def save_isaac_stage(
         file_path: Optional[str] = None,
     ) -> ToolResult:
-        if file_path is not None and not server._is_path_allowed(file_path):
-            return ErrorResponse(
-                error="File path is not allowed by sandbox policy",
-                error_type="SandboxError",
-                details={"file_path": file_path},
-            ).model_dump()
+        denial = server._sandbox_denial(file_path, write=True)
+        if denial is not None:
+            return denial
         return await server._exec_isaac(
             "save_isaac_stage",
             server._isaac_tools.save_isaac_stage(file_path=file_path),
@@ -831,7 +835,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         name="import_isaac_asset",
         description=(
             "Import an external asset (USD, USDZ, OBJ, FBX) into "
-            "the current stage at a target path."
+            "the current stage at a target path. Paths must be inside the "
+            "configured sandbox (security.allowed_paths); omniverse:// URLs are "
+            "allowed when their scheme is in security.allowed_url_schemes."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=True
@@ -841,12 +847,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         asset_path: str,
         target_path: str = "/World/ImportedAsset",
     ) -> ToolResult:
-        if not server._is_path_allowed(asset_path):
-            return ErrorResponse(
-                error="File path is not allowed by sandbox policy",
-                error_type="SandboxError",
-                details={"file_path": asset_path},
-            ).model_dump()
+        denial = server._sandbox_denial(asset_path)
+        if denial is not None:
+            return denial
         return await server._exec_isaac(
             "import_isaac_asset",
             server._isaac_tools.import_isaac_asset(
@@ -858,19 +861,18 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         name="add_isaac_reference",
         description=(
             "Add a USD reference to a prim so it composes in "
-            "content from another USD file."
+            "content from another USD file. Paths must be inside the "
+            "configured sandbox (security.allowed_paths); omniverse:// URLs are "
+            "allowed when their scheme is in security.allowed_url_schemes."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=True
         ),
     )
     async def add_isaac_reference(prim_path: str, reference_path: str) -> ToolResult:
-        if not server._is_path_allowed(reference_path):
-            return ErrorResponse(
-                error="File path is not allowed by sandbox policy",
-                error_type="SandboxError",
-                details={"file_path": reference_path},
-            ).model_dump()
+        denial = server._sandbox_denial(reference_path)
+        if denial is not None:
+            return denial
         return await server._exec_isaac(
             "add_isaac_reference",
             server._isaac_tools.add_isaac_reference(

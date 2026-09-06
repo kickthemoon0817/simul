@@ -45,7 +45,7 @@ from ..adapters import (
 )
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
-from ..utils.paths import PathPolicy
+from ..utils.paths import PathPolicy, SandboxDenied
 from ..utils.timing import RateLimiter
 from .registration._helpers import apply_success_from_error
 from .result_budget import apply_result_budget
@@ -493,10 +493,29 @@ class SimulMCPServer(LoggerMixin):
     def _resolve_allowed_paths(self) -> List[Path]:
         return self._path_policy.allowed_roots
 
-    def _is_path_allowed(self, path_str: str) -> bool:
-        # Kept as a fast-fail at the MCP boundary. The authoritative check now
-        # lives in the tools layer, below both this and the CLI.
-        return self._path_policy.is_allowed(path_str)
+    def _sandbox_denial(
+        self, path_str: Optional[str], *, write: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """Return the SandboxError payload for ``path_str``, or None when allowed.
+
+        A fast-fail at the MCP boundary; the authoritative check lives in the
+        tools and session layers, below both this and the CLI.
+
+        Args:
+            path_str: Path or URL supplied by the caller, or None when the tool
+                received no path to police.
+            write: Whether the tool writes to the location.
+
+        Returns:
+            The error envelope naming the allowed roots and URL schemes, or None.
+        """
+        if path_str is None or self._path_policy.is_allowed(path_str, write=write):
+            return None
+        return ErrorResponse(
+            error="File path is not allowed by sandbox policy",
+            error_type="SandboxError",
+            details=self._path_policy.denial_details(path_str, write=write),
+        ).model_dump()
 
     def _validate_input(
         self, model: Type[BaseModel], **kwargs
@@ -600,6 +619,16 @@ class SimulMCPServer(LoggerMixin):
                 return self._validate_output(
                     response_model(**payload).model_dump(), models, tool_name
                 )
+        except SandboxDenied as exc:
+            return self._validate_output(
+                ErrorResponse(
+                    error="File path is not allowed by sandbox policy",
+                    error_type="SandboxError",
+                    details=exc.details,
+                ).model_dump(),
+                models,
+                tool_name,
+            )
         except Exception as exc:
             self.logger.error("Error in %s: %s", tool_name, exc)
             return self._validate_output(

@@ -55,6 +55,7 @@ class BridgeServerLifecycle:
         self._socket_inode: tuple[int, int] | None = None
         self._server: asyncio.AbstractServer | None = None
         self._unix_server: asyncio.AbstractServer | None = None
+        self._closing_servers: list[asyncio.AbstractServer] = []
         self._actual_port: int = port
         self._discovery_file: str | None = None
 
@@ -162,16 +163,29 @@ class BridgeServerLifecycle:
         return True
 
     async def stop(self) -> None:
-        """Stop the bridge TCP server."""
+        """Stop the bridge server and wait for accepted connections to drain."""
+        self.close()
+        await self.wait_closed()
+
+    def close(self) -> None:
+        """Stop accepting connections and release the discovery file and socket inode.
+
+        Everything here is synchronous: ``asyncio.Server.close`` shuts the
+        listening sockets immediately, so a client dialling the port is
+        refused as soon as this returns. Only the drain of connections that
+        were already accepted is asynchronous; ``wait_closed`` covers that.
+        This split matters on Kit's main thread, which owns the event loop
+        and therefore cannot block on a coroutine scheduled onto it.
+        """
         if self._server is None:
             return
         self.remove_discovery_file()
+        self._closing_servers = [self._server]
         self._server.close()
-        await self._server.wait_closed()
         self._server = None
         if self._unix_server is not None:
+            self._closing_servers.append(self._unix_server)
             self._unix_server.close()
-            await self._unix_server.wait_closed()
             self._unix_server = None
         if self._actual_socket_path and self._socket_inode is not None:
             # Only remove the inode this instance bound. Another bridge may
@@ -185,6 +199,12 @@ class BridgeServerLifecycle:
                 pass
         self._actual_socket_path = None
         self._socket_inode = None
+
+    async def wait_closed(self) -> None:
+        """Wait for the listeners released by ``close`` to finish draining."""
+        closing, self._closing_servers = self._closing_servers, []
+        for server in closing:
+            await server.wait_closed()
 
     # A wildcard bind covers every interface, loopback included, but it is not
     # an address anything can connect to — and the reader drops a discovery

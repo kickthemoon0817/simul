@@ -96,7 +96,11 @@ mcp__simul__capture_isaac_viewport
 - Default resolution is the current viewport size if width/height are omitted.
 - Use `format: "png"` for lossless images (recommended for analysis).
 - Use `format: "jpg"` for smaller file size when quality is less critical.
-- Capture returns the file path where the image was saved.
+- Capture returns the file path where the image was saved. The PNG lands in the
+  capture directory (`viewport.capture_dir`, or `<allowed root>/captures` when
+  unset), which must be inside the sandbox (`security.allowed_paths`); only the
+  oldest captures in that directory are reclaimed. The viewport resolution is
+  restored after the capture.
 - If the scene has physics running, pause it before capture for a clean frame:
   `mcp__simul__pause_isaac_simulation` → capture → `mcp__simul__start_isaac_simulation`.
 

@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import pytest
+
 src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
@@ -268,3 +270,35 @@ def test_connection_refused_resets_detected_protocol() -> None:
 
     client = asyncio.run(scenario())
     assert client.socket_protocol == "auto"
+
+
+def test_bridge_read_timeout_names_endpoint_and_timeout() -> None:
+    """A bridge that accepts but never answers must not surface as an empty TimeoutError."""
+
+    async def scenario() -> None:
+        async def _hang(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await reader.read()
+            # Hold the connection open with no reply until the loop tears it down.
+            await asyncio.sleep(30)
+
+        server = await asyncio.start_server(_hang, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        client = IsaacSocketClient(
+            bridge_host="127.0.0.1",
+            bridge_port=port,
+            prefer_bridge=True,
+            fallback_to_vscode=False,
+            bridge_timeout_seconds=0.2,
+        )
+        try:
+            with pytest.raises(TimeoutError) as excinfo:
+                await client.bridge_request("ping", {})
+        finally:
+            server.close()
+            await server.wait_closed()
+        message = str(excinfo.value)
+        assert f"127.0.0.1:{port}" in message
+        assert "0.2s" in message
+        assert "'ping'" in message
+
+    asyncio.run(scenario())

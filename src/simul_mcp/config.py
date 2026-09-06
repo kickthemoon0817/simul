@@ -389,6 +389,13 @@ class ViewportConfig(BaseModel):
     fov: float = Field(default=45.0, description="Field of view", ge=1.0, le=179.0)
     near_plane: float = Field(default=0.1, description="Near clipping plane", gt=0.0)
     far_plane: float = Field(default=1000.0, description="Far clipping plane", gt=0.0)
+    capture_dir: Optional[str] = Field(
+        default=None,
+        description=(
+            "Directory viewport captures are written to. Must sit inside the sandbox "
+            "when it is enabled; None picks <writable allowed root>/captures"
+        ),
+    )
 
 
 class LoggingConfig(BaseModel):
@@ -463,6 +470,14 @@ class SecurityConfig(BaseModel):
     allowed_paths: List[str] = Field(
         default_factory=lambda: ["examples", "tests/data", "/tmp/simul_mcp"],
         description="Allowed file paths",
+    )
+    allowed_url_schemes: List[str] = Field(
+        default_factory=lambda: ["omniverse"],
+        description="URL schemes that may be read from (opened, imported, referenced)",
+    )
+    allowed_write_url_schemes: List[str] = Field(
+        default_factory=list,
+        description="URL schemes that may be written to; empty keeps writes local-only",
     )
     rate_limiting_enabled: bool = Field(
         default=True, description="Enable rate limiting"
@@ -739,6 +754,9 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     "max_size": _coalesce(viewport.get("max_size"), viewport_capture.get("max_size")),
                     "format": _coalesce(viewport.get("format"), viewport_capture.get("format")),
                     "quality": _coalesce(viewport.get("quality"), viewport_capture.get("quality")),
+                    "capture_dir": _coalesce(
+                        viewport.get("capture_dir"), viewport_capture.get("directory")
+                    ),
                     "samples_per_pixel": _coalesce(
                         viewport.get("samples_per_pixel"),
                         viewport_rendering.get("samples_per_pixel"),
@@ -790,6 +808,14 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     ),
                     "allowed_paths": _coalesce(
                         security.get("allowed_paths"), security_sandbox.get("allowed_paths")
+                    ),
+                    "allowed_url_schemes": _coalesce(
+                        security.get("allowed_url_schemes"),
+                        security_sandbox.get("allowed_url_schemes"),
+                    ),
+                    "allowed_write_url_schemes": _coalesce(
+                        security.get("allowed_write_url_schemes"),
+                        security_sandbox.get("allowed_write_url_schemes"),
                     ),
                     "rate_limiting_enabled": _coalesce(
                         security.get("rate_limiting_enabled"),

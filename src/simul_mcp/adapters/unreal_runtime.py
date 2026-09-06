@@ -54,6 +54,7 @@ except ImportError:
 UNREAL_AVAILABLE = AIOHTTP_AVAILABLE or UNREAL_EMBEDDED_AVAILABLE
 
 from ..config import Settings, get_settings
+from ..utils.paths import PathPolicy
 from ..logging import LoggerMixin, get_logger
 
 logger = get_logger(__name__)
@@ -106,6 +107,9 @@ class UnrealRuntimeSession(LoggerMixin):
 
         self._base_url: str = f"http://{self.host}:{self.port}"
         self._session: Optional[Any] = None  # aiohttp.ClientSession, lazily created
+        # Enforced in the session layer so MCP registration, the CLI and tests
+        # all sit above the same check.
+        self._path_policy: PathPolicy = PathPolicy.from_settings(self.settings)
 
         self.logger.info(
             "Unreal runtime session initialized (base_url=%s, embedded=%s)",
@@ -2306,7 +2310,11 @@ print('{marker}' + json.dumps(payload))
 
         Returns:
             Dict with imported_assets, actor_paths, warnings.
+
+        Raises:
+            SandboxDenied: If ``usd_path`` is outside the sandbox.
         """
+        usd_path = self._path_policy.authorize(usd_path)
         body: Dict[str, Any] = {
             "objectPath": "/Script/InterchangeEngine.Default__InterchangeManager",
             "functionName": "ImportAssetAsync",
@@ -2341,7 +2349,11 @@ print('{marker}' + json.dumps(payload))
 
         Returns:
             Dict with output_path, actors_exported, file_size_bytes.
+
+        Raises:
+            SandboxDenied: If ``output_path`` is outside the sandbox.
         """
+        output_path = self._path_policy.authorize(output_path, write=True)
         body: Dict[str, Any] = {
             "objectPath": "/Script/InterchangeEngine.Default__InterchangeManager",
             "functionName": "ExportAsset",
@@ -2387,7 +2399,12 @@ print('{marker}' + json.dumps(payload))
 
         Returns:
             Dict with output_path, conversions_applied, warnings.
+
+        Raises:
+            SandboxDenied: If either path is outside the sandbox.
         """
+        usd_path = self._path_policy.authorize(usd_path)
+        output_path = self._path_policy.authorize(output_path, write=True)
         body: Dict[str, Any] = {
             "objectPath": "/Script/InterchangeEngine.Default__InterchangeManager",
             "functionName": "ConvertToSimReady",
@@ -2432,6 +2449,7 @@ print('{marker}' + json.dumps(payload))
                 "up_axis",
                 "semantics",
             ]
+        usd_path = self._path_policy.authorize(usd_path)
         body: Dict[str, Any] = {
             "objectPath": "/Script/InterchangeEngine.Default__InterchangeManager",
             "functionName": "ValidateSimReadyAsset",
