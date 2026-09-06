@@ -561,8 +561,13 @@ class IsaacSocketClient:
                 )
             except asyncio.IncompleteReadError as exc:
                 raise ConnectionError(
-                    f"Bridge at {self.bridge_endpoint} closed connection before sending full response."
+                    f"Bridge at {endpoint} closed connection before sending full response."
                 ) from exc
+            except asyncio.TimeoutError:
+                raise TimeoutError(
+                    f"No response from Isaac bridge at {endpoint} within "
+                    f"{self._bridge_timeout_seconds}s of sending {action!r}."
+                ) from None
 
             response: Dict[str, Any] = json.loads(response_bytes.decode("utf-8"))
             if not isinstance(response, dict):

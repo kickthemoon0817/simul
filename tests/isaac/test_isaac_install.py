@@ -11,11 +11,19 @@ src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
 from simul_mcp.adapters.isaac_install import (  # noqa: E402
+    NEWEST_KNOWN_MAJOR,
     PYTHON_SERVER_EXTENSION,
+    PYTHON_SOCKET_PORT_SETTINGS,
+    PYTHON_TRANSPORT_EXTENSIONS,
     VSCODE_EXTENSION,
     IsaacVersion,
     read_isaac_version,
 )
+
+extension_root = Path(__file__).resolve().parents[2] / "src" / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"
+sys.path.insert(0, str(extension_root))
+
+from khemoo.simul.mcp import extension as bridge_extension  # noqa: E402
 
 
 @pytest.mark.parametrize(
@@ -57,13 +65,34 @@ def test_read_isaac_version_missing_or_unparseable(tmp_path: Path) -> None:
 def test_year_scheme_versions_are_not_treated_as_six_or_newer() -> None:
     """Isaac Sim 2023.1.1 parses as major 2023; it must not select python_server."""
     legacy = IsaacVersion.parse("2023.1.1")
-    assert legacy.is_supported is False
+    assert legacy.support_level == "unsupported"
     with pytest.raises(ValueError):
         legacy.python_transport_extension
 
 
-def test_supported_range_covers_five_and_six_only() -> None:
-    assert IsaacVersion(5, 1, 0).is_supported is True
-    assert IsaacVersion(6, 0, 1).is_supported is True
-    assert IsaacVersion(4, 5, 0).is_supported is False
-    assert IsaacVersion(7, 0, 0).is_supported is False
+def test_support_levels_by_major() -> None:
+    assert IsaacVersion(5, 1, 0).support_level == "supported"
+    assert IsaacVersion(6, 0, 1).support_level == "supported"
+    assert IsaacVersion(4, 5, 0).support_level == "unsupported"
+    assert IsaacVersion(7, 0, 0).support_level == "assumed"
+    assert IsaacVersion(12, 0, 0).support_level == "assumed"
+    assert IsaacVersion(2022, 2, 1).support_level == "unsupported"
+
+
+def test_newer_major_assumes_the_newest_known_extension() -> None:
+    """Isaac Sim 7 is routed like 6, with the caller expected to warn."""
+    assert NEWEST_KNOWN_MAJOR == 6
+    assert IsaacVersion(7, 0, 0).python_transport_extension == PYTHON_TRANSPORT_EXTENSIONS[NEWEST_KNOWN_MAJOR]
+    assert IsaacVersion(7, 0, 0).python_transport_extension == PYTHON_SERVER_EXTENSION
+
+
+def test_older_major_has_no_transport_extension() -> None:
+    with pytest.raises(ValueError):
+        IsaacVersion(4, 5, 0).python_transport_extension
+
+
+def test_port_setting_table_matches_the_bridge_extension() -> None:
+    """The bridge runs inside Kit and cannot import simul_mcp, so it carries its own copy."""
+    assert bridge_extension.PYTHON_SOCKET_PORT_SETTINGS == PYTHON_SOCKET_PORT_SETTINGS
+    newest_first = [PYTHON_TRANSPORT_EXTENSIONS[major] for major in sorted(PYTHON_TRANSPORT_EXTENSIONS, reverse=True)]
+    assert PYTHON_SOCKET_PORT_SETTINGS == tuple(f"/exts/{ext}/port" for ext in newest_first)

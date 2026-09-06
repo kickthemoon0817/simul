@@ -804,6 +804,41 @@ def test_launch_auth_token_configures_python_server_without_echoing_it(tmp_path:
     assert "t0k" not in result.stdout
 
 
+def test_launch_warns_but_proceeds_on_newer_major(tmp_path: Path) -> None:
+    """Isaac Sim 7 is routed like 6 and flagged, not refused."""
+    root = _write_isaac_root(tmp_path, "7.0.0", with_bridge=True)
+
+    result = runner.invoke(app, ["--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["support_level"] == "assumed"
+    assert payload["transport_extension"] == "isaacsim.code_editor.python_server"
+    assert "7.0.0" in payload["warning"]
+    assert "isaacsim.code_editor.python_server" in payload["warning"]
+    assert "--/exts/isaacsim.code_editor.python_server/port=8226" in payload["command"]
+
+
+def test_launch_reports_supported_level_without_warning(tmp_path: Path) -> None:
+    root = _write_isaac_root(tmp_path, "6.0.1", with_bridge=False)
+
+    result = runner.invoke(app, ["--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["support_level"] == "supported"
+    assert "warning" not in payload
+
+
+def test_launch_rejects_older_major(tmp_path: Path) -> None:
+    root = _write_isaac_root(tmp_path, "4.5.0", with_bridge=False)
+
+    result = runner.invoke(app, ["--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run"])
+
+    assert result.exit_code != 0
+    assert "UnsupportedInstall" in result.stdout
+
+
 def test_launch_rejects_year_scheme_install(tmp_path: Path) -> None:
     """Isaac Sim 2023.1.1 has neither transport extension simul knows about."""
     root = _write_isaac_root(tmp_path, "2023.1.1", with_bridge=False)
