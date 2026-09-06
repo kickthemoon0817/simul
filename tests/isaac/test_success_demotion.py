@@ -23,6 +23,7 @@ sys.path.insert(0, str(src_path))
 
 from simul_mcp.adapters.isaac_socket_client import ScriptResult  # noqa: E402
 from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.mcp import backends as backends_module  # noqa: E402
 from simul_mcp.mcp import server as server_module  # noqa: E402
 from simul_mcp.mcp.tools.isaac_tools import IsaacTools  # noqa: E402
 from tests.mcp.test_discoverability import FakeFastMCP  # noqa: E402
@@ -110,9 +111,9 @@ class _PingClient:
 def _ping_payload(monkeypatch: pytest.MonkeyPatch, reachable: bool) -> Dict[str, Any]:
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
     instance = server_module.SimulMCPServer(settings=Settings())
     monkeypatch.setattr(
         instance, "_get_request_isaac_client", lambda: _PingClient(reachable)

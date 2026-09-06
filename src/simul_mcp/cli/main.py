@@ -36,7 +36,7 @@ from rich.table import Table
 from simul_mcp.cli.output import emit, emit_error, is_json_mode, set_json_mode
 from simul_mcp.config import get_settings, load_settings, validate_settings
 from simul_mcp.logging import setup_logging, get_logger
-from simul_mcp.mcp.server import SimulMCPServer, start_mcp_server
+from simul_mcp.mcp.server import TRANSPORTS, SimulMCPServer, start_mcp_server
 from simul_mcp.adapters import is_blender_available, is_headless_available
 
 # Import sub-apps
@@ -265,7 +265,13 @@ def server(
         dir_okay=False,
     ),
     transport: str = typer.Option(
-        "stdio", "--transport", "-t", help="Transport type (stdio, sse)"
+        "stdio",
+        "--transport",
+        "-t",
+        help=(
+            "Transport: stdio (the client spawns the server), http (streamable HTTP on "
+            "server.host:server.port) or sse (legacy network transport)."
+        ),
     ),
     backends: Optional[str] = typer.Option(
         None,
@@ -325,6 +331,14 @@ def server(
                     )
                 }
             )
+
+        transport = transport.strip().lower()
+        if transport not in TRANSPORTS:
+            console.print(
+                f"[red]Unknown --transport value: {transport!r}. "
+                f"Valid: {', '.join(TRANSPORTS)}[/red]"
+            )
+            raise typer.Exit(1)
 
         # Parse --backends into a set
         backend_set = None
@@ -403,63 +417,13 @@ def info(
         blender_available = is_blender_available()
         usd_available = is_headless_available()
 
-        # Instantiate server to get actually registered tools
+        # Instantiate the server so the listing is what actually registered,
+        # grouped by the backend registry entry that registered each tool.
         server_instance = SimulMCPServer(settings)
-        tool_names: list[str] = []
-        lp = getattr(server_instance.mcp, "local_provider", None)
-        if lp is not None:
-            components = getattr(lp, "_components", {})
-            tool_names = sorted(
-                k.split(":")[1].split("@")[0]
-                for k in components
-                if k.startswith("tool:")
-            )
-
-        # Categorise by name prefix
-        categories: dict[str, list[str]] = {
-            "Isaac Sim": [],
-            "Blender": [],
-            "Unreal": [],
-            "USD / Headless": [],
-            "Instance Management": [],
-        }
-        for name in tool_names:
-            if name.startswith(("list_isaac_instances", "set_active_isaac_instance")):
-                categories["Instance Management"].append(name)
-            elif name.startswith(
-                (
-                    "isaac_",
-                    "ping_isaac",
-                    "execute_isaac",
-                    "get_isaac",
-                    "set_isaac",
-                    "create_isaac",
-                    "delete_isaac",
-                    "search_isaac",
-                    "list_isaac",
-                    "add_isaac",
-                    "duplicate_isaac",
-                    "reparent_isaac",
-                    "import_isaac",
-                    "new_isaac",
-                    "open_isaac",
-                    "save_isaac",
-                    "capture_isaac",
-                    "start_isaac",
-                    "stop_isaac",
-                    "pause_isaac",
-                    "reset_isaac",
-                    "step_isaac",
-                    "assign_isaac",
-                )
-            ):
-                categories["Isaac Sim"].append(name)
-            elif "blender" in name or "simready" in name:
-                categories["Blender"].append(name)
-            elif "unreal" in name:
-                categories["Unreal"].append(name)
-            else:
-                categories["USD / Headless"].append(name)
+        categories: dict[str, list[str]] = server_instance.tools_by_backend()
+        tool_names: list[str] = sorted(
+            name for names in categories.values() for name in names
+        )
 
         isaac_install_path = settings.isaac_sim.path
         isaac_install_error = settings.isaac_sim.path_error
@@ -477,7 +441,8 @@ def info(
                     "usd_headless": {"available": usd_available},
                 },
                 "tool_count": len(tool_names),
-                "categories": {k: v for k, v in categories.items() if v},
+                "categories": categories,
+                "capabilities": server_instance.get_capabilities(),
             }
             emit(data)
             return
@@ -526,8 +491,7 @@ def info(
         categories_table.add_column("Category", style="cyan")
         categories_table.add_column("Tools", justify="center")
         for cat_name, cat_tools in categories.items():
-            if cat_tools:
-                categories_table.add_row(cat_name, str(len(cat_tools)))
+            categories_table.add_row(cat_name, str(len(cat_tools)))
         console.print(categories_table)
         console.print()
 

@@ -21,6 +21,7 @@ src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
 from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.mcp import backends as backends_module  # noqa: E402
 from simul_mcp.mcp import server as server_module  # noqa: E402
 from simul_mcp.mcp.registration._helpers import (  # noqa: E402
     describe_params,
@@ -66,9 +67,9 @@ def listed_tools() -> List[Any]:
         update={"unreal": Settings().unreal.model_copy(update={"tool_surface": "full"})}
     )
     with pytest.MonkeyPatch.context() as patcher:
-        patcher.setattr(server_module, "is_blender_available", lambda: True)
+        patcher.setattr(backends_module, "is_blender_available", lambda: True)
         patcher.setattr(
-            server_module.BlenderRuntimeAdapter, "is_available", lambda self: True
+            backends_module.BlenderRuntimeAdapter, "is_available", lambda self: True
         )
         return _list_tools(settings, {"isaac", "usd", "unreal", "blender"})
 

@@ -42,6 +42,7 @@ from khemoo.simul.mcp.protocol import BridgeResponse  # noqa: E402
 
 from simul_mcp.adapters.isaac_socket_client import IsaacSocketClient  # noqa: E402
 from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.mcp import backends as backends_module  # noqa: E402
 from simul_mcp.mcp import server as server_module  # noqa: E402
 
 
@@ -266,9 +267,9 @@ class _FakeFastMCP:
 def _server(monkeypatch: pytest.MonkeyPatch, discovery_dir: Path) -> Any:
     monkeypatch.setattr(server_module, "FastMCP", _FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
     settings = Settings(
         isaac_sim={
             "discovery_dir": str(discovery_dir),

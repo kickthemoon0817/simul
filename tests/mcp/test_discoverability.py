@@ -17,6 +17,7 @@ src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
 from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.mcp import backends as backends_module  # noqa: E402
 from simul_mcp.mcp import server as server_module  # noqa: E402
 
 
@@ -72,9 +73,9 @@ def _make_server(
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
 
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: headless)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "is_unreal_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: headless)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_unreal_available", lambda: False)
 
     return server_module.SimulMCPServer(settings=Settings())
 
@@ -236,10 +237,10 @@ def _make_full_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCP
     """Register every backend, with the full Unreal surface, on a FakeFastMCP."""
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: True)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: True)
-    monkeypatch.setattr(server_module, "BlenderRuntimeAdapter", _AvailableAdapter)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", _AvailableAdapter)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: True)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
+    monkeypatch.setattr(backends_module, "BlenderRuntimeAdapter", _AvailableAdapter)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", _AvailableAdapter)
     settings = Settings().model_copy(
         update={"unreal": Settings().unreal.model_copy(update={"tool_surface": "full"})}
     )
@@ -314,7 +315,7 @@ class TestCapabilitiesReport:
         assert "socket" in report["isaac"]["capabilities"]
 
     def test_unavailable_backends_report_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+        monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
         instance = _make_server(monkeypatch)
         instance._backends = {"usd"}
 

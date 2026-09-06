@@ -24,6 +24,7 @@ src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
 from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.mcp import backends as backends_module  # noqa: E402
 from simul_mcp.mcp import server as server_module  # noqa: E402
 from simul_mcp.mcp.schemas.common import ErrorResponse  # noqa: E402
 from simul_mcp.utils.paths import SandboxDenied  # noqa: E402
@@ -71,9 +72,9 @@ def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServe
     monkeypatch.setattr(server_module, "TaskConfig", None)
     # USD tools only register when the headless adapter exists, and these
     # tests exercise the USD sandbox surface, so keep the real adapter.
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: True)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: True)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
     return server_module.SimulMCPServer(settings=Settings())
 
 

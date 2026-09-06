@@ -2743,6 +2743,8 @@ class BlenderRuntimeSession(LoggerMixin):
 class BlenderRuntimeAdapter(LoggerMixin):
     """Adapter for Blender runtime operations."""
 
+    name: str = "blender"
+
     def __init__(self, settings: Optional[Settings] = None):
         """
         Initialize Blender runtime adapter.
@@ -2775,6 +2777,9 @@ class BlenderRuntimeAdapter(LoggerMixin):
             True when bpy module is available.
         """
         return BLENDER_AVAILABLE and self.settings.blender.enabled
+
+    def close(self) -> None:
+        """Nothing is held between sessions; each one cleans up after itself."""
 
     def get_capabilities(self) -> List[str]:
         """

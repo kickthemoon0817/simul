@@ -19,6 +19,7 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .._meta import tool_meta
 
 
 class OmniGraphMixin:
@@ -26,6 +27,17 @@ class OmniGraphMixin:
     # OmniGraph
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="list_isaac_graphs",
+        description=(
+            "List all OmniGraph graphs in the current Isaac Sim session. Returns each "
+            "graph's path, evaluator type, pipeline stage, node count, and backing type. "
+            "Use this to discover available graphs before querying or modifying their "
+            "nodes."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def list_isaac_graphs(self) -> Dict[str, Any]:
         """
         List all OmniGraph graphs in the current Isaac Sim session.
@@ -56,6 +68,16 @@ class OmniGraphMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="get_isaac_graph_nodes",
+        description=(
+            "List nodes in an OmniGraph graph with their types, input/output attributes, "
+            "and connections. Use this to inspect graph structure, find node types, and "
+            "trace data flow between nodes."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_graph_nodes(
         self,
         graph_path: str,
@@ -128,6 +150,17 @@ class OmniGraphMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="create_isaac_graph_node",
+        description=(
+            "Create a node in an OmniGraph graph. Specify the graph path, desired node "
+            "path, and node type ID. Use list_isaac_graph_node_types to discover available "
+            "node types. Common types include omni.graph.nodes.OnPlaybackTick, "
+            "omni.graph.nodes.ReadVariable, "
+            "isaacsim.core.nodes.IsaacArticulationController."
+        ),
+        read_only=False,
+    )
     async def create_isaac_graph_node(
         self,
         graph_path: str,
@@ -172,6 +205,16 @@ class OmniGraphMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="connect_isaac_graph_nodes",
+        description=(
+            "Connect two OmniGraph node attributes by their full paths. Source is typically "
+            "an outputs: attribute, target is an inputs: attribute. Example: connect "
+            "'/World/Graph/OnTick.outputs:tick' to '/World/Graph/Controller.inputs:execIn'."
+        ),
+        read_only=False,
+        idempotent=True,
+    )
     async def connect_isaac_graph_nodes(
         self,
         source_attr_path: str,
@@ -207,6 +250,18 @@ class OmniGraphMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="set_isaac_graph_node_values",
+        description=(
+            "Set attribute values on an OmniGraph node. Pass a dict of attribute names to "
+            "values. Attribute names should include the namespace prefix (e.g. "
+            "'inputs:velocity', 'inputs:enabled'). Use get_isaac_graph_nodes to discover "
+            "attribute names first."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def set_isaac_graph_node_values(
         self,
         node_path: str,
@@ -254,6 +309,16 @@ class OmniGraphMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="list_isaac_graph_node_types",
+        description=(
+            "List available OmniGraph node types that can be used with "
+            "create_isaac_graph_node. Use search to filter by substring (e.g. 'Isaac', "
+            "'OnPlayback', 'Articulation'). Returns registered node type IDs."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def list_isaac_graph_node_types(
         self,
         search: Optional[str] = None,
@@ -293,6 +358,16 @@ class OmniGraphMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="delete_isaac_graph_node",
+        description=(
+            "Delete a node from an OmniGraph graph. Removes the node and all its "
+            "connections."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def delete_isaac_graph_node(
         self,
         graph_path: str,

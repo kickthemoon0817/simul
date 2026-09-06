@@ -14,6 +14,7 @@ src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
 from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.mcp import backends as backends_module  # noqa: E402
 from simul_mcp.mcp import server as server_module  # noqa: E402
 
 
@@ -124,10 +125,10 @@ class TestUnrealToolRegistration:
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
 
-        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
         monkeypatch.setattr(
-            server_module, "UnrealRuntimeAdapter", FakeUnrealAdapter
+            backends_module, "UnrealRuntimeAdapter", FakeUnrealAdapter
         )
 
         instance = server_module.SimulMCPServer(settings=Settings())
@@ -146,10 +147,10 @@ class TestUnrealToolRegistration:
         """``unreal.tool_surface = "full"`` exposes the granular tools too."""
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
-        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
         monkeypatch.setattr(
-            server_module, "UnrealRuntimeAdapter", FakeUnrealAdapter
+            backends_module, "UnrealRuntimeAdapter", FakeUnrealAdapter
         )
         settings = Settings().model_copy(
             update={"unreal": Settings().unreal.model_copy(update={"tool_surface": "full"})}
@@ -178,9 +179,9 @@ class TestUnrealToolRegistration:
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
 
-        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-        monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+        monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
 
         instance = server_module.SimulMCPServer(settings=Settings())
         assert instance.unreal_adapter is None
@@ -251,10 +252,10 @@ class TestIter16WrapperSurfacesAdapterError:
     ) -> None:
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
-        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
         monkeypatch.setattr(
-            server_module, "UnrealRuntimeAdapter", FakeUnrealAdapterErroring
+            backends_module, "UnrealRuntimeAdapter", FakeUnrealAdapterErroring
         )
 
         instance = server_module.SimulMCPServer(settings=Settings())

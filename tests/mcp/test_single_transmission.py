@@ -32,6 +32,7 @@ sys.path.insert(0, str(src_path))
 from fastmcp.tools.tool import ToolResult  # noqa: E402
 
 from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.mcp import backends as backends_module  # noqa: E402
 from simul_mcp.mcp import server as server_module  # noqa: E402
 
 
@@ -62,9 +63,9 @@ class FakeFastMCP:
 def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServer:
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
     return server_module.SimulMCPServer(settings=Settings())
 
 
@@ -185,9 +186,9 @@ def test_every_registered_tool_is_single_transmission(
     """
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: True)
-    monkeypatch.setattr(server_module, "BlenderRuntimeAdapter", _StubAdapter)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", _StubAdapter)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
+    monkeypatch.setattr(backends_module, "BlenderRuntimeAdapter", _StubAdapter)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", _StubAdapter)
     instance = server_module.SimulMCPServer(
         settings=Settings(
             security={"rate_limiting_enabled": False}, unreal={"tool_surface": "full"}

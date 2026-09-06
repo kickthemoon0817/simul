@@ -18,6 +18,7 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .._meta import SandboxedPath, tool_meta
 
 
 class StageAssetMixin:
@@ -25,6 +26,19 @@ class StageAssetMixin:
     # Phase 8: Asset & Stage Operations
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="open_isaac_stage",
+        description=(
+            "Open a USD stage file in Isaac Sim. Paths must be inside the configured "
+            "sandbox (security.allowed_paths); omniverse:// URLs are allowed when their "
+            "scheme is in security.allowed_url_schemes. Refused while the current stage has "
+            "unsaved edits unless discard_unsaved=true."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+        sandboxed_paths=(SandboxedPath("file_path"),),
+    )
     async def open_isaac_stage(
         self, file_path: str, discard_unsaved: bool = False
     ) -> Dict[str, Any]:
@@ -74,6 +88,20 @@ class StageAssetMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="save_isaac_stage",
+        description=(
+            "Save the current stage, overwriting the file on disk. Optionally provide a "
+            "file path to save-as to a new location; an existing file there is refused "
+            "unless overwrite=true. Paths must be inside the configured sandbox "
+            "(security.allowed_paths); writes to URLs are refused unless the scheme is in "
+            "security.allowed_write_url_schemes."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+        sandboxed_paths=(SandboxedPath("file_path", write=True),),
+    )
     async def save_isaac_stage(
         self, file_path: Optional[str] = None, overwrite: bool = False
     ) -> Dict[str, Any]:
@@ -144,6 +172,16 @@ class StageAssetMixin:
             """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="new_isaac_stage",
+        description=(
+            "Create a new empty stage in Isaac Sim. Refused while the current stage has "
+            "unsaved edits unless discard_unsaved=true."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def new_isaac_stage(self, discard_unsaved: bool = False) -> Dict[str, Any]:
         """
         Create a new empty stage in Isaac Sim.
@@ -180,6 +218,17 @@ class StageAssetMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="import_isaac_asset",
+        description=(
+            "Import an external asset (USD, USDZ, OBJ, FBX) into the current stage at a "
+            "target path. Paths must be inside the configured sandbox "
+            "(security.allowed_paths); omniverse:// URLs are allowed when their scheme is "
+            "in security.allowed_url_schemes."
+        ),
+        read_only=False,
+        sandboxed_paths=(SandboxedPath("asset_path"),),
+    )
     async def import_isaac_asset(
         self,
         asset_path: str,
@@ -222,6 +271,17 @@ class StageAssetMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="add_isaac_reference",
+        description=(
+            "Add a USD reference to a prim so it composes in content from another USD file. "
+            "Paths must be inside the configured sandbox (security.allowed_paths); "
+            "omniverse:// URLs are allowed when their scheme is in "
+            "security.allowed_url_schemes."
+        ),
+        read_only=False,
+        sandboxed_paths=(SandboxedPath("reference_path"),),
+    )
     async def add_isaac_reference(
         self,
         prim_path: str,

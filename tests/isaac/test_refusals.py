@@ -27,6 +27,7 @@ sys.path.insert(0, str(src_path))
 
 from simul_mcp.adapters.isaac_socket_client import ScriptResult  # noqa: E402
 from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.mcp import backends as backends_module  # noqa: E402
 from simul_mcp.mcp import server as server_module  # noqa: E402
 from simul_mcp.mcp.tools.isaac._shared import (  # noqa: E402
     PROTECTED_CARB_SETTING_PREFIXES,
@@ -213,8 +214,8 @@ def test_refusal_from_a_generated_script_keeps_its_error_type() -> None:
 def _registered(monkeypatch: pytest.MonkeyPatch) -> Dict[str, Any]:
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
     instance = server_module.SimulMCPServer(settings=Settings())
     return {tool.name: tool for tool in instance.mcp.tools}
 

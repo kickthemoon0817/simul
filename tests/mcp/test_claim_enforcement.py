@@ -16,6 +16,7 @@ src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
 from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.mcp import backends as backends_module  # noqa: E402
 from simul_mcp.mcp import server as server_module  # noqa: E402
 from simul_mcp.mcp import session_manager as session_manager_module  # noqa: E402
 from simul_mcp.mcp.session_manager import SessionManager  # noqa: E402
@@ -82,9 +83,9 @@ def _make_server(
 ) -> tuple[server_module.SimulMCPServer, ContextVar[Any]]:
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
     settings = Settings(isaac_sim={"enforce_claims": enforce, "discovery_dir": str(tmp_path / "disc")})
     instance = server_module.SimulMCPServer(settings=settings)
     instance.session_manager = SessionManager(tmp_path / "sessions")

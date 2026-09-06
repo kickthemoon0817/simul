@@ -19,6 +19,8 @@ sys.path.insert(0, str(repo_root / "src" / "simul_mcp" / "bridge_ext" / "khemoo.
 
 from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle  # noqa: E402
 from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.adapters import isaac_runtime as isaac_runtime_module  # noqa: E402
+from simul_mcp.mcp import backends as backends_module  # noqa: E402
 from simul_mcp.mcp import server as server_module  # noqa: E402
 from simul_mcp.utils.discovery import DiscoveryDir  # noqa: E402
 
@@ -102,10 +104,10 @@ class FakeSocketClient:
 def _make_server(monkeypatch: pytest.MonkeyPatch, discovery_dir: Path) -> server_module.SimulMCPServer:
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
-    monkeypatch.setattr(server_module, "IsaacSocketClient", FakeSocketClient)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
+    monkeypatch.setattr(isaac_runtime_module, "IsaacSocketClient", FakeSocketClient)
     monkeypatch.setattr(server_module.os, "kill", lambda pid, sig: None)
     return server_module.SimulMCPServer(
         settings=Settings(isaac_sim={"discovery_dir": str(discovery_dir)})

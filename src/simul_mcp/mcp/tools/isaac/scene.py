@@ -18,6 +18,7 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .._meta import DeprecatedAlias, tool_meta
 
 
 # Prefix for every generated script that counts prims. get_isaac_scene_summary
@@ -47,6 +48,16 @@ class SceneInspectionMixin:
     # Phase 1: Scene Inspection (Read-only)
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="get_isaac_stage_info",
+        description=(
+            "Get current stage metadata including root layer, up-axis, meters-per-unit, and "
+            "default prim. Pass include_prim_count=true to also count every prim "
+            "(total_prims); the count walks the whole stage, so it is off by default."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_stage_info(
         self, include_prim_count: bool = False
     ) -> Dict[str, Any]:
@@ -109,6 +120,20 @@ class SceneInspectionMixin:
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
+    @tool_meta(
+        name="list_isaac_prims",
+        description=(
+            "List prims in the current Isaac Sim stage under a given root path, with depth "
+            "control, prim type filtering, and paging (max_results/offset; applied_limit "
+            "reports the effective cap). Use list_isaac_prims to walk a level of the "
+            "hierarchy; use search_isaac_prims to find prims by name or type anywhere below "
+            "a root, get_isaac_subtree for a depth-annotated tree, and "
+            "get_isaac_scene_summary for counts without listing."
+        ),
+        read_only=True,
+        idempotent=True,
+        deprecated_aliases=(DeprecatedAlias("max_items", "max_results"),),
+    )
     async def list_isaac_prims(
         self,
         root_path: str = "/",
@@ -427,6 +452,19 @@ class SceneInspectionMixin:
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
+    @tool_meta(
+        name="search_isaac_prims",
+        description=(
+            "Search the whole hierarchy below root_path for prims whose type name equals "
+            "query (search_type='type') or whose name contains query (search_type='name'); "
+            "paged via max_results/offset. Use search_isaac_prims when you know a name or "
+            "type; use query_isaac_typed_prims to match by USD schema and read attributes "
+            "in the same call, list_isaac_prims to browse one level, and "
+            "find_isaac_prims_in_area to search by position."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def search_isaac_prims(
         self,
         query: str,
@@ -531,6 +569,19 @@ class SceneInspectionMixin:
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
+    @tool_meta(
+        name="get_isaac_scene_summary",
+        description=(
+            "Get a high-level summary of the whole stage: total prims and counts per prim "
+            "type, hierarchy depth, has_physics/has_animation flags, root prims, up axis "
+            "and meters per unit. Counts prims the same way as get_isaac_scene_stats. Use "
+            "get_isaac_scene_summary to orient before listing; use get_isaac_scene_stats "
+            "for geometry totals (vertices, faces, meshes, lights, cameras, materials) "
+            "under a chosen root."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_scene_summary(self) -> Dict[str, Any]:
         """
         Get a high-level summary of the current Isaac Sim scene.

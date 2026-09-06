@@ -523,6 +523,8 @@ class HeadlessUSDAdapter(LoggerMixin):
     releases the loaded stages.
     """
 
+    name: str = "usd"
+
     def __init__(self, settings: Optional[Settings] = None):
         """
         Initialize headless USD adapter.

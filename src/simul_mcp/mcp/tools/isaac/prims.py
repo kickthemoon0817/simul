@@ -23,6 +23,7 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .._meta import tool_meta
 
 
 class PrimEditMixin:
@@ -30,6 +31,14 @@ class PrimEditMixin:
     # Phase 3: Prim Manipulation
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="create_isaac_prim",
+        description=(
+            "Create a new USD prim at the given path with optional type (Xform, Mesh, "
+            "Sphere, Cube, Cylinder, Cone, Capsule, Plane)."
+        ),
+        read_only=False,
+    )
     async def create_isaac_prim(
         self,
         prim_path: str,
@@ -66,6 +75,17 @@ class PrimEditMixin:
         )
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="delete_isaac_prim",
+        description=(
+            "Delete a prim and all its children from the stage. Refuses the pseudo-root "
+            "'/'. Refuses '/World' unless allow_root_delete=true, since that removes the "
+            "whole scene."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def delete_isaac_prim(
         self, prim_path: str, allow_root_delete: bool = False
     ) -> Dict[str, Any]:
@@ -119,6 +139,16 @@ class PrimEditMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="set_isaac_prim_transform",
+        description=(
+            "Set a prim's local transform: translate, rotate (euler XYZ degrees), and/or "
+            "scale."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def set_isaac_prim_transform(
         self,
         prim_path: str,
@@ -163,6 +193,13 @@ class PrimEditMixin:
         )
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="set_isaac_prim_visibility",
+        description="Show or hide a prim in the viewport.",
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def set_isaac_prim_visibility(
         self, prim_path: str, visible: bool
     ) -> Dict[str, Any]:
@@ -203,6 +240,16 @@ class PrimEditMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="set_isaac_prim_attribute",
+        description=(
+            "Set an arbitrary attribute value on a prim, overwriting its current value. The "
+            "attribute must already exist."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def set_isaac_prim_attribute(
         self,
         prim_path: str,
@@ -254,6 +301,11 @@ class PrimEditMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="duplicate_isaac_prim",
+        description="Duplicate a prim (deep copy) to a new path.",
+        read_only=False,
+    )
     async def duplicate_isaac_prim(
         self, prim_path: str, new_path: str
     ) -> Dict[str, Any]:
@@ -305,6 +357,13 @@ class PrimEditMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="reparent_isaac_prim",
+        description="Move a prim under a new parent in the hierarchy.",
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def reparent_isaac_prim(
         self, prim_path: str, new_parent_path: str
     ) -> Dict[str, Any]:

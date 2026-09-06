@@ -14,7 +14,10 @@ def _raise_import_error(adapter_name: str) -> Any:
     raise ImportError(f"{adapter_name} is not available in this environment")
 
 
+from .base import BackendAdapter
+
 # Isaac Sim TCP socket client (always available — no omni.* dependency)
+from .isaac_runtime import IsaacRuntimeAdapter
 from .isaac_socket_client import IsaacSocketClient, ScriptResult
 
 
@@ -79,7 +82,10 @@ except Exception:
 
 
 __all__ = [
+    # Interface every backend adapter implements
+    "BackendAdapter",
     # Isaac Sim TCP adapter
+    "IsaacRuntimeAdapter",
     "IsaacSocketClient",
     "ScriptResult",
     # Headless USD adapter

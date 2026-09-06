@@ -14,6 +14,7 @@ src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
 from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.mcp import backends as backends_module  # noqa: E402
 from simul_mcp.mcp import server as server_module  # noqa: E402
 
 
@@ -105,9 +106,9 @@ class TestBlenderToolRegistration:
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
 
-        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_blender_available", lambda: True)
-        monkeypatch.setattr(server_module, "BlenderRuntimeAdapter", FakeBlenderAdapter)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
+        monkeypatch.setattr(backends_module, "BlenderRuntimeAdapter", FakeBlenderAdapter)
 
         instance = server_module.SimulMCPServer(settings=Settings())
         tool_names = {tool.name for tool in instance.mcp.tools}
@@ -124,8 +125,8 @@ class TestBlenderToolRegistration:
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
 
-        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
 
         instance = server_module.SimulMCPServer(settings=Settings())
         tool_names = {tool.name for tool in instance.mcp.tools}
@@ -193,10 +194,10 @@ class TestIter17WrapperSurfacesAdapterError:
     ) -> None:
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
-        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_blender_available", lambda: True)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
         monkeypatch.setattr(
-            server_module, "BlenderRuntimeAdapter", FakeBlenderAdapterErroring
+            backends_module, "BlenderRuntimeAdapter", FakeBlenderAdapterErroring
         )
 
         instance = server_module.SimulMCPServer(settings=Settings())

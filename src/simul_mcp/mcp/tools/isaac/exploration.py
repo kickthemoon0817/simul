@@ -19,6 +19,7 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .._meta import DeprecatedAlias, tool_meta
 from .scene import COUNTED_PRIMS_HELPER
 
 
@@ -128,6 +129,14 @@ class ExplorationMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="list_isaac_lights",
+        description=(
+            "List all light prims in the scene with type, intensity, and color information."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def list_isaac_lights(
         self, root_path: str = "/", max_results: int = 200, offset: int = 0
     ) -> Dict[str, Any]:
@@ -265,6 +274,15 @@ class ExplorationMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="create_isaac_light",
+        description=(
+            "Create a light prim in the scene. Supports DomeLight (environment/HDRI), "
+            "DistantLight (sun), SphereLight (point), RectLight (area), DiskLight, and "
+            "CylinderLight. Configure intensity, color, color temperature, and texture."
+        ),
+        read_only=False,
+    )
     async def create_isaac_light(
         self,
         prim_path: str,
@@ -408,6 +426,19 @@ class ExplorationMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="get_isaac_subtree",
+        description=(
+            "Get a subtree as a flat, traversal-ordered list with depth, type, and child "
+            "count for each prim; paged via max_results/offset. Use get_isaac_subtree to "
+            "see the structure under one prim (a robot, an imported asset); use "
+            "list_isaac_prims to browse with a type filter, and search_isaac_prims to find "
+            "a prim by name."
+        ),
+        read_only=True,
+        idempotent=True,
+        deprecated_aliases=(DeprecatedAlias("max_prims", "max_results"),),
+    )
     async def get_isaac_subtree(
         self,
         root_path: str = "/",
@@ -563,6 +594,15 @@ class ExplorationMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="get_isaac_layer_info",
+        description=(
+            "Get USD layer stack information: root layer, sublayers, session layer, and "
+            "layer dirty states."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_layer_info(self) -> Dict[str, Any]:
         """
         Get USD layer stack information for the current stage.
@@ -609,6 +649,18 @@ class ExplorationMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="get_isaac_scene_stats",
+        description=(
+            "Get aggregate geometry statistics under root_path: total prims, vertices, "
+            "faces, meshes, lights, cameras, materials, xforms, and prim type counts. "
+            "Counts prims the same way as get_isaac_scene_summary, which adds hierarchy "
+            "depth, physics/animation flags and stage metadata but always covers the whole "
+            "stage."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_scene_stats(self, root_path: str = "/") -> Dict[str, Any]:
         """
         Get aggregate scene statistics: vertex/face counts, material usage.
@@ -679,6 +731,15 @@ class ExplorationMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="get_isaac_texture_dependencies",
+        description=(
+            "List all external texture files referenced by scene materials with their "
+            "referencing material paths."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_texture_dependencies(
         self, root_path: str = "/", max_results: int = DEFAULT_MAX_RESULTS
     ) -> Dict[str, Any]:
@@ -795,6 +856,15 @@ class ExplorationMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="focus_isaac_viewport",
+        description=(
+            "Frame the viewport camera to focus on a specific prim, zooming to fit it in "
+            "view."
+        ),
+        read_only=False,
+        idempotent=True,
+    )
     async def focus_isaac_viewport(self, prim_path: str) -> Dict[str, Any]:
         """
         Frame the viewport camera to focus on a specific prim.
@@ -839,6 +909,15 @@ class ExplorationMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="get_isaac_selection",
+        description=(
+            "Get the currently selected prims in the Isaac Sim viewport with their paths, "
+            "names, and types."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_selection(
         self, max_results: int = DEFAULT_MAX_RESULTS
     ) -> Dict[str, Any]:
@@ -924,6 +1003,15 @@ class ExplorationMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="raycast_isaac_scene",
+        description=(
+            "Cast a ray into the physics scene and return the closest hit prim, position, "
+            "normal, and distance."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def raycast_isaac_scene(
         self,
         origin: FloatList,
@@ -978,6 +1066,20 @@ class ExplorationMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="find_isaac_prims_in_area",
+        description=(
+            "Find prims whose bounding box center is within a given radius of a point, "
+            "sorted by distance. Without prim_type only prims with their own geometry "
+            "(meshes, shapes, point instancers, area lights) are candidates; containers "
+            "such as Xform are matched only when prim_type names them. The search stops "
+            "after max_results hits, so a truncated result holds the first matches in stage "
+            "order, not the nearest overall: narrow root_path, max_depth or radius to see "
+            "the rest."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def find_isaac_prims_in_area(
         self,
         center: FloatList,

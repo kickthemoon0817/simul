@@ -27,6 +27,7 @@ from simul_mcp.adapters.isaac_socket_client import ScriptResult  # noqa: E402
 from simul_mcp.cli import isaac as isaac_cli  # noqa: E402
 from simul_mcp.cli.main import app  # noqa: E402
 from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.mcp import backends as backends_module  # noqa: E402
 from simul_mcp.mcp import server as server_module  # noqa: E402
 from simul_mcp.mcp.tools.isaac_tools import IsaacTools  # noqa: E402
 from tests.mcp.test_discoverability import FakeFastMCP, _AvailableAdapter  # noqa: E402
@@ -49,10 +50,10 @@ def _settings(allow_script_execution: bool) -> Settings:
 def _tool_names(monkeypatch: pytest.MonkeyPatch, allow_script_execution: bool) -> List[str]:
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: True)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: True)
-    monkeypatch.setattr(server_module, "BlenderRuntimeAdapter", _AvailableAdapter)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", _AvailableAdapter)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: True)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
+    monkeypatch.setattr(backends_module, "BlenderRuntimeAdapter", _AvailableAdapter)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", _AvailableAdapter)
     instance = server_module.SimulMCPServer(settings=_settings(allow_script_execution))
     return [tool.name for tool in instance.mcp.tools]
 
