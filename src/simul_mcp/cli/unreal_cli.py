@@ -946,6 +946,8 @@ def setup(
     if not is_json_mode():
         console.print(patch.uproject.summary())
         console.print(patch.ini.summary())
+        for warning in patch.ini.warnings:
+            console.print(f"[yellow]warning:[/yellow] {warning}")
 
     # Launch if requested.
     launched = False
@@ -989,6 +991,7 @@ def setup(
                 "changed": patch.ini.changed,
                 "added": patch.ini.added,
                 "updated": patch.ini.updated,
+                "warnings": patch.ini.warnings,
             },
             # engine_ini is populated by ensure_remote_control_config
             # only when --bind was supplied (HTTP bind lives in

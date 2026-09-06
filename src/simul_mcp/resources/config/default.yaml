@@ -30,7 +30,10 @@ isaac_sim:
   socket_timeout: 30.0
   # Stock socket flavour: auto probes the server once; python_server / vscode pin it.
   socket_protocol: "auto"
-  # Only for a 6.0 python_server started with require_auth=true
+  # Only for a 6.0 python_server started with require_auth=true. Precedence:
+  # ISAAC_SIM__SOCKET_AUTH_TOKEN / .env, then this key, then the
+  # <discovery_dir>/auth-token-<pid> file written by
+  # `simul-mcp isaac launch --generate-auth-token` for the newest running editor.
   # socket_auth_token: ""
 
   # Preferred bridge extension transport. Falls back to the stock socket when unavailable.
@@ -43,6 +46,11 @@ isaac_sim:
 
   # Discovery directory for bridge extension port files
   discovery_dir: "/tmp/simul-mcp"
+
+  # When true, a live claim_isaac_instance by one agent makes mutating Isaac
+  # tools from every other agent fail with InstanceClaimed until the claim is
+  # released or expires (120 s without activity). False keeps claims advisory.
+  enforce_claims: false
 
   # Kit configuration
   kit:
