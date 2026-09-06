@@ -26,10 +26,20 @@ Bridge protocol:
 
 Python socket protocol (5.x VS Code ext and 6.0+ python_server ext):
     1. Open TCP connection to host:port
-    2. Send Python code as UTF-8 bytes (optionally prefixed by a token header)
+    2. Send the script. 5.x takes raw UTF-8 source; python_server takes the
+       JSON envelope {"code", "timeout", "auth_token"} so it enforces a
+       per-request execution timeout instead of running a runaway script
+       until the process dies.
     3. python_server only: half-close the socket so the server executes
     4. Receive JSON response: {"status":"ok"|"error","output":"..."}
     5. Connection closes after each execution
+
+Bridge circuit breaker: a bridge port that is filtered or half-open costs
+the full bridge timeout on every call, not the ~1 ms a refused port does.
+After ``bridge_failure_threshold`` consecutive transport failures the client
+stops dialling the bridge for ``bridge_cooldown_seconds`` and goes straight
+to the stock socket; the first call after the cooldown probes the bridge
+again, and one success closes the circuit.
 """
 
 import asyncio
@@ -58,6 +68,18 @@ _FLAVOR_PROBE: Dict[str, Any] = {"introspect": "status"}
 MAX_RESPONSE_BYTES: int = 10 * 1024 * 1024  # 10 MB cap on response size
 MAX_REQUEST_BYTES: int = 1024 * 1024  # 1 MB cap on outgoing bridge payloads
 BRIDGE_PROTOCOL_VERSION: str = "1.0"
+DEFAULT_BRIDGE_FAILURE_THRESHOLD: int = 3
+DEFAULT_BRIDGE_COOLDOWN_SECONDS: float = 30.0
+#: Floor for the per-request script timeout sent to the server.
+MIN_SCRIPT_TIMEOUT_SECONDS: float = 1.0
+
+
+class BridgeCircuitOpenError(ConnectionRefusedError):
+    """The bridge was skipped because recent failures opened its circuit.
+
+    A ``ConnectionRefusedError`` so every existing fallback path treats it
+    like a bridge that is not there.
+    """
 
 
 @dataclass(frozen=True)
@@ -111,6 +133,9 @@ class IsaacSocketClient:
         max_response_bytes: int = MAX_RESPONSE_BYTES,
         socket_protocol: SocketProtocol = "auto",
         auth_token: Optional[str] = None,
+        script_timeout_seconds: Optional[float] = None,
+        bridge_failure_threshold: int = DEFAULT_BRIDGE_FAILURE_THRESHOLD,
+        bridge_cooldown_seconds: float = DEFAULT_BRIDGE_COOLDOWN_SECONDS,
     ) -> None:
         """
         Initialize the socket client.
@@ -134,11 +159,36 @@ class IsaacSocketClient:
                 probes the server once; "python_server" (Isaac Sim 6.0+)
                 half-closes after sending; "vscode" (Isaac Sim 5.x) does not.
             auth_token: Token for a python_server configured with
-                ``require_auth``. Sent as a raw-source header; ignored by 5.x.
+                ``require_auth``. Sent in the JSON envelope on python_server
+                and as a raw-source header on the probe; ignored by 5.x.
+            script_timeout_seconds: Execution budget the server is asked to
+                enforce on each script (python_server ``timeout`` field and
+                bridge ``execute_script`` payload). Defaults to one second
+                less than ``timeout_seconds`` so the server reports the
+                overrun before this client's own read deadline expires;
+                never below one second. The 5.x VS Code socket has no such
+                field and ignores it.
+            bridge_failure_threshold: Consecutive bridge transport failures
+                that open the circuit.
+            bridge_cooldown_seconds: How long an open circuit skips the
+                bridge before probing it again.
         """
         self._host = host
         self._port = port
         self._timeout_seconds = timeout_seconds
+        self._script_timeout_seconds = (
+            script_timeout_seconds
+            if script_timeout_seconds is not None
+            else max(MIN_SCRIPT_TIMEOUT_SECONDS, timeout_seconds - 1.0)
+        )
+        if bridge_failure_threshold < 1:
+            raise ValueError("bridge_failure_threshold must be at least 1")
+        if bridge_cooldown_seconds < 0:
+            raise ValueError("bridge_cooldown_seconds must not be negative")
+        self._bridge_failure_threshold = bridge_failure_threshold
+        self._bridge_cooldown_seconds = bridge_cooldown_seconds
+        self._bridge_consecutive_failures = 0
+        self._bridge_circuit_opened_at: Optional[float] = None
         self._bridge_host = bridge_host
         self._bridge_port = bridge_port
         self._bridge_socket_path = bridge_socket_path
@@ -236,6 +286,29 @@ class IsaacSocketClient:
         """Return the stock socket flavour in use: python_server, vscode, or auto."""
         return self._detected_socket_protocol or self._socket_protocol
 
+    @property
+    def script_timeout_seconds(self) -> float:
+        """Return the per-script execution budget asked of the server."""
+        return self._script_timeout_seconds
+
+    @property
+    def bridge_circuit_open(self) -> bool:
+        """Whether bridge calls are currently being skipped after repeated failures.
+
+        Turns back to False once the cooldown has elapsed: the next call is
+        allowed through as a probe, and its outcome decides whether the
+        circuit closes or reopens.
+        """
+        if self._bridge_circuit_opened_at is None:
+            return False
+        elapsed = time.monotonic() - self._bridge_circuit_opened_at
+        return elapsed < self._bridge_cooldown_seconds
+
+    @property
+    def bridge_consecutive_failures(self) -> int:
+        """Return how many bridge transport calls in a row have failed."""
+        return self._bridge_consecutive_failures
+
     async def execute(self, code: str) -> ScriptResult:
         """
         Execute Python code inside the running Isaac Sim process.
@@ -314,13 +387,27 @@ class IsaacSocketClient:
         """
         if self._detected_socket_protocol is None:
             self._detected_socket_protocol = await self._detect_socket_protocol()
-        payload = code
-        if self._auth_token:
-            payload = f"{PYTHON_SERVER_TOKEN_HEADER} {self._auth_token}\n{code}"
+        is_python_server = self._detected_socket_protocol == "python_server"
+        if is_python_server:
+            # The envelope is what carries the per-request timeout; raw source
+            # would run until the process is killed. A stale flavour is
+            # harmless: the 5.x extension evaluates the envelope as a dict
+            # literal and then closes on EOF, which re-probes below.
+            envelope: Dict[str, Any] = {
+                "code": code,
+                "timeout": self._script_timeout_seconds,
+            }
+            if self._auth_token:
+                envelope["auth_token"] = self._auth_token
+            payload = json.dumps(envelope)
+        else:
+            payload = code
+            if self._auth_token:
+                payload = f"{PYTHON_SERVER_TOKEN_HEADER} {self._auth_token}\n{code}"
         try:
             raw_response = await self._socket_round_trip(
                 payload.encode("utf-8"),
-                half_close=self._detected_socket_protocol == "python_server",
+                half_close=is_python_server,
             )
         except (ConnectionRefusedError, TimeoutError, OSError, ValueError):
             self._forget_detected_protocol()
@@ -445,8 +532,17 @@ class IsaacSocketClient:
                 logger.warning("Failed to close socket cleanly: %s", exc)
 
     async def _execute_bridge_script(self, code: str) -> ScriptResult:
-        """Execute Python code through the custom bridge extension."""
-        response = await self._bridge_request("execute_script", {"code": code})
+        """Execute Python code through the custom bridge extension.
+
+        The bridge enforces ``timeout`` itself: a script still running when it
+        expires is interrupted inside Kit, so the failure comes back as a
+        ``ScriptInterrupted`` error rather than a client-side read timeout
+        with the script still wedging the editor.
+        """
+        response = await self._bridge_request(
+            "execute_script",
+            {"code": code, "timeout": self._script_timeout_seconds},
+        )
         if response.get("status") == "ok":
             payload = response.get("payload", {})
             return ScriptResult(
@@ -494,13 +590,81 @@ class IsaacSocketClient:
         async with self._lock:
             return await self._bridge_request(action, payload or {})
 
+    async def interrupt_bridge_script(self) -> Dict[str, Any]:
+        """Ask the bridge to stop the script it is running.
+
+        Deliberately skips this client's request lock and the circuit
+        breaker: the script being interrupted is usually the call holding
+        the lock, and an operator asking for a stop wants the wire tried
+        regardless of recent failures.
+
+        Returns:
+            The bridge response envelope for the ``interrupt`` action.
+        """
+        return await self._bridge_request("interrupt", {}, ignore_circuit=True)
+
     async def _bridge_request(
-        self, action: str, payload: Dict[str, Any]
+        self, action: str, payload: Dict[str, Any], *, ignore_circuit: bool = False
     ) -> Dict[str, Any]:
-        """Send a typed request to the custom bridge extension."""
+        """Send a typed request to the custom bridge extension.
+
+        Args:
+            action: Bridge action name.
+            payload: Action payload.
+            ignore_circuit: Dial the bridge even while its circuit is open.
+
+        Raises:
+            BridgeCircuitOpenError: The circuit is open and ``ignore_circuit``
+                is False; nothing was dialled.
+        """
         if not self._bridge_configured:
             raise ConnectionRefusedError("Bridge transport is not configured.")
+        if not ignore_circuit and self.bridge_circuit_open:
+            remaining = self._bridge_cooldown_seconds - (
+                time.monotonic() - (self._bridge_circuit_opened_at or 0.0)
+            )
+            raise BridgeCircuitOpenError(
+                f"Isaac bridge at {self.bridge_endpoint} skipped: "
+                f"{self._bridge_consecutive_failures} consecutive failures opened "
+                f"its circuit; retrying in {max(0.0, remaining):.0f}s."
+            )
+        try:
+            response = await self._dial_bridge(action, payload)
+        except (ConnectionRefusedError, ConnectionError, TimeoutError, OSError):
+            self._record_bridge_failure()
+            raise
+        self._record_bridge_success()
+        return response
 
+    def _record_bridge_failure(self) -> None:
+        """Count a transport failure and open the circuit at the threshold."""
+        self._bridge_consecutive_failures += 1
+        if self._bridge_consecutive_failures < self._bridge_failure_threshold:
+            return
+        was_open = self._bridge_circuit_opened_at is not None
+        self._bridge_circuit_opened_at = time.monotonic()
+        if not was_open:
+            logger.warning(
+                "Isaac bridge at %s failed %d times in a row; skipping it for %.0fs "
+                "and using the stock socket at %s directly.",
+                self.bridge_endpoint,
+                self._bridge_consecutive_failures,
+                self._bridge_cooldown_seconds,
+                self.vscode_address,
+            )
+
+    def _record_bridge_success(self) -> None:
+        """Close the circuit after a bridge call that got a response."""
+        if self._bridge_circuit_opened_at is not None:
+            logger.info(
+                "Isaac bridge at %s is answering again; circuit closed.",
+                self.bridge_endpoint,
+            )
+        self._bridge_consecutive_failures = 0
+        self._bridge_circuit_opened_at = None
+
+    async def _dial_bridge(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Perform one bridge round trip: connect, send the frame, read the reply."""
         request: Dict[str, Any] = {
             "protocol_version": BRIDGE_PROTOCOL_VERSION,
             "request_id": str(uuid.uuid4()),

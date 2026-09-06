@@ -573,16 +573,18 @@ class UnrealRuntimeSession(LoggerMixin):
         Control is up.
 
         Returns:
-            Dictionary with ``connected`` boolean. When connected, also
-            includes best-effort ``engine_version``, ``project_name``,
-            ``is_editor``, and per-probe ``warnings`` (any non-fatal
-            metadata-fetch errors).
+            Dictionary with a ``reachable`` boolean — the field every backend
+            ping shares — and ``connected``, its older name, kept as an alias
+            for one release. When reachable, also includes best-effort
+            ``engine_version``, ``project_name``, ``is_editor``, and per-probe
+            ``warnings`` (any non-fatal metadata-fetch errors).
         """
         try:
             await self._http_get("/remote/info")
         except Exception as exc:
             self.logger.warning("Health check connectivity failed: %s", exc)
             return {
+                "reachable": False,
                 "connected": False,
                 "error": str(exc),
             }
@@ -609,6 +611,7 @@ class UnrealRuntimeSession(LoggerMixin):
             warnings.append(f"project_name unavailable: {exc}")
 
         result: Dict[str, Any] = {
+            "reachable": True,
             "connected": True,
             "engine_version": engine_version,
             "project_name": project_name,
