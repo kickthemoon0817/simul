@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
 from ._shared import (
+    PROTECTED_CARB_SETTING_PREFIXES,
     BULK_GEOMETRY_ATTRIBUTES,
     LOG_SCAN_WINDOW_BYTES,
     MAX_CAPTURE_DIMENSION,
@@ -167,8 +168,24 @@ class SystemMixin:
                       (e.g. {"/rtx/fog/enabled": true, "/rtx/fog/fogEndDist": 200.0}).
 
         Returns:
-            Dict with applied settings and their verified new values.
+            Dict with applied settings and their verified new values, or a
+            RefusedOperation error when any key configures the MCP transport.
         """
+        protected_keys = sorted(
+            key
+            for key in settings
+            if ("/" + key.lstrip("/")).startswith(PROTECTED_CARB_SETTING_PREFIXES)
+        )
+        if protected_keys:
+            return self._refusal(
+                "Refusing to write transport settings: "
+                + ", ".join(protected_keys)
+                + ". Keys under "
+                + " and ".join(PROTECTED_CARB_SETTING_PREFIXES)
+                + " configure the socket simul-mcp is speaking through. No settings were applied.",
+                refused_keys=protected_keys,
+                protected_prefixes=list(PROTECTED_CARB_SETTING_PREFIXES),
+            )
         _settings = _pyval(settings)
         script = textwrap.dedent(f"""\
             import json

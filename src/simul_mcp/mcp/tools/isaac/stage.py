@@ -25,66 +25,102 @@ class StageAssetMixin:
     # Phase 8: Asset & Stage Operations
     # ------------------------------------------------------------------
 
-    async def open_isaac_stage(self, file_path: str) -> Dict[str, Any]:
+    async def open_isaac_stage(
+        self, file_path: str, discard_unsaved: bool = False
+    ) -> Dict[str, Any]:
         """
         Open a USD stage file in Isaac Sim.
 
         Args:
             file_path: Path or URL to the USD file.
+            discard_unsaved: Replace the current stage even when it has
+                unsaved edits. Off by default so an open cannot silently
+                throw away work.
 
         Returns:
-            Dict confirming the stage was opened.
+            Dict confirming the stage was opened, or a RefusedOperation error
+            when unsaved edits would be lost.
         """
         denial = self._sandbox_denial(file_path)
         if denial is not None:
             return denial
         _file_path = _pyval(self._path_policy.authorize(file_path))
+        _discard = _pyval(discard_unsaved)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
 
             ctx = omni.usd.get_context()
-            result, error = await ctx.open_stage_async({_file_path})
-            if result:
-                stage = ctx.get_stage()
-                total = sum(1 for _ in stage.Traverse()) if stage else 0
+            if ctx.has_pending_edit() and not {_discard}:
                 print(json.dumps({{
-                    "file_path": {_file_path},
-                    "opened": True,
-                    "total_prims": total,
+                    "error": "The current stage has unsaved edits. Save it with save_isaac_stage, "
+                             "or pass discard_unsaved=true to open " + {_file_path} + " anyway.",
+                    "error_type": "RefusedOperation",
+                    "current_stage": ctx.get_stage_url(),
+                    "override": "discard_unsaved",
                 }}))
             else:
-                print(json.dumps({{"error": f"Failed to open stage: {{error}}"}}))
+                result, error = await ctx.open_stage_async({_file_path})
+                if result:
+                    stage = ctx.get_stage()
+                    total = sum(1 for _ in stage.Traverse()) if stage else 0
+                    print(json.dumps({{
+                        "file_path": {_file_path},
+                        "opened": True,
+                        "total_prims": total,
+                    }}))
+                else:
+                    print(json.dumps({{"error": f"Failed to open stage: {{error}}"}}))
         """)
         return await self._execute_json_script(script)
 
     async def save_isaac_stage(
-        self, file_path: Optional[str] = None
+        self, file_path: Optional[str] = None, overwrite: bool = False
     ) -> Dict[str, Any]:
         """
         Save the current stage. If file_path is given, saves to that path.
 
+        Saving in place always writes the stage's own file. A save-as target
+        that already exists is refused unless ``overwrite`` is set; the check
+        runs inside Isaac Sim because the file system is Isaac's.
+
         Args:
             file_path: Optional path to save to. None saves to current location.
+            overwrite: Replace an existing file at ``file_path``.
 
         Returns:
-            Dict confirming the stage was saved.
+            Dict confirming the stage was saved, or a RefusedOperation error
+            naming the file that would have been overwritten.
         """
         denial = self._sandbox_denial(file_path, write=True)
         if denial is not None:
             return denial
         if file_path:
             _file_path = _pyval(self._path_policy.authorize(file_path, write=True))
+            _overwrite = _pyval(overwrite)
             script = textwrap.dedent(f"""\
                 import json
+                import os
                 import omni.usd
 
                 ctx = omni.usd.get_context()
-                result, error, saved_paths = await ctx.save_as_stage_async({_file_path})
-                if result:
-                    print(json.dumps({{"file_path": {_file_path}, "saved": True}}))
+                target = {_file_path}
+                current = ctx.get_stage_url() or ""
+                same_file = os.path.exists(target) and os.path.exists(current) and os.path.samefile(target, current)
+                if os.path.exists(target) and not same_file and not {_overwrite}:
+                    print(json.dumps({{
+                        "error": "Refusing to overwrite existing file " + target + ". "
+                                 "Pass overwrite=true to replace it.",
+                        "error_type": "RefusedOperation",
+                        "file_path": target,
+                        "override": "overwrite",
+                    }}))
                 else:
-                    print(json.dumps({{"error": f"Failed to save stage: {{error}}"}}))
+                    result, error, saved_paths = await ctx.save_as_stage_async(target)
+                    if result:
+                        print(json.dumps({{"file_path": target, "saved": True}}))
+                    else:
+                        print(json.dumps({{"error": f"Failed to save stage: {{error}}"}}))
             """)
         else:
             script = textwrap.dedent("""\
@@ -108,23 +144,39 @@ class StageAssetMixin:
             """)
         return await self._execute_json_script(script)
 
-    async def new_isaac_stage(self) -> Dict[str, Any]:
+    async def new_isaac_stage(self, discard_unsaved: bool = False) -> Dict[str, Any]:
         """
         Create a new empty stage in Isaac Sim.
 
+        Args:
+            discard_unsaved: Replace the current stage even when it has
+                unsaved edits. Off by default so a reset cannot silently
+                throw away work.
+
         Returns:
-            Dict confirming the new stage was created.
+            Dict confirming the new stage was created, or a RefusedOperation
+            error when unsaved edits would be lost.
         """
-        script = textwrap.dedent("""\
+        _discard = _pyval(discard_unsaved)
+        script = textwrap.dedent(f"""\
             import json
             import omni.usd
 
             ctx = omni.usd.get_context()
-            result, error = await ctx.new_stage_async()
-            if result:
-                print(json.dumps({"created": True, "new_stage": True}))
+            if ctx.has_pending_edit() and not {_discard}:
+                print(json.dumps({{
+                    "error": "The current stage has unsaved edits. Save it with save_isaac_stage, "
+                             "or pass discard_unsaved=true to replace it with an empty stage.",
+                    "error_type": "RefusedOperation",
+                    "current_stage": ctx.get_stage_url(),
+                    "override": "discard_unsaved",
+                }}))
             else:
-                print(json.dumps({"error": f"Failed to create new stage: {error}"}))
+                result, error = await ctx.new_stage_async()
+                if result:
+                    print(json.dumps({{"created": True, "new_stage": True}}))
+                else:
+                    print(json.dumps({{"error": f"Failed to create new stage: {{error}}"}}))
         """)
         return await self._execute_json_script(script)
 

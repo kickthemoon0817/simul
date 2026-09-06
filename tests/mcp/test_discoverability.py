@@ -229,7 +229,7 @@ HEADLESS_USD_TOOLS: frozenset[str] = frozenset({
     "get_bounding_box",
     "summarize_scene",
 })
-META_TOOLS: frozenset[str] = frozenset({"get_tool_usage_stats", "reset_tool_usage_stats"})
+META_TOOLS: frozenset[str] = frozenset({"get_tool_usage_stats"})
 
 
 def _make_full_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServer:

@@ -7,6 +7,8 @@ from typing import Any, Callable, Dict, List, Optional
 from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
 from ._shared import (
+    DEFAULT_WORLD_PATH,
+    STAGE_ROOT_PATH,
     BULK_GEOMETRY_ATTRIBUTES,
     LOG_SCAN_WINDOW_BYTES,
     MAX_CAPTURE_DIMENSION,
@@ -75,16 +77,36 @@ class PrimEditMixin:
         """)
         return await self._execute_json_script(script)
 
-    async def delete_isaac_prim(self, prim_path: str) -> Dict[str, Any]:
+    async def delete_isaac_prim(
+        self, prim_path: str, allow_root_delete: bool = False
+    ) -> Dict[str, Any]:
         """
         Delete a prim and its children from the current stage.
 
+        The pseudo-root ``/`` is never deleted. ``/World`` is refused unless
+        ``allow_root_delete`` is set, because removing it empties the scene.
+
         Args:
             prim_path: USD path of the prim to delete.
+            allow_root_delete: Permit deleting ``/World``.
 
         Returns:
-            Dict confirming deletion.
+            Dict confirming deletion, or a RefusedOperation error.
         """
+        normalized = prim_path.rstrip("/") or STAGE_ROOT_PATH
+        if normalized == STAGE_ROOT_PATH:
+            return self._refusal(
+                "Refusing to delete the stage pseudo-root. Delete a child prim, or use "
+                "new_isaac_stage to start over.",
+                prim_path=prim_path,
+            )
+        if normalized == DEFAULT_WORLD_PATH and not allow_root_delete:
+            return self._refusal(
+                f"Refusing to delete {DEFAULT_WORLD_PATH}: it holds the whole scene. "
+                "Pass allow_root_delete=true to delete it anyway.",
+                prim_path=prim_path,
+                override="allow_root_delete",
+            )
         _prim_path = _pyval(prim_path)
         script = textwrap.dedent(f"""\
             import json
