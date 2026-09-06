@@ -16,6 +16,7 @@ from ._shared import (
     _compose_script,
     _pyval,
 )
+from .._meta import tool_meta
 
 # Compound-only glue: reuse an existing material or define a fresh
 # UsdPreviewSurface one. The single-step tool refuses to overwrite, and a
@@ -33,6 +34,22 @@ ENSURE_MATERIAL_CORE = """\
 
 
 class CompoundMixin:
+    @tool_meta(
+        name="create_isaac_object",
+        description=(
+            "Build a complete object in one call: create a prim, then optionally set its "
+            "transform, apply a rigid body, a collider, a mass, and bind a material (reused "
+            "when material_path exists, otherwise created with diffuse_color). Prefer this "
+            "over chaining create_isaac_prim, set_isaac_prim_transform, "
+            "add_isaac_rigid_body, add_isaac_collision, set_isaac_mass_properties, "
+            "create_isaac_material and assign_isaac_material: it runs the same steps in a "
+            "single round trip and reports each step's result under 'steps'. Stops at the "
+            "first failing step and names it in 'failed_step'. collision accepts none, "
+            "convexHull, convexDecomposition, meshSimplification, boundingSphere, "
+            "boundingCube."
+        ),
+        read_only=False,
+    )
     async def create_isaac_object(
         self,
         prim_path: str,

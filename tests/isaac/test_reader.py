@@ -11,14 +11,11 @@ from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 
 # Test imports
-import sys
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
 pytest.importorskip("pxr", reason="pxr library not available")
 
-from simul_mcp.usd.reader import PrimType, USDLayerInfo, USDPrimInfo, USDReader, USDStageInfo
+from simul_mcp.usd.reader import PrimType, USDLayerInfo, USDPrimInfo, USDReader, USDStageInfo  # noqa: E402
 
 
 class TestUSDReader:

@@ -9,17 +9,13 @@ review chose for Isaac after finding registration-level checks bypassable.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-repo_root = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(repo_root / "src"))
 
-from simul_mcp.adapters import blender_runtime  # noqa: E402
-from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.adapters import blender_runtime
+from simul_mcp.config import Settings
 
 OUTSIDE = "/etc/shadow"
 

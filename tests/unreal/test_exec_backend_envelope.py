@@ -15,20 +15,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 import pytest
 from pydantic import BaseModel, Field
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-from simul_mcp.mcp.result_budget import DEFAULT_RESULT_BUDGET_BYTES  # noqa: E402
+from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from simul_mcp.mcp.result_budget import DEFAULT_RESULT_BUDGET_BYTES
+from tests.fakes import FakeFastMCP
 
 
 def _payload(result: Any) -> Dict[str, Any]:
@@ -82,33 +80,13 @@ class _Adapter:
             self.sessions_closed += 1
 
 
-class FakeFastMCP:
-    def __init__(self, name: str, version: str, **kwargs: Any):
-        self.tools: List[Any] = []
-
-    def tool(self, name: str, **kwargs: Any):
-        def decorator(func):
-            return func
-
-        return decorator
-
-    def resource(self, *args, **kwargs):
-        def decorator(func):
-            return func
-
-        return decorator
-
-    def add_middleware(self, middleware: Any) -> None:
-        return
-
-
 @pytest.fixture
 def server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServer:
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
     return server_module.SimulMCPServer(settings=Settings())
 
 
@@ -302,21 +280,6 @@ def test_result_budget_applies_to_backend_payloads(server) -> None:
     assert len(json.dumps(result)) <= DEFAULT_RESULT_BUDGET_BYTES
 
 
-class _RecordingFastMCP(FakeFastMCP):
-    """FakeFastMCP that keeps the registered tool functions addressable."""
-
-    def __init__(self, name: str, version: str, **kwargs: Any):
-        super().__init__(name, version, **kwargs)
-        self.by_name: Dict[str, Any] = {}
-
-    def tool(self, name: str, **kwargs: Any):
-        def decorator(func):
-            self.by_name[name] = func
-            return func
-
-        return decorator
-
-
 @pytest.mark.parametrize(
     ("tool_name", "kwargs"),
     [
@@ -341,12 +304,12 @@ def test_registered_tool_checks_the_rate_limit_exactly_once(
         def is_available(self) -> bool:
             return True
 
-    monkeypatch.setattr(server_module, "FastMCP", _RecordingFastMCP)
+    monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: True)
-    monkeypatch.setattr(server_module, "BlenderRuntimeAdapter", _StubAdapter)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", _StubAdapter)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
+    monkeypatch.setattr(backends_module, "BlenderRuntimeAdapter", _StubAdapter)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", _StubAdapter)
     instance = server_module.SimulMCPServer(settings=Settings())
 
     # MCP mode registers the thin Unreal set; the converted tools live in

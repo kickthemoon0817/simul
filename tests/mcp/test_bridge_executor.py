@@ -10,23 +10,16 @@ thread and step the latter outside any Task.
 from __future__ import annotations
 
 import asyncio
-import sys
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-extension_root = (
-    Path(__file__).resolve().parents[2]
-    / "src" / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"
-)
-sys.path.insert(0, str(extension_root))
 
-from khemoo.simul.mcp.executor import ScriptExecutor, ScriptInterrupted  # noqa: E402
-from khemoo.simul.mcp.protocol import BridgeRequest  # noqa: E402
-from khemoo.simul.mcp.service import (  # noqa: E402
+from khemoo.simul.mcp.executor import ScriptExecutor, ScriptInterrupted
+from khemoo.simul.mcp.protocol import BridgeRequest
+from khemoo.simul.mcp.service import (
     LOCK_FREE_ACTIONS,
     READ_ONLY_ACTIONS,
     BridgeCommandService,

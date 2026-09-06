@@ -15,8 +15,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 extension_root = (
     Path(__file__).resolve().parents[2]
     / "src"
@@ -24,7 +22,6 @@ extension_root = (
     / "bridge_ext"
     / "khemoo.simul.mcp"
 )
-sys.path.insert(0, str(extension_root))
 
 from khemoo.simul.mcp.protocol import BridgeRequest  # noqa: E402
 from khemoo.simul.mcp.service import BridgeCommandService  # noqa: E402

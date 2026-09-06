@@ -23,6 +23,7 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .._meta import tool_meta
 
 
 class PhysicsMixin:
@@ -30,6 +31,15 @@ class PhysicsMixin:
     # Phase 4: Physics Inspection
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="get_isaac_physics_scene",
+        description=(
+            "Get physics scene configuration: gravity, solver settings, and physics scene "
+            "prim paths."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_physics_scene(self) -> Dict[str, Any]:
         """
         Get physics scene configuration from the current stage.
@@ -125,6 +135,15 @@ class PhysicsMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="list_isaac_physics_objects",
+        description=(
+            "List all prims with physics APIs: rigid bodies, colliders, and joints under a "
+            "root path."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def list_isaac_physics_objects(
         self, root_path: str = "/", max_results: int = 200, offset: int = 0
     ) -> Dict[str, Any]:
@@ -354,6 +373,11 @@ class PhysicsMixin:
     # Phase 5: Physics Configuration
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="add_isaac_rigid_body",
+        description="Apply RigidBodyAPI to a prim, optionally making it kinematic.",
+        read_only=False,
+    )
     async def add_isaac_rigid_body(
         self,
         prim_path: str,
@@ -388,6 +412,14 @@ class PhysicsMixin:
         )
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="add_isaac_collision",
+        description=(
+            "Apply CollisionAPI to a prim with optional mesh approximation (none, "
+            "convexHull, convexDecomposition, boundingSphere, boundingCube)."
+        ),
+        read_only=False,
+    )
     async def add_isaac_collision(
         self,
         prim_path: str,
@@ -424,6 +456,16 @@ class PhysicsMixin:
         )
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="set_isaac_mass_properties",
+        description=(
+            "Set mass, density, and/or center of mass on a prim. Applies MassAPI if not "
+            "already present."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def set_isaac_mass_properties(
         self,
         prim_path: str,
@@ -467,6 +509,16 @@ class PhysicsMixin:
         )
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="set_isaac_physics_material",
+        description=(
+            "Create or update a physics material with friction and restitution "
+            "coefficients."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def set_isaac_physics_material(
         self,
         prim_path: str,
@@ -515,6 +567,17 @@ class PhysicsMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="create_isaac_physics_scene",
+        description=(
+            "Create a UsdPhysics.Scene prim with configurable gravity, or apply the "
+            "requested gravity to a scene that already exists at prim_path (reported as "
+            "updated=true). This is the prerequisite for any physics simulation — rigid "
+            "bodies, colliders, and joints require a physics scene to function."
+        ),
+        read_only=False,
+        idempotent=True,
+    )
     async def create_isaac_physics_scene(
         self,
         prim_path: str = "/World/PhysicsScene",

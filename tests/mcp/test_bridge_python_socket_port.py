@@ -2,17 +2,9 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-extension_root = (
-    Path(__file__).resolve().parents[2]
-    / "src" / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"
-)
-sys.path.insert(0, str(extension_root))
-
-from khemoo.simul.mcp.extension import resolve_python_socket_port  # noqa: E402
-from khemoo.simul.mcp.lifecycle import PYTHON_SERVER_TOKEN_HEADER  # noqa: E402
+from khemoo.simul.mcp.extension import resolve_python_socket_port
+from khemoo.simul.mcp.lifecycle import PYTHON_SERVER_TOKEN_HEADER
 
 
 def test_prefers_python_server_setting_on_isaac_six() -> None:

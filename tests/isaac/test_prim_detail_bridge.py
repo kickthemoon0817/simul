@@ -12,24 +12,18 @@ import asyncio
 import json
 import sys
 import types
-from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
-extension_root = src_path / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"
-sys.path.insert(0, str(extension_root))
-
-from khemoo.simul.mcp import prim_detail as bridge_prim_detail  # noqa: E402
-from khemoo.simul.mcp.protocol import BridgeRequest, BridgeResponse  # noqa: E402
-from khemoo.simul.mcp.service import READ_ONLY_ACTIONS, BridgeCommandService  # noqa: E402
-from simul_mcp.adapters.isaac_socket_client import ScriptResult  # noqa: E402
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp.tools.isaac_tools import PRIM_DETAIL_ASPECTS, IsaacTools  # noqa: E402
+from khemoo.simul.mcp import prim_detail as bridge_prim_detail
+from khemoo.simul.mcp.protocol import BridgeRequest, BridgeResponse
+from khemoo.simul.mcp.service import READ_ONLY_ACTIONS, BridgeCommandService
+from simul_mcp.adapters.isaac_socket_client import ScriptResult
+from simul_mcp.config import Settings
+from simul_mcp.mcp.tools.isaac_tools import PRIM_DETAIL_ASPECTS, IsaacTools
 
 ALL_ASPECTS: List[str] = list(PRIM_DETAIL_ASPECTS)
 

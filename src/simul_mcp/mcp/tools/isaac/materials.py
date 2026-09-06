@@ -22,6 +22,7 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .._meta import tool_meta
 
 
 class MaterialsMixin:
@@ -99,6 +100,12 @@ class MaterialsMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="list_isaac_materials",
+        description="List all material prims in the current stage.",
+        read_only=True,
+        idempotent=True,
+    )
     async def list_isaac_materials(
         self, max_results: int = 200, offset: int = 0
     ) -> Dict[str, Any]:
@@ -174,6 +181,15 @@ class MaterialsMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="assign_isaac_material",
+        description=(
+            "Bind a material to a prim so the prim renders with that material's appearance."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def assign_isaac_material(
         self, prim_path: str, material_path: str
     ) -> Dict[str, Any]:
@@ -206,6 +222,16 @@ class MaterialsMixin:
         )
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="set_isaac_material_property",
+        description=(
+            "Set an input property on a material's surface shader (e.g. "
+            "diffuse_color_constant, metallic_constant, roughness_constant)."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def set_isaac_material_property(
         self,
         material_path: str,
@@ -279,6 +305,15 @@ class MaterialsMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="create_isaac_material",
+        description=(
+            "Create a new material with a surface shader. Supports UsdPreviewSurface "
+            "(portable) and OmniPBR (NVIDIA MDL). Set diffuse color, roughness, metallic, "
+            "and opacity. After creation, use assign_isaac_material to bind it to prims."
+        ),
+        read_only=False,
+    )
     async def create_isaac_material(
         self,
         material_path: str,

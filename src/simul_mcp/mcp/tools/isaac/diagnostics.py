@@ -19,6 +19,7 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .._meta import tool_meta
 
 
 class DiagnosticsMixin:
@@ -26,6 +27,19 @@ class DiagnosticsMixin:
     # Runtime diagnostics
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="get_isaac_runtime_info",
+        description=(
+            "Get consolidated runtime diagnostics from the running Isaac Sim instance: Kit "
+            "app version, timeline state, physics stats (rigid body/articulation/shape "
+            "counts, CUDA availability), GPU/renderer info, viewport state, stage summary, "
+            "and extension counts. Use this for a quick health check or to understand the "
+            "current state of the simulation environment. Pass include_prim_count=true to "
+            "also count every prim on the stage."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_runtime_info(
         self, include_prim_count: bool = False
     ) -> Dict[str, Any]:
@@ -205,6 +219,22 @@ class DiagnosticsMixin:
             result["client"] = self._client_state()
         return result
 
+    @tool_meta(
+        name="interrupt_isaac_script",
+        description=(
+            "Stop the script the Isaac Sim bridge is currently running, so a runaway "
+            "execute_isaac_script does not hold the instance for every agent. Reaches a "
+            "coroutine script or one suspended at an await; a synchronous script that never "
+            "yields also blocks the bridge's event loop, so that one is stopped by the "
+            "per-request timeout sent with every script instead. Requires the bridge "
+            "extension; the stock Python socket has no interrupt path. Check "
+            "get_isaac_runtime_info's bridge section (busy, busy_since, current_action) "
+            "first to tell a busy instance from a hung one."
+        ),
+        read_only=False,
+        idempotent=True,
+        bypasses_instance_lock=True,
+    )
     async def interrupt_script(self) -> Dict[str, Any]:
         """
         Stop the script the bridge is currently running.
@@ -270,6 +300,18 @@ class DiagnosticsMixin:
             "script_timeout_seconds": client.script_timeout_seconds,
         }
 
+    @tool_meta(
+        name="get_isaac_logs",
+        description=(
+            "Read recent log entries from the running Isaac Sim console. Returns entries "
+            "filtered by minimum level (verbose/info/warn/error), optional source module "
+            "filter, and optional text search. Includes per-level counts and log file path. "
+            "Use this to diagnose errors, warnings, or check what happened during a "
+            "simulation."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_logs(
         self,
         level: str = "warn",
@@ -401,6 +443,17 @@ class DiagnosticsMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="set_isaac_log_level",
+        description=(
+            "Set the Carbonite logging threshold for the running Isaac Sim. Levels: "
+            "verbose, info, warn, error. Lower levels include all higher levels. Use "
+            "'verbose' for maximum detail when debugging."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def set_isaac_log_level(self, level: str) -> Dict[str, Any]:
         """
         Set the Carbonite logging threshold level for the running Isaac Sim instance.
@@ -441,6 +494,21 @@ class DiagnosticsMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="disable_isaac_extension",
+        description=(
+            "Disable an extension immediately in the running Isaac Sim instance. Accepts "
+            "EITHER the bare canonical Kit extension name (e.g. 'omni.physx', "
+            "'isaacsim.replicator.behavior') OR the version-suffixed ID returned by "
+            "list_isaac_extensions (e.g. 'omni.physx-107.3.7'). The bare name is preferred "
+            "— it keeps callers decoupled from the installed version. Refuses the transport "
+            "extensions simul-mcp speaks through (khemoo.simul.mcp, "
+            "isaacsim.code_editor.python_server, isaacsim.code_editor.vscode)."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def disable_isaac_extension(self, extension_id: str) -> Dict[str, Any]:
         """
         Disable an extension by its ID in the running Isaac Sim instance.

@@ -10,16 +10,12 @@ import numpy as np
 from unittest.mock import Mock, patch, MagicMock
 
 # Test imports
-import sys
-from pathlib import Path
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
 pytest.importorskip("pxr", reason="pxr library not available")
 
-from simul_mcp.usd.mesh_ops import MeshOperations, MeshInfo
-from simul_mcp.utils.math import BBox
+from simul_mcp.usd.mesh_ops import MeshOperations, MeshInfo  # noqa: E402
+from simul_mcp.utils.math import BBox  # noqa: E402
 
 
 class TestMeshOperations:

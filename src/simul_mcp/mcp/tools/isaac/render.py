@@ -19,6 +19,7 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .._meta import DeprecatedAlias, tool_meta
 
 
 class RenderMixin:
@@ -26,6 +27,19 @@ class RenderMixin:
     # AOV / Replicator
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="read_isaac_aovs",
+        description=(
+            "Read one or more AOV (render pass) buffers and return per-AOV statistics. "
+            "Handles the full replicator pipeline in a single call: creates a render "
+            "product, attaches annotators, renders frames, reads numpy data, computes stats "
+            "(shape, min, max, mean, rgb_max, rgb_mean, nonzero_pixels for color AOVs), and "
+            "cleans up. Common AOVs: HdrColor, DirectDiffuse, DirectSpecular, "
+            "IndirectDiffuse, Reflections, AmbientOcclusion, Depth, SmoothNormal, normals. "
+            "Use list_isaac_aovs for the registered set."
+        ),
+        read_only=False,
+    )
     async def read_aovs(
         self,
         aov_names: List[str],
@@ -223,6 +237,16 @@ class RenderMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="list_isaac_aovs",
+        description=(
+            "List all available AOV annotator names registered in the current Isaac Sim "
+            "session. Use this to discover which AOV names can be passed to "
+            "read_isaac_aovs."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def list_aovs(self, max_results: int = DEFAULT_MAX_RESULTS) -> Dict[str, Any]:
         """
         List all available AOV annotator names in the current session.
@@ -254,6 +278,24 @@ class RenderMixin:
     # USD schema queries
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="query_isaac_typed_prims",
+        description=(
+            "Query prims by USD schema type and optionally read their attributes. Traverses "
+            "the stage from root_path, finds all prims matching the schema type, and reads "
+            "the requested attributes. Supported types: UsdLux.DistantLight, "
+            "UsdLux.SphereLight, UsdLux.DomeLight, UsdGeom.Mesh, UsdGeom.PointInstancer, "
+            "UsdGeom.Xform, UsdShade.Material, or any USD type name. Attributes are read "
+            "via schema API first (e.g. 'intensity' -> GetIntensityAttr), then fallback to "
+            "generic and inputs: prefix. Paged via max_results/offset. Use "
+            "query_isaac_typed_prims when you need attribute values or schema-based "
+            "matching (subclasses included); use search_isaac_prims for a plain name or "
+            "exact type lookup."
+        ),
+        read_only=True,
+        idempotent=True,
+        deprecated_aliases=(DeprecatedAlias("max_prims", "max_results"),),
+    )
     async def query_usd_typed_prims(
         self,
         type_name: str,
@@ -388,6 +430,15 @@ class RenderMixin:
     # Viewport / render info
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="get_isaac_viewport_info",
+        description=(
+            "Get detailed information about the active viewport including camera path, "
+            "render product path, resolution, and viewport name."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_viewport_info(self) -> Dict[str, Any]:
         """
         Get detailed information about the active viewport.
@@ -418,6 +469,16 @@ class RenderMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="list_isaac_render_vars",
+        description=(
+            "List available render variable (AOV) names from SyntheticData and sensor "
+            "types. Use this to discover what render passes and sensor data are available "
+            "in the current session."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def list_render_vars(
         self, max_results: int = DEFAULT_MAX_RESULTS
     ) -> Dict[str, Any]:

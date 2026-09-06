@@ -11,6 +11,7 @@ import textwrap
 from typing import Any, Dict
 
 from ._shared import _pyval
+from .._meta import tool_meta
 
 # Caps for the widget-tree walk, mirroring the max(1, min(x, N)) clamp the
 # other bounded tools use. The depth cap doubles as the recursion bound.
@@ -23,6 +24,16 @@ class UiObservabilityMixin:
     # GUI / application state observability
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="get_isaac_ui_state",
+        description=(
+            "Get a consolidated snapshot of the Isaac Sim GUI and app state: omni.ui "
+            "windows (visibility, focus, docking), active viewport, selection, timeline, "
+            "and open-stage status. Degrades gracefully on headless runs."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_ui_state(self) -> Dict[str, Any]:
         """
         Get a consolidated snapshot of the Isaac Sim GUI and app state.
@@ -148,6 +159,16 @@ class UiObservabilityMixin:
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
+    @tool_meta(
+        name="get_isaac_ui_window",
+        description=(
+            "Inspect one omni.ui window as a widget tree: widget types, identifiers, label "
+            "text, state flags, and model values, depth- and count-limited. Window titles "
+            "come from get_isaac_ui_state."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_ui_window(
         self,
         window_title: str,

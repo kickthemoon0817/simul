@@ -10,17 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import re
-import sys
-from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import pytest
 from pxr import Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools  # noqa: E402
+from simul_mcp.mcp.tools.isaac_tools import IsaacTools
 
 
 @pytest.fixture

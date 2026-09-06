@@ -3,58 +3,16 @@
 import asyncio
 import json
 from contextlib import contextmanager
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
-import sys
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-
-
-class FakeFastMCP:
-    """Minimal FastMCP test double for tool registration."""
-
-    def __init__(self, name: str, version: str, **kwargs: Any):
-        self.name = name
-        self.version = version
-        self.description = kwargs.get("description")
-        self.instructions = kwargs.get("instructions")
-        self.tools: list[SimpleNamespace] = []
-
-    def tool(self, name: str, **kwargs):
-        """Return decorator that records tool metadata."""
-
-        def decorator(func):
-            self.tools.append(SimpleNamespace(name=name, func=func, kwargs=kwargs))
-            return func
-
-        return decorator
-
-    def get_tools(self):
-        """Mirror FastMCP get_tools API."""
-        return self.tools
-
-    def resource(self, *args, **kwargs):
-        """Stub for resource registration."""
-        def decorator(func):
-            return func
-        return decorator
-
-    def add_middleware(self, middleware: Any) -> None:
-        """Stub for FastMCP middleware registration.
-
-        SimulMCPServer adds a request-context middleware (PR #23) before
-        any tools register. The stub only needs to not raise — no test
-        in any of the 5 FakeFastMCP doubles asserts on middleware state.
-        Iter20 normalized all 5 doubles to this bare-return form.
-        """
-        return
+from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from tests.fakes import FakeFastMCP
 
 
 class FakeUnrealAdapter:
@@ -124,10 +82,10 @@ class TestUnrealToolRegistration:
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
 
-        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
         monkeypatch.setattr(
-            server_module, "UnrealRuntimeAdapter", FakeUnrealAdapter
+            backends_module, "UnrealRuntimeAdapter", FakeUnrealAdapter
         )
 
         instance = server_module.SimulMCPServer(settings=Settings())
@@ -146,10 +104,10 @@ class TestUnrealToolRegistration:
         """``unreal.tool_surface = "full"`` exposes the granular tools too."""
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
-        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
         monkeypatch.setattr(
-            server_module, "UnrealRuntimeAdapter", FakeUnrealAdapter
+            backends_module, "UnrealRuntimeAdapter", FakeUnrealAdapter
         )
         settings = Settings().model_copy(
             update={"unreal": Settings().unreal.model_copy(update={"tool_surface": "full"})}
@@ -178,9 +136,9 @@ class TestUnrealToolRegistration:
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
 
-        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-        monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+        monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
 
         instance = server_module.SimulMCPServer(settings=Settings())
         assert instance.unreal_adapter is None
@@ -251,10 +209,10 @@ class TestIter16WrapperSurfacesAdapterError:
     ) -> None:
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
-        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-        monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
         monkeypatch.setattr(
-            server_module, "UnrealRuntimeAdapter", FakeUnrealAdapterErroring
+            backends_module, "UnrealRuntimeAdapter", FakeUnrealAdapterErroring
         )
 
         instance = server_module.SimulMCPServer(settings=Settings())

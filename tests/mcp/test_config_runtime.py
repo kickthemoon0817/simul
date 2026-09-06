@@ -6,13 +6,10 @@ import json
 import logging
 import sys
 import importlib
-from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
 from simul_mcp.cli.main import app
 from simul_mcp.config import Settings, get_settings, load_settings

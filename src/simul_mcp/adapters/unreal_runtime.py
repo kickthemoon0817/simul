@@ -3784,6 +3784,8 @@ print('{marker}' + json.dumps(payload))
 class UnrealRuntimeAdapter(LoggerMixin):
     """Adapter for Unreal Engine runtime operations."""
 
+    name: str = "unreal"
+
     def __init__(self, settings: Optional[Settings] = None) -> None:
         """
         Initialize Unreal runtime adapter.
@@ -3817,6 +3819,9 @@ class UnrealRuntimeAdapter(LoggerMixin):
             and the adapter is enabled in settings.
         """
         return UNREAL_AVAILABLE and self.settings.unreal.enabled
+
+    def close(self) -> None:
+        """Nothing is held between sessions; each one cleans up after itself."""
 
     def get_capabilities(self) -> List[str]:
         """

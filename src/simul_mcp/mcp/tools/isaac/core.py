@@ -18,9 +18,20 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .._meta import tool_meta
 
 
 class CoreToolsMixin:
+    @tool_meta(
+        name="get_isaac_prim_detail",
+        description=(
+            "Read one or more aspects of a prim in a single call. Aspects: info, transform, "
+            "ancestors, relationships, variants, bounding_box, mesh, light, material, "
+            "rigid_body, collision, joint, mass, animation. Defaults to info."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_prim_detail(
         self,
         prim_path: str,
@@ -69,6 +80,22 @@ class CoreToolsMixin:
             detail[aspect] = await method(prim_path)
         return detail
 
+    @tool_meta(
+        name="execute_isaac_script",
+        description=(
+            "Execute arbitrary Python code inside a running Isaac Sim application. The code "
+            "runs in Kit's Python scope with full access to omni.*, pxr.*, and isaacsim.* "
+            "APIs. stdout is captured and returned. For structured results, print JSON via "
+            "json.dumps(). Each execution is independent — always import modules at the top "
+            "of every script. Call ping_isaac first to verify connectivity before sending "
+            "scripts. Read the 'simul://isaac-sim/skills' resource for scripting patterns, "
+            "API quick reference, and Isaac Sim 5.1 / 6.0 namespace migration notes."
+        ),
+        read_only=False,
+        destructive=True,
+        script=True,
+        hidden_parameters=("keep_raw_output",),
+    )
     async def execute_script(
         self, code: str, keep_raw_output: bool = False
     ) -> Dict[str, Any]:

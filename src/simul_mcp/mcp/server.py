@@ -19,11 +19,13 @@ from typing import (
     Coroutine,
     Dict,
     List,
+    Literal,
     Optional,
     Set,
     Tuple,
     Type,
     Union,
+    cast,
 )
 
 from fastmcp import FastMCP
@@ -34,20 +36,15 @@ from mcp.types import ImageContent, TextContent, ToolAnnotations
 from pydantic import BaseModel
 
 from .. import __version__ as _source_version
-from ..adapters import (
-    BlenderRuntimeAdapter,
-    HeadlessUSDAdapter,
-    IsaacSocketClient,
-    UnrealRuntimeAdapter,
-    is_blender_available,
-    is_headless_available,
-    is_unreal_available,
-)
+from ..adapters import IsaacRuntimeAdapter, IsaacSocketClient
+from ..adapters.base import BackendAdapter
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
 from ..resources import find_checkout_root, resource
 from ..utils.paths import PathPolicy, SandboxDenied
 from ..utils.timing import RateLimiter
+from .backends import ALL_BACKEND_NAMES, BACKENDS
+from .registration import register_stats_tools
 from .registration._helpers import apply_success_from_error
 from .result_budget import apply_result_budget
 from .schemas.common import ErrorResponse
@@ -91,15 +88,11 @@ _MCP_INSTRUCTIONS: str = (
     "ROUTING — the backend name appears somewhere inside the tool name, "
     "usually as an infix (create_isaac_prim, capture_unreal_viewport, "
     "get_blender_info):\n"
-    "  Tools containing 'isaac' → require a running Isaac Sim instance (TCP socket).\n"
-    "  Tools containing 'unreal' → require a connected Unreal Engine instance.\n"
-    "  Tools containing 'blender' → require a connected Blender runtime.\n"
-    "  Tools containing 'simready' (SimReady asset helpers) exist for both "
+    + "".join(f"  {spec.routing_rule}\n" for spec in BACKENDS if spec.name != "usd")
+    + "  Tools containing 'simready' (SimReady asset helpers) exist for both "
     "Blender and Unreal; each one's description names the runtime it targets.\n"
-    "  Tools containing none of those names (load_usd_file, get_prim_info, "
-    "create_prim, summarize_scene, etc.) → operate on local USD files via the "
-    "headless adapter; they do NOT connect to any engine. The two "
-    "*_tool_usage_stats tools are server metadata, not a backend.\n\n"
+    + "".join(f"  {spec.routing_rule}\n" for spec in BACKENDS if spec.name == "usd")
+    + "  The two *_tool_usage_stats tools are server metadata, not a backend.\n\n"
     "MULTI-INSTANCE — when multiple Isaac Sim applications are running:\n"
     "  1. Call list_isaac_instances to discover all running instances "
     "and see which stage each has loaded.\n"
@@ -115,6 +108,11 @@ _FASTMCP_SUPPORTS_INSTRUCTIONS: bool = (
 
 # Tool key of the bucket that caps one agent's calls across every tool.
 _GLOBAL_RATE_BUCKET: str = "*"
+
+# Transports ``SimulMCPServer.run`` accepts. ``http`` is streamable HTTP, the
+# current MCP network transport; ``sse`` is kept for clients that still speak it.
+NETWORK_TRANSPORTS: Tuple[str, ...] = ("http", "sse")
+TRANSPORTS: Tuple[str, ...] = ("stdio", *NETWORK_TRANSPORTS)
 
 
 @dataclass
@@ -144,13 +142,14 @@ class SimulMCPServer(LoggerMixin):
     """
     Simul 3D MCP Server.
 
-    Unified MCP server for 3D simulation and DCC tools. Registers tools for
-    Isaac Sim (live TCP), headless USD, Blender, and Unreal Engine backends.
-    Supports multi-instance Isaac Sim discovery and active instance routing.
+    Unified MCP server for 3D simulation and DCC tools. Every backend in
+    ``simul_mcp.mcp.backends.BACKENDS`` gets its adapter built and its tools
+    registered here; Isaac Sim additionally has multi-instance discovery and
+    per-session instance routing.
     """
 
     # All recognised backend names for --backends validation.
-    ALL_BACKENDS: Set[str] = {"isaac", "unreal", "usd", "blender"}
+    ALL_BACKENDS: frozenset[str] = ALL_BACKEND_NAMES
 
     def __init__(
         self,
@@ -198,24 +197,19 @@ class SimulMCPServer(LoggerMixin):
         # guessing through a 1000-frame step.
         self._instance_lock_timeout = float(self.settings.server.timeout)
 
-        # Initialize adapters
-        self.headless_adapter = (
-            HeadlessUSDAdapter(self.settings) if is_headless_available() else None
-        )
+        # One adapter per registered backend; None when its runtime is not
+        # importable in this process.
+        self._adapters: Dict[str, Optional[BackendAdapter]] = {
+            spec.name: spec.adapter_factory(self.settings) for spec in BACKENDS
+        }
+        # Which backend registered each tool, for the CLI's grouping.
+        self._tool_backends: Dict[str, str] = {}
 
-        # Multi-instance Isaac Sim registry
+        # Multi-instance Isaac Sim registry. The adapter owns the default
+        # instance's client and builds the others from the same settings.
         self._isaac_clients: Dict[str, IsaacSocketClient] = {}
         self._active_instance: str = "default"
-        default_client = self._build_isaac_client(
-            socket_host=self.settings.isaac_sim.socket_host,
-            socket_port=self.settings.isaac_sim.socket_port,
-            socket_timeout=self.settings.isaac_sim.socket_timeout,
-            bridge_enabled=self.settings.isaac_sim.bridge_enabled,
-            bridge_host=self.settings.isaac_sim.bridge_host,
-            bridge_port=self.settings.isaac_sim.bridge_port,
-            bridge_timeout=self.settings.isaac_sim.bridge_timeout,
-            bridge_fallback_to_vscode=self.settings.isaac_sim.bridge_fallback_to_vscode,
-        )
+        default_client = self.isaac_adapter.client
         self._isaac_clients["default"] = default_client
         for inst in self.settings.isaac_sim.instances:
             self._isaac_clients[inst.name] = self._build_isaac_client(
@@ -235,15 +229,6 @@ class SimulMCPServer(LoggerMixin):
             self.client,
             self.settings,
             client_resolver=self._get_request_isaac_client,
-        )
-
-        self.blender_adapter = (
-            BlenderRuntimeAdapter(self.settings) if is_blender_available() else None
-        )
-        self.unreal_adapter = (
-            UnrealRuntimeAdapter(self.settings)
-            if UnrealRuntimeAdapter is not None
-            else None
         )
 
         # Initialize FastMCP server
@@ -271,6 +256,73 @@ class SimulMCPServer(LoggerMixin):
         self._register_resources()
 
         self.logger.info("Simul 3D MCP Server initialized")
+
+    @property
+    def isaac_adapter(self) -> IsaacRuntimeAdapter:
+        """The Isaac Sim adapter; always built, since its client has no import-time dependency."""
+        adapter = self._adapters["isaac"]
+        if not isinstance(adapter, IsaacRuntimeAdapter):
+            raise RuntimeError("The Isaac backend adapter is missing from the registry")
+        return adapter
+
+    @property
+    def headless_adapter(self) -> Optional[BackendAdapter]:
+        """The headless USD adapter, or None when pxr is not importable."""
+        return self._adapters["usd"]
+
+    @headless_adapter.setter
+    def headless_adapter(self, adapter: Optional[BackendAdapter]) -> None:
+        self._adapters["usd"] = adapter
+
+    @property
+    def blender_adapter(self) -> Optional[BackendAdapter]:
+        """The Blender adapter, or None when bpy is not importable."""
+        return self._adapters["blender"]
+
+    @blender_adapter.setter
+    def blender_adapter(self, adapter: Optional[BackendAdapter]) -> None:
+        self._adapters["blender"] = adapter
+
+    @property
+    def unreal_adapter(self) -> Optional[BackendAdapter]:
+        """The Unreal adapter, or None when its module did not import."""
+        return self._adapters["unreal"]
+
+    @unreal_adapter.setter
+    def unreal_adapter(self, adapter: Optional[BackendAdapter]) -> None:
+        self._adapters["unreal"] = adapter
+
+    def tools_by_backend(self) -> Dict[str, List[str]]:
+        """Group the registered tool names by the backend that registered them.
+
+        Returns:
+            Backend label to sorted tool names, in registry order, followed by
+            a ``Server`` group for the tools no backend owns (usage stats).
+        """
+        groups: Dict[str, List[str]] = {}
+        for spec in BACKENDS:
+            names = sorted(
+                name for name, backend in self._tool_backends.items() if backend == spec.name
+            )
+            if names:
+                groups[spec.label] = names
+        unowned = sorted(self._registered_tool_names() - set(self._tool_backends))
+        if unowned:
+            groups["Server"] = unowned
+        return groups
+
+    def _registered_tool_names(self) -> Set[str]:
+        """Return every tool name currently registered on the FastMCP instance.
+
+        Returns:
+            The names, read from FastMCP 3's local provider where components
+            are keyed ``tool:<name>@``; empty when the provider is absent.
+        """
+        provider = getattr(self.mcp, "local_provider", None)
+        components = getattr(provider, "_components", {}) if provider is not None else {}
+        return {
+            key.split(":", 1)[1].split("@", 1)[0] for key in components if key.startswith("tool:")
+        }
 
     def _get_rate_limiter(self, tool_name: str, agent_id: str) -> RateLimiter:
         """Return the token bucket for one agent's use of one tool.
@@ -1087,17 +1139,11 @@ class SimulMCPServer(LoggerMixin):
 
     def _bridge_port_for_socket(self, socket_port: int) -> int:
         """Derive the bridge port for an Isaac instance from its socket port."""
-        derived = self.settings.isaac_sim.bridge_port + (
-            socket_port - self.settings.isaac_sim.socket_port
-        )
-        return max(1024, min(derived, 65535))
+        return self.isaac_adapter.bridge_port_for_socket(socket_port)
 
     def _socket_port_for_bridge(self, bridge_port: int) -> int:
         """Derive the VS Code socket port for an instance from its bridge port."""
-        derived = self.settings.isaac_sim.socket_port + (
-            bridge_port - self.settings.isaac_sim.bridge_port
-        )
-        return max(1024, min(derived, 65535))
+        return self.isaac_adapter.socket_port_for_bridge(bridge_port)
 
     def _build_isaac_client(
         self,
@@ -1115,39 +1161,18 @@ class SimulMCPServer(LoggerMixin):
         socket_auth_token: Optional[str] = None,
     ) -> IsaacSocketClient:
         """Create one bridge-aware Isaac client from default or per-instance config."""
-        resolved_bridge_port = (
-            bridge_port
-            if bridge_port is not None
-            else self._bridge_port_for_socket(socket_port)
-        )
-        resolved_bridge_timeout = (
-            bridge_timeout
-            if bridge_timeout is not None
-            else self.settings.isaac_sim.bridge_timeout
-        )
-        resolved_fallback = (
-            bridge_fallback_to_vscode
-            if bridge_fallback_to_vscode is not None
-            else self.settings.isaac_sim.bridge_fallback_to_vscode
-        )
-        return IsaacSocketClient(
-            host=socket_host,
-            port=socket_port,
-            bridge_host=bridge_host or socket_host,
-            bridge_port=resolved_bridge_port,
+        return self.isaac_adapter.build_client(
+            socket_host=socket_host,
+            socket_port=socket_port,
+            socket_timeout=socket_timeout,
+            bridge_enabled=bridge_enabled,
+            bridge_host=bridge_host,
+            bridge_port=bridge_port,
+            bridge_timeout=bridge_timeout,
+            bridge_fallback_to_vscode=bridge_fallback_to_vscode,
             bridge_socket_path=bridge_socket_path,
-            bridge_timeout_seconds=resolved_bridge_timeout,
-            prefer_bridge=bridge_enabled,
-            fallback_to_vscode=resolved_fallback,
-            timeout_seconds=socket_timeout,
-            socket_protocol=socket_protocol or self.settings.isaac_sim.socket_protocol,
-            auth_token=(
-                socket_auth_token
-                if socket_auth_token is not None
-                else self.settings.isaac_sim.socket_auth_token
-            ),
-            bridge_failure_threshold=self.settings.isaac_sim.bridge_failure_threshold,
-            bridge_cooldown_seconds=self.settings.isaac_sim.bridge_cooldown_seconds,
+            socket_protocol=socket_protocol,
+            socket_auth_token=socket_auth_token,
         )
 
     async def _discover_from_files(self) -> Dict[str, IsaacSocketClient]:
@@ -1430,58 +1455,30 @@ class SimulMCPServer(LoggerMixin):
         return self._backends is None or name in self._backends
 
     def _register_tools(self) -> None:
-        """Register MCP tools for enabled backends only."""
-        from .registration import (
-            register_blender_tools,
-            register_instance_tools,
-            register_isaac_tools,
-            register_stats_tools,
-            register_unreal_tools,
-            register_usd_tools,
-        )
+        """Register the tools of every enabled backend whose adapter is available.
 
-        # USD file operations (headless, local files only). Registering them
-        # without the adapter would expose tools that fail on every call.
-        if self._backend_enabled("usd") and self.headless_adapter is not None:
-            register_usd_tools(self)
-
-        # Isaac Sim tools (TCP socket to running instance), including the
-        # instance discovery / routing tools that only make sense with Isaac.
-        if self._backend_enabled("isaac"):
-            register_instance_tools(self)
-            register_isaac_tools(self)
-
-        # Blender tools (if runtime available)
-        if self._backend_enabled("blender"):
-            if self.blender_adapter and self.blender_adapter.is_available():
-                register_blender_tools(self)
-
-        # Unreal tools. The thin surface (health, ping, instance listing,
-        # capture, exec script) keeps the MCP tool list small; the full
-        # surface is opted into via unreal.tool_surface / --unreal-tools full.
-        if self._backend_enabled("unreal"):
-            if self.unreal_adapter and self.unreal_adapter.is_available():
-                register_unreal_tools(
-                    self, thin=self.settings.unreal.tool_surface == "thin"
-                )
+        A backend without an adapter, or whose runtime is not available in
+        this process, registers nothing: its tools would fail on every call.
+        """
+        for spec in BACKENDS:
+            adapter = self._adapters[spec.name]
+            if not self._backend_enabled(spec.name) or adapter is None or not adapter.is_available():
+                continue
+            before = self._registered_tool_names()
+            spec.register_tools(self)
+            for name in self._registered_tool_names() - before:
+                self._tool_backends[name] = spec.name
 
         # Usage statistics (always available)
         register_stats_tools(self)
 
-        # FastMCP 3.x stores tools in local_provider._components with
-        # keys like "tool:<name>@".  Count entries whose key starts with
-        # "tool:" to get an accurate tool count.
-        tool_count = 0
-        lp = getattr(self.mcp, "local_provider", None)
-        if lp is not None:
-            components = getattr(lp, "_components", {})
-            tool_count = sum(1 for k in components if k.startswith("tool:"))
-        self.logger.info(f"Registered {tool_count} MCP tools")
+        self.logger.info(f"Registered {len(self._registered_tool_names())} MCP tools")
 
     async def shutdown(self) -> None:
         """Release server resources on shutdown."""
-        if self.headless_adapter is not None:
-            self.headless_adapter.close()
+        for adapter in self._adapters.values():
+            if adapter is not None:
+                adapter.close()
         self._isaac_clients.clear()
         self._rate_limiters.clear()
         self.usage_tracker._stats.clear()
@@ -1493,21 +1490,28 @@ class SimulMCPServer(LoggerMixin):
         Run the MCP server.
 
         Args:
-            transport: Transport type (stdio, sse)
+            transport: One of ``TRANSPORTS``: ``stdio`` for a client that
+                spawns the server, ``http`` (streamable HTTP) or ``sse`` for a
+                network listener on ``server.host``:``server.port``.
+
+        Raises:
+            ValueError: When ``transport`` is not one of ``TRANSPORTS``.
         """
         try:
             self.logger.info(f"Starting Simul 3D MCP Server with {transport} transport")
 
             if transport == "stdio":
                 await self.mcp.run_async(transport="stdio")
-            elif transport == "sse":
+            elif transport in NETWORK_TRANSPORTS:
                 await self.mcp.run_async(
-                    transport="sse",
+                    transport=cast(Literal["http", "sse"], transport),
                     host=self.settings.server.host,
                     port=self.settings.server.port,
                 )
             else:
-                raise ValueError(f"Unsupported transport: {transport}")
+                raise ValueError(
+                    f"Unsupported transport: {transport}. Valid: {', '.join(TRANSPORTS)}"
+                )
 
         except Exception as e:
             self.logger.error("Error running MCP server: %s", e)
@@ -1524,35 +1528,24 @@ class SimulMCPServer(LoggerMixin):
         liveness probe of the engine, which needs a network round-trip.
 
         Returns:
-            Mapping of backend name (``isaac``, ``usd``, ``blender``,
-            ``unreal``) to ``{"enabled": bool, "available": bool,
-            "capabilities": list[str]}``. ``enabled`` is whether the backend
-            was selected for tool registration.
+            Mapping of every registered backend name to ``{"enabled": bool,
+            "available": bool, "capabilities": list[str]}``. ``enabled`` is
+            whether the backend was selected for tool registration.
         """
-        isaac_transports: List[str] = ["socket"]
-        if self.client.bridge_enabled:
-            isaac_transports.append("bridge")
-
         return {
-            "isaac": {
-                "enabled": self._backend_enabled("isaac"),
-                "available": True,
-                "capabilities": isaac_transports,
-            },
-            "usd": self._adapter_capabilities("usd", self.headless_adapter),
-            "blender": self._adapter_capabilities("blender", self.blender_adapter),
-            "unreal": self._adapter_capabilities("unreal", self.unreal_adapter),
+            spec.name: self._adapter_capabilities(spec.name, self._adapters[spec.name])
+            for spec in BACKENDS
         }
 
     def _adapter_capabilities(
-        self, backend: str, adapter: Optional[Any]
+        self, backend: str, adapter: Optional[BackendAdapter]
     ) -> Dict[str, Any]:
-        """Build one ``get_capabilities`` entry for an adapter-backed backend."""
+        """Build one ``get_capabilities`` entry for a backend."""
         available = adapter is not None and adapter.is_available()
         return {
             "enabled": self._backend_enabled(backend),
             "available": available,
-            "capabilities": sorted(adapter.get_capabilities()) if available else [],
+            "capabilities": sorted(adapter.get_capabilities()) if available and adapter else [],
         }
 
 

@@ -15,46 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
-from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-
-
-class FakeFastMCP:
-    """Minimal FastMCP double that records registered tools."""
-
-    def __init__(self, name: str, version: str, **kwargs: Any):
-        self.name = name
-        self.version = version
-        self.instructions = kwargs.get("instructions")
-        self.tools: List[SimpleNamespace] = []
-
-    def tool(
-        self, name: str, **kwargs: Any
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools.append(SimpleNamespace(name=name, func=func, kwargs=kwargs))
-            return func
-
-        return decorator
-
-    def resource(self, *args, **kwargs):
-        def decorator(func):
-            return func
-
-        return decorator
-
-    def add_middleware(self, middleware: Any) -> None:
-        return
+from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from tests.fakes import FakeFastMCP
 
 
 class _FakeClient:
@@ -115,9 +84,9 @@ class _FakeSessionManager:
 def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServer:
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
     instance = server_module.SimulMCPServer(settings=Settings())
     instance.session_manager = _FakeSessionManager()
     return instance

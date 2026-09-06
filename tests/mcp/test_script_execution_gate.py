@@ -12,24 +12,21 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
-from pathlib import Path
 from typing import Any, List
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from typer.testing import CliRunner
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult  # noqa: E402
-from simul_mcp.cli import isaac as isaac_cli  # noqa: E402
-from simul_mcp.cli.main import app  # noqa: E402
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools  # noqa: E402
-from tests.mcp.test_discoverability import FakeFastMCP, _AvailableAdapter  # noqa: E402
+from simul_mcp.adapters.isaac_socket_client import ScriptResult
+from simul_mcp.cli import isaac as isaac_cli
+from simul_mcp.cli.main import app
+from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from tests.fakes import AvailableAdapter, FakeFastMCP
 
 SCRIPT_TOOLS = ("execute_isaac_script", "execute_unreal_script", "execute_blender_script")
 
@@ -49,10 +46,10 @@ def _settings(allow_script_execution: bool) -> Settings:
 def _tool_names(monkeypatch: pytest.MonkeyPatch, allow_script_execution: bool) -> List[str]:
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: True)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: True)
-    monkeypatch.setattr(server_module, "BlenderRuntimeAdapter", _AvailableAdapter)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", _AvailableAdapter)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: True)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
+    monkeypatch.setattr(backends_module, "BlenderRuntimeAdapter", AvailableAdapter)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", AvailableAdapter)
     instance = server_module.SimulMCPServer(settings=_settings(allow_script_execution))
     return [tool.name for tool in instance.mcp.tools]
 

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import threading
 import time
 from pathlib import Path
@@ -20,16 +19,11 @@ from typing import Any
 
 import pytest
 
-extension_root = (
-    Path(__file__).resolve().parents[2]
-    / "src" / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"
-)
-sys.path.insert(0, str(extension_root))
 
-from khemoo.simul.mcp import extension as extension_module  # noqa: E402
-from khemoo.simul.mcp.extension import IsaacMCPServerExtension  # noqa: E402
-from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle  # noqa: E402
-from khemoo.simul.mcp.protocol import BridgeRequest, BridgeResponse  # noqa: E402
+from khemoo.simul.mcp import extension as extension_module
+from khemoo.simul.mcp.extension import IsaacMCPServerExtension
+from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle
+from khemoo.simul.mcp.protocol import BridgeRequest, BridgeResponse
 
 
 class _FakeCarb:

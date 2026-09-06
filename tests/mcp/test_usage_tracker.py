@@ -6,15 +6,12 @@ ToolStats.avg_duration_ms, CallRecord.to_dict(), and OSError suppression paths.
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
 from simul_mcp.mcp.usage_tracker import CallRecord, ToolStats, ToolUsageTracker
 

@@ -5,16 +5,13 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.adapters import unreal_setup  # noqa: E402
-from simul_mcp.adapters.unreal_setup import (  # noqa: E402
+from simul_mcp.adapters import unreal_setup
+from simul_mcp.adapters.unreal_setup import (
     HEADLESS_FLAGS,
     HTTP_LISTENERS_SECTION,
     REMOTE_CONTROL_SECTION,

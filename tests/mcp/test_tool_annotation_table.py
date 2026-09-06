@@ -10,18 +10,15 @@ destructive. Hints matching the client's assumed default are omitted.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any, Dict
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-from tests.mcp.test_discoverability import FakeFastMCP, _AvailableAdapter  # noqa: E402
+from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from tests.fakes import AvailableAdapter, FakeFastMCP
 
 RO, RW, DESTRUCTIVE = "read_only", "additive", "destructive"
 
@@ -113,10 +110,10 @@ def registered() -> Dict[str, Dict[str, Any]]:
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
         monkeypatch.setattr(server_module, "TaskConfig", None)
-        monkeypatch.setattr(server_module, "is_headless_available", lambda: True)
-        monkeypatch.setattr(server_module, "is_blender_available", lambda: True)
-        monkeypatch.setattr(server_module, "BlenderRuntimeAdapter", _AvailableAdapter)
-        monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", _AvailableAdapter)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: True)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
+        monkeypatch.setattr(backends_module, "BlenderRuntimeAdapter", AvailableAdapter)
+        monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", AvailableAdapter)
         base = Settings()
         settings = base.model_copy(
             update={"unreal": base.unreal.model_copy(update={"tool_surface": "full"})}

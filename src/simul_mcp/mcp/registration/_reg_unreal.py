@@ -1432,21 +1432,16 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     @with_param_descriptions()
     async def import_unreal_usd(
         usd_path: str,
-        target_path: Optional[str] = None,
-        import_animations: bool = True,
-        import_materials: bool = True,
-        scale_factor: float = 1.0,
+        destination_path: str = "/Game/Imports",
+        import_options: Optional[Dict[str, Any]] = None,
     ) -> ToolResult:
         """Import USD file into Unreal.
 
         Args:
             usd_path: Path to the USD file on disk; must be inside the sandbox.
-            target_path: Content browser destination path (defaults to
-                /Game/Imports).
-            import_animations: Import animation data when true.
-            import_materials: Import materials when true.
-            scale_factor: Uniform scale applied on import; 1.0 keeps the file's
-                units (USD metres become Unreal cm via the Interchange pipeline).
+            destination_path: Content browser destination path.
+            import_options: Interchange pipeline options passed through as the
+                import's PipelineOptions; omit for the pipeline defaults.
         """
         return await server._exec_backend(
             "import_unreal_usd",
@@ -1455,10 +1450,8 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             UnrealImportUsdResponse,
             lambda session: session.import_usd(
                 usd_path=usd_path,
-                target_path=target_path,
-                import_animations=import_animations,
-                import_materials=import_materials,
-                scale_factor=scale_factor,
+                destination_path=destination_path,
+                import_options=import_options,
             ),
         )
 
@@ -1478,19 +1471,15 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     async def export_unreal_usd(
         actor_paths: str,
         output_path: str,
-        export_materials: bool = True,
-        export_animations: bool = True,
-        convert_to_meters: bool = True,
+        export_options: Optional[Dict[str, Any]] = None,
     ) -> ToolResult:
         """Export actors to USD.
 
         Args:
             actor_paths: Comma-separated actor object paths to export.
             output_path: Output USD file path; must be inside the sandbox.
-            export_materials: Export materials when true.
-            export_animations: Export animation data when true.
-            convert_to_meters: Write the stage in metres (metersPerUnit=1)
-                instead of Unreal centimetres.
+            export_options: Interchange pipeline options passed through as the
+                export's PipelineOptions; omit for the pipeline defaults.
         """
 
         def _call(session):
@@ -1501,9 +1490,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             return session.export_usd(
                 actor_paths=paths,
                 output_path=output_path,
-                export_materials=export_materials,
-                export_animations=export_animations,
-                convert_to_meters=convert_to_meters,
+                export_options=export_options,
             )
 
         return await server._exec_backend(
@@ -1528,50 +1515,41 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     )
     @with_param_descriptions()
     async def convert_to_simready(
-        actor_paths: str,
-        output_directory: str,
+        usd_path: str,
+        output_path: str,
         add_physics: bool = True,
         add_collision: bool = True,
-        semantic_labels: str = "",
+        add_semantic_labels: bool = True,
+        target_up_axis: str = "Z",
+        target_units: str = "meters",
     ) -> ToolResult:
-        """Convert actors to SimReady format.
+        """Convert a USD asset to SimReady format through Unreal's Interchange.
 
         Args:
-            actor_paths: Comma-separated actor object paths to convert.
-            output_directory: Directory for the SimReady USD output; must be
-                inside the sandbox.
+            usd_path: Source USD file; must be inside the sandbox.
+            output_path: Output SimReady USD file path; must be inside the
+                sandbox.
             add_physics: Add physics schemas (rigid body) to the output.
             add_collision: Generate collision geometry.
-            semantic_labels: Comma-separated semantic labels to attach, in
-                actor order. Empty string attaches none.
+            add_semantic_labels: Attach semantic labels to the output prims.
+            target_up_axis: Up axis written to the output stage (Y or Z).
+            target_units: Unit system of the output stage (meters or
+                centimeters).
         """
-
-        def _call(session):
-            # Parsing stays inside the envelope: malformed input must
-            # return the error payload it always has, not escape as an
-            # unhandled exception.
-            paths = [p.strip() for p in actor_paths.split(",")]
-            labels = None
-            if semantic_labels:
-                labels = dict(
-                    pair.split("=")
-                    for pair in semantic_labels.split(",")
-                    if "=" in pair
-                )
-            return session.convert_to_simready(
-                actor_paths=paths,
-                output_directory=output_directory,
-                add_physics=add_physics,
-                add_collision=add_collision,
-                semantic_labels=labels,
-            )
-
         return await server._exec_backend(
             "convert_to_simready",
             server.unreal_adapter,
             "Unreal",
             UnrealConvertToSimreadyResponse,
-            _call,
+            lambda session: session.convert_to_simready(
+                usd_path=usd_path,
+                output_path=output_path,
+                add_physics=add_physics,
+                add_collision=add_collision,
+                add_semantic_labels=add_semantic_labels,
+                target_up_axis=target_up_axis,
+                target_units=target_units,
+            ),
         )
 
     @server.mcp.tool(
@@ -1587,15 +1565,16 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     )
     @with_param_descriptions()
     async def validate_simready_asset(
-        asset_path: str,
+        usd_path: str,
         checks: str = "",
     ) -> ToolResult:
-        """Validate asset against SimReady spec.
+        """Validate a USD asset against the SimReady spec through Unreal.
 
         Args:
-            asset_path: USD file path to validate; must be inside the sandbox.
-            checks: Comma-separated validation checks to run. Empty string runs
-                every check.
+            usd_path: USD file path to validate; must be inside the sandbox.
+            checks: Comma-separated validation checks to run (physics,
+                collision, materials, scale, up_axis, semantics). Empty string
+                runs every check.
         """
 
         def _call(session):
@@ -1606,7 +1585,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 [c.strip() for c in checks.split(",") if c.strip()] if checks else None
             )
             return session.validate_simready_asset(
-                asset_path=asset_path,
+                usd_path=usd_path,
                 checks=check_list,
             )
 

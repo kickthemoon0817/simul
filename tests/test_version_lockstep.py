@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from pathlib import Path
 
 # Anchor at the repo root so the test runs regardless of cwd.
@@ -38,13 +37,9 @@ def _read_plugin_json_version() -> str:
 
 
 def _read_init_version() -> str:
-    sys.path.insert(0, str(_REPO / "src"))
-    try:
-        import simul_mcp
-        # Reload-safe — just read the module attribute.
-        return simul_mcp.__version__
-    finally:
-        sys.path.pop(0)
+    import simul_mcp
+
+    return simul_mcp.__version__
 
 
 def _read_bridge_ext_version() -> str:

@@ -11,19 +11,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import sys
 from pathlib import Path
 from typing import Any, Dict
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-from simul_mcp.mcp.usage_tracker import CallRecord, ToolUsageTracker  # noqa: E402
-from tests.mcp.test_sandbox_surface import FakeFastMCP  # noqa: E402
+from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from simul_mcp.mcp.usage_tracker import CallRecord, ToolUsageTracker
+from tests.fakes import FakeFastMCP
 
 CODE = "print('hello')"
 
@@ -31,9 +29,9 @@ CODE = "print('hello')"
 def _server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> server_module.SimulMCPServer:
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
     instance = server_module.SimulMCPServer(settings=Settings())
     instance.usage_tracker = ToolUsageTracker(log_dir=tmp_path)
 

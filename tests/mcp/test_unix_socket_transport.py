@@ -25,24 +25,19 @@ import json
 import os
 import stat
 import struct
-import sys
 from pathlib import Path
 from typing import Any, Dict
 
 import pytest
 
-repo_root = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(repo_root / "src"))
-sys.path.insert(
-    0, str(repo_root / "src" / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp")
-)
+from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle
+from khemoo.simul.mcp.protocol import BridgeResponse
 
-from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle  # noqa: E402
-from khemoo.simul.mcp.protocol import BridgeResponse  # noqa: E402
-
-from simul_mcp.adapters.isaac_socket_client import IsaacSocketClient  # noqa: E402
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
+from simul_mcp.adapters.isaac_socket_client import IsaacSocketClient
+from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from tests.fakes import FakeFastMCP
 
 
 async def _ping_handler(request: Any) -> BridgeResponse:
@@ -243,32 +238,12 @@ def test_client_ping_works_over_the_socket_alone(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-class _FakeFastMCP:
-    def __init__(self, *args: Any, **kwargs: Any):
-        pass
-
-    def tool(self, *args: Any, **kwargs: Any):
-        def decorator(func):
-            return func
-
-        return decorator
-
-    def resource(self, *args: Any, **kwargs: Any):
-        def decorator(func):
-            return func
-
-        return decorator
-
-    def add_middleware(self, middleware: Any) -> None:
-        return
-
-
 def _server(monkeypatch: pytest.MonkeyPatch, discovery_dir: Path) -> Any:
-    monkeypatch.setattr(server_module, "FastMCP", _FakeFastMCP)
+    monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
     settings = Settings(
         isaac_sim={
             "discovery_dir": str(discovery_dir),

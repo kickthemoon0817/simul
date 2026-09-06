@@ -18,6 +18,7 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .._meta import tool_meta
 
 
 class SimulationMixin:
@@ -25,6 +26,15 @@ class SimulationMixin:
     # Phase 6: Simulation Control
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="get_isaac_simulation_state",
+        description=(
+            "Get the current simulation state: playing, paused, or stopped, along with "
+            "current time and time-codes-per-second."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_simulation_state(self) -> Dict[str, Any]:
         """
         Get the current simulation state (playing, paused, stopped).
@@ -64,6 +74,12 @@ class SimulationMixin:
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
+    @tool_meta(
+        name="start_isaac_simulation",
+        description="Start (play) the simulation timeline.",
+        read_only=False,
+        idempotent=True,
+    )
     async def start_isaac_simulation(self) -> Dict[str, Any]:
         """
         Start (play) the simulation.
@@ -91,6 +107,12 @@ class SimulationMixin:
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
+    @tool_meta(
+        name="stop_isaac_simulation",
+        description="Stop the simulation and reset to initial state.",
+        read_only=False,
+        idempotent=True,
+    )
     async def stop_isaac_simulation(self) -> Dict[str, Any]:
         """
         Stop the simulation and reset to initial state.
@@ -118,6 +140,12 @@ class SimulationMixin:
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
+    @tool_meta(
+        name="pause_isaac_simulation",
+        description="Pause the currently running simulation.",
+        read_only=False,
+        idempotent=True,
+    )
     async def pause_isaac_simulation(self) -> Dict[str, Any]:
         """
         Pause the running simulation.
@@ -145,6 +173,11 @@ class SimulationMixin:
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
+    @tool_meta(
+        name="step_isaac_simulation",
+        description="Step the simulation forward by N physics steps.",
+        read_only=False,
+    )
     async def step_isaac_simulation(
         self, num_steps: int = 1
     ) -> Dict[str, Any]:
@@ -194,6 +227,12 @@ class SimulationMixin:
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
+    @tool_meta(
+        name="reset_isaac_simulation",
+        description="Reset the simulation to initial state and time 0.",
+        read_only=False,
+        idempotent=True,
+    )
     async def reset_isaac_simulation(self) -> Dict[str, Any]:
         """
         Reset the simulation to initial state (stop + set time to 0).
@@ -226,6 +265,12 @@ class SimulationMixin:
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)
 
+    @tool_meta(
+        name="get_isaac_simulation_time",
+        description="Get current simulation time, start/end times, and time-codes-per-second.",
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_simulation_time(self) -> Dict[str, Any]:
         """
         Get current simulation time information.

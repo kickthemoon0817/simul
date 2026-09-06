@@ -19,6 +19,7 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .._meta import tool_meta
 
 
 class SystemMixin:
@@ -26,6 +27,17 @@ class SystemMixin:
     # Extension management
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="list_isaac_extensions",
+        description=(
+            "List extensions registered in the running Isaac Sim instance. Returns each "
+            "extension's ID (version-suffixed, e.g. 'omni.physx-107.3.7'), version, and "
+            "enabled status. Lists enabled extensions by default; pass enabled_only=false "
+            "with search='<substring>' to scope a wider query."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def list_isaac_extensions(
         self,
         enabled_only: bool = True,
@@ -106,6 +118,19 @@ class SystemMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="enable_isaac_extension",
+        description=(
+            "Enable an extension immediately in the running Isaac Sim instance. Accepts "
+            "EITHER the bare canonical Kit extension name (e.g. 'omni.physx', "
+            "'isaacsim.replicator.behavior') OR the version-suffixed ID returned by "
+            "list_isaac_extensions (e.g. 'omni.physx-107.3.7'). The bare name is preferred "
+            "— it is what the underlying Kit set_extension_enabled_immediate API takes and "
+            "keeps callers decoupled from the installed version."
+        ),
+        read_only=False,
+        idempotent=True,
+    )
     async def enable_isaac_extension(self, extension_id: str) -> Dict[str, Any]:
         """
         Enable an extension by its ID in the running Isaac Sim instance.
@@ -161,6 +186,17 @@ class SystemMixin:
     # Carb settings
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="get_isaac_carb_settings",
+        description=(
+            "Read one or more Carbonite (carb) settings by key path. Settings control RTX "
+            "renderer options, fog, exposure, tone mapping, and other runtime parameters. "
+            "Key paths look like /rtx/fog/enabled, /rtx/post/tonemap/op, "
+            "/rtx/raytracing/showLights. Returns the current value for each requested key."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_carb_settings(self, keys: List[str]) -> Dict[str, Any]:
         """
         Read one or more Carbonite settings by key path.
@@ -191,6 +227,20 @@ class SystemMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="set_isaac_carb_settings",
+        description=(
+            "Write one or more Carbonite (carb) settings by key path. Takes a dict of "
+            'key-value pairs (e.g. {"/rtx/fog/enabled": true, "/rtx/fog/fogEndDist": '
+            "200.0}). Returns the verified new values after applying. Changes take effect "
+            "immediately in the renderer. Keys under /exts/khemoo.simul.mcp/ and "
+            "/exts/isaacsim.code_editor.python_server/ configure the MCP transport and are "
+            "refused."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def set_carb_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
         """
         Write one or more Carbonite settings by key path.

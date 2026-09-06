@@ -15,19 +15,15 @@ import asyncio
 import inspect
 import json
 import re
-import sys
-from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
 from simul_mcp.adapters.isaac_socket_client import ScriptResult
 from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
 from simul_mcp.mcp import server as server_module
 from simul_mcp.mcp.result_budget import (
     DEFAULT_RESULT_BUDGET_BYTES,
@@ -35,6 +31,7 @@ from simul_mcp.mcp.result_budget import (
     apply_result_budget,
 )
 from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from tests.fakes import FakeFastMCP
 
 
 def _prims(count: int) -> List[Dict[str, Any]]:
@@ -173,36 +170,12 @@ def test_payload_without_lists_is_left_alone() -> None:
 # ---------------------------------------------------------------------------
 
 
-class FakeFastMCP:
-    def __init__(self, name: str, version: str, **kwargs: Any):
-        self.name = name
-        self.version = version
-        self.instructions = kwargs.get("instructions")
-        self.tools: List[SimpleNamespace] = []
-
-    def tool(self, name: str, **kwargs: Any) -> Callable[..., Any]:
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools.append(SimpleNamespace(name=name, func=func, kwargs=kwargs))
-            return func
-
-        return decorator
-
-    def resource(self, *args, **kwargs):
-        def decorator(func):
-            return func
-
-        return decorator
-
-    def add_middleware(self, middleware: Any) -> None:
-        return
-
-
 def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServer:
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
-    monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
-    monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
     return server_module.SimulMCPServer(settings=Settings())
 
 

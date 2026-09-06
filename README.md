@@ -277,6 +277,14 @@ This Compose file:
 
 Port-forwarding note:
 - Simul MCP always talks to the host-visible ports.
+- Cross-host Isaac Sim is not a supported deployment shape. The MCP server
+  only trusts loopback addresses in discovery files, the `simul-mcp isaac
+  launch` command binds the transports on the local machine, and neither the
+  bridge nor the stock Python socket authenticates beyond the optional
+  python_server token: anything that can reach the ports can run Python
+  inside Isaac Sim. Run `simul-mcp` on the same host (or, for a container,
+  publish the ports to the host's loopback as the Compose file does). Unreal's
+  `--bind/--allow-public/--passphrase` flow has no Isaac counterpart.
 - If the container publishes `127.0.0.1:9229` and `127.0.0.1:9226`, the MCP server must use `9229` / `9226`.
 - Discovery files now include both the bridge port and the forwarded VS Code fallback port so multi-instance routing can distinguish local and containerized Isaac apps correctly.
 
@@ -723,7 +731,11 @@ simul-mcp/
 │                          # bundled in the wheel since v0.0.36;
 │                          # publish via `simul-mcp isaac install-bridge`
 ├── tests/               # Test suite
-│   └── isaac/           # Isaac Sim tests
+│   ├── conftest.py      # sys.path setup + shared FakeFastMCP fixture
+│   ├── fakes.py         # FakeFastMCP / AvailableAdapter doubles
+│   ├── isaac/           # Isaac Sim tests (live tier under isaac/live/)
+│   ├── mcp/             # Server, registry, tool surface tests
+│   ├── unreal/, blender/, cli/, packaging/
 ├── examples/            # Example scripts
 │   └── isaac/           # Isaac Sim examples
 ```
@@ -763,13 +775,22 @@ pytest --cov=simul_mcp tests/
 
 # Run tests with verbose output
 pytest -v tests/
+
+# Isaac Sim live tier (skips unless a running instance answers on the configured socket)
+pytest tests/isaac/live -m isaac
+
+# Wheel build + fresh-venv install smoke (slow; the packaging marker is off by default)
+pytest tests/packaging -m packaging
 ```
 
 ### SimulationApp Smoke Test
 
+This is the one script that runs inside Isaac Sim's own interpreter; the MCP
+server itself never does.
+
 ```bash
 # Run a minimal Isaac Sim smoke check
-/isaac-sim/python.sh scripts/smoke_simulationapp.py
+$ISAAC_SIM_PATH/python.sh scripts/isaac/smoke_simulationapp.py
 ```
 
 ### Code Formatting

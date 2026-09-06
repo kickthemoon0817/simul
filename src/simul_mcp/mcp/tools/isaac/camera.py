@@ -19,6 +19,7 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .._meta import tool_meta
 
 
 class CameraMixin:
@@ -26,6 +27,15 @@ class CameraMixin:
     # Phase 2: Viewport & Camera
     # ------------------------------------------------------------------
 
+    @tool_meta(
+        name="get_isaac_camera_info",
+        description=(
+            "Get camera properties (focal length, clipping range, resolution) for the "
+            "active or specified camera."
+        ),
+        read_only=True,
+        idempotent=True,
+    )
     async def get_isaac_camera_info(
         self, camera_path: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -91,6 +101,12 @@ class CameraMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="list_isaac_cameras",
+        description="List all camera prims in the current Isaac Sim stage.",
+        read_only=True,
+        idempotent=True,
+    )
     async def list_isaac_cameras(
         self, max_results: int = 200, offset: int = 0
     ) -> Dict[str, Any]:
@@ -154,6 +170,15 @@ class CameraMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="set_isaac_camera",
+        description=(
+            "Set the active viewport camera position, target (look-at), or switch to a "
+            "specific camera prim."
+        ),
+        read_only=False,
+        idempotent=True,
+    )
     async def set_isaac_camera(
         self,
         position: Optional[FloatList] = None,
@@ -251,6 +276,20 @@ class CameraMixin:
         """)
         return await self._execute_json_script(script)
 
+    @tool_meta(
+        name="capture_isaac_viewport",
+        description=(
+            "Capture the current viewport to a PNG on the Isaac Sim host and return its "
+            "path. Writes the PNG under the capture directory (viewport.capture_dir, "
+            "default <allowed root>/captures) and reclaims the oldest captures there; the "
+            "directory must be inside the configured sandbox (security.allowed_paths). Pass "
+            "inline=true to also receive the image itself as an image content block; "
+            "captures above the inline size cap return the path alone."
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    )
     async def capture_isaac_viewport(
         self,
         width: int = 1280,

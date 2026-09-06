@@ -59,9 +59,9 @@ jobs:
         # The project's pyproject.toml addopts already bakes in
         # `-m "not packaging"`, so the bare `pytest tests/`
         # invocation skips the long-running wheel-build tests.
-        # Live engine tests (`isaac`, `unreal_live`) are gated by
-        # markers and skip automatically when the engine is not
-        # reachable.
+        # Live engine tests (`isaac` under tests/isaac/live/,
+        # `unreal_live`) skip automatically when the engine is not
+        # reachable, so they collect here and run nothing.
         run: uv run pytest tests/ --no-cov
 
   packaging-gate:
@@ -135,11 +135,9 @@ jobs:
         run: uv run isort --check-only src/ tests/
 
       - name: flake8 (informational)
-        # Note: project lacks a flake8 config, so default 79-char
-        # max-line-length applies — many failures expected against
-        # CLAUDE.md's 119-char convention. A future iter that adds
-        # `[flake8] max-line-length = 119` (or migrates to ruff)
-        # will tighten this gate.
+        # Reads the repo's .flake8 (max-line-length 119, the project
+        # convention). Still informational: the backlog of older
+        # findings is worked down incrementally.
         continue-on-error: true
         run: uv run flake8 src/ tests/
 

@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.adapters.isaac_install import (  # noqa: E402
+from simul_mcp.adapters.isaac_install import (
     NEWEST_KNOWN_MAJOR,
     PYTHON_SERVER_EXTENSION,
     PYTHON_SOCKET_PORT_SETTINGS,
@@ -21,7 +18,6 @@ from simul_mcp.adapters.isaac_install import (  # noqa: E402
 )
 
 extension_root = Path(__file__).resolve().parents[2] / "src" / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"
-sys.path.insert(0, str(extension_root))
 
 from khemoo.simul.mcp import extension as bridge_extension  # noqa: E402
 

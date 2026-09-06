@@ -11,19 +11,15 @@ review asked for stays in place.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
 from typer.testing import CliRunner
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.cli import main as cli_main  # noqa: E402
-from simul_mcp.cli.main import app  # noqa: E402
-from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.cli import main as cli_main
+from simul_mcp.cli.main import app
+from simul_mcp.config import Settings
 
 runner = CliRunner()
 

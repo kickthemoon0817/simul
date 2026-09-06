@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Any, Dict
 
 import pytest
 from typer.testing import CliRunner
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.cli import unreal_cli  # noqa: E402
-from simul_mcp.cli.main import app  # noqa: E402
+from simul_mcp.cli import unreal_cli
+from simul_mcp.cli.main import app
 
 
 runner = CliRunner()

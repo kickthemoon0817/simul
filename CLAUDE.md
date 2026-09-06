@@ -331,18 +331,24 @@ Implications:
   through PRs (`gh pr create … && gh pr merge <N> --merge --delete-branch`).
 - `gh issue view <N>` errors on this repo with the Projects-classic
   deprecation; use `gh api repos/kickthemoon0817/simul/issues/<N>` instead.
-- `pytest tests/` should be 100% green on `main`. Reference
-  numbers from iter20 baseline: `491 passed, 6 skipped, 3
-  deselected, 0 failed`. The 6 skipped are `@pytest.mark.isaac` /
-  `@pytest.mark.unreal_live` tests that need a running engine;
-  the 3 deselected are the `packaging` marker tests
-  (`tests/packaging/test_wheel_contents.py`) that addopts skips
-  by default. The historical 14-16 pre-existing FakeFastMCP
-  `add_middleware` failures were eliminated in iter17 (Blender
-  file) + iter20 (the remaining 3: `tests/mcp/test_discoverability.py`,
-  `tests/mcp/test_isaac_bridge_server.py`, `tests/mcp/test_isaac_session_routing.py`).
-  All 5 FakeFastMCP doubles now stub `add_middleware` and
-  `resource`. New failures are real regressions; debug them.
+- `pytest tests/` should be 100% green on `main`. The skips are the
+  `@pytest.mark.isaac` (`tests/isaac/live/`) and `@pytest.mark.unreal_live`
+  tests that need a running engine; the deselected tests are the
+  `packaging` marker tests (`tests/packaging/test_wheel_contents.py`) that
+  addopts skips by default. New failures are real regressions; debug them.
+- The FastMCP double lives in one place: `tests/fakes.py` (`FakeFastMCP`,
+  `AvailableAdapter`), installed by the `fake_fastmcp` fixture in
+  `tests/conftest.py`. When FastMCP grows a call the server makes at
+  construction time, add it to that one class rather than to a test file.
+  Tests that want a runtime to look present or absent patch the probes on
+  `simul_mcp.mcp.backends` (`is_headless_available`,
+  `is_blender_available`, `is_unreal_available`, the adapter classes), which
+  is where the server reads them from.
+- Isaac tools are declared once: the `@tool_meta` decorator on the
+  `IsaacTools` method carries the name, description and hints, and
+  `_reg_isaac.py` builds the MCP wrapper from the method signature and
+  docstring. `tests/mcp/test_tool_meta_drift.py` fails when a public method
+  lacks the decorator or a wrapper drifts from its implementation.
 - The simul MCP server in a running Claude Code session does **not**
   hot-reload — Python loads source at process start, edits don't
   propagate. To live-verify a `simul_mcp` source change, run the
@@ -397,8 +403,9 @@ How to detect "the machine has it":
   and optional 8229 (bridge). If the binary exists but isn't running,
   **start it with `ISAAC_SIM_PATH=<root> simul-mcp isaac launch`** (it
   enables the right transports per version and waits for the ports),
-  then run the live test. A transport change must be verified on both a
-  5.1 and a 6.0 install. Don't claim a fix works without it.
+  then run `pytest tests/isaac/live -m isaac`. A transport change must be
+  verified on both a 5.1 and a 6.0 install. Don't claim a fix works
+  without it.
 - **Unreal Engine** — installed engines under `~/apps/unreal-*/` or
   `~/UnrealEngine/`, with `Engine/Binaries/<OS>/UnrealEditor`. For
   per-OS detection, also check `which UnrealEditor`. The live test

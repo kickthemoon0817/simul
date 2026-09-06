@@ -3,19 +3,16 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from typer.testing import CliRunner
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult  # noqa: E402
-from simul_mcp.cli import isaac as isaac_cli  # noqa: E402
-from simul_mcp.cli.main import app  # noqa: E402
+from simul_mcp.adapters.isaac_socket_client import ScriptResult
+from simul_mcp.cli import isaac as isaac_cli
+from simul_mcp.cli.main import app
 
 
 runner = CliRunner()
