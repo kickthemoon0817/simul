@@ -515,7 +515,13 @@ class SimulMCPServer(LoggerMixin):
             holder = self._foreign_claim(instance_name, self._request_agent_id())
             if holder is not None:
                 self.usage_tracker.record(
-                    tool_name, 0.0, False, params=params, error="instance_claimed"
+                    tool_name,
+                    0.0,
+                    False,
+                    params=params,
+                    error="instance_claimed",
+                    agent_id=agent_id,
+                    script_sha256=script_sha256,
                 )
                 coro.close()
                 return self._as_text_result(self._claimed_error(instance_name, holder))
