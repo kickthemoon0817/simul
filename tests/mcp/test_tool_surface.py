@@ -13,18 +13,17 @@ Two guards born from the 0.1.0 alias removal:
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Callable, List, Set
+from typing import Set
 
 import pytest
 
-_REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(_REPO / "src"))
 
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
+from simul_mcp.config import Settings
+from simul_mcp.mcp import server as server_module
+from tests.fakes import FakeFastMCP
+
+_REPO = Path(__file__).resolve().parents[2]
 
 # The aliases 0.1.0 removed. get_isaac_texture_dependencies is deliberately
 # absent: it is a subtree walk, not a single-prim read, and stays registered.
@@ -46,36 +45,9 @@ REMOVED_ALIASES = {
 }
 
 
-class _RecordingFastMCP:
-    """FastMCP double that records registered tool names."""
-
-    def __init__(self, name: str, version: str, **kwargs: Any):
-        self.name = name
-        self.version = version
-        self.tools: List[SimpleNamespace] = []
-
-    def tool(
-        self, name: str, **kwargs: Any
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools.append(SimpleNamespace(name=name, func=func))
-            return func
-
-        return decorator
-
-    def resource(self, *args: Any, **kwargs: Any):
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            return func
-
-        return decorator
-
-    def add_middleware(self, middleware: Any) -> None:
-        return
-
-
 def _registered_tool_names(monkeypatch: pytest.MonkeyPatch) -> Set[str]:
     """All tool names the server registers with real backend availability."""
-    monkeypatch.setattr(server_module, "FastMCP", _RecordingFastMCP)
+    monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
     instance = server_module.SimulMCPServer(settings=Settings())
     return {tool.name for tool in instance.mcp.tools}

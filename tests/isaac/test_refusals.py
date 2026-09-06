@@ -15,26 +15,22 @@ import ast
 import asyncio
 import inspect
 import json
-import sys
-from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult  # noqa: E402
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import backends as backends_module  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-from simul_mcp.mcp.tools.isaac._shared import (  # noqa: E402
+from simul_mcp.adapters.isaac_socket_client import ScriptResult
+from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from simul_mcp.mcp.tools.isaac._shared import (
     PROTECTED_CARB_SETTING_PREFIXES,
     PROTECTED_EXTENSIONS,
 )
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools  # noqa: E402
-from tests.mcp.test_sandbox_surface import FakeFastMCP  # noqa: E402
+from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from tests.fakes import FakeFastMCP
 
 SANDBOX_USD = "/tmp/simul_mcp/scene.usd"
 

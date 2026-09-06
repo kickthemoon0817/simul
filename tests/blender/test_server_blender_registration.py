@@ -2,60 +2,16 @@
 
 import asyncio
 import json
-import sys
 from contextlib import contextmanager
-from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import backends as backends_module  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-
-
-class FakeFastMCP:
-    """Minimal FastMCP test double for tool registration."""
-
-    def __init__(self, name: str, version: str, **kwargs: Any):
-        self.name = name
-        self.version = version
-        self.description = kwargs.get("description")
-        self.instructions = kwargs.get("instructions")
-        self.tools: list[SimpleNamespace] = []
-
-    def tool(self, name: str, **kwargs):
-        """Return decorator that records tool metadata."""
-
-        def decorator(func):
-            self.tools.append(SimpleNamespace(name=name, func=func, kwargs=kwargs))
-            return func
-
-        return decorator
-
-    def get_tools(self):
-        """Mirror FastMCP get_tools API."""
-        return self.tools
-
-    def resource(self, *args, **kwargs):
-        """Stub for resource registration."""
-        def decorator(func):
-            return func
-        return decorator
-
-    def add_middleware(self, middleware: Any) -> None:
-        """Stub for FastMCP middleware registration.
-
-        SimulMCPServer adds a request-context middleware (PR #23) before
-        any tools register. The stub only needs to not raise — no test
-        in this file inspects the middleware list, so we don't bother
-        accumulating it.
-        """
-        return
+from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from tests.fakes import FakeFastMCP
 
 
 class FakeBlenderAdapter:

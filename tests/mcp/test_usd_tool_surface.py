@@ -10,19 +10,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
 from fastmcp import Client
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.adapters import is_headless_available  # noqa: E402
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp.server import SimulMCPServer  # noqa: E402
+from simul_mcp.adapters import is_headless_available
+from simul_mcp.config import Settings
+from simul_mcp.mcp.server import SimulMCPServer
 
 FIXTURE_SCENE: Path = Path(__file__).resolve().parents[1] / "data" / "simple_scene.usda"
 

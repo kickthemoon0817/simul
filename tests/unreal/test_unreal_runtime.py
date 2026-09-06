@@ -8,16 +8,13 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
-import sys
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.adapters import unreal_runtime  # noqa: E402
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.utils.paths import SandboxDenied  # noqa: E402
+from simul_mcp.adapters import unreal_runtime
+from simul_mcp.config import Settings
+from simul_mcp.utils.paths import SandboxDenied
 
 
 # ---------------------------------------------------------------------------
@@ -900,7 +897,6 @@ class TestModuleLevelHelpers:
 
         session = unreal_runtime.create_unreal_session(settings=Settings())
         assert isinstance(session, unreal_runtime.UnrealRuntimeSession)
-
 
 
 class TestUnrealRuntimeSessionPhase3:

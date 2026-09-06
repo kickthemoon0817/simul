@@ -17,13 +17,10 @@ from __future__ import annotations
 import json
 import os
 import stat
-import sys
 from pathlib import Path
 
-repo_root = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(repo_root / "src" / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"))
 
-from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle  # noqa: E402
+from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle
 
 
 def _write(tmp_path: Path) -> Path:

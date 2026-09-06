@@ -6,59 +6,15 @@ server does without scanning individual tool signatures:
     server name → instructions field → tool listing → tool descriptions
 """
 
-import sys
-from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Callable, List
+from typing import List
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import backends as backends_module  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-
-
-class FakeFastMCP:
-    """Minimal FastMCP test double that captures all registration metadata."""
-
-    def __init__(self, name: str, version: str, **kwargs: Any):
-        self.name = name
-        self.version = version
-        self.description = kwargs.get("description")
-        self.instructions = kwargs.get("instructions")
-        self.tools: List[SimpleNamespace] = []
-
-    def tool(
-        self, name: str, **kwargs: Any
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """Return decorator that records tool metadata."""
-
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools.append(SimpleNamespace(name=name, func=func, kwargs=kwargs))
-            return func
-
-        return decorator
-
-    def get_tools(self) -> List[SimpleNamespace]:
-        """Mirror FastMCP get_tools API."""
-        return self.tools
-
-    def resource(self, *args, **kwargs):
-        """Stub for resource registration."""
-        def decorator(func):
-            return func
-        return decorator
-
-    def add_middleware(self, middleware: Any) -> None:
-        """Stub for FastMCP middleware registration.
-
-        SimulMCPServer adds a request-context middleware (PR #23)
-        before any tools register. The stub only needs to not raise.
-        """
-        return
+from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from tests.fakes import FakeFastMCP
 
 
 def _make_server(
@@ -204,7 +160,7 @@ class TestMCPDiscoverability:
         assert "pre-flight" in desc.lower() or "verify" in desc.lower()
 
 
-class _AvailableAdapter:
+class AvailableAdapter:
     """Adapter stub that reports itself available so its tools register."""
 
     def __init__(self, settings: Settings) -> None:
@@ -239,8 +195,8 @@ def _make_full_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCP
     monkeypatch.setattr(server_module, "TaskConfig", None)
     monkeypatch.setattr(backends_module, "is_headless_available", lambda: True)
     monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
-    monkeypatch.setattr(backends_module, "BlenderRuntimeAdapter", _AvailableAdapter)
-    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", _AvailableAdapter)
+    monkeypatch.setattr(backends_module, "BlenderRuntimeAdapter", AvailableAdapter)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", AvailableAdapter)
     settings = Settings().model_copy(
         update={"unreal": Settings().unreal.model_copy(update={"tool_surface": "full"})}
     )

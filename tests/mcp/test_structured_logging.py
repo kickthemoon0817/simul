@@ -20,8 +20,6 @@ from pathlib import Path
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
 from simul_mcp.config import Settings
 from simul_mcp.logging import (  # noqa: E402  (sys.path manipulation above)

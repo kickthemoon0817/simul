@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import IsaacSimConfig, Settings  # noqa: E402
+from simul_mcp.config import IsaacSimConfig, Settings
 
 
 def test_defaults_probe_and_send_no_token() -> None:

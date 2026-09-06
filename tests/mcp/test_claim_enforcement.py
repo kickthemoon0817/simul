@@ -3,54 +3,21 @@
 from __future__ import annotations
 
 import json
-import sys
 import time
 from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import backends as backends_module  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-from simul_mcp.mcp import session_manager as session_manager_module  # noqa: E402
-from simul_mcp.mcp.session_manager import SessionManager  # noqa: E402
-
-
-class FakeFastMCP:
-    """FastMCP double that records tools and answers ``get_tool`` like the real one."""
-
-    def __init__(self, name: str, version: str, **kwargs: Any):
-        self.name = name
-        self.version = version
-        self.tools: List[SimpleNamespace] = []
-
-    def tool(self, name: str, **kwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools.append(SimpleNamespace(name=name, func=func, kwargs=kwargs))
-            return func
-
-        return decorator
-
-    async def get_tool(self, name: str) -> Optional[SimpleNamespace]:
-        for tool in self.tools:
-            if tool.name == name:
-                return SimpleNamespace(annotations=tool.kwargs.get("annotations"))
-        return None
-
-    def resource(self, *args: Any, **kwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            return func
-
-        return decorator
-
-    def add_middleware(self, middleware: Any) -> None:
-        return
+from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from simul_mcp.mcp import session_manager as session_manager_module
+from simul_mcp.mcp.session_manager import SessionManager
+from tests.fakes import FakeFastMCP
 
 
 class FakeIsaacClient:

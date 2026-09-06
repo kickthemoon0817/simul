@@ -22,16 +22,12 @@ from __future__ import annotations
 
 import asyncio
 import json as _json
-import sys
-from pathlib import Path
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession  # noqa: E402
-from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
+from simul_mcp.config import Settings
 
 
 pytestmark = pytest.mark.unreal_live

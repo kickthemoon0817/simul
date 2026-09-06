@@ -18,14 +18,11 @@ import json
 import sys
 import types
 from contextlib import redirect_stdout
-from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
 from simul_mcp.adapters.isaac_socket_client import ScriptResult
 from simul_mcp.mcp.tools.isaac_tools import IsaacTools

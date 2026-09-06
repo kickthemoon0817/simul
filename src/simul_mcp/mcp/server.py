@@ -19,11 +19,13 @@ from typing import (
     Coroutine,
     Dict,
     List,
+    Literal,
     Optional,
     Set,
     Tuple,
     Type,
     Union,
+    cast,
 )
 
 from fastmcp import FastMCP
@@ -1502,7 +1504,7 @@ class SimulMCPServer(LoggerMixin):
                 await self.mcp.run_async(transport="stdio")
             elif transport in NETWORK_TRANSPORTS:
                 await self.mcp.run_async(
-                    transport=transport,
+                    transport=cast(Literal["http", "sse"], transport),
                     host=self.settings.server.host,
                     port=self.settings.server.port,
                 )

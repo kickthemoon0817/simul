@@ -1,18 +1,15 @@
 """Tests for Blender runtime adapter functionality."""
 
 import math
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.adapters import blender_runtime  # noqa: E402
-from simul_mcp.config import SecurityConfig, Settings  # noqa: E402
+from simul_mcp.adapters import blender_runtime
+from simul_mcp.config import SecurityConfig, Settings
 
 
 class FakeVector:

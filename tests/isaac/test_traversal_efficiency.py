@@ -13,23 +13,17 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
-from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
-extension_root = src_path / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"
-sys.path.insert(0, str(extension_root))
-
-from khemoo.simul.mcp.protocol import BridgeRequest  # noqa: E402
-from khemoo.simul.mcp.service import BridgeCommandService  # noqa: E402
-from simul_mcp.adapters.isaac_socket_client import ScriptResult  # noqa: E402
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools  # noqa: E402
+from khemoo.simul.mcp.protocol import BridgeRequest
+from khemoo.simul.mcp.service import BridgeCommandService
+from simul_mcp.adapters.isaac_socket_client import ScriptResult
+from simul_mcp.config import Settings
+from simul_mcp.mcp.tools.isaac_tools import IsaacTools
 
 
 def _cube(stage: Usd.Stage, path: str, position: Tuple[float, float, float]) -> UsdGeom.Cube:

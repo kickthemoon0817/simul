@@ -26,9 +26,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock, MagicMock
 
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
-
 from simul_mcp.adapters.isaac_socket_client import ScriptResult
 from simul_mcp.config import Settings
 from simul_mcp.mcp.tools.isaac_tools import MAX_RETAINED_CAPTURES, IsaacTools

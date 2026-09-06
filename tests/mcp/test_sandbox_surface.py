@@ -13,21 +13,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List
+from typing import Any, Dict
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import backends as backends_module  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-from simul_mcp.mcp.schemas.common import ErrorResponse  # noqa: E402
-from simul_mcp.utils.paths import SandboxDenied  # noqa: E402
+from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from simul_mcp.mcp.schemas.common import ErrorResponse
+from simul_mcp.utils.paths import SandboxDenied
+from tests.fakes import FakeFastMCP
 
 OUTSIDE_SANDBOX = "/etc/shadow"
 
@@ -41,30 +39,6 @@ FILE_TAKING_TOOLS = (
     "load_usd_file",
     "validate_usd_file",
 )
-
-
-class FakeFastMCP:
-    def __init__(self, name: str, version: str, **kwargs: Any):
-        self.name = name
-        self.version = version
-        self.instructions = kwargs.get("instructions")
-        self.tools: List[SimpleNamespace] = []
-
-    def tool(self, name: str, **kwargs: Any) -> Callable[..., Any]:
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools.append(SimpleNamespace(name=name, func=func, kwargs=kwargs))
-            return func
-
-        return decorator
-
-    def resource(self, *args: Any, **kwargs: Any) -> Callable[..., Any]:
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            return func
-
-        return decorator
-
-    def add_middleware(self, middleware: Any) -> None:
-        return
 
 
 def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServer:

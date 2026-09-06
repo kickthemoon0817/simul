@@ -5,65 +5,22 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
-import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.adapters import isaac_runtime as isaac_runtime_module  # noqa: E402
-from simul_mcp.mcp import backends as backends_module  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-
-extension_root = (
-    Path(__file__).resolve().parents[2]
-    / "src" / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"
-)
-sys.path.insert(0, str(extension_root))
-
-from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle  # noqa: E402
-from khemoo.simul.mcp.protocol import BridgeResponse  # noqa: E402
+from simul_mcp.config import Settings
+from simul_mcp.adapters import isaac_runtime as isaac_runtime_module
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from tests.fakes import FakeFastMCP
 
 
-class FakeFastMCP:
-    """Minimal FastMCP test double for server construction."""
-
-    def __init__(self, name: str, version: str, **kwargs: Any):
-        self.name = name
-        self.version = version
-        self.description = kwargs.get("description")
-        self.instructions = kwargs.get("instructions")
-        self.tools: list[SimpleNamespace] = []
-
-    def tool(
-        self, name: str, **kwargs: Any
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """Record tool metadata and return the original function."""
-
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools.append(SimpleNamespace(name=name, func=func, kwargs=kwargs))
-            return func
-
-        return decorator
-
-    def resource(self, *args, **kwargs):
-        """Stub for resource registration."""
-        def decorator(func):
-            return func
-        return decorator
-
-    def add_middleware(self, middleware: Any) -> None:
-        """Stub for FastMCP middleware registration.
-
-        SimulMCPServer adds a request-context middleware (PR #23)
-        before any tools register. The stub only needs to not raise.
-        """
-        return
+from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle
+from khemoo.simul.mcp.protocol import BridgeResponse
 
 
 def _make_server(

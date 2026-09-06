@@ -10,18 +10,14 @@ it: the page honours ``offset``, ``applied_limit`` is the clamped cap,
 from __future__ import annotations
 
 import asyncio
-import sys
 import types
-from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools  # noqa: E402
-from tests.isaac.fake_usd import (  # noqa: E402
+from simul_mcp.config import Settings
+from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from tests.isaac.fake_usd import (
     FakePrim,
     FakeStage,
     capture_script,

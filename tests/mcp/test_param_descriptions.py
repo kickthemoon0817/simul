@@ -10,20 +10,16 @@ drops a parameter, fails here rather than in an agent's guess.
 from __future__ import annotations
 
 import asyncio
-import sys
-from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
 from fastmcp import Client
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.mcp import backends as backends_module  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-from simul_mcp.mcp.registration._helpers import (  # noqa: E402
+from simul_mcp.config import Settings
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from simul_mcp.mcp.registration._helpers import (
     describe_params,
     resolve_deprecated_alias,
 )

@@ -17,16 +17,14 @@ simply unreachable:
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-repo_root = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(repo_root / "src"))
-sys.path.insert(0, str(repo_root / "src" / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"))
 
-from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle  # noqa: E402
+from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle
+
+repo_root = Path(__file__).resolve().parents[2]
 
 WILDCARDS = ["0.0.0.0", "::", ""]
 

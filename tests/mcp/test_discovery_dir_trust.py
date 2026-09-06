@@ -8,21 +8,18 @@ import os
 import stat
 import sys
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Callable, List
+from typing import Any, List
 
 import pytest
 
-repo_root = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(repo_root / "src"))
-sys.path.insert(0, str(repo_root / "src" / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"))
 
-from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle  # noqa: E402
-from simul_mcp.config import Settings  # noqa: E402
-from simul_mcp.adapters import isaac_runtime as isaac_runtime_module  # noqa: E402
-from simul_mcp.mcp import backends as backends_module  # noqa: E402
-from simul_mcp.mcp import server as server_module  # noqa: E402
-from simul_mcp.utils.discovery import DiscoveryDir  # noqa: E402
+from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle
+from simul_mcp.config import Settings
+from simul_mcp.adapters import isaac_runtime as isaac_runtime_module
+from simul_mcp.mcp import backends as backends_module
+from simul_mcp.mcp import server as server_module
+from simul_mcp.utils.discovery import DiscoveryDir
+from tests.fakes import FakeFastMCP
 
 DEAD_PID = 2**31 - 1
 
@@ -66,27 +63,6 @@ def simul_warnings() -> Any:
             lg.removeHandler(handler)
             lg.disabled = disabled
             lg.setLevel(level)
-
-
-class FakeFastMCP:
-    def __init__(self, name: str, version: str, **kwargs: Any):
-        self.tools: List[SimpleNamespace] = []
-
-    def tool(self, name: str, **kwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            self.tools.append(SimpleNamespace(name=name, func=func, kwargs=kwargs))
-            return func
-
-        return decorator
-
-    def resource(self, *args: Any, **kwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-            return func
-
-        return decorator
-
-    def add_middleware(self, middleware: Any) -> None:
-        return
 
 
 class FakeSocketClient:

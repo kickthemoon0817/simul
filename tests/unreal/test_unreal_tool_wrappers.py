@@ -123,7 +123,10 @@ def unreal_tools() -> Dict[str, Any]:
         monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
         instance = server_module.SimulMCPServer(settings=Settings(), backends={"isaac"})
     register_unreal_tools(instance, thin=False)
-    return {"server": instance, "tools": {name: func for name, func in instance.mcp.by_name.items() if "unreal" in name or "simready" in name}}
+    tools = {
+        name: func for name, func in instance.mcp.by_name.items() if "unreal" in name or "simready" in name
+    }
+    return {"server": instance, "tools": tools}
 
 
 def test_the_full_surface_is_under_test(unreal_tools: Dict[str, Any]) -> None:

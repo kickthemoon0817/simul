@@ -1,15 +1,11 @@
 """Unit tests for IsaacTools — mocked TCP socket client."""
 import asyncio
 import json
-import sys
-from pathlib import Path
 from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-src_path = Path(__file__).resolve().parents[2] / "src"
-sys.path.insert(0, str(src_path))
 
 from simul_mcp.adapters.isaac_socket_client import ScriptResult
 from simul_mcp.config import Settings
@@ -217,7 +213,6 @@ class TestExecuteJsonScript:
         result = asyncio.run(tools.get_isaac_stage_info())
         assert result["success"] is True
         assert result["error"] == "soft warning only"
-
 
 
 # ---------------------------------------------------------------------------
