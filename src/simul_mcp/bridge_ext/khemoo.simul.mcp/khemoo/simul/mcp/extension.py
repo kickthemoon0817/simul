@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import threading
 import traceback
 from typing import Any, Callable
 
@@ -34,6 +36,8 @@ PYTHON_SOCKET_PORT_SETTINGS: tuple[str, ...] = (
     "/exts/isaacsim.code_editor.vscode/port",
 )
 DEFAULT_PYTHON_SOCKET_PORT = 8226
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_python_socket_port(get_setting: Callable[[str], Any]) -> int:
@@ -71,6 +75,8 @@ class IsaacMCPServerExtension(OmniExtBase):
         self._vscode_port = 8226
         self._max_port_retries = 10
         self._discovery_dir = "/tmp/simul-mcp"
+        self._socket_path = ""
+        self._loop_thread_ident: int | None = None
         self._ui_builder: BridgeUIBuilder | None = None
 
     def on_startup(self, ext_id: str) -> None:
@@ -97,10 +103,7 @@ class IsaacMCPServerExtension(OmniExtBase):
         if not OMNI_AVAILABLE:
             return
         self._sync_stop_bridge(timeout=5)
-        self._server = None
-        self._executor = None
-        self._service = None
-        self._request_lock = None
+        self._clear_runtime_state()
         if self._ui_builder is not None:
             self._ui_builder.shutdown()
             self._ui_builder = None
@@ -246,16 +249,62 @@ class IsaacMCPServerExtension(OmniExtBase):
         loop.create_task(coro)
 
     def _sync_stop_bridge(self, timeout: float = 5.0) -> None:
-        """Stop the bridge server synchronously during shutdown."""
-        if self._server is None:
+        """Stop the bridge server without returning control to the event loop.
+
+        Kit calls ``on_shutdown`` on the thread that drives its asyncio loop.
+        Blocking that thread on a future scheduled onto the same loop can never
+        complete: the loop only advances once this call returns. So on the loop
+        thread the listener is closed synchronously and only the drain of
+        already-accepted connections is left as a task. Blocking on the loop is
+        reserved for callers on another thread, where the loop keeps running.
+
+        Args:
+            timeout: Seconds to wait for the loop to run the stop when called
+                from a thread other than the loop's own.
+        """
+        server = self._server
+        if server is None:
             return
-        future = asyncio.run_coroutine_threadsafe(
-            self._stop_bridge_async(), self._get_event_loop()
-        )
+        loop = self._get_event_loop()
+        if self._on_loop_thread():
+            server.close()
+            try:
+                loop.create_task(server.wait_closed())
+            except RuntimeError as exc:
+                self._log_warn(f"Bridge listener closed but its connections cannot be drained: {exc}")
+            self._clear_runtime_state()
+            self._refresh_ui()
+            return
+        future = asyncio.run_coroutine_threadsafe(self._stop_bridge_async(), loop)
         try:
             future.result(timeout=timeout)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._log_warn(
+                f"Bridge stop did not complete within {timeout}s ({exc!r}); "
+                f"closing the listener on {server.address} directly."
+            )
+            server.close()
+            self._clear_runtime_state()
+
+    def _on_loop_thread(self) -> bool:
+        """Return whether the current thread drives an event loop.
+
+        Kit steps its loop from the main thread, so between frames the loop
+        reports not running even though this thread is its only driver; the
+        thread ident recorded when the bridge started covers that window.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return threading.get_ident() == self._loop_thread_ident
+        return True
+
+    def _clear_runtime_state(self) -> None:
+        """Forget the server, executor, service and lock of a stopped bridge."""
+        self._server = None
+        self._executor = None
+        self._service = None
+        self._request_lock = None
 
     async def _start_bridge_async(self) -> None:
         """Create and start the bridge service if it is not already running."""
@@ -268,6 +317,7 @@ class IsaacMCPServerExtension(OmniExtBase):
             allow_unsafe_execution=self._allow_unsafe_execution,
         )
         self._request_lock = asyncio.Lock()
+        self._loop_thread_ident = threading.get_ident()
         self._server = BridgeServerLifecycle(
             host=self._host,
             port=self._port,
@@ -282,8 +332,11 @@ class IsaacMCPServerExtension(OmniExtBase):
         # Write actual bound port back to Carb settings
         actual_port = self._server.actual_port
         if actual_port != self._port:
-            carb.log_info(
-                f"Configured port {self._port} was in use, bound to {actual_port} instead."
+            # Clients dial the configured port, so whatever holds it is what
+            # they will reach; this must never pass unnoticed in the log.
+            self._log_warn(
+                f"Simul MCP bridge configured for port {self._port} but it was in use; "
+                f"bound to {actual_port} instead."
             )
             settings = carb.settings.get_settings()
             settings.set("/exts/khemoo.simul.mcp/port", actual_port)
@@ -316,12 +369,8 @@ class IsaacMCPServerExtension(OmniExtBase):
         if self._server is None:
             self._refresh_ui()
             return
-        self._server.remove_discovery_file()
         await self._server.stop()
-        self._server = None
-        self._executor = None
-        self._service = None
-        self._request_lock = None
+        self._clear_runtime_state()
         self._refresh_ui()
 
     async def _restart_bridge_async(self) -> None:
@@ -333,3 +382,11 @@ class IsaacMCPServerExtension(OmniExtBase):
         """Refresh the UI models if the settings window is available."""
         if self._ui_builder is not None:
             self._ui_builder.refresh()
+
+    @staticmethod
+    def _log_warn(message: str) -> None:
+        """Emit a warning through Kit's log when it is loaded, else stdlib logging."""
+        if carb is not None:
+            carb.log_warn(message)
+        else:
+            logger.warning(message)

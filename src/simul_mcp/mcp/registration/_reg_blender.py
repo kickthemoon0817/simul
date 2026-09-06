@@ -1773,9 +1773,9 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="export_simready_usd",
         description=(
-            "Export a SimReady-compliant USD file. Validates objects "
-            "before export, selects the requested objects, and carries "
-            "simready_ custom properties into USD attributes."
+            "Export a SimReady-compliant USD file from Blender. Validates "
+            "objects before export, selects the requested objects, and "
+            "carries simready_ custom properties into USD attributes."
         ),
         annotations=server._tool_annotations(
             read_only=False,
@@ -1816,8 +1816,8 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="setup_simready_hierarchy",
         description=(
-            "Create a SimReady-compliant object hierarchy with a root "
-            "empty (XForm equivalent) and parent the given children "
+            "Create a SimReady-compliant object hierarchy in Blender with "
+            "a root empty (XForm equivalent) and parent the given children "
             "under it. Optionally applies semantic labels to the root."
         ),
         annotations=server._tool_annotations(

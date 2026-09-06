@@ -17,6 +17,7 @@ sys.path.insert(0, str(src_path))
 
 from simul_mcp.adapters import unreal_runtime  # noqa: E402
 from simul_mcp.config import Settings  # noqa: E402
+from simul_mcp.utils.paths import SandboxDenied  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -1588,7 +1589,7 @@ class TestUnrealRuntimeSessionPhase6:
             }),
         })
 
-        result = asyncio.run(session.import_usd(usd_path="/tmp/whale.usd"))
+        result = asyncio.run(session.import_usd(usd_path="/tmp/simul_mcp/whale.usd"))
 
         assert result["imported_assets"] == ["/Game/Imports/Whale"]
         assert result["actor_paths"] == ["/Game/Maps/T.T:PersistentLevel.Whale_0"]
@@ -1605,12 +1606,71 @@ class TestUnrealRuntimeSessionPhase6:
 
         result = asyncio.run(session.export_usd(
             actor_paths=["/Game/Maps/T.T:PersistentLevel.Cube_0"],
-            output_path="/tmp/export.usd",
+            output_path="/tmp/simul_mcp/export.usd",
         ))
 
-        assert result["output_path"] == "/tmp/export.usd"
+        assert result["output_path"] == "/tmp/simul_mcp/export.usd"
         assert result["actors_exported"] == 1
         assert result["file_size_bytes"] == 12345
+
+    def test_import_usd_outside_sandbox_is_refused_before_any_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The path policy sits in the session layer, below MCP registration and the CLI."""
+        session = self._make_session(monkeypatch)
+        requests: list = []
+        session._session = SmartFakeClientSession(
+            put_fn=lambda path, json: requests.append((path, json)) or FakeResponse({})
+        )
+
+        with pytest.raises(SandboxDenied) as excinfo:
+            asyncio.run(session.import_usd(usd_path="/etc/shadow"))
+
+        assert requests == [], "Remote Control was called despite the sandbox denial"
+        assert excinfo.value.details["file_path"] == "/etc/shadow"
+        assert excinfo.value.details["access"] == "read"
+        assert excinfo.value.details["allowed_roots"]
+
+    def test_import_usd_embeds_the_resolved_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A relative path is resolved against the project root, not the editor's cwd."""
+        session = self._make_session(monkeypatch)
+        requests: list = []
+        session._session = SmartFakeClientSession(
+            put_fn=lambda path, json: requests.append((path, json)) or FakeResponse({})
+        )
+
+        asyncio.run(session.import_usd(usd_path="examples/whale.usd"))
+
+        source = requests[0][1]["parameters"]["SourceData"]
+        assert Path(source).is_absolute()
+        assert source.endswith("/examples/whale.usd")
+
+    def test_export_usd_to_a_url_is_refused_by_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = self._make_session(monkeypatch)
+        session._session = SmartFakeClientSession(put_responses={})
+
+        with pytest.raises(SandboxDenied) as excinfo:
+            asyncio.run(session.export_usd(
+                actor_paths=["/Game/Maps/T.T:PersistentLevel.Cube_0"],
+                output_path="omniverse://nucleus/Projects/export.usd",
+            ))
+
+        assert excinfo.value.details["access"] == "write"
+        assert excinfo.value.details["allowed_url_schemes"] == []
+
+    def test_export_usd_outside_sandbox_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = self._make_session(monkeypatch)
+        session._session = SmartFakeClientSession(put_responses={})
+
+        with pytest.raises(SandboxDenied):
+            asyncio.run(session.export_usd(
+                actor_paths=["/Game/Maps/T.T:PersistentLevel.Cube_0"],
+                output_path="/tmp/export.usd",
+            ))
 
     def test_convert_to_simready_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """convert_to_simready returns conversions applied."""
@@ -1623,11 +1683,11 @@ class TestUnrealRuntimeSessionPhase6:
         })
 
         result = asyncio.run(session.convert_to_simready(
-            usd_path="/tmp/model.usd",
-            output_path="/tmp/model_simready.usd",
+            usd_path="/tmp/simul_mcp/model.usd",
+            output_path="/tmp/simul_mcp/model_simready.usd",
         ))
 
-        assert result["output_path"] == "/tmp/model_simready.usd"
+        assert result["output_path"] == "/tmp/simul_mcp/model_simready.usd"
         assert "physics" in result["conversions_applied"]
         assert len(result["warnings"]) == 1
 
@@ -1643,7 +1703,7 @@ class TestUnrealRuntimeSessionPhase6:
             }),
         })
 
-        result = asyncio.run(session.validate_simready_asset(usd_path="/tmp/asset.usd"))
+        result = asyncio.run(session.validate_simready_asset(usd_path="/tmp/simul_mcp/asset.usd"))
 
         assert result["is_valid"] is True
         assert result["checks"]["physics"] is True

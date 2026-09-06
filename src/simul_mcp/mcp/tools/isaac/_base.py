@@ -61,18 +61,31 @@ class IsaacScriptBase(LoggerMixin):
         """Update the default client when using non-session-scoped routing."""
         self._default_client = client
 
-    def _sandbox_denial(self, path: Optional[str]) -> Optional[Dict[str, Any]]:
+    def _sandbox_denial(
+        self, path: Optional[str], *, write: bool = False
+    ) -> Optional[Dict[str, Any]]:
         """Return an error payload when ``path`` is outside the sandbox.
 
         ``None`` means "carry on" — either the path is allowed, or there is no
-        path to police (an optional save-as target that was not supplied).
+        path to police (an optional save-as target that was not supplied). A
+        caller that carries on must embed ``self._path_policy.authorize(path)``
+        in the generated script, never the raw string: Kit resolves a relative
+        path against its own working directory, not the project root the
+        containment test used.
+
+        Args:
+            path: Path or URL supplied by the caller, or None.
+            write: Whether the tool writes to the location.
+
+        Returns:
+            The SandboxError payload, or None when the path may be used.
         """
-        if path is None or self._path_policy.is_allowed(path):
+        if path is None or self._path_policy.is_allowed(path, write=write):
             return None
         return ErrorResponse(
             error="File path is not allowed by sandbox policy",
             error_type="SandboxError",
-            details={"file_path": path},
+            details=self._path_policy.denial_details(path, write=write),
         ).model_dump()
 
     async def _execute_json_script(

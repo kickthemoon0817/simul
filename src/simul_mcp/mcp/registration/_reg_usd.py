@@ -39,7 +39,10 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="load_usd_file",
-        description="Load a USD file and return stage information.",
+        description=(
+            "Load a USD file and return stage information. Paths must be inside "
+            "the configured sandbox (security.allowed_paths)."
+        ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
@@ -64,12 +67,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         if isinstance(input_data, dict):
             return input_data
 
-        if not server._is_path_allowed(input_data.file_path):
-            return ErrorResponse(
-                error="File path is not allowed by sandbox policy",
-                error_type="SandboxError",
-                details={"file_path": input_data.file_path},
-            ).model_dump()
+        denial = server._sandbox_denial(input_data.file_path)
+        if denial is not None:
+            return denial
 
         try:
             adapter = server.headless_adapter
@@ -79,7 +79,9 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 ).model_dump()
 
             with adapter.create_session() as session:
-                stage_id = session.load_stage(input_data.file_path)
+                stage_id = session.load_stage(
+                    server._path_policy.authorize(input_data.file_path)
+                )
                 if stage_id:
                     stage_info = session.get_stage_info(stage_id)
                     if stage_info:
@@ -92,12 +94,12 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                             start_time=stage_info.start_time_code,
                             end_time=stage_info.end_time_code,
                             frame_rate=stage_info.frame_rate,
-                            total_prims=len(stage_info.all_prims),
+                            total_prims=stage_info.prim_count,
                             root_prims=stage_info.root_prims,
                             has_animation=stage_info.start_time_code
                             != stage_info.end_time_code,
                             layer_count=len(stage_info.layers),
-                            default_prim=stage_info.default_prim,
+                            default_prim=stage_info.default_prim_path,
                         ).model_dump()
                         return server._validate_output(
                             result, (StageInfo, ErrorResponse), "load_usd_file"
@@ -120,7 +122,10 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="validate_usd_file",
-        description="Validate a USD file without loading it.",
+        description=(
+            "Validate a USD file without loading it. Paths must be inside the "
+            "configured sandbox (security.allowed_paths)."
+        ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
@@ -135,15 +140,12 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         if isinstance(input_data, dict):
             return input_data
 
-        if not server._is_path_allowed(input_data.file_path):
-            return ErrorResponse(
-                error="File path is not allowed by sandbox policy",
-                error_type="SandboxError",
-                details={"file_path": input_data.file_path},
-            ).model_dump()
+        denial = server._sandbox_denial(input_data.file_path)
+        if denial is not None:
+            return denial
 
         try:
-            path = Path(input_data.file_path)
+            path = Path(server._path_policy.authorize(input_data.file_path))
             file_exists = path.exists()
             is_file = path.is_file() if file_exists else False
             file_size = path.stat().st_size if is_file else 0
@@ -286,7 +288,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         name="create_prim",
         description="Create a prim in a USD stage.",
         annotations=server._tool_annotations(
-            read_only=False, idempotent=False, open_world=False, destructive=True
+            read_only=False, idempotent=False, open_world=False
         ),
         output_schema=None,
     )

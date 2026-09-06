@@ -273,6 +273,14 @@ def server(
         "-b",
         help="Comma-separated backends to enable (isaac,unreal,usd,blender). Default: all available.",
     ),
+    unreal_tools: Optional[str] = typer.Option(
+        None,
+        "--unreal-tools",
+        help=(
+            "Unreal MCP tool surface: 'thin' (health, ping, instances, capture, "
+            "exec script) or 'full' (every granular tool). Overrides unreal.tool_surface."
+        ),
+    ),
     log_level: Optional[str] = typer.Option(
         None, "--log-level", "-l", help="Log level (DEBUG, INFO, WARNING, ERROR)"
     ),
@@ -298,6 +306,22 @@ def server(
                 update={
                     "logging": settings.logging.model_copy(
                         update={"level": resolved_level}
+                    )
+                }
+            )
+
+        if unreal_tools is not None:
+            surface = unreal_tools.strip().lower()
+            if surface not in ("thin", "full"):
+                console.print(
+                    f"[red]Unknown --unreal-tools value: {unreal_tools!r}. "
+                    f"Valid: thin, full[/red]"
+                )
+                raise typer.Exit(1)
+            settings = settings.model_copy(
+                update={
+                    "unreal": settings.unreal.model_copy(
+                        update={"tool_surface": surface}
                     )
                 }
             )
@@ -331,6 +355,7 @@ def server(
                 f"[bold blue]Simul -- 3D Simulation & DCC Tools[/bold blue]\n"
                 f"Transport: {transport}\n"
                 f"Backends: {backends_label}\n"
+                f"Unreal tools: {settings.unreal.tool_surface}\n"
                 f"Isaac Sim (TCP :{isaac_port}): {'reachable' if isaac_reachable else 'not reachable (tools will retry at call time)'}\n"
                 f"Blender: {'available' if blender_available else 'unavailable'}\n"
                 f"USD Headless: {'available' if usd_available else 'unavailable'}\n"

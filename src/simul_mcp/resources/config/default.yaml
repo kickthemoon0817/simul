@@ -93,6 +93,9 @@ viewport:
     max_size: 2048
     format: "png"  # png, jpg, exr
     quality: 95
+    # Where captures land on the Isaac Sim host. Must sit inside the sandbox
+    # when it is enabled; unset picks <writable allowed root>/captures.
+    # directory: "/tmp/simul_mcp/captures"
 
   # Rendering settings
   rendering:
@@ -154,6 +157,12 @@ security:
       - "examples"
       - "tests/data"
       - "/tmp/simul_mcp"
+    # URL schemes that may be read from (open, import, reference). Strings
+    # shaped like <scheme>://... are URLs, never project-relative paths.
+    allowed_url_schemes:
+      - "omniverse"
+    # URL schemes that may be written to. Empty keeps writes local-only.
+    allowed_write_url_schemes: []
 
   # Rate limiting
   rate_limiting:

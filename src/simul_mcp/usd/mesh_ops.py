@@ -105,7 +105,7 @@ class MeshOperations(LoggerMixin):
             
             # Get UVs (texture coordinates)
             uvs = None
-            primvars = mesh.GetPrimvars()
+            primvars = UsdGeom.PrimvarsAPI(mesh.GetPrim()).GetPrimvars()
             for primvar in primvars:
                 if primvar.GetPrimvarName() in ['st', 'uv', 'texCoord']:
                     uv_data = primvar.Get(time_code)
@@ -348,7 +348,7 @@ class MeshOperations(LoggerMixin):
         """Check if a mesh has tangent data."""
         try:
             tangent_names = {"tangent", "tangents", "tangentVectors"}
-            for primvar in mesh.GetPrimvars():
+            for primvar in UsdGeom.PrimvarsAPI(mesh.GetPrim()).GetPrimvars():
                 if primvar.GetPrimvarName() in tangent_names:
                     return True
             return False

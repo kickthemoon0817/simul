@@ -77,7 +77,9 @@ class BlenderRuntimeSession(LoggerMixin):
         )
         self._path_policy = PathPolicy.from_settings(self.settings)
 
-    def _deny_outside_sandbox(self, path: Optional[str]) -> Optional[str]:
+    def _deny_outside_sandbox(
+        self, path: Optional[str], *, write: bool = False
+    ) -> Optional[str]:
         """Refuse a filesystem path the sandbox policy does not allow.
 
         Enforced here, in the session layer, so every caller — MCP
@@ -90,14 +92,20 @@ class BlenderRuntimeSession(LoggerMixin):
         ``~``/``$VAR``/relative prefixes before the containment test, so the
         raw string can name a different file than the one that was checked.
         With the sandbox disabled the raw path passes through untouched.
+
+        Args:
+            path: Filesystem path supplied by the caller, or None.
+            write: Whether the caller writes to the location.
+
+        Returns:
+            The path to use for the operation, or None when none was given.
+
+        Raises:
+            SandboxDenied: If the path is outside the sandbox.
         """
         if path is None:
             return None
-        if not self._path_policy.enabled:
-            return path
-        if not self._path_policy.is_allowed(path):
-            raise PermissionError(f"File path is not allowed by sandbox policy: {path}")
-        return str(self._path_policy.resolve(path))
+        return self._path_policy.authorize(path, write=write)
 
     @property
     def blender_version(self) -> Tuple[int, int, int]:
@@ -1118,7 +1126,7 @@ class BlenderRuntimeSession(LoggerMixin):
             PermissionError: If the path is outside the sandbox policy.
             ValueError: If no path given and file was never saved.
         """
-        file_path = self._deny_outside_sandbox(file_path)
+        file_path = self._deny_outside_sandbox(file_path, write=True)
         blender_module: Any = bpy
 
         if file_path is not None:
@@ -1209,7 +1217,7 @@ class BlenderRuntimeSession(LoggerMixin):
             PermissionError: If the path is outside the sandbox policy.
             ValueError: If the format is unsupported.
         """
-        file_path = self._deny_outside_sandbox(file_path)
+        file_path = self._deny_outside_sandbox(file_path, write=True)
         fmt = file_format.upper()
         if fmt not in self._SUPPORTED_FORMATS:
             raise ValueError(
@@ -2342,7 +2350,7 @@ class BlenderRuntimeSession(LoggerMixin):
         Raises:
             PermissionError: If the path is outside the sandbox policy.
         """
-        file_path = self._deny_outside_sandbox(file_path)
+        file_path = self._deny_outside_sandbox(file_path, write=True)
         blender_module: Any = bpy
         issues: Optional[List[Dict[str, Any]]] = None
         validation_passed = True

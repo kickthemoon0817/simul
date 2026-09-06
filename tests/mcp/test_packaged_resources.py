@@ -81,8 +81,14 @@ def test_relative_allowlist_entries_are_dropped_without_a_checkout(
         paths_logger.removeHandler(caplog.handler)
 
     assert policy.allowed_roots == [Path("/tmp/simul_mcp").resolve()]
-    dropped = [record.getMessage() for record in caplog.records if "Dropping relative sandbox path" in record.getMessage()]
-    assert len(dropped) == 2
+    # The record may reach caplog twice (at the logger and, when propagation is
+    # still on, at the root), so compare the set of dropped entries, not a count.
+    dropped = {
+        record.getMessage().split("'")[1]
+        for record in caplog.records
+        if "Dropping relative sandbox path" in record.getMessage()
+    }
+    assert dropped == {"examples", "tests/data"}
     assert not any("lib/python" in str(root) for root in policy.allowed_roots)
 
 

@@ -363,14 +363,23 @@ def launch(
             2,
         )
         return
-    if not version.is_supported:
+    if version.support_level == "unsupported":
         _fail(
-            f"Isaac Sim {version} is not supported; simul knows the transport "
-            "extensions of the 5.x and 6.x series only.",
+            f"Isaac Sim {version} is not supported; releases older than 5.x, including the "
+            "year-scheme 20xx.x series, ship neither transport extension simul knows.",
             "UnsupportedInstall",
             2,
         )
         return
+    version_warning: Optional[str] = None
+    if version.support_level == "assumed":
+        version_warning = (
+            f"Isaac Sim {version} is newer than any release simul has been verified against; "
+            f"assuming it still ships {version.python_transport_extension} for the Python socket. "
+            "If the editor starts but no transport answers, that assumption is wrong."
+        )
+        if not is_json_mode():
+            console.print(f"[yellow]{version_warning}[/yellow]")
     if auth_token and version.major < 6:
         _fail(
             f"--auth-token needs Isaac Sim 6.0+ ({PYTHON_SERVER_EXTENSION}); found {version}.",
@@ -411,12 +420,15 @@ def launch(
     result: Dict[str, Any] = {
         "isaac_root": str(root),
         "version": str(version),
+        "support_level": version.support_level,
         "transport_extension": transport_ext,
         "bridge_extension_present": bridge_present,
         "socket_address": f"{settings.isaac_sim.socket_host}:{resolved_socket_port}",
         "bridge_address": f"{settings.isaac_sim.bridge_host}:{resolved_bridge_port}",
         "command": redacted_command,
     }
+    if version_warning is not None:
+        result["warning"] = version_warning
     if not bridge_present:
         result["hint"] = (
             f"{BRIDGE_EXTENSION} is not published under {root / 'extsUser'}; run "

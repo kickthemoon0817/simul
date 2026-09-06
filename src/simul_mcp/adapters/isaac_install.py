@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 PYTHON_SERVER_EXTENSION: str = "isaacsim.code_editor.python_server"
 VSCODE_EXTENSION: str = "isaacsim.code_editor.vscode"
@@ -28,11 +28,20 @@ PYTHON_SOCKET_PORT_SETTINGS: tuple[str, ...] = (
 
 _VERSION_PATTERN = re.compile(r"^\s*(\d+)\.(\d+)\.(\d+)")
 
-#: Majors simul knows how to launch. Isaac Sim 2022.x / 2023.x parse as
-#: major 2023, so an open-ended ">= 6" would hand those installs an extension
-#: name that has not existed yet and time out waiting for a port.
-MIN_SUPPORTED_MAJOR: int = 5
-MAX_SUPPORTED_MAJOR: int = 6
+#: Python socket extension shipped by each Isaac Sim major simul has been run
+#: against. A newer major is assumed to keep the newest entry's extension until
+#: it is verified and added here.
+PYTHON_TRANSPORT_EXTENSIONS: dict[int, str] = {
+    5: VSCODE_EXTENSION,
+    6: PYTHON_SERVER_EXTENSION,
+}
+NEWEST_KNOWN_MAJOR: int = max(PYTHON_TRANSPORT_EXTENSIONS)
+
+#: Isaac Sim 2020.x-2023.x parse as four-digit majors. They predate both
+#: transport extensions, so they must not be mistaken for a future release.
+YEAR_SCHEME_MAJOR_FLOOR: int = 2000
+
+SupportLevel = Literal["supported", "assumed", "unsupported"]
 
 
 @dataclass(frozen=True)
@@ -47,23 +56,38 @@ class IsaacVersion:
         return f"{self.major}.{self.minor}.{self.patch}"
 
     @property
-    def is_supported(self) -> bool:
-        """Return whether simul knows which transport extensions this version ships."""
-        return MIN_SUPPORTED_MAJOR <= self.major <= MAX_SUPPORTED_MAJOR
+    def support_level(self) -> SupportLevel:
+        """How well simul knows this version's transport extensions.
+
+        Returns:
+            ``"supported"`` for a major in the extension table, ``"assumed"``
+            for a major newer than the table knows (callers should warn), and
+            ``"unsupported"`` for majors older than the table and year-scheme
+            releases.
+        """
+        if self.major in PYTHON_TRANSPORT_EXTENSIONS:
+            return "supported"
+        if NEWEST_KNOWN_MAJOR < self.major < YEAR_SCHEME_MAJOR_FLOOR:
+            return "assumed"
+        return "unsupported"
 
     @property
     def python_transport_extension(self) -> str:
         """Extension that serves raw Python on the socket port for this version.
 
+        An ``assumed`` version gets the newest known major's extension.
+
         Raises:
-            ValueError: If the version is outside the supported major range.
+            ValueError: If the version is unsupported.
         """
-        if not self.is_supported:
+        if self.support_level == "unsupported":
             raise ValueError(
-                f"Isaac Sim {self} is not supported; expected major "
-                f"{MIN_SUPPORTED_MAJOR}-{MAX_SUPPORTED_MAJOR}"
+                f"Isaac Sim {self} is not supported; simul knows the transport "
+                f"extensions of majors {sorted(PYTHON_TRANSPORT_EXTENSIONS)} only"
             )
-        return PYTHON_SERVER_EXTENSION if self.major == 6 else VSCODE_EXTENSION
+        return PYTHON_TRANSPORT_EXTENSIONS.get(
+            self.major, PYTHON_TRANSPORT_EXTENSIONS[NEWEST_KNOWN_MAJOR]
+        )
 
     @classmethod
     def parse(cls, text: str) -> "IsaacVersion":

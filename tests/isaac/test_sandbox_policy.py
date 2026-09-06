@@ -103,20 +103,86 @@ def test_save_without_a_path_still_runs() -> None:
     assert client.execute.await_count == 1
 
 
-def test_remote_urls_count_as_outside_the_sandbox() -> None:
-    """Pin current behaviour: the sandbox also refuses omniverse:// URLs.
+def test_nucleus_urls_are_admitted_for_reads_and_passed_verbatim() -> None:
+    """A ``<scheme>://`` string is a URL, never a project-relative path.
 
-    This is what the MCP layer already did — a URL is not under an allowed root,
-    so it is refused — and the CLI now matches it. Whether a Nucleus URL *should*
-    be exempt from a filesystem sandbox is a policy question rather than a bug,
-    so it is recorded here instead of changed silently. If the answer becomes
-    "exempt remote schemes", this is the test to flip.
+    ``omniverse://`` is on the default read allowlist, so opening a Nucleus
+    asset works and the URL reaches Kit untouched.
     """
     tools, client = _tools()
+    url = "omniverse://nucleus/Projects/scene.usd"
+    result = asyncio.run(tools.open_isaac_stage(file_path=url))
+
+    assert not _denied(result)
+    assert client.execute.await_count == 1
+    assert repr(url) in client.execute.await_args.args[0]
+
+
+def test_saving_to_a_nucleus_url_is_refused_by_default() -> None:
+    """Writes stay local unless a scheme is opted into allowed_write_url_schemes."""
+    tools, client = _tools()
     result = asyncio.run(
-        tools.open_isaac_stage(file_path="omniverse://nucleus/Projects/scene.usd")
+        tools.save_isaac_stage(file_path="omniverse://nucleus/Projects/scene.usd")
     )
     _assert_blocked(result, client)
+    assert result["details"]["access"] == "write"
+    assert result["details"]["allowed_url_schemes"] == []
+
+
+def test_http_urls_are_refused_until_allowlisted() -> None:
+    tools, client = _tools()
+    result = asyncio.run(
+        tools.import_isaac_asset(asset_path="https://example.com/asset.usd")
+    )
+    _assert_blocked(result, client)
+    assert result["details"]["allowed_url_schemes"] == ["omniverse"]
+
+
+def test_denial_names_the_allowed_roots_and_a_hint() -> None:
+    """A denial that only echoes the path back leaves the caller guessing."""
+    tools, _client = _tools()
+    result = asyncio.run(tools.open_isaac_stage(file_path=OUTSIDE_SANDBOX))
+
+    details = result["details"]
+    assert details["file_path"] == OUTSIDE_SANDBOX
+    assert details["access"] == "read"
+    assert any(root.endswith("/tmp/simul_mcp") for root in details["allowed_roots"])
+    assert details["allowed_url_schemes"] == ["omniverse"]
+    assert "allowed_paths" in details["hint"]
+
+
+def test_stage_scripts_embed_the_resolved_path_not_the_raw_string() -> None:
+    """Kit resolves a relative path against its own cwd, not the project root.
+
+    The containment test resolved ``examples/x.usd`` against the project root
+    and approved it; embedding the raw string then let Kit write it wherever
+    Kit happened to be started from.
+    """
+    tools, client = _tools()
+    relative = "examples/rel_escape.usd"
+    resolved = str(tools._path_policy.resolve(relative))
+    assert resolved != relative and Path(resolved).is_absolute()
+
+    asyncio.run(tools.open_isaac_stage(file_path=relative))
+    asyncio.run(tools.save_isaac_stage(file_path=relative))
+    asyncio.run(tools.import_isaac_asset(asset_path=relative))
+    asyncio.run(tools.add_isaac_reference(prim_path="/World/Ref", reference_path=relative))
+
+    assert client.execute.await_count == 4
+    for call in client.execute.await_args_list:
+        script = call.args[0]
+        assert repr(resolved) in script
+        assert repr(relative) not in script
+
+
+def test_file_urls_are_converted_and_policy_checked() -> None:
+    tools, client = _tools()
+    asyncio.run(tools.open_isaac_stage(file_path=f"file://{INSIDE_SANDBOX}"))
+    assert client.execute.await_count == 1
+    assert repr(INSIDE_SANDBOX) in client.execute.await_args.args[0]
+
+    result = asyncio.run(tools.open_isaac_stage(file_path=f"file://{OUTSIDE_SANDBOX}"))
+    assert _denied(result)
 
 
 def test_sandbox_disabled_allows_any_path() -> None:

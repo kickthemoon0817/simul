@@ -20,6 +20,7 @@ from .reader import (
 
 from .mesh_ops import (
     MeshInfo,
+    MeshOperations,
     extract_mesh_data,
     get_mesh_statistics,
     decimate_mesh,
@@ -39,6 +40,7 @@ from .bbox import (
 )
 
 from .summarize import (
+    SceneSummarizer,
     SceneSummary,
     PrimSummary,
     MaterialSummary,
@@ -63,6 +65,7 @@ __all__ = [
     
     # Mesh operations
     "MeshInfo",
+    "MeshOperations",
     "extract_mesh_data",
     "get_mesh_statistics",
     "decimate_mesh",
@@ -80,6 +83,7 @@ __all__ = [
     "dict_to_bbox",
     
     # Summarization
+    "SceneSummarizer",
     "SceneSummary",
     "PrimSummary",
     "MaterialSummary", 
