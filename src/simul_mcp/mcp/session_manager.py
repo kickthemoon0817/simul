@@ -2,8 +2,11 @@
 Instance session manager for multi-agent coordination.
 
 Tracks which agents are using which Isaac Sim instances via file-based
-session records at ``~/.simul/sessions/``. Sessions are advisory (soft
-locks) — agents are informed about who's doing what but never hard-blocked.
+session records at ``~/.simul/sessions/``. Sessions are advisory by default —
+agents are informed about who's doing what but not blocked. With
+``isaac_sim.enforce_claims`` enabled the MCP server turns a live claim into a
+lock: mutating tools from any other agent are refused until the claim is
+released or expires after ``CLAIM_TTL_SECONDS`` without a heartbeat.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SESSION_DIR = Path.home() / ".simul" / "sessions"
-_STALE_THRESHOLD_SEC = 120.0
+CLAIM_TTL_SECONDS = 120.0
 _STOPWORDS = frozenset({
     "a", "an", "the", "and", "or", "for", "in", "on", "to", "of",
     "is", "it", "with", "from", "at", "by", "as", "this", "that",
@@ -57,7 +60,7 @@ class InstanceSession:
         except (json.JSONDecodeError, OSError):
             return []
         now = time.time()
-        active = [s for s in sessions if now - s.get("last_active", 0) < _STALE_THRESHOLD_SEC]
+        active = [s for s in sessions if now - s.get("last_active", 0) < CLAIM_TTL_SECONDS]
         if len(active) != len(sessions):
             self._write(active)
         return active
@@ -244,7 +247,9 @@ class SessionManager:
 
         incoming_tokens = _tokenize(incoming_purpose)
         best_score = 0.0
-        best_match_purpose = ""
+        # With no overlap at all the reason still has to name whose work the
+        # caller would be interfering with, so start from the first session.
+        best_match_purpose = sessions[0].get("purpose", "")
 
         for s in sessions:
             existing_tokens = _tokenize(s.get("purpose", ""))

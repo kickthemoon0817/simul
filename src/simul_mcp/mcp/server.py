@@ -51,7 +51,8 @@ from ..utils.timing import RateLimiter
 from .registration._helpers import apply_success_from_error
 from .result_budget import apply_result_budget
 from .schemas.common import ErrorResponse
-from .session_manager import SessionManager
+from .session_manager import CLAIM_TTL_SECONDS, SessionManager
+from ..utils.discovery import DiscoveryDir
 from .tools.isaac_tools import IsaacTools
 from .usage_tracker import ToolUsageTracker
 
@@ -167,6 +168,7 @@ class SimulMCPServer(LoggerMixin):
         self.usage_tracker = ToolUsageTracker()
         self.session_manager = SessionManager()
         self._session_routes: Dict[str, IsaacSessionRoute] = {}
+        self._read_only_tools: Dict[str, bool] = {}
         self._isaac_instance_locks: Dict[str, asyncio.Lock] = {}
         self._rate_limiters: Dict[str, RateLimiter] = {}
         self._rate_limit_enabled = self.settings.security.rate_limiting_enabled
@@ -395,6 +397,83 @@ class SimulMCPServer(LoggerMixin):
             route.active_instance = next(iter(route.bindings))
         return binding
 
+    def _request_agent_id(self) -> str:
+        """Return the agent id the current request acts as: its binding's, else the session's."""
+        binding = self._get_active_binding()
+        if binding is not None:
+            return binding.agent_id
+        return self._resolve_agent_id(None)
+
+    def _foreign_claim(
+        self, instance_name: str, caller_agent_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the live claim another agent holds on ``instance_name``, when enforced.
+
+        Args:
+            instance_name: Registry name of the Isaac instance being used.
+            caller_agent_id: The agent making the request.
+
+        Returns:
+            The holder's session record when ``isaac_sim.enforce_claims`` is on
+            and a live claim by a different agent exists, otherwise ``None``.
+            Expired claims are pruned by the session manager, so a stale holder
+            never blocks.
+        """
+        if not self.settings.isaac_sim.enforce_claims:
+            return None
+        client = self._isaac_clients.get(instance_name)
+        if client is None:
+            return None
+        sessions = self.session_manager.get_instance_session(client._port).get_status()["sessions"]
+        for session in sessions:
+            if session.get("agent_id") != caller_agent_id:
+                return session
+        return None
+
+    def _claimed_error(self, instance_name: str, holder: Dict[str, Any]) -> Dict[str, Any]:
+        """Build the InstanceClaimed payload naming the holder and the way forward."""
+        expires_in = max(0.0, CLAIM_TTL_SECONDS - (time.time() - float(holder.get("last_active", 0.0))))
+        return ErrorResponse(
+            error=(
+                f"Isaac instance {instance_name!r} is claimed by agent "
+                f"{holder.get('agent_id')!r} for {holder.get('purpose', '')!r}; "
+                "isaac_sim.enforce_claims refuses mutating tools from other agents while "
+                "that claim is live."
+            ),
+            error_type="InstanceClaimed",
+            details={
+                "instance": instance_name,
+                "holder_agent_id": holder.get("agent_id"),
+                "holder_purpose": holder.get("purpose", ""),
+                "claim_expires_in_seconds": round(expires_in, 1),
+                "hint": (
+                    "Read-only tools still work. Ask the holder to call "
+                    "release_isaac_instance, or wait for the claim to expire "
+                    f"({int(CLAIM_TTL_SECONDS)} s without activity), then call "
+                    "claim_isaac_instance yourself. list_isaac_instances shows other instances."
+                ),
+            },
+        ).model_dump()
+
+    async def _tool_is_read_only(self, tool_name: str) -> bool:
+        """Report whether the registered tool carries ``readOnlyHint``; unknown tools count as mutating."""
+        cached = self._read_only_tools.get(tool_name)
+        if cached is not None:
+            return cached
+        get_tool = getattr(self.mcp, "get_tool", None)
+        read_only = False
+        if callable(get_tool):
+            tool = get_tool(tool_name)
+            if inspect.isawaitable(tool):
+                tool = await tool
+            annotations = getattr(tool, "annotations", None)
+            if isinstance(annotations, dict):
+                read_only = bool(annotations.get("readOnlyHint"))
+            else:
+                read_only = bool(getattr(annotations, "readOnlyHint", False))
+        self._read_only_tools[tool_name] = read_only
+        return read_only
+
     async def _exec_isaac(
         self,
         tool_name: str,
@@ -431,6 +510,22 @@ class SimulMCPServer(LoggerMixin):
             coro.close()
             return self._as_text_result(rate_error)
         instance_name = self._get_effective_instance_name()
+        # --- claim enforcement (isaac_sim.enforce_claims) ---
+        if self.settings.isaac_sim.enforce_claims and not await self._tool_is_read_only(tool_name):
+            holder = self._foreign_claim(instance_name, self._request_agent_id())
+            if holder is not None:
+                self.usage_tracker.record(
+                    tool_name,
+                    0.0,
+                    False,
+                    params=params,
+                    error="instance_claimed",
+                    agent_id=agent_id,
+                    script_sha256=script_sha256,
+                )
+                coro.close()
+                return self._as_text_result(self._claimed_error(instance_name, holder))
+        # --- end claim enforcement ---
         lock = self._get_instance_lock(instance_name)
         try:
             # Bounded, so a caller queued behind a long step learns the instance
@@ -914,6 +1009,17 @@ class SimulMCPServer(LoggerMixin):
         """
         discovery_dir = self.settings.isaac_sim.discovery_dir
         if not os.path.isdir(discovery_dir):
+            return {}
+        # Every entry below is trusted, so the directory has to be ours alone:
+        # another local user who can write here can point the server at a
+        # loopback port they own and read every script we send.
+        dir_problem = DiscoveryDir(discovery_dir).problem()
+        if dir_problem is not None:
+            self.logger.warning(
+                "Skipping Isaac discovery files: %s. Make it private (chmod 700) or point "
+                "isaac_sim.discovery_dir elsewhere.",
+                dir_problem,
+            )
             return {}
 
         existing_ports: set[int] = set()

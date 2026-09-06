@@ -160,6 +160,7 @@ class PatchResult:
     added: List[str] = field(default_factory=list)
     updated: List[str] = field(default_factory=list)
     already_ok: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
 
     def summary(self) -> str:
         if not self.changed:
@@ -170,6 +171,50 @@ class PatchResult:
         if self.updated:
             parts.append(f"updated {', '.join(self.updated)}")
         return f"{self.path}: {'; '.join(parts) if parts else 'changed'}"
+
+
+def git_visibility_warning(file_path: Path) -> Optional[str]:
+    """Warn when a file holding a secret would travel with the project's git history.
+
+    Args:
+        file_path: The file about to receive a secret.
+
+    Returns:
+        A warning sentence when the file sits inside a git work tree and is
+        either already tracked or not ignored (so ``git add`` would pick it up),
+        ``None`` when git is unavailable, the file is outside any repository,
+        or ``.gitignore`` already excludes it.
+    """
+    directory = file_path.parent
+
+    def _git(*args: str) -> Optional[int]:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(directory), *args],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return completed.returncode
+
+    if _git("rev-parse", "--is-inside-work-tree") != 0:
+        return None
+    if _git("ls-files", "--error-unmatch", str(file_path)) == 0:
+        return (
+            f"{file_path} is tracked by git; the passphrase digest written into it will be "
+            "committed with the project. Move the passphrase out of version control or "
+            "rotate it before pushing."
+        )
+    if _git("check-ignore", "-q", str(file_path)) == 1:
+        return (
+            f"{file_path} is inside a git repository and not ignored; a later `git add` "
+            "would commit the passphrase digest. Add it to .gitignore or keep it out of "
+            "the commit."
+        )
+    return None
 
 
 @dataclass
@@ -306,6 +351,9 @@ def patch_remote_control_ini(
     # on re-run is a no-op; a different hash adds an additional entry (UE
     # accepts any matching passphrase, so this is non-destructive).
     if passphrase_md5 is not None:
+        git_warning = git_visibility_warning(ini_path)
+        if git_warning is not None:
+            result.warnings.append(git_warning)
         passphrase_line = _passphrase_array_line(passphrase_md5)
         if passphrase_line not in (line.strip() for line in out_lines):
             if not any(line.strip() == f"[{REMOTE_CONTROL_SECTION}]" for line in out_lines):

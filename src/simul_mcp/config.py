@@ -142,7 +142,11 @@ class IsaacSimConfig(BaseModel):
         default=None,
         description=(
             "Auth token for an Isaac Sim 6.0+ python_server started with "
-            "require_auth=true; sent as the '# isaacsim-python-server-token:' header"
+            "require_auth=true; sent as the '# isaacsim-python-server-token:' header. "
+            "Precedence: an explicit value (ISAAC_SIM__SOCKET_AUTH_TOKEN, .env or YAML) "
+            "wins; when unset, the token file `simul-mcp isaac launch "
+            "--generate-auth-token` wrote to <discovery_dir>/auth-token-<pid> for the "
+            "newest still-running editor is used"
         ),
     )
     bridge_enabled: bool = Field(
@@ -190,6 +194,32 @@ class IsaacSimConfig(BaseModel):
         default="/tmp/simul-mcp",
         description="Directory where bridge extensions write port discovery files",
     )
+    enforce_claims: bool = Field(
+        default=False,
+        description=(
+            "Turn claim_isaac_instance into a lock: while another agent holds a live "
+            "claim on an instance, mutating Isaac tools from anyone else are refused "
+            "with InstanceClaimed. Off means claims are advisory"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _pick_up_generated_auth_token(self) -> "IsaacSimConfig":
+        """Fall back to the token file ``simul-mcp isaac launch`` left in the discovery dir.
+
+        Only when nothing explicit was configured: the environment, ``.env`` and
+        YAML all rank above the file. The file is read only from a discovery
+        directory that is owned by the current user and writable by nobody else.
+        """
+        if self.socket_auth_token is not None:
+            return self
+        # Imported here: simul_mcp.utils pulls in simul_mcp.logging, which imports this module.
+        from .utils.discovery import DiscoveryDir
+
+        token = DiscoveryDir(self.discovery_dir).read_auth_token()
+        if token is None:
+            return self
+        return self.model_copy(update={"socket_auth_token": token})
 
     @property
     def path_error(self) -> Optional[str]:
@@ -826,6 +856,7 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     "scan_port_start": isaac.get("scan_port_start"),
                     "scan_port_end": isaac.get("scan_port_end"),
                     "discovery_dir": isaac.get("discovery_dir"),
+                    "enforce_claims": isaac.get("enforce_claims"),
                 }
             ),
             "blender": raw.get("blender"),
