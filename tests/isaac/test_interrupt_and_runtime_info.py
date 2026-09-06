@@ -233,6 +233,6 @@ def test_list_isaac_instances_reports_the_circuit_state(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(instance, "_get_instance_brief", _brief)
 
-    result = asyncio.run(_tool(instance, "list_isaac_instances")(scan=False))
+    result = _payload(asyncio.run(_tool(instance, "list_isaac_instances")(scan=False)))
 
     assert result["instances"][0]["bridge_circuit_open"] is True
