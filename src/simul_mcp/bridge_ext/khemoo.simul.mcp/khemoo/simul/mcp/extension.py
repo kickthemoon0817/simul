@@ -12,7 +12,7 @@ from typing import Any, Callable
 from .executor import ScriptExecutor
 from .lifecycle import BridgeServerLifecycle
 from .protocol import BridgeRequest, BridgeResponse
-from .service import BridgeCommandService, READ_ONLY_ACTIONS
+from .service import BridgeCommandService, LOCK_FREE_ACTIONS
 from .ui_builder import BridgeUIBuilder
 
 try:
@@ -209,8 +209,9 @@ class IsaacMCPServerExtension(_extension_base()):
         # Reads skip the lock. Kit is single-threaded, so they cannot interleave
         # mid-operation with a mutation, and queueing them behind step — which
         # holds the lock across up to 1000 frame awaits — is what made a ping
-        # during a long step report the instance as unreachable.
-        if request.action in READ_ONLY_ACTIONS:
+        # during a long step report the instance as unreachable. interrupt
+        # skips it too: its whole purpose is to reach the script holding it.
+        if request.action in LOCK_FREE_ACTIONS:
             return await self._service.dispatch(request)
 
         # Serialize bridge requests on Kit's event loop so stage/runtime state

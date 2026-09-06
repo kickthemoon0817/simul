@@ -849,6 +849,8 @@ class SimulMCPServer(LoggerMixin):
                 if socket_auth_token is not None
                 else self.settings.isaac_sim.socket_auth_token
             ),
+            bridge_failure_threshold=self.settings.isaac_sim.bridge_failure_threshold,
+            bridge_cooldown_seconds=self.settings.isaac_sim.bridge_cooldown_seconds,
         )
 
     async def _discover_from_files(self) -> Dict[str, IsaacSocketClient]:
@@ -969,6 +971,14 @@ class SimulMCPServer(LoggerMixin):
         instances via discovery files; Phase 2 fills gaps with a port scan.
         All port-scan candidate pings run concurrently via ``asyncio.gather``
         to avoid sequential timeouts.
+
+        Ports that are bridge endpoints — the configured default, every
+        per-instance override, and any bridge advertised by a discovery file
+        or already registered — are excluded from the scan. Probing one with
+        the stock-socket protocol never finds an instance: the bridge waits
+        for a length prefix that never comes, and the probe only returns
+        when its read deadline expires, which used to add the full cap to
+        every listing.
         """
         # Phase 1: fast discovery via files
         file_discovered = await self._discover_from_files()
@@ -982,10 +992,19 @@ class SimulMCPServer(LoggerMixin):
             c._port for c in self._isaac_clients.values() if c._host == host
         }
         existing_ports.update(c._port for c in file_discovered.values())
+        bridge_ports: set[int] = {self.settings.isaac_sim.bridge_port}
+        bridge_ports.update(
+            inst.bridge_port
+            for inst in self.settings.isaac_sim.instances
+            if inst.bridge_port is not None
+        )
+        for known in (*self._isaac_clients.values(), *file_discovered.values()):
+            if known._bridge_port is not None:
+                bridge_ports.add(known._bridge_port)
 
         candidates: Dict[int, IsaacSocketClient] = {}
         for port in range(scan_start, scan_end):
-            if port in existing_ports:
+            if port in existing_ports or port in bridge_ports:
                 continue
             candidates[port] = self._build_isaac_client(
                 socket_host=host,

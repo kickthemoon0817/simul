@@ -57,7 +57,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             ).get_status()
             brief["sessions"] = session_status["sessions"]
             brief["session_count"] = session_status["session_count"]
-
+            # Open means this server is skipping the bridge after repeated
+            # transport failures and talking to the stock socket instead.
+            brief["bridge_circuit_open"] = client.bridge_circuit_open
             if not brief.get("reachable"):
                 # Session bookkeeping says nothing about whether we can talk to
                 # the instance, so an empty session list must not read as

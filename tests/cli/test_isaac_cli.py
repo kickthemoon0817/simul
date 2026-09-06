@@ -121,6 +121,47 @@ def _make_bridge_up_tools() -> SimpleNamespace:
     return tools
 
 
+def test_interrupt_json(monkeypatch) -> None:
+    """simul-mcp isaac interrupt forwards the bridge's answer."""
+    tools = _make_tools()
+    tools.interrupt_script = AsyncMock(
+        return_value={
+            "success": True,
+            "interrupted": True,
+            "was_busy": True,
+            "phase": "async",
+            "current_action": "execute_script",
+            "busy_for_seconds": 3.5,
+        }
+    )
+    monkeypatch.setattr(isaac_cli, "_tools", lambda *args, **kwargs: tools)
+
+    result = runner.invoke(app, ["--json", "isaac", "interrupt"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["interrupted"] is True
+    assert payload["current_action"] == "execute_script"
+    tools.interrupt_script.assert_awaited_once()
+
+
+def test_interrupt_json_without_bridge_exits_non_zero(monkeypatch) -> None:
+    tools = _make_tools()
+    tools.interrupt_script = AsyncMock(
+        return_value={
+            "success": False,
+            "error": "interrupt needs the simul bridge extension",
+            "error_type": "BridgeUnavailable",
+        }
+    )
+    monkeypatch.setattr(isaac_cli, "_tools", lambda *args, **kwargs: tools)
+
+    result = runner.invoke(app, ["--json", "isaac", "interrupt"])
+
+    assert result.exit_code != 0
+    assert "BridgeUnavailable" in result.output
+
+
 def test_bridge_up_already_reachable(monkeypatch) -> None:
     """First branch: bridge already responds → action=already-up, no enable call."""
     tools = _make_bridge_up_tools()

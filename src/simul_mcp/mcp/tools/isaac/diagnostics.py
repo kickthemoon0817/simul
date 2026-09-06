@@ -33,10 +33,15 @@ class DiagnosticsMixin:
         info, and viewport state in a single call.
 
         Returns:
-            Dict with app, timeline, physics, renderer, and viewport sections.
+            Dict with app, timeline, physics, renderer, and viewport sections,
+            plus ``client`` describing this side of the wire. Over the bridge
+            the payload also carries ``bridge`` (``busy``, ``busy_since``,
+            ``busy_for_seconds``, ``current_action``), which is how a caller
+            tells an instance that is working from one that is hung.
         """
         bridge_result = await self._execute_bridge_action("get_runtime_info")
         if bridge_result is not None:
+            bridge_result["client"] = self._client_state()
             return bridge_result
 
         script = textwrap.dedent("""\
@@ -180,7 +185,75 @@ class DiagnosticsMixin:
             print(json.dumps(info))
         """)
         mode = self._raw_script_transport_mode
-        return await self._execute_json_script(script, transport_mode=mode)
+        result = await self._execute_json_script(script, transport_mode=mode)
+        if result.get("success", True):
+            result["client"] = self._client_state()
+        return result
+
+    async def interrupt_script(self) -> Dict[str, Any]:
+        """
+        Stop the script the bridge is currently running.
+
+        Only the bridge has an interrupt path; the stock python_server socket
+        enforces its per-request timeout but cannot be told to stop early.
+        The request skips the client's request lock and circuit breaker so it
+        reaches the bridge while a runaway call still holds both.
+
+        Returns:
+            Dict with ``interrupted``, ``was_busy``, ``phase``,
+            ``current_action`` and ``busy_for_seconds`` from the bridge, or an
+            ErrorResponse dict when no bridge is configured or reachable.
+        """
+        client = self._client
+        if not client.bridge_enabled:
+            return ErrorResponse(
+                error=(
+                    "interrupt needs the simul bridge extension; this instance "
+                    "is configured for the stock Python socket only, which "
+                    "cannot stop a running script. Scripts sent to it still "
+                    f"carry a {client.script_timeout_seconds}s execution timeout."
+                ),
+                error_type="BridgeUnavailable",
+            ).model_dump()
+        try:
+            response = await client.interrupt_bridge_script()
+        except (ConnectionRefusedError, TimeoutError, OSError, ValueError) as exc:
+            return ErrorResponse(
+                error=(
+                    f"Could not reach the bridge at {client.bridge_endpoint} to "
+                    f"interrupt: {exc}. A synchronous script that never yields "
+                    "also blocks the bridge's event loop, so it cannot take this "
+                    "request; its per-request timeout is what stops it."
+                ),
+                error_type=type(exc).__name__,
+            ).model_dump()
+        if response.get("status") == "ok":
+            payload = response.get("payload", {})
+            if not isinstance(payload, dict):
+                return ErrorResponse(
+                    error="Bridge response payload must be an object.",
+                    error_type="BridgeProtocolError",
+                ).model_dump()
+            payload.setdefault("success", True)
+            return payload
+        error = response.get("error", {})
+        return ErrorResponse(
+            error=str(error.get("message", "Bridge request failed")),
+            error_type=str(error.get("name", "BridgeError")),
+        ).model_dump()
+
+    def _client_state(self) -> Dict[str, Any]:
+        """Describe this client's transport state for diagnostics payloads."""
+        client = self._client
+        return {
+            "bridge_enabled": client.bridge_enabled,
+            "bridge_address": client.bridge_address,
+            "bridge_circuit_open": client.bridge_circuit_open,
+            "bridge_consecutive_failures": client.bridge_consecutive_failures,
+            "vscode_address": client.vscode_address,
+            "socket_protocol": client.socket_protocol,
+            "script_timeout_seconds": client.script_timeout_seconds,
+        }
 
     async def get_isaac_logs(
         self,

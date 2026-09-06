@@ -1353,6 +1353,13 @@ class BlenderExecuteScriptResponse(BaseModel):
     duration_seconds: float = Field(
         ..., description="Wall-clock execution time in seconds"
     )
+    timed_out: bool = Field(
+        False,
+        description=(
+            "True when the script exceeded its timeout; it keeps running on a "
+            "background thread and its output is discarded"
+        ),
+    )
 
 
 class BlenderCreateMeshFromDataRequest(BaseModel):

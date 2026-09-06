@@ -129,6 +129,9 @@ class TestUnrealRuntimeSession:
 
         result = asyncio.run(session.health_check())
 
+        # ``reachable`` is the field shared by every backend ping; ``connected``
+        # stays as an alias for one release.
+        assert result["reachable"] is True
         assert result["connected"] is True
         assert result["engine_version"] == "5.4.0"
         assert result["project_name"] == "TestProject"
@@ -141,6 +144,7 @@ class TestUnrealRuntimeSession:
 
         result = asyncio.run(session.health_check())
 
+        assert result["reachable"] is False
         assert result["connected"] is False
         assert "error" in result
 

@@ -80,6 +80,10 @@ class _FakeClient:
     def fallback_to_vscode(self) -> bool:
         return True
 
+    @property
+    def bridge_circuit_open(self) -> bool:
+        return False
+
 
 class _FakeSessionManager:
     """Session bookkeeping with no sessions recorded — the reported case."""

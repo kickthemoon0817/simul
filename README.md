@@ -194,6 +194,8 @@ for example:
 
 Isaac Sim tools prefer a running Isaac Sim instance with the repo-owned `khemoo.simul.mcp` bridge extension enabled on TCP port 8229. When that bridge is unavailable, the client falls back to the stock Python socket on TCP port 8226: `isaacsim.code_editor.python_server` on Isaac Sim 6.0+, `isaacsim.code_editor.vscode` on 5.x. The client detects which one it is talking to; set `ISAAC_SIM__SOCKET_PROTOCOL` to pin it. Use `ping_isaac` to verify connectivity.
 
+Every script carries a server-side execution timeout (one second under `ISAAC_SIM__SOCKET_TIMEOUT`, minimum 1 s): the bridge interrupts a script that overruns it inside Kit, and the 6.0 `python_server` reports the overrun through its request envelope. A script that is still running can be stopped early with `interrupt_isaac_script` / `simul-mcp isaac interrupt` when it is a coroutine or suspended at an `await`; a synchronous loop that never yields also blocks the bridge's event loop, so only the timeout reaches it, and a blocking C call is interrupted only when it returns to Python. `get_isaac_runtime_info` reports `bridge.busy`, `bridge.busy_since` and `bridge.current_action` so a busy instance can be told from a hung one. A bridge port that is filtered or half-open would cost the full bridge timeout on every call; after `ISAAC_SIM__BRIDGE_FAILURE_THRESHOLD` consecutive failures (default 3) the client skips the bridge for `ISAAC_SIM__BRIDGE_COOLDOWN_SECONDS` (default 30) and uses the stock socket directly, reported as `bridge_circuit_open` by `ping_isaac`, `list_isaac_instances` and `get_isaac_runtime_info`.
+
 Isaac Sim 6.0 enables neither extension at startup. `simul-mcp isaac launch` starts the editor with the right ones enabled for the install it finds under `$ISAAC_SIM_PATH`; see [Isaac Sim 6.0](#isaac-sim-60) below.
 
 When Isaac Sim runs in Docker, Simul MCP connects to the host-published ports, not the container-internal ports. With the included Compose file, the host-facing ports are controlled by `ISAAC_BRIDGE_PORT` and `ISAAC_VSCODE_PORT`, so the MCP server and agents should target those host values.
@@ -334,6 +336,7 @@ simul-mcp isaac ping
 simul-mcp isaac status
 simul-mcp isaac scene
 simul-mcp isaac exec "print('hello')"
+simul-mcp isaac interrupt   # stop the script the bridge is running
 
 # Unreal Engine commands
 simul-mcp unreal health
@@ -517,7 +520,7 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 ### Isaac Sim — Advanced
 
-`execute_isaac_script` (custom Python), `ping_isaac`, `raycast_isaac_scene`, `find_isaac_prims_in_area`, `get_isaac_texture_dependencies`, `list_isaac_instances`, `set_active_isaac_instance`
+`execute_isaac_script` (custom Python), `interrupt_isaac_script`, `ping_isaac`, `raycast_isaac_scene`, `find_isaac_prims_in_area`, `get_isaac_texture_dependencies`, `list_isaac_instances`, `set_active_isaac_instance`
 
 ### Observability
 

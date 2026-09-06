@@ -96,6 +96,10 @@ class FakeIsaacClient:
     def timeout_seconds(self) -> float:
         return self._timeout_seconds
 
+    @property
+    def bridge_circuit_open(self) -> bool:
+        return False
+
     async def ping(self) -> bool:
         return True
 

@@ -168,6 +168,22 @@ class IsaacSimConfig(BaseModel):
         default=True,
         description="Fallback to the VS Code extension transport when the bridge is unavailable",
     )
+    bridge_failure_threshold: int = Field(
+        default=3,
+        description=(
+            "Consecutive bridge transport failures after which the client stops "
+            "dialling the bridge and goes straight to the stock socket"
+        ),
+        ge=1,
+    )
+    bridge_cooldown_seconds: float = Field(
+        default=30.0,
+        description=(
+            "How long an opened bridge circuit skips the bridge before probing "
+            "it again; a successful probe closes the circuit"
+        ),
+        ge=0.0,
+    )
 
     # Multi-instance support
     instances: List[IsaacInstanceConfig] = Field(
@@ -813,6 +829,14 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     "bridge_fallback_to_vscode": _coalesce(
                         isaac.get("bridge_fallback_to_vscode"),
                         isaac_bridge.get("fallback_to_vscode"),
+                    ),
+                    "bridge_failure_threshold": _coalesce(
+                        isaac.get("bridge_failure_threshold"),
+                        isaac_bridge.get("failure_threshold"),
+                    ),
+                    "bridge_cooldown_seconds": _coalesce(
+                        isaac.get("bridge_cooldown_seconds"),
+                        isaac_bridge.get("cooldown_seconds"),
                     ),
                     "instances": _normalise_isaac_instances(isaac.get("instances")),
                     "scan_port_start": isaac.get("scan_port_start"),
