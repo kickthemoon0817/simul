@@ -94,12 +94,12 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                             start_time=stage_info.start_time_code,
                             end_time=stage_info.end_time_code,
                             frame_rate=stage_info.frame_rate,
-                            total_prims=len(stage_info.all_prims),
+                            total_prims=stage_info.prim_count,
                             root_prims=stage_info.root_prims,
                             has_animation=stage_info.start_time_code
                             != stage_info.end_time_code,
                             layer_count=len(stage_info.layers),
-                            default_prim=stage_info.default_prim,
+                            default_prim=stage_info.default_prim_path,
                         ).model_dump()
                         return server._validate_output(
                             result, (StageInfo, ErrorResponse), "load_usd_file"

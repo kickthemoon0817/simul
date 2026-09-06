@@ -50,8 +50,9 @@ Per-OS coverage: the live tests are OS-agnostic at the Python level
 ## Available tools (thin-mode MCP surface)
 
 simul ships thin mode by default — only 5 Unreal tools register. The full
-~50-tool set is opt-in via registration config; this checklist targets
-the thin surface because that's what agents actually see.
+~50-tool set is opt-in via `simul-mcp server --unreal-tools full` (or
+`unreal.tool_surface: full` in config); this checklist targets the thin
+surface because that's what agents see by default.
 
 | Tool | Shape | Typical output size |
 |---|---|---|

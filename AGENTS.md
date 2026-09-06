@@ -22,6 +22,7 @@ pip install -e ".[dev]"                       # + dev deps
 python -m build                               # build sdist + wheel
 simul-mcp server                              # MCP server (dev)
 simul-mcp server --backends usd               # MCP server (headless USD only)
+simul-mcp server --unreal-tools full          # MCP server with every granular Unreal tool
 $ISAAC_SIM_PATH/python.sh -m simul_mcp.cli.main server   # MCP server via Isaac Sim python.sh
 ```
 

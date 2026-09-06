@@ -63,3 +63,31 @@ def test_logging_section_stays_immutable() -> None:
 
     with pytest.raises(Exception):
         settings.logging.level = "DEBUG"
+
+
+def test_unreal_tools_flag_overrides_tool_surface(
+    captured_settings: List[Settings],
+) -> None:
+    result = runner.invoke(app, ["server", "--unreal-tools", "FULL"])
+
+    assert result.exit_code == 0, result.output
+    assert captured_settings[-1].unreal.tool_surface == "full"
+
+
+def test_unreal_tools_flag_rejects_unknown_value(
+    captured_settings: List[Settings],
+) -> None:
+    result = runner.invoke(app, ["server", "--unreal-tools", "medium"])
+
+    assert result.exit_code == 1
+    assert "Unknown --unreal-tools value" in result.output
+    assert not captured_settings, "server started despite an invalid flag"
+
+
+def test_unreal_tools_default_keeps_thin_surface(
+    captured_settings: List[Settings],
+) -> None:
+    result = runner.invoke(app, ["server"])
+
+    assert result.exit_code == 0, result.output
+    assert captured_settings[-1].unreal.tool_surface == "thin"

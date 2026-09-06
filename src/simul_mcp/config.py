@@ -268,6 +268,15 @@ class UnrealConfig(BaseModel):
         ge=1,
         le=5000,
     )
+    tool_surface: Literal["thin", "full"] = Field(
+        default="thin",
+        description=(
+            "Which Unreal tools the MCP server registers. 'thin' exposes only "
+            "unreal_health_check, ping_unreal, list_unreal_instances, "
+            "capture_unreal_viewport and execute_unreal_script; 'full' exposes "
+            "every granular Unreal tool. Env: UNREAL__TOOL_SURFACE."
+        ),
+    )
 
     # Retry / resilience
     max_retries: int = Field(

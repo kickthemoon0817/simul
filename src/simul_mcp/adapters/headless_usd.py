@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Union
+from typing import Any, Dict, Iterator, List, Optional, Union
 from contextlib import contextmanager
 
 from ..usd._pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
@@ -177,7 +177,7 @@ class HeadlessUSDSession(LoggerMixin):
             return None
 
         xformable = UsdGeom.Xformable(prim)
-        matrix, _ = xformable.GetLocalTransformation()
+        matrix = xformable.GetLocalTransformation()
         transform = Gf.Transform(matrix)
 
         translation = transform.GetTranslation()
@@ -257,10 +257,15 @@ class HeadlessUSDSession(LoggerMixin):
             if not value_type:
                 return False
             attr = prim.CreateAttribute(name, value_type)
+        # JSON input arrives as lists; pxr only accepts a tuple for fixed-size
+        # vector types (GfVec2/3/4) while array types take lists as they are.
+        if isinstance(value, list) and not attr.GetTypeName().isArray:
+            value = tuple(value)
         try:
             attr.Set(value)
             return True
-        except Exception:
+        except Exception as e:
+            self.logger.error(f"Failed to set attribute {name} on {prim.GetPath()}: {e}")
             return False
 
     def create_prim(
@@ -459,7 +464,10 @@ class HeadlessUSDSession(LoggerMixin):
                         "volume": mesh_info.volume,
                         "materials": mesh_info.materials,
                         "subsets": mesh_info.subsets,
-                        "bbox": mesh_info.bbox,
+                        "bbox": {
+                            "min": list(mesh_info.bbox[0]),
+                            "max": list(mesh_info.bbox[1]),
+                        },
                     }
                 except Exception as e:
                     self.logger.error(f"Error getting mesh info for {prim_path}: {e}")
@@ -508,34 +516,39 @@ class HeadlessUSDSession(LoggerMixin):
 class HeadlessUSDAdapter(LoggerMixin):
     """
     Adapter for headless USD operations.
-    
+
     Provides a high-level interface for USD operations without Isaac Sim runtime.
+    One session lives for the adapter's whole lifetime so that a ``stage_id``
+    handed out by ``load_stage`` stays valid for every later call; ``close``
+    releases the loaded stages.
     """
-    
+
     def __init__(self, settings: Optional[Settings] = None):
         """
         Initialize headless USD adapter.
-        
+
         Args:
             settings: Configuration settings
         """
         self.settings = settings or get_settings()
+        self._session = HeadlessUSDSession(self.settings)
         self.logger.info("Headless USD adapter initialized")
-    
+
     @contextmanager
-    def create_session(self):
+    def create_session(self) -> Iterator[HeadlessUSDSession]:
         """
-        Create a headless USD session context manager.
-        
+        Yield the adapter's shared headless USD session.
+
         Yields:
-            HeadlessUSDSession instance
+            The long-lived HeadlessUSDSession; stages loaded in one call
+            remain available to the next.
         """
-        session = HeadlessUSDSession(self.settings)
-        try:
-            yield session
-        finally:
-            session.cleanup()
-    
+        yield self._session
+
+    def close(self) -> None:
+        """Release every loaded stage and cached reader state."""
+        self._session.cleanup()
+
     def is_available(self) -> bool:
         """
         Check if headless USD operations are available.

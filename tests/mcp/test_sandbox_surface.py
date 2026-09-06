@@ -69,7 +69,9 @@ class FakeFastMCP:
 def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServer:
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
-    monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
+    # USD tools only register when the headless adapter exists, and these
+    # tests exercise the USD sandbox surface, so keep the real adapter.
+    monkeypatch.setattr(server_module, "is_headless_available", lambda: True)
     monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
     monkeypatch.setattr(server_module, "UnrealRuntimeAdapter", None)
     return server_module.SimulMCPServer(settings=Settings())
