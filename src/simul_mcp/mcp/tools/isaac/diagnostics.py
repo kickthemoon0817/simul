@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
 from ._shared import (
+    PROTECTED_EXTENSIONS,
     BULK_GEOMETRY_ATTRIBUTES,
     LOG_SCAN_WINDOW_BYTES,
     MAX_CAPTURE_DIMENSION,
@@ -440,8 +441,17 @@ class DiagnosticsMixin:
                 (e.g. "isaacsim.core.utils", "omni.physx", "worv.env.sun-0.3.0").
 
         Returns:
-            Dict with success status and extension info after disabling.
+            Dict with success status and extension info after disabling, or a
+            RefusedOperation error for the extensions the MCP transport runs on.
         """
+        bare_name = extension_id.rsplit("-", 1)[0] if "-" in extension_id else extension_id
+        if bare_name in PROTECTED_EXTENSIONS:
+            return self._refusal(
+                f"Refusing to disable {extension_id!r}: simul-mcp reaches Isaac Sim "
+                "through it, and disabling it would leave this instance unreachable.",
+                extension_id=extension_id,
+                protected_extensions=sorted(PROTECTED_EXTENSIONS),
+            )
         _ext_id = repr(extension_id)
         script = textwrap.dedent(f"""\
             import json

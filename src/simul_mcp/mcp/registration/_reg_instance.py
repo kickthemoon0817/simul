@@ -5,7 +5,9 @@ Instance discovery, routing, and session management for Simul MCP Server.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+from fastmcp.tools.tool import ToolResult
 
 from ..schemas.common import ErrorResponse
 
@@ -13,8 +15,25 @@ if TYPE_CHECKING:
     from ..server import SimulMCPServer
 
 
+_CLAIM_MODE_SENTENCE = {
+    True: (
+        "Claims are ENFORCED on this server (isaac_sim.enforce_claims=true): a live "
+        "claim blocks mutating Isaac tools from every other agent with InstanceClaimed."
+    ),
+    False: (
+        "Claims are ADVISORY on this server (isaac_sim.enforce_claims=false): a "
+        "listed session tells you who is working there but does not block you."
+    ),
+}
+
+
 def register_instance_tools(server: "SimulMCPServer") -> None:
-    """Register Isaac Sim instance discovery, routing, and session tools."""
+    """Register Isaac Sim instance discovery, routing, and session tools.
+
+    The claim tools describe the server's actual behaviour: with
+    ``isaac_sim.enforce_claims`` on, a claim is a lock; off, it is a notice.
+    """
+    enforced: bool = server.settings.isaac_sim.enforce_claims
 
     @server.mcp.tool(
         name="list_isaac_instances",
@@ -24,7 +43,8 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             "loaded stage URL, simulation state, and active agent sessions with "
             "their purposes. Use this to find a free or compatible instance "
             "before starting work; unreachable instances report "
-            "instance_status 'unreachable'."
+            "instance_status 'unreachable'. "
+            + _CLAIM_MODE_SENTENCE[enforced]
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -34,7 +54,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
     async def list_isaac_instances(
         scan: bool = True,
         my_purpose: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         List all known and discovered Isaac Sim instances with session info.
 
@@ -100,12 +120,14 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         )
 
         reachable = [i for i in instances if i["reachable"]]
-        return {
-            "success": True,
-            "instances": instances,
-            "active_instance": server._get_effective_instance_name(),
-            "total_discovered": len(reachable),
-        }
+        return server._as_text_result(
+            {
+                "success": True,
+                "instances": instances,
+                "active_instance": server._get_effective_instance_name(),
+                "total_discovered": len(reachable),
+            }
+        )
 
     @server.mcp.tool(
         name="set_active_isaac_instance",
@@ -114,7 +136,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             "'isaac') target for the rest of this MCP session. "
             "Use list_isaac_instances first to see available instances and "
             "their session status. Optionally register your purpose so other "
-            "agents can see what you're doing on this instance."
+            "agents can see what you're doing on this instance; with a purpose "
+            "this is the same as claim_isaac_instance. "
+            + _CLAIM_MODE_SENTENCE[enforced]
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False
@@ -125,7 +149,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         instance_name: str,
         purpose: Optional[str] = None,
         agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         Switch the active Isaac Sim instance and optionally register a session.
 
@@ -142,17 +166,23 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         """
         if instance_name not in server._isaac_clients:
             available = list(server._isaac_clients.keys())
-            return ErrorResponse(
-                error=f"Unknown instance '{instance_name}'. Available: {available}",
-                error_type="NotFoundError",
-                details={"available": available},
-            ).model_dump()
+            return server._as_text_result(
+                ErrorResponse(
+                    error=f"Unknown instance '{instance_name}'. Available: {available}",
+                    error_type="NotFoundError",
+                    details={"available": available},
+                ).model_dump()
+            )
 
         client = server._isaac_clients[instance_name]
         port = client._port
+        _agent_id = server._resolve_agent_id(agent_id)
 
         compat_info: Dict[str, Any] = {}
         if purpose:
+            holder = server._foreign_claim(instance_name, _agent_id)
+            if holder is not None:
+                return server._claimed_error(instance_name, holder)
             compat_info = server.session_manager.score_compatibility(purpose, port)
 
         server._set_request_active_instance(instance_name)
@@ -161,7 +191,6 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         session_result: Dict[str, Any] = {}
         binding_result: Dict[str, Any] = {}
         if purpose:
-            _agent_id = server._resolve_agent_id(agent_id)
             inst_session = server.session_manager.get_instance_session(port)
             session_result = inst_session.register(_agent_id, purpose)
             binding = server._bind_request_session(
@@ -193,16 +222,30 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             result["session"] = session_result
         if binding_result:
             result["binding"] = binding_result
-        return result
+        return server._as_text_result(result)
 
     @server.mcp.tool(
         name="claim_isaac_instance",
         description=(
-            "Register your purpose on the current active Isaac Sim instance. "
-            "Other agents will see your purpose and can decide whether to join "
-            "or pick a different instance. Call this at the start of your work "
-            "to coordinate with other agents. The claim is advisory — it "
-            "informs but does not block other agents."
+            (
+                "Claim the current active Isaac Sim instance for your purpose. "
+                "Claims are ENFORCED on this server (isaac_sim.enforce_claims=true): "
+                "while your claim is live, mutating Isaac tools from any other agent "
+                "fail with InstanceClaimed, and this call fails the same way when "
+                "another agent already holds a live claim. Read-only tools are never "
+                "blocked. A claim expires after 120 s without tool activity; call "
+                "release_isaac_instance when you are done."
+            )
+            if enforced
+            else (
+                "Register your purpose on the current active Isaac Sim instance. "
+                "Claims are ADVISORY on this server (isaac_sim.enforce_claims=false): "
+                "other agents see your purpose in list_isaac_instances and get a "
+                "compatibility score when they claim, but nothing stops them from "
+                "mutating the scene. Set isaac_sim.enforce_claims=true to make a "
+                "claim block other agents' mutating tools. A claim expires after "
+                "120 s without tool activity."
+            )
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False
@@ -212,7 +255,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
     async def claim_isaac_instance(
         purpose: str,
         agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         Register a purpose on the current active instance.
 
@@ -226,12 +269,17 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         instance_name = server._get_effective_instance_name()
         client = server._isaac_clients.get(instance_name)
         if not client:
-            return ErrorResponse(
-                error="No active instance", error_type="StateError"
-            ).model_dump()
+            return server._as_text_result(
+                ErrorResponse(
+                    error="No active instance", error_type="StateError"
+                ).model_dump()
+            )
 
         port = client._port
         _agent_id = server._resolve_agent_id(agent_id)
+        holder = server._foreign_claim(instance_name, _agent_id)
+        if holder is not None:
+            return server._claimed_error(instance_name, holder)
         inst_session = server.session_manager.get_instance_session(port)
 
         compat = server.session_manager.score_compatibility(purpose, port)
@@ -243,29 +291,38 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             purpose=purpose,
         )
 
-        return {
-            "success": True,
-            "instance": instance_name,
-            "port": port,
-            "session": reg,
-            "binding": {
-                "binding_id": binding.binding_id,
-                "agent_id": binding.agent_id,
-                "session_id": binding.session_id,
-            },
-            "compatibility": compat["compatibility"],
-            "compatibility_score": compat["score"],
-            "compatibility_reason": compat["reason"],
-            "existing_sessions": compat["sessions"],
-        }
+        return server._as_text_result(
+            {
+                "success": True,
+                "instance": instance_name,
+                "port": port,
+                "session": reg,
+                "binding": {
+                    "binding_id": binding.binding_id,
+                    "agent_id": binding.agent_id,
+                    "session_id": binding.session_id,
+                },
+                "compatibility": compat["compatibility"],
+                "compatibility_score": compat["score"],
+                "compatibility_reason": compat["reason"],
+                "existing_sessions": compat["sessions"],
+            }
+        )
 
     @server.mcp.tool(
         name="release_isaac_instance",
         description=(
-            "Release your session on an Isaac Sim instance. Call this when "
-            "you're done with your work so other agents know the instance "
-            "is available. Sessions also auto-expire after 120 seconds of "
-            "inactivity."
+            "Release your own claim on the active Isaac Sim instance; an "
+            "agent_id that is not yours is refused. Call this when you're done "
+            "so other agents can use the instance. Claims also expire after "
+            "120 seconds of inactivity. "
+            + (
+                "Claims are ENFORCED on this server (isaac_sim.enforce_claims=true): "
+                "releasing lifts the InstanceClaimed refusal for other agents."
+                if enforced
+                else "Claims are ADVISORY on this server (isaac_sim.enforce_claims=false): "
+                "releasing only changes what other agents see."
+            )
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False
@@ -274,7 +331,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
     )
     async def release_isaac_instance(
         agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         Release the current agent's session.
 
@@ -289,13 +346,27 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         _agent_id = agent_id or (binding.agent_id if binding is not None else None)
         _port = binding.port if binding is not None else None
         if not _agent_id or not _port:
-            return {"success": False, "error": "No active session to release"}
+            return server._as_text_result(
+                {"success": False, "error": "No active session to release"}
+            )
+        if binding is not None and _agent_id != binding.agent_id:
+            return server._as_text_result(
+                ErrorResponse(
+                    error=(
+                        f"agent_id {_agent_id!r} is not this session's claim "
+                        f"({binding.agent_id!r}); only your own claim can be released."
+                    ),
+                    error_type="PermissionError",
+                ).model_dump()
+            )
 
         inst_session = server.session_manager.get_instance_session(_port)
         result = inst_session.release(_agent_id)
         released = server._release_request_binding(instance_name, _agent_id)
-        return {
-            "success": True,
-            **result,
-            "binding_released": released.binding_id if released is not None else None,
-        }
+        return server._as_text_result(
+            {
+                "success": True,
+                **result,
+                "binding_released": released.binding_id if released is not None else None,
+            }
+        )

@@ -34,6 +34,7 @@ from simul_mcp.adapters.isaac_install import (
 from simul_mcp.cli.output import emit, emit_error, is_json_mode
 from simul_mcp.config import get_settings
 from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul_mcp.utils.discovery import DiscoveryDir
 
 app = typer.Typer(
     name="isaac",
@@ -330,11 +331,27 @@ def launch(
         None,
         "--auth-token",
         help=(
-            "Require this token on the python_server socket (Isaac Sim 6.0+ only). "
+            "Require this exact token on the python_server socket (Isaac Sim 6.0+ only). "
             "Set the same value as ISAAC_SIM__SOCKET_AUTH_TOKEN for the MCP server. "
             "Kit takes settings on argv, so the token is visible to other local "
-            "users via the process list for the editor's lifetime."
+            "users via the process list for the editor's lifetime; prefer "
+            "--generate-auth-token, which keeps it off argv."
         ),
+    ),
+    generate_auth_token: bool = typer.Option(
+        False,
+        "--generate-auth-token",
+        help=(
+            "Require auth on the python_server socket and let Kit generate the token "
+            "(Isaac Sim 6.0+ only). The token is read back from the launch log and stored "
+            "0600 at <discovery_dir>/auth-token-<pid>, where the MCP server picks it up "
+            "when ISAAC_SIM__SOCKET_AUTH_TOKEN is unset. Nothing secret reaches argv."
+        ),
+    ),
+    print_token: bool = typer.Option(
+        False,
+        "--print-token",
+        help="With --generate-auth-token, also print the token once (stderr, or auth_token in JSON).",
     ),
     wait_timeout: float = typer.Option(
         180.0, "--wait-timeout", help="Seconds to wait for a transport to answer."
@@ -419,9 +436,24 @@ def launch(
         )
         if not is_json_mode():
             console.print(f"[yellow]{version_warning}[/yellow]")
-    if auth_token and version.major < 6:
+    if (auth_token or generate_auth_token) and version.major < 6:
         _fail(
-            f"--auth-token needs Isaac Sim 6.0+ ({PYTHON_SERVER_EXTENSION}); found {version}.",
+            f"--auth-token / --generate-auth-token need Isaac Sim 6.0+ ({PYTHON_SERVER_EXTENSION}); "
+            f"found {version}.",
+            "InvalidArgument",
+            2,
+        )
+        return
+    if auth_token and generate_auth_token:
+        _fail(
+            "--auth-token and --generate-auth-token are exclusive; pass one or the other.",
+            "InvalidArgument",
+            2,
+        )
+        return
+    if print_token and not generate_auth_token:
+        _fail(
+            "--print-token only applies with --generate-auth-token.",
             "InvalidArgument",
             2,
         )
@@ -443,6 +475,10 @@ def launch(
             f"--/exts/{transport_ext}/require_auth=true",
             f"--/exts/{transport_ext}/auth_token={auth_token}",
         ]
+    elif generate_auth_token:
+        # An empty auth_token with require_auth makes python_server generate
+        # one and print it, so the secret never appears on the command line.
+        command.append(f"--/exts/{transport_ext}/require_auth=true")
     if bridge_present:
         command += ["--enable", BRIDGE_EXTENSION, f"--/exts/{BRIDGE_EXTENSION}/port={resolved_bridge_port}"]
     if headless:
@@ -465,6 +501,10 @@ def launch(
         "socket_address": f"{settings.isaac_sim.socket_host}:{resolved_socket_port}",
         "bridge_address": f"{settings.isaac_sim.bridge_host}:{resolved_bridge_port}",
         "command": redacted_command,
+        "auth_required": bool(auth_token or generate_auth_token),
+        "auth_token_source": (
+            "argv" if auth_token else "generated" if generate_auth_token else None
+        ),
     }
     if version_warning is not None:
         result["warning"] = version_warning
@@ -482,8 +522,19 @@ def launch(
         console.print("[cyan]Would run:[/cyan] " + " ".join(redacted_command))
         return
 
+    # The discovery dir receives the launch log, the bridge's port file and
+    # (with --generate-auth-token) the socket token; the MCP server ignores all
+    # of it unless the directory is private to this user.
+    discovery = DiscoveryDir(settings.isaac_sim.discovery_dir)
+    discovery_problem = discovery.ensure_private()
+    if discovery_problem is not None:
+        result["discovery_dir_warning"] = (
+            f"{discovery_problem}; the MCP server will ignore discovery and token files there."
+        )
+        if not is_json_mode():
+            console.print(f"[yellow]{result['discovery_dir_warning']}[/yellow]")
     resolved_log = log_file or (
-        Path(settings.isaac_sim.discovery_dir) / f"launch-{time.strftime('%Y%m%d-%H%M%S')}.log"
+        discovery.path / f"launch-{time.strftime('%Y%m%d-%H%M%S')}.log"
     )
     resolved_log.parent.mkdir(parents=True, exist_ok=True)
     with open(resolved_log, "ab") as log_handle:
@@ -500,18 +551,45 @@ def launch(
     if not is_json_mode():
         console.print(f"Started Isaac Sim {version} (pid {process.pid}), log: {resolved_log}")
 
-    client = IsaacSocketClient(
-        host=settings.isaac_sim.socket_host,
-        port=resolved_socket_port,
-        bridge_host=settings.isaac_sim.bridge_host,
-        bridge_port=resolved_bridge_port,
-        prefer_bridge=True,
-        fallback_to_vscode=True,
-        timeout_seconds=5.0,
-        bridge_timeout_seconds=5.0,
-        socket_protocol=settings.isaac_sim.socket_protocol,
-        auth_token=auth_token or settings.isaac_sim.socket_auth_token,
-    )
+    def _probe_client(token: Optional[str]) -> IsaacSocketClient:
+        return IsaacSocketClient(
+            host=settings.isaac_sim.socket_host,
+            port=resolved_socket_port,
+            bridge_host=settings.isaac_sim.bridge_host,
+            bridge_port=resolved_bridge_port,
+            prefer_bridge=True,
+            fallback_to_vscode=True,
+            timeout_seconds=5.0,
+            bridge_timeout_seconds=5.0,
+            socket_protocol=settings.isaac_sim.socket_protocol,
+            auth_token=token,
+        )
+
+    client = _probe_client(auth_token or settings.isaac_sim.socket_auth_token)
+    generated_token: Optional[str] = None
+    if generate_auth_token:
+        # Until Kit prints the token the probe has nothing to authenticate with,
+        # so the socket cannot count as ready before the token is on disk.
+        client = _probe_client(None)
+        discovery.prune_stale_auth_tokens()
+
+    def _collect_generated_token() -> None:
+        nonlocal client, generated_token
+        if not generate_auth_token or generated_token is not None:
+            return
+        token = DiscoveryDir.token_from_launch_log(resolved_log)
+        if token is None:
+            return
+        generated_token = token
+        token_file = discovery.write_auth_token(process.pid, token)
+        client = _probe_client(token)
+        result["auth_token_file"] = str(token_file)
+        if print_token:
+            result["auth_token"] = token
+            if not is_json_mode():
+                console.print(f"Python server auth token: {token}")
+        elif not is_json_mode():
+            console.print(f"Python server auth token stored in {token_file} (0600)")
 
     async def _probe() -> tuple[bool, bool]:
         bridge_ok = False
@@ -548,6 +626,7 @@ def launch(
                 result,
             )
             return
+        _collect_generated_token()
         bridge_ok, socket_ok = asyncio.run(_probe())
         if socket_ok and (bridge_ok or not bridge_present):
             break
@@ -560,6 +639,13 @@ def launch(
         socket_protocol=client.socket_protocol,
         elapsed_seconds=round(time.monotonic() - started, 1),
     )
+    if generate_auth_token:
+        result["auth_token_found"] = generated_token is not None
+        if generated_token is None:
+            result["hint"] = (
+                f"{transport_ext} never printed 'Python server authentication token:' to "
+                f"{resolved_log}; without it the socket cannot be authenticated."
+            )
     if is_json_mode():
         emit(result)
         if not result["success"]:
@@ -899,7 +985,13 @@ def bridge_set_unsafe(
     enable: bool = typer.Option(
         True,
         "--enable/--disable",
-        help="Enable or disable bridge execute_script permission.",
+        help=(
+            "Enable or disable the bridge transport's raw execute_script action. "
+            "Gates the bridge only: granular tools and raw scripts still run over "
+            "the stock Kit Python socket. Not a security boundary; use "
+            "SECURITY__ALLOW_SCRIPT_EXECUTION=false on the simul-mcp server to "
+            "remove the execute_*_script tools."
+        ),
     ),
     restart: bool = typer.Option(
         True,
@@ -910,7 +1002,7 @@ def bridge_set_unsafe(
     port: Optional[int] = _port_opt,
     timeout: Optional[float] = _timeout_opt,
 ) -> None:
-    """Toggle bridge execute_script permission inside the running Isaac Sim instance."""
+    """Toggle the bridge transport's raw execute_script action in the running Isaac Sim instance."""
     tools = _tools(host, port, timeout)
     script = textwrap.dedent(
         f"""\

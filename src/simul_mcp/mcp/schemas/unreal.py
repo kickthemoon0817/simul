@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +67,11 @@ class UnrealHealthCheckResponse(BaseModel):
     engine_version: Optional[str] = Field(
         None, description="Unreal Engine version string"
     )
+    project_name: Optional[str] = Field(None, description="Active project name")
+    is_editor: Optional[bool] = Field(
+        None, description="Whether the engine is running in editor mode"
+    )
+    error: Optional[str] = Field(None, description="Error message when success is False")
 
     @model_validator(mode="before")
     @classmethod
@@ -83,11 +88,6 @@ class UnrealHealthCheckResponse(BaseModel):
             elif "connected" not in data and "reachable" in data:
                 data = {**data, "connected": data["reachable"]}
         return data
-    project_name: Optional[str] = Field(None, description="Active project name")
-    is_editor: Optional[bool] = Field(
-        None, description="Whether the engine is running in editor mode"
-    )
-    error: Optional[str] = Field(None, description="Error message when success is False")
 
 
 class UnrealEngineInfoResponse(BaseModel):
@@ -329,6 +329,20 @@ class UnrealCaptureViewportRequest(BaseModel):
     resolution_x: int = Field(1920, description="Capture width in pixels")
     resolution_y: int = Field(1080, description="Capture height in pixels")
     format: str = Field("png", description="Image format: png or jpeg")
+
+
+class UnrealExecuteScriptResponse(BaseModel):
+    """Whatever JSON object a script printed, with the envelope's status fields.
+
+    The script decides the shape, so every key it emitted is kept.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    success: bool = Field(True, description="Whether the script ran and printed JSON")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
 
 
 class UnrealCaptureViewportResponse(BaseModel):
@@ -1527,6 +1541,7 @@ class UnrealComputeMeshUvResponse(BaseModel):
 
 
 __all__ = [
+    "UnrealExecuteScriptResponse",
     "UnrealPingResponse",
     "UnrealInstanceInfo",
     "UnrealListInstancesResponse",

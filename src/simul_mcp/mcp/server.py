@@ -30,7 +30,7 @@ from fastmcp import FastMCP
 from fastmcp.server.context import _current_context
 from fastmcp.server.tasks import TaskConfig
 from fastmcp.tools.tool import ToolResult
-from mcp.types import TextContent, ToolAnnotations
+from mcp.types import ImageContent, TextContent, ToolAnnotations
 from pydantic import BaseModel
 
 from .. import __version__ as _source_version
@@ -51,7 +51,8 @@ from ..utils.timing import RateLimiter
 from .registration._helpers import apply_success_from_error
 from .result_budget import apply_result_budget
 from .schemas.common import ErrorResponse
-from .session_manager import SessionManager
+from .session_manager import CLAIM_TTL_SECONDS, SessionManager
+from ..utils.discovery import DiscoveryDir
 from .tools.isaac_tools import IsaacTools
 from .usage_tracker import ToolUsageTracker
 
@@ -106,6 +107,9 @@ _MCP_INSTRUCTIONS: str = (
 _FASTMCP_SUPPORTS_INSTRUCTIONS: bool = (
     "instructions" in inspect.signature(FastMCP).parameters
 )
+
+# Tool key of the bucket that caps one agent's calls across every tool.
+_GLOBAL_RATE_BUCKET: str = "*"
 
 
 @dataclass
@@ -167,11 +171,22 @@ class SimulMCPServer(LoggerMixin):
         self.usage_tracker = ToolUsageTracker()
         self.session_manager = SessionManager()
         self._session_routes: Dict[str, IsaacSessionRoute] = {}
+        self._read_only_tools: Dict[str, bool] = {}
         self._isaac_instance_locks: Dict[str, asyncio.Lock] = {}
-        self._rate_limiters: Dict[str, RateLimiter] = {}
+        # Token buckets keyed by (agent, tool); the per-agent ceiling across
+        # every tool uses _GLOBAL_RATE_BUCKET as the tool key.
+        self._rate_limiters: Dict[Tuple[str, str], RateLimiter] = {}
         self._rate_limit_enabled = self.settings.security.rate_limiting_enabled
         self._rate_limit_rate = self.settings.security.requests_per_minute / 60.0
         self._rate_limit_burst = self.settings.security.burst_size
+        global_per_minute = self.settings.security.global_requests_per_minute
+        self._global_rate_limit_rate = global_per_minute / 60.0
+        # Ten seconds of the per-agent allowance, so an agent fanning out
+        # across many tools at once is not refused by a ceiling meant for
+        # runaway loops.
+        self._global_rate_limit_burst = max(
+            self._rate_limit_burst, global_per_minute // 6
+        )
         self._tool_timeout = self.settings.server.timeout
         # How long a call waits for an instance already in use. Generous enough
         # for ordinary contention, short enough that a caller is not left
@@ -252,26 +267,80 @@ class SimulMCPServer(LoggerMixin):
 
         self.logger.info("Simul 3D MCP Server initialized")
 
-    def _get_rate_limiter(self, tool_name: str) -> Optional[RateLimiter]:
+    def _get_rate_limiter(self, tool_name: str, agent_id: str) -> RateLimiter:
+        """Return the token bucket for one agent's use of one tool.
+
+        Args:
+            tool_name: Registered tool name, or ``_GLOBAL_RATE_BUCKET`` for
+                the agent's ceiling across every tool.
+            agent_id: Stable id of the calling agent.
+
+        Returns:
+            The bucket, created on first use.
+        """
+        key = (agent_id, tool_name)
+        limiter = self._rate_limiters.get(key)
+        if limiter is None:
+            if tool_name == _GLOBAL_RATE_BUCKET:
+                limiter = RateLimiter(
+                    self._global_rate_limit_rate, self._global_rate_limit_burst
+                )
+            else:
+                limiter = RateLimiter(self._rate_limit_rate, self._rate_limit_burst)
+            self._rate_limiters[key] = limiter
+        return limiter
+
+    def _check_rate_limit(
+        self, tool_name: str, agent_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Spend one token for ``tool_name`` on behalf of the calling agent.
+
+        Two buckets must both have room: the agent's bucket for this tool and
+        the agent's ceiling across every tool. Keying on the agent means one
+        looping agent cannot starve another on the same tool, and the ceiling
+        means it cannot dodge a per-tool refusal by switching to
+        execute_isaac_script. A refusal spends nothing, so a caller that waits
+        ``retry_after_seconds`` finds the token it was promised.
+
+        Args:
+            tool_name: Registered tool name.
+            agent_id: Calling agent; resolved from the MCP session when omitted.
+
+        Returns:
+            The RateLimitError payload carrying ``retry_after_seconds``, or
+            None when the call may proceed.
+        """
         if not self._rate_limit_enabled:
             return None
+        agent = agent_id or self._resolve_agent_id(None)
+        tool_bucket = self._get_rate_limiter(tool_name, agent)
+        agent_bucket = self._get_rate_limiter(_GLOBAL_RATE_BUCKET, agent)
+        tool_wait = tool_bucket.seconds_until_available()
+        agent_wait = agent_bucket.seconds_until_available()
+        if tool_wait <= 0.0 and agent_wait <= 0.0:
+            tool_bucket.acquire()
+            agent_bucket.acquire()
+            return None
 
-        if tool_name not in self._rate_limiters:
-            self._rate_limiters[tool_name] = RateLimiter(
-                self._rate_limit_rate,
-                self._rate_limit_burst,
-            )
-        return self._rate_limiters[tool_name]
-
-    def _check_rate_limit(self, tool_name: str) -> Optional[Dict[str, Any]]:
-        limiter = self._get_rate_limiter(tool_name)
-        if limiter and not limiter.acquire():
-            return ErrorResponse(
-                error="Rate limit exceeded",
-                error_type="RateLimitError",
-                details={"tool": tool_name},
-            ).model_dump()
-        return None
+        per_tool = tool_wait >= agent_wait
+        retry_after = max(round(max(tool_wait, agent_wait), 3), 0.001)
+        security = self.settings.security
+        payload = ErrorResponse(
+            error=f"Rate limit exceeded; retry in {retry_after} s",
+            error_type="RateLimitError",
+            details={
+                "tool": tool_name,
+                "agent_id": agent,
+                "scope": "tool" if per_tool else "agent",
+                "limit_per_minute": (
+                    security.requests_per_minute
+                    if per_tool
+                    else security.global_requests_per_minute
+                ),
+            },
+        ).model_dump()
+        payload["retry_after_seconds"] = retry_after
+        return payload
 
     def _get_request_context(self) -> Any:
         """Return the active FastMCP request context when available."""
@@ -395,11 +464,89 @@ class SimulMCPServer(LoggerMixin):
             route.active_instance = next(iter(route.bindings))
         return binding
 
+    def _request_agent_id(self) -> str:
+        """Return the agent id the current request acts as: its binding's, else the session's."""
+        binding = self._get_active_binding()
+        if binding is not None:
+            return binding.agent_id
+        return self._resolve_agent_id(None)
+
+    def _foreign_claim(
+        self, instance_name: str, caller_agent_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the live claim another agent holds on ``instance_name``, when enforced.
+
+        Args:
+            instance_name: Registry name of the Isaac instance being used.
+            caller_agent_id: The agent making the request.
+
+        Returns:
+            The holder's session record when ``isaac_sim.enforce_claims`` is on
+            and a live claim by a different agent exists, otherwise ``None``.
+            Expired claims are pruned by the session manager, so a stale holder
+            never blocks.
+        """
+        if not self.settings.isaac_sim.enforce_claims:
+            return None
+        client = self._isaac_clients.get(instance_name)
+        if client is None:
+            return None
+        sessions = self.session_manager.get_instance_session(client._port).get_status()["sessions"]
+        for session in sessions:
+            if session.get("agent_id") != caller_agent_id:
+                return session
+        return None
+
+    def _claimed_error(self, instance_name: str, holder: Dict[str, Any]) -> Dict[str, Any]:
+        """Build the InstanceClaimed payload naming the holder and the way forward."""
+        expires_in = max(0.0, CLAIM_TTL_SECONDS - (time.time() - float(holder.get("last_active", 0.0))))
+        return ErrorResponse(
+            error=(
+                f"Isaac instance {instance_name!r} is claimed by agent "
+                f"{holder.get('agent_id')!r} for {holder.get('purpose', '')!r}; "
+                "isaac_sim.enforce_claims refuses mutating tools from other agents while "
+                "that claim is live."
+            ),
+            error_type="InstanceClaimed",
+            details={
+                "instance": instance_name,
+                "holder_agent_id": holder.get("agent_id"),
+                "holder_purpose": holder.get("purpose", ""),
+                "claim_expires_in_seconds": round(expires_in, 1),
+                "hint": (
+                    "Read-only tools still work. Ask the holder to call "
+                    "release_isaac_instance, or wait for the claim to expire "
+                    f"({int(CLAIM_TTL_SECONDS)} s without activity), then call "
+                    "claim_isaac_instance yourself. list_isaac_instances shows other instances."
+                ),
+            },
+        ).model_dump()
+
+    async def _tool_is_read_only(self, tool_name: str) -> bool:
+        """Report whether the registered tool carries ``readOnlyHint``; unknown tools count as mutating."""
+        cached = self._read_only_tools.get(tool_name)
+        if cached is not None:
+            return cached
+        get_tool = getattr(self.mcp, "get_tool", None)
+        read_only = False
+        if callable(get_tool):
+            tool = get_tool(tool_name)
+            if inspect.isawaitable(tool):
+                tool = await tool
+            annotations = getattr(tool, "annotations", None)
+            if isinstance(annotations, dict):
+                read_only = bool(annotations.get("readOnlyHint"))
+            else:
+                read_only = bool(getattr(annotations, "readOnlyHint", False))
+        self._read_only_tools[tool_name] = read_only
+        return read_only
+
     async def _exec_isaac(
         self,
         tool_name: str,
         coro: Coroutine[Any, Any, Dict[str, Any]],
         params: Optional[Dict[str, Any]] = None,
+        script_sha256: Optional[str] = None,
     ) -> ToolResult:
         """
         Execute an Isaac Sim tool coroutine with rate limiting,
@@ -409,11 +556,13 @@ class SimulMCPServer(LoggerMixin):
             tool_name: Name of the tool for rate limiting.
             coro: Awaitable coroutine returned by an IsaacTools method.
             params: Optional dict of call parameters for usage logging.
+            script_sha256: Digest of the agent-authored source for script tools.
 
         Returns:
             Tool result dict or error response dict.
         """
-        rate_error = self._check_rate_limit(tool_name)
+        agent_id = self._resolve_agent_id(None)
+        rate_error = self._check_rate_limit(tool_name, agent_id)
         if rate_error is not None:
             self.usage_tracker.record(
                 tool_name,
@@ -421,11 +570,29 @@ class SimulMCPServer(LoggerMixin):
                 False,
                 params=params,
                 error="rate_limited",
+                agent_id=agent_id,
+                script_sha256=script_sha256,
             )
             # Caller already built the coroutine; nothing will await it now.
             coro.close()
             return self._as_text_result(rate_error)
         instance_name = self._get_effective_instance_name()
+        # --- claim enforcement (isaac_sim.enforce_claims) ---
+        if self.settings.isaac_sim.enforce_claims and not await self._tool_is_read_only(tool_name):
+            holder = self._foreign_claim(instance_name, self._request_agent_id())
+            if holder is not None:
+                self.usage_tracker.record(
+                    tool_name,
+                    0.0,
+                    False,
+                    params=params,
+                    error="instance_claimed",
+                    agent_id=agent_id,
+                    script_sha256=script_sha256,
+                )
+                coro.close()
+                return self._as_text_result(self._claimed_error(instance_name, holder))
+        # --- end claim enforcement ---
         lock = self._get_instance_lock(instance_name)
         try:
             # Bounded, so a caller queued behind a long step learns the instance
@@ -439,6 +606,8 @@ class SimulMCPServer(LoggerMixin):
                 False,
                 params=params,
                 error="instance_busy",
+                agent_id=agent_id,
+                script_sha256=script_sha256,
             )
             coro.close()
             return self._as_text_result(
@@ -462,6 +631,8 @@ class SimulMCPServer(LoggerMixin):
                     success,
                     params=params,
                     error=result.get("error") if not success else None,
+                    agent_id=agent_id,
+                    script_sha256=script_sha256,
                 )
                 binding = self._get_active_binding()
                 if binding is not None:
@@ -469,9 +640,7 @@ class SimulMCPServer(LoggerMixin):
                         binding.agent_id, tool_name
                     )
                     binding.last_heartbeat = time.time()
-                # Applied at the chokepoint so every Isaac tool is covered by
-                # one rule rather than each growing its own cap.
-                return self._as_text_result(apply_result_budget(result))
+                return self._as_text_result(result)
             except Exception as exc:
                 duration_ms = (time.monotonic() - t0) * 1000
                 self.usage_tracker.record(
@@ -480,6 +649,8 @@ class SimulMCPServer(LoggerMixin):
                     False,
                     params=params,
                     error=str(exc),
+                    agent_id=agent_id,
+                    script_sha256=script_sha256,
                 )
                 logger.error("Isaac tool %s failed: %s", tool_name, exc)
                 return self._as_text_result(
@@ -571,32 +742,78 @@ class SimulMCPServer(LoggerMixin):
         adapter: Any,
         adapter_label: str,
         response_model: Type[BaseModel],
-        call: Callable[[Any], Awaitable[Dict[str, Any]]],
-    ) -> Dict[str, Any]:
+        call: Callable[[Any], Union[Dict[str, Any], Awaitable[Dict[str, Any]]]],
+        params: Optional[Dict[str, Any]] = None,
+    ) -> ToolResult:
         """
-        Run a DCC-backend tool with the shared envelope.
+        Run a USD, Blender or Unreal tool with the shared envelope.
 
-        The Isaac family has had ``_exec_isaac`` for this since the start,
-        which is why its tools are a single forwarding line each while Unreal
-        and Blender hand-rolled the same rate limit, availability check,
-        session scope, success normalisation, model validation and error
-        wrapping per tool. Copying it ~110 times is what let four sites keep
-        pydantic v1's ``.dict()`` long after the rest of the codebase moved.
+        This is the one place every non-Isaac tool passes through, so it
+        carries everything a tool owes the operator and the caller: the
+        per-agent rate limit, the usage record, the availability check, the
+        session scope, success normalisation, schema validation, sandbox and
+        exception wrapping, the result budget and single transmission. Tools
+        that hand-rolled this block drifted on every one of those points.
 
         Args:
             tool_name: Registered tool name, used for rate limiting and logs.
             adapter: Runtime adapter, or None when the backend is absent.
             adapter_label: Human-readable backend name for the error message.
-            response_model: Schema the payload is validated against.
-            call: Receives an open session and returns the payload.
+            response_model: Schema a successful payload is validated against.
+            call: Receives an open session and returns the payload, or an
+                error envelope (``success`` False with ``error``) that is
+                passed through as is. May be sync or async.
+            params: Call parameters worth keeping in the usage log.
 
         Returns:
-            Validated response dict, or an error envelope.
+            The payload as one JSON content block, plus an image block when
+            it carries one.
         """
-        rate_error = self._check_rate_limit(tool_name)
-        if rate_error:
-            return rate_error
+        agent_id = self._resolve_agent_id(None)
+        rate_error = self._check_rate_limit(tool_name, agent_id)
+        if rate_error is not None:
+            self.usage_tracker.record(
+                tool_name, 0.0, False, params=params, error="rate_limited", agent_id=agent_id
+            )
+            return self._as_text_result(rate_error)
 
+        started = time.monotonic()
+        payload = await self._run_backend_call(
+            tool_name, adapter, adapter_label, response_model, call
+        )
+        duration_ms = (time.monotonic() - started) * 1000
+        error = payload.get("error")
+        success = not error and payload.get("success", True) is not False
+        self.usage_tracker.record(
+            tool_name,
+            duration_ms,
+            success,
+            params=params,
+            error=str(error) if error else None,
+            agent_id=agent_id,
+        )
+        return self._as_text_result(payload)
+
+    async def _run_backend_call(
+        self,
+        tool_name: str,
+        adapter: Any,
+        adapter_label: str,
+        response_model: Type[BaseModel],
+        call: Callable[[Any], Union[Dict[str, Any], Awaitable[Dict[str, Any]]]],
+    ) -> Dict[str, Any]:
+        """Open a session, run ``call`` and validate what it returns.
+
+        Args:
+            tool_name: Registered tool name for logs and validation errors.
+            adapter: Runtime adapter, or None when the backend is absent.
+            adapter_label: Human-readable backend name for the error message.
+            response_model: Schema a successful payload is validated against.
+            call: Receives the open session and returns the payload.
+
+        Returns:
+            The validated payload, or an error envelope.
+        """
         models = (response_model, ErrorResponse)
         try:
             if adapter is None or not adapter.is_available():
@@ -616,6 +833,12 @@ class SimulMCPServer(LoggerMixin):
                 if inspect.isawaitable(payload):
                     payload = await payload
                 apply_success_from_error(payload)
+                if payload.get("success") is False and payload.get("error"):
+                    # An error envelope built by the tool (input validation,
+                    # not-found, script failure) keeps its own fields; forcing
+                    # it through the success schema would only replace the
+                    # message with a pydantic complaint.
+                    return self._validate_output(payload, models, tool_name)
                 return self._validate_output(
                     response_model(**payload).model_dump(), models, tool_name
                 )
@@ -638,17 +861,67 @@ class SimulMCPServer(LoggerMixin):
             )
 
     def _as_text_result(self, payload: Dict[str, Any]) -> ToolResult:
-        """Return ``payload`` as a single JSON content block.
+        """Return ``payload`` within the result budget, sent once.
 
         Returning a plain dict makes FastMCP emit the payload twice — once as
         JSON text and again as ``structuredContent`` — and both copies land in
         the caller's context window. A content-only ToolResult is the one shape
         that sends it once; ``output_schema=None`` alone does not (it drops the
         schema from the listing but keeps the duplicate).
+
+        A payload carrying ``image_base64`` (viewport captures, asset
+        thumbnails) has the image lifted into an ``ImageContent`` block the
+        client can render; inside the JSON it is opaque text at roughly one
+        token per three bytes. The result budget is applied here, after the
+        lift, so every envelope is covered by one rule and an image never
+        counts against the text it accompanies.
+
+        Args:
+            payload: The tool's result dict.
+
+        Returns:
+            One JSON text block, preceded by an image block when present.
         """
-        return ToolResult(
-            content=[TextContent(type="text", text=json.dumps(payload, default=str))]
-        )
+        content: List[Any] = []
+        image = payload.get("image_base64")
+        if isinstance(image, str) and image:
+            payload = {
+                key: value
+                for key, value in payload.items()
+                if key not in ("image_base64", "encoding")
+            }
+            payload["image_attached"] = True
+            image_format = str(payload.get("format", "png")).lower()
+            mime_type = (
+                "image/jpeg" if image_format in ("jpg", "jpeg") else f"image/{image_format}"
+            )
+            content.append(ImageContent(type="image", data=image, mimeType=mime_type))
+        text = json.dumps(apply_result_budget(payload), default=str)
+        content.append(TextContent(type="text", text=text))
+        return ToolResult(content=content)
+
+    def _script_tool(self, **tool_kwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Register an arbitrary-code tool, or leave it off the surface.
+
+        ``security.allow_script_execution`` is the operator's switch for the
+        agent-authored code path. Granular tools are generated scripts and stay
+        registered either way; only the three ``execute_*_script`` tools go
+        through here.
+
+        Args:
+            **tool_kwargs: Keyword arguments for ``FastMCP.tool``.
+
+        Returns:
+            The FastMCP registration decorator, or an identity decorator when
+            script execution is disabled.
+        """
+        if self.settings.security.allow_script_execution:
+            return self.mcp.tool(**tool_kwargs)
+
+        def unregistered(func: Callable[..., Any]) -> Callable[..., Any]:
+            return func
+
+        return unregistered
 
     def _tool_annotations(
         self,
@@ -657,13 +930,32 @@ class SimulMCPServer(LoggerMixin):
         open_world: bool,
         destructive: bool = False,
     ) -> Optional[Any]:
-        # Only the hints that carry information. idempotentHint and
-        # openWorldHint collapsed to a handful of combinations across the whole
-        # surface, and destructiveHint was false on the large majority — all of
-        # it paid for in every session's tool listing.
+        """Build the MCP annotations for one tool.
+
+        Every hint the call site computes is preserved: a hint is omitted only
+        when it equals the value a client assumes for a missing hint
+        (destructive and idempotent false, open world true), so nothing is
+        dropped and the listing stays small. readOnlyHint is always emitted
+        because auto-approval policies key on it.
+
+        Args:
+            read_only: The tool does not modify its environment.
+            idempotent: Repeating the call with the same arguments has no
+                additional effect.
+            open_world: The tool talks to an external process or the network.
+            destructive: The tool overwrites or deletes existing state or files.
+
+        Returns:
+            A ``ToolAnnotations`` instance, or the plain dict when FastMCP does
+            not expose the model.
+        """
         annotations: Dict[str, Any] = {"readOnlyHint": read_only}
         if destructive:
             annotations["destructiveHint"] = True
+        if idempotent:
+            annotations["idempotentHint"] = True
+        if not open_world:
+            annotations["openWorldHint"] = False
         if ToolAnnotations:
             return ToolAnnotations(**annotations)
         return annotations
@@ -863,6 +1155,17 @@ class SimulMCPServer(LoggerMixin):
         """
         discovery_dir = self.settings.isaac_sim.discovery_dir
         if not os.path.isdir(discovery_dir):
+            return {}
+        # Every entry below is trusted, so the directory has to be ours alone:
+        # another local user who can write here can point the server at a
+        # loopback port they own and read every script we send.
+        dir_problem = DiscoveryDir(discovery_dir).problem()
+        if dir_problem is not None:
+            self.logger.warning(
+                "Skipping Isaac discovery files: %s. Make it private (chmod 700) or point "
+                "isaac_sim.discovery_dir elsewhere.",
+                dir_problem,
+            )
             return {}
 
         existing_ports: set[int] = set()

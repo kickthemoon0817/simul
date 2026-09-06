@@ -30,7 +30,10 @@ isaac_sim:
   socket_timeout: 30.0
   # Stock socket flavour: auto probes the server once; python_server / vscode pin it.
   socket_protocol: "auto"
-  # Only for a 6.0 python_server started with require_auth=true
+  # Only for a 6.0 python_server started with require_auth=true. Precedence:
+  # ISAAC_SIM__SOCKET_AUTH_TOKEN / .env, then this key, then the
+  # <discovery_dir>/auth-token-<pid> file written by
+  # `simul-mcp isaac launch --generate-auth-token` for the newest running editor.
   # socket_auth_token: ""
 
   # Preferred bridge extension transport. Falls back to the stock socket when unavailable.
@@ -49,6 +52,11 @@ isaac_sim:
 
   # Discovery directory for bridge extension port files
   discovery_dir: "/tmp/simul-mcp"
+
+  # When true, a live claim_isaac_instance by one agent makes mutating Isaac
+  # tools from every other agent fail with InstanceClaimed until the claim is
+  # released or expires (120 s without activity). False keeps claims advisory.
+  enforce_claims: false
 
   # Kit configuration
   kit:
@@ -170,8 +178,17 @@ security:
     # URL schemes that may be written to. Empty keeps writes local-only.
     allowed_write_url_schemes: []
 
-  # Rate limiting
+  # Register the arbitrary-code tools: execute_isaac_script,
+  # execute_unreal_script, execute_blender_script. Set false to keep agents on
+  # the granular tools only. This is the server-side control; the bridge
+  # extension's allow_unsafe_execution only gates raw scripts sent over the
+  # bridge transport and is not a security boundary.
+  allow_script_execution: true
+
+  # Rate limiting. Buckets are per agent (MCP session) and per tool; an
+  # agent's calls across every tool are also capped by global_requests_per_minute.
   rate_limiting:
     enabled: true
     requests_per_minute: 60
     burst_size: 10
+    global_requests_per_minute: 600

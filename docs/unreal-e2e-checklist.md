@@ -60,7 +60,7 @@ surface because that's what agents see by default.
 | `mcp__simul__ping_unreal` | `() → {reachable, latency_ms, ...}` | ~100 B |
 | `mcp__simul__list_unreal_instances` | `({scan_port_start?, scan_port_end?}) → [{port, project_name, ...}]` | ~200 B × N |
 | `mcp__simul__execute_unreal_script` | `({code, mode}) → {success, result}` | depends on what the script prints |
-| `mcp__simul__capture_unreal_viewport` | `({resolution_x, resolution_y, format}) → {image_base64, ...}` | ≈ `w × h × 4 × 4/3` base64 bytes |
+| `mcp__simul__capture_unreal_viewport` | `({resolution_x, resolution_y, format, inline}) → {path, size_bytes, ...}` plus an image content block when `inline` | ~200 B of JSON; the image travels as `ImageContent`, not as text |
 
 ## Sanity checklist
 
@@ -134,11 +134,12 @@ pass when:
 
 ```text
 tool: mcp__simul__capture_unreal_viewport
-args: {resolution_x: 256, resolution_y: 256, format: "png"}
+args: {resolution_x: 256, resolution_y: 256, format: "png", inline: true}
 pass when:
-  - success == true
-  - image_base64 is a non-empty string
-  - len(image_base64) roughly proportional to 256*256 (not 1-2 bytes — means the
+  - success == true and image_attached == true in the JSON block
+  - the result carries one ImageContent block (mimeType image/png) and the
+    JSON block has no image_base64 field
+  - size_bytes is roughly proportional to 256*256 (not 0 — means the
     HighResShot filesystem poll timed out)
 note:
   - first call after editor start can take 3-5 s (shaders compile).
@@ -258,8 +259,8 @@ the summary is what matters to the parent conversation.
   though the file contains it. The other historical keys appeared to
   work only because their C++ defaults already matched what we wanted.
 - **First viewport capture after editor start** can stall 3–5 s waiting
-  for shaders; if `image_base64` comes back empty, retry once before
-  declaring failure.
+  for shaders; if the capture comes back with `size_bytes == 0` and no
+  image block, retry once before declaring failure.
 
 ## Follow-ups (not in scope today)
 

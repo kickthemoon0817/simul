@@ -7,7 +7,9 @@ import json
 import logging
 import os
 import socket
+import stat
 import struct
+import sys
 import tempfile
 import uuid
 from typing import Any, Awaitable, Callable
@@ -225,8 +227,21 @@ class BridgeServerLifecycle:
         pid: int,
         vscode_port: int | None = None,
     ) -> None:
-        """Write a discovery file with the actual bound port."""
+        """Write a discovery file with the actual bound port.
+
+        The MCP server refuses to read a discovery directory that other users
+        can write to or that it does not own, so a bridge advertising into such
+        a directory is invisible. The file is still written — the directory may
+        be a deliberately shared container volume — but the problem is logged
+        so the silence has an explanation.
+        """
         os.makedirs(discovery_dir, mode=0o700, exist_ok=True)
+        problem = self._discovery_dir_problem(discovery_dir)
+        if problem is not None:
+            logger.warning(
+                "Discovery directory is not trustworthy, the MCP server will ignore it: %s",
+                problem,
+            )
         filepath = os.path.join(discovery_dir, f"simul-mcp-{pid}.json")
         data = {
             "pid": pid,
@@ -258,6 +273,24 @@ class BridgeServerLifecycle:
                 pass
             raise
         self._discovery_file = filepath
+
+    @staticmethod
+    def _discovery_dir_problem(discovery_dir: str) -> str | None:
+        """Return why the directory fails the reader's trust check, or None.
+
+        Mirrors ``simul_mcp.utils.discovery.DiscoveryDir.problem``; the bridge
+        runs inside Kit and cannot import the host package.
+        """
+        try:
+            info = os.stat(discovery_dir)
+        except OSError as exc:
+            return f"cannot stat {discovery_dir}: {exc}"
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return f"{discovery_dir} is writable by other users (mode {mode:04o})"
+        if sys.platform != "win32" and info.st_uid != os.getuid():
+            return f"{discovery_dir} is owned by uid {info.st_uid}, not the current uid {os.getuid()}"
+        return None
 
     def remove_discovery_file(self) -> None:
         """Remove the discovery file if it exists."""

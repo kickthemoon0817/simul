@@ -23,6 +23,26 @@ from ...schemas.common import ErrorResponse
 
 logger = get_logger(__name__)
 
+# Extensions the MCP server speaks through. Disabling one saws off the
+# transport the agent is using and leaves the instance unreachable.
+PROTECTED_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        "khemoo.simul.mcp",
+        "isaacsim.code_editor.python_server",
+        "isaacsim.code_editor.vscode",
+    }
+)
+
+# Carb settings namespaces that configure those transports.
+PROTECTED_CARB_SETTING_PREFIXES: tuple[str, ...] = (
+    "/exts/khemoo.simul.mcp/",
+    "/exts/isaacsim.code_editor.python_server/",
+)
+
+# Prim paths whose removal empties the scene rather than editing it.
+STAGE_ROOT_PATH = "/"
+DEFAULT_WORLD_PATH = "/World"
+
 
 def _coerce_str_to_float_list(value: Any) -> Any:
     """Pydantic ``BeforeValidator``: accept ``'[1, 2, 3]'`` as a list of floats.

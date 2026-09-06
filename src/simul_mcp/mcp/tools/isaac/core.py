@@ -81,6 +81,15 @@ class CoreToolsMixin:
             The script's JSON object when it printed one, otherwise its text
             output, or an error envelope.
         """
+        if not self.settings.security.allow_script_execution:
+            return ErrorResponse(
+                error=(
+                    "Arbitrary script execution is disabled by "
+                    "security.allow_script_execution. Use the granular tools, or "
+                    "set SECURITY__ALLOW_SCRIPT_EXECUTION=true to re-enable it."
+                ),
+                error_type="ScriptExecutionDisabled",
+            ).model_dump()
         if len(code) > MAX_SCRIPT_BYTES:
             return ErrorResponse(
                 error=(

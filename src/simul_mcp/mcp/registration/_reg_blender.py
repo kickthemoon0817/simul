@@ -6,8 +6,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from fastmcp.tools.tool import ToolResult
+
 from ..schemas.blender import *
-from ..schemas.common import ErrorResponse
 from ..schemas.simready import *
 
 if TYPE_CHECKING:
@@ -28,7 +29,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def get_blender_info() -> Dict[str, Any]:
+    async def get_blender_info() -> ToolResult:
         """
         Get information about the active Blender runtime.
 
@@ -58,7 +59,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         collection_name: Optional[str] = None,
         include_hidden: bool = False,
         max_items: int = server.settings.blender.max_scene_objects,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         List objects from the active Blender scene.
 
@@ -77,7 +78,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             max_items=max_items,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
 
         return await server._exec_backend(
             "list_blender_scene_objects",
@@ -106,13 +107,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     )
     async def get_blender_object_info(
         object_name: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderObjectInfoRequest,
             object_name=object_name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "get_blender_object_info",
             server.blender_adapter,
@@ -134,13 +135,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     )
     async def get_blender_mesh_info(
         object_name: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderMeshInfoRequest,
             object_name=object_name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "get_blender_mesh_info",
             server.blender_adapter,
@@ -163,14 +164,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def get_blender_bounding_box(
         object_name: str,
         world_space: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderBoundingBoxRequest,
             object_name=object_name,
             world_space=world_space,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "get_blender_bounding_box",
             server.blender_adapter,
@@ -199,7 +200,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         name_pattern: Optional[str] = None,
         object_type: Optional[str] = None,
         max_results: int = 50,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderSearchObjectsRequest,
             name_pattern=name_pattern,
@@ -207,7 +208,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             max_results=max_results,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "search_blender_objects",
             server.blender_adapter,
@@ -231,7 +232,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def summarize_blender_scene() -> Dict[str, Any]:
+    async def summarize_blender_scene() -> ToolResult:
         return await server._exec_backend(
             "summarize_blender_scene",
             server.blender_adapter,
@@ -253,13 +254,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     )
     async def get_blender_material_info(
         material_name: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderMaterialInfoRequest,
             material_name=material_name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "get_blender_material_info",
             server.blender_adapter,
@@ -284,14 +285,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def get_blender_distance_between(
         object_name_a: str,
         object_name_b: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderDistanceRequest,
             object_name_a=object_name_a,
             object_name_b=object_name_b,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "get_blender_distance_between",
             server.blender_adapter,
@@ -318,7 +319,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         object_name: str,
         bounds_min: List[float],
         bounds_max: List[float],
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderBoundsCheckRequest,
             object_name=object_name,
@@ -326,7 +327,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             bounds_max=bounds_max,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "check_blender_object_bounds",
             server.blender_adapter,
@@ -357,7 +358,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         height: int = 512,
         jpeg_quality: int = 85,
         use_render_fallback: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderCaptureViewportRequest,
             width=width,
@@ -366,7 +367,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             use_render_fallback=use_render_fallback,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "capture_blender_viewport",
             server.blender_adapter,
@@ -395,7 +396,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         location: List[float],
         rotation_euler: List[float],
         camera_name: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderSetCameraViewRequest,
             location=location,
@@ -403,7 +404,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             camera_name=camera_name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "set_blender_camera_view",
             server.blender_adapter,
@@ -429,7 +430,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     )
     async def get_blender_camera_info(
         camera_name: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         return await server._exec_backend(
             "get_blender_camera_info",
             server.blender_adapter,
@@ -453,7 +454,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         object_name: str,
         distance_factor: float = 2.0,
         camera_name: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderFocusOnObjectRequest,
             object_name=object_name,
@@ -461,7 +462,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             camera_name=camera_name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "focus_blender_on_object",
             server.blender_adapter,
@@ -485,7 +486,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def get_blender_viewport_info() -> Dict[str, Any]:
+    async def get_blender_viewport_info() -> ToolResult:
         return await server._exec_backend(
             "get_blender_viewport_info",
             server.blender_adapter,
@@ -514,7 +515,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         width: int = 512,
         height: int = 512,
         jpeg_quality: int = 85,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderCaptureSequenceRequest,
             start_frame=start_frame,
@@ -525,7 +526,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             jpeg_quality=jpeg_quality,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "capture_blender_viewport_sequence",
             server.blender_adapter,
@@ -560,7 +561,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         location: List[float] = [0.0, 0.0, 0.0],
         rotation_euler: List[float] = [0.0, 0.0, 0.0],
         scale: List[float] = [1.0, 1.0, 1.0],
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderCreateObjectRequest,
             object_type=object_type,
@@ -570,7 +571,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             scale=scale,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "create_blender_object",
             server.blender_adapter,
@@ -599,13 +600,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     )
     async def delete_blender_object(
         object_name: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderDeleteObjectRequest,
             object_name=object_name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "delete_blender_object",
             server.blender_adapter,
@@ -621,6 +622,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -630,7 +632,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         location: Optional[List[float]] = None,
         rotation_euler: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderSetTransformRequest,
             object_name=object_name,
@@ -639,7 +641,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             scale=scale,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "set_blender_object_transform",
             server.blender_adapter,
@@ -660,6 +662,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -667,14 +670,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def set_blender_object_parent(
         child_name: str,
         parent_name: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderSetParentRequest,
             child_name=child_name,
             parent_name=parent_name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "set_blender_object_parent",
             server.blender_adapter,
@@ -693,6 +696,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -700,14 +704,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def clear_blender_object_parent(
         object_name: str,
         keep_transform: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderClearParentRequest,
             object_name=object_name,
             keep_transform=keep_transform,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "clear_blender_object_parent",
             server.blender_adapter,
@@ -726,6 +730,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -736,7 +741,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         base_color: List[float] = [0.8, 0.8, 0.8, 1.0],
         metallic: float = 0.0,
         roughness: float = 0.5,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderAssignMaterialRequest,
             object_name=object_name,
@@ -746,7 +751,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             roughness=roughness,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "assign_blender_material",
             server.blender_adapter,
@@ -777,7 +782,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         modifier_type: str,
         modifier_name: Optional[str] = None,
         params: Dict[str, Any] = {},
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderAddModifierRequest,
             object_name=object_name,
@@ -786,7 +791,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             params=params,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "add_blender_modifier",
             server.blender_adapter,
@@ -807,6 +812,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -819,7 +825,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         spot_size: Optional[float] = None,
         spot_blend: Optional[float] = None,
         shadow_soft_size: Optional[float] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderSetLightParamsRequest,
             light_name=light_name,
@@ -831,7 +837,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             shadow_soft_size=shadow_soft_size,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "set_blender_light_params",
             server.blender_adapter,
@@ -864,13 +870,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     )
     async def open_blender_file(
         file_path: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderOpenFileRequest,
             file_path=file_path,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "open_blender_file",
             server.blender_adapter,
@@ -886,19 +892,20 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
     )
     async def save_blender_file(
         file_path: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderSaveFileRequest,
             file_path=file_path,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "save_blender_file",
             server.blender_adapter,
@@ -921,14 +928,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def import_blender_file(
         file_path: str,
         file_format: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderImportFileRequest,
             file_path=file_path,
             file_format=file_format,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "import_blender_file",
             server.blender_adapter,
@@ -949,6 +956,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -957,7 +965,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         file_path: str,
         file_format: str,
         selected_only: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderExportFileRequest,
             file_path=file_path,
@@ -965,7 +973,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             selected_only=selected_only,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "export_blender_file",
             server.blender_adapter,
@@ -989,7 +997,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def get_blender_file_info() -> Dict[str, Any]:
+    async def get_blender_file_info() -> ToolResult:
         return await server._exec_backend(
             "get_blender_file_info",
             server.blender_adapter,
@@ -1011,13 +1019,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def set_blender_frame(frame: int) -> Dict[str, Any]:
+    async def set_blender_frame(frame: int) -> ToolResult:
         input_data = server._validate_input(
             BlenderSetFrameRequest,
             frame=frame,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "set_blender_frame",
             server.blender_adapter,
@@ -1037,7 +1045,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def get_blender_frame() -> Dict[str, Any]:
+    async def get_blender_frame() -> ToolResult:
         return await server._exec_backend(
             "get_blender_frame",
             server.blender_adapter,
@@ -1053,6 +1061,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1060,14 +1069,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def set_blender_frame_range(
         frame_start: int,
         frame_end: int,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderSetFrameRangeRequest,
             frame_start=frame_start,
             frame_end=frame_end,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "set_blender_frame_range",
             server.blender_adapter,
@@ -1092,13 +1101,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     )
     async def play_blender_animation(
         action: str = "play",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderPlayAnimationRequest,
             action=action,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "play_blender_animation",
             server.blender_adapter,
@@ -1123,7 +1132,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         data_path: str,
         frame: int,
         index: int = -1,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderInsertKeyframeRequest,
             object_name=object_name,
@@ -1132,7 +1141,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             index=index,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "insert_blender_keyframe",
             server.blender_adapter,
@@ -1153,6 +1162,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1162,7 +1172,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         data_path: str,
         frame: int,
         index: int = -1,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderDeleteKeyframeRequest,
             object_name=object_name,
@@ -1171,7 +1181,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             index=index,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "delete_blender_keyframe",
             server.blender_adapter,
@@ -1198,13 +1208,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     )
     async def get_blender_keyframes(
         object_name: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderGetKeyframesRequest,
             object_name=object_name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "get_blender_keyframes",
             server.blender_adapter,
@@ -1224,6 +1234,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1237,7 +1248,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         collision_shape: str = "CONVEX_HULL",
         linear_damping: float = 0.04,
         angular_damping: float = 0.1,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderSetupRigidBodyRequest,
             object_name=object_name,
@@ -1250,7 +1261,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             angular_damping=angular_damping,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "setup_blender_rigid_body",
             server.blender_adapter,
@@ -1284,7 +1295,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         strength: float = 1.0,
         location: Optional[List[float]] = None,
         name: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderAddForceFieldRequest,
             field_type=field_type,
@@ -1293,7 +1304,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             name=name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "add_blender_force_field",
             server.blender_adapter,
@@ -1320,13 +1331,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     )
     async def get_blender_force_field_info(
         object_name: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderGetForceFieldInfoRequest,
             object_name=object_name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "get_blender_force_field_info",
             server.blender_adapter,
@@ -1354,7 +1365,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         object2_name: str,
         location: Optional[List[float]] = None,
         disable_collisions: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderAddConstraintRequest,
             constraint_type=constraint_type,
@@ -1364,7 +1375,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             disable_collisions=disable_collisions,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "add_blender_rigid_body_constraint",
             server.blender_adapter,
@@ -1392,13 +1403,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     )
     async def get_blender_constraint_info(
         object_name: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderGetConstraintInfoRequest,
             object_name=object_name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "get_blender_constraint_info",
             server.blender_adapter,
@@ -1422,13 +1433,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     )
     async def get_blender_physics_state(
         object_name: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderGetPhysicsStateRequest,
             object_name=object_name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "get_blender_physics_state",
             server.blender_adapter,
@@ -1455,7 +1466,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         start_frame: int,
         end_frame: int,
         step: int = 1,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderGetTrajectoryRequest,
             object_name=object_name,
@@ -1464,7 +1475,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             step=step,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "get_blender_object_trajectory",
             server.blender_adapter,
@@ -1492,14 +1503,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def bake_blender_simulation(
         frame_start: int,
         frame_end: int,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderBakeSimulationRequest,
             frame_start=frame_start,
             frame_end=frame_end,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "bake_blender_simulation",
             server.blender_adapter,
@@ -1518,53 +1529,29 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
     )
-    async def free_blender_bake() -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("free_blender_bake")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                # Void side-effect: session.free_bake() returns None,
-                # so there is no payload to inspect for an `error` key.
-                # If the call fails it raises, and the outer except
-                # clause emits ErrorResponse. Reaching this line means
-                # the bake was actually freed — success=True is genuine.
-                session.free_bake()
-                result = BlenderFreeBakeResponse(
-                    success=True,
-                ).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderFreeBakeResponse,
-                        ErrorResponse,
-                    ),
-                    "free_blender_bake",
-                )
-        except Exception as e:
-            server.logger.error("Error freeing bake: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderFreeBakeResponse,
-                    ErrorResponse,
-                ),
-                "free_blender_bake",
-            )
+    async def free_blender_bake() -> ToolResult:
+        def _free_bake(session: Any) -> Dict[str, Any]:
+            # session.free_bake() returns None and raises on failure, so
+            # reaching the return means the bake was actually freed.
+            session.free_bake()
+            return {}
+
+        return await server._exec_backend(
+            "free_blender_bake",
+            server.blender_adapter,
+            "Blender",
+            BlenderFreeBakeResponse,
+            _free_bake,
+        )
 
     # -- Scripting & mesh-from-data tools --------------------------------
 
-    @server.mcp.tool(
+    @server._script_tool(
         name="execute_blender_script",
         description=(
             "Execute arbitrary Python code inside Blender with access "
@@ -1574,6 +1561,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1581,14 +1569,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def execute_blender_script(
         script: str,
         timeout: Optional[float] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderExecuteScriptRequest,
             script=script,
             timeout=timeout,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "execute_blender_script",
             server.blender_adapter,
@@ -1621,7 +1609,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         faces: List[List[int]] = [],
         location: Optional[List[float]] = None,
         collection_name: Optional[str] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             BlenderCreateMeshFromDataRequest,
             name=name,
@@ -1632,7 +1620,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             collection_name=collection_name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "create_blender_mesh_from_data",
             server.blender_adapter,
@@ -1661,6 +1649,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=True,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1668,14 +1657,14 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     async def apply_simready_metadata(
         object_name: str,
         metadata: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             SimReadyApplyMetadataRequest,
             object_name=object_name,
             metadata=metadata,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "apply_simready_metadata",
             server.blender_adapter,
@@ -1704,13 +1693,13 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     )
     async def get_simready_metadata(
         object_name: str,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             SimReadyGetMetadataRequest,
             object_name=object_name,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "get_simready_metadata",
             server.blender_adapter,
@@ -1743,7 +1732,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         check_transforms: bool = True,
         check_materials: bool = True,
         check_hierarchy: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             SimReadyValidateRequest,
             object_names=object_names,
@@ -1754,7 +1743,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             check_hierarchy=check_hierarchy,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "validate_simready_compliance",
             server.blender_adapter,
@@ -1781,6 +1770,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             read_only=False,
             idempotent=False,
             open_world=True,
+            destructive=True,
         ),
         output_schema=None,
         task=server._task_optional(),
@@ -1790,7 +1780,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         object_names: Optional[List[str]] = None,
         embed_metadata: bool = True,
         validate_before_export: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             SimReadyExportRequest,
             file_path=file_path,
@@ -1799,7 +1789,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             validate_before_export=validate_before_export,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "export_simready_usd",
             server.blender_adapter,
@@ -1832,7 +1822,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         root_name: str,
         child_names: List[str],
         semantic: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         input_data = server._validate_input(
             SimReadySetupHierarchyRequest,
             root_name=root_name,
@@ -1840,7 +1830,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             semantic=semantic,
         )
         if isinstance(input_data, dict):
-            return input_data
+            return server._as_text_result(input_data)
         return await server._exec_backend(
             "setup_simready_hierarchy",
             server.blender_adapter,

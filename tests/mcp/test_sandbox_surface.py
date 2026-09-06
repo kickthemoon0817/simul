@@ -198,4 +198,4 @@ def test_backend_envelope_turns_sandbox_denied_into_sandbox_error(
         instance._exec_backend("export_unreal_usd", adapter, "Unreal", ErrorResponse, _call)
     )
 
-    _assert_actionable(result, OUTSIDE_SANDBOX, "write")
+    _assert_actionable(_payload(result), OUTSIDE_SANDBOX, "write")
