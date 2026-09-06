@@ -2602,6 +2602,62 @@ class TestExecuteScript:
         assert result["error"] is not None
         assert "ZeroDivisionError" in result["error"]
 
+    def test_execute_script_timeout_returns_instead_of_blocking(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A script that never returns must not hang the MCP server."""
+        import threading
+        import time
+
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        release = threading.Event()
+        fake_bpy.release = release
+
+        session = blender_runtime.BlenderRuntimeSession()
+        started = time.monotonic()
+        result = session.execute_script("bpy.release.wait()\nprint('late')", timeout=0.2)
+        elapsed = time.monotonic() - started
+        release.set()
+
+        assert elapsed < 2.0
+        assert result["timed_out"] is True
+        assert result["error"] is not None
+        assert result["error"].startswith("TimeoutError")
+        assert "still running" in result["error"]
+        assert result["output"] is None
+        assert result["return_value"] is None
+        assert result["duration_seconds"] == 0.2
+
+    def test_execute_script_with_timeout_returns_normally_when_fast(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.execute_script("__result__ = 7\nprint('quick')", timeout=5.0)
+
+        assert result["output"] == "quick\n"
+        assert result["return_value"] == "7"
+        assert "error" not in result
+        assert "timed_out" not in result
+
+    def test_execute_script_with_timeout_reports_script_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.execute_script("x = 1 / 0", timeout=5.0)
+
+        assert "ZeroDivisionError" in result["error"]
+        assert "timed_out" not in result
+
     def test_execute_script_output_capped(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

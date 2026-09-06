@@ -62,6 +62,8 @@ def _tools(
         timeout_seconds=timeout if timeout is not None else settings.isaac_sim.socket_timeout,
         socket_protocol=settings.isaac_sim.socket_protocol,
         auth_token=settings.isaac_sim.socket_auth_token,
+        bridge_failure_threshold=settings.isaac_sim.bridge_failure_threshold,
+        bridge_cooldown_seconds=settings.isaac_sim.bridge_cooldown_seconds,
     )
     return IsaacTools(client, settings)
 
@@ -140,6 +142,35 @@ def ping(
     else:
         console.print(f"[red]No response[/red] from {tools._client.address}")
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# interrupt
+# ---------------------------------------------------------------------------
+@app.command()
+def interrupt(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+    timeout: Optional[float] = _timeout_opt,
+) -> None:
+    """Stop the script the bridge is currently running.
+
+    Reaches a coroutine script, or one suspended at an await. A synchronous
+    script that never yields also blocks the bridge's event loop, so this
+    request cannot be received until it ends; the per-request timeout sent
+    with every script is the stop that works there.
+    """
+    result = _run(_tools(host, port, timeout).interrupt_script())
+    if is_json_mode():
+        emit(result)
+        return
+    if result.get("interrupted"):
+        console.print(
+            f"[green]Interrupted[/green] {result.get('current_action') or 'script'} "
+            f"(phase {result.get('phase')}, running {result.get('busy_for_seconds')}s)"
+        )
+    else:
+        console.print("[yellow]Nothing was running[/yellow] on the bridge")
 
 
 @app.command("bridge-up")
