@@ -96,7 +96,7 @@ def _make_server(
     async def fake_execute_script(code: str) -> dict[str, Any]:
         return {"success": True, "output": "ran"}
 
-    async def fake_stage_info() -> dict[str, Any]:
+    async def fake_stage_info(include_prim_count: bool = False) -> dict[str, Any]:
         return {"success": True, "stage": "/World"}
 
     monkeypatch.setattr(instance._isaac_tools, "execute_script", fake_execute_script)

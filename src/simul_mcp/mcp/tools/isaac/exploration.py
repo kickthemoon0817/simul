@@ -8,6 +8,7 @@ from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
 from ._shared import (
     BULK_GEOMETRY_ATTRIBUTES,
+    DEFAULT_MAX_RESULTS,
     LOG_SCAN_WINDOW_BYTES,
     MAX_CAPTURE_DIMENSION,
     MAX_INLINE_CAPTURE_BYTES,
@@ -144,6 +145,7 @@ class ExplorationMixin:
             Dict with a page of lights (type, intensity, color) and the total
             count.
         """
+        max_results = max(1, min(max_results, 1000))
         _root_path = _pyval(root_path)
         max_results = max(1, min(max_results, 1000))
         offset = max(0, offset)
@@ -160,9 +162,16 @@ class ExplorationMixin:
                 if not root.IsValid():
                     print(json.dumps({{"error": "Root path not found: " + {_root_path}}}))
                 else:
+                    offset = {offset}
+                    limit = {max_results}
                     lights = []
+                    total = 0
                     for p in Usd.PrimRange(root):
                         if not p.HasAPI(UsdLux.LightAPI):
+                            continue
+                        index = total
+                        total += 1
+                        if index < offset or len(lights) >= limit:
                             continue
                         info = {{
                             "path": str(p.GetPath()),
@@ -182,14 +191,12 @@ class ExplorationMixin:
                             if temp and temp.Get() is not None:
                                 info["color_temperature"] = float(temp.Get())
                         lights.append(info)
-                    offset = {offset}
-                    limit = {max_results}
-                    page = lights[offset:offset + limit]
-                    truncated = offset + len(page) < len(lights)
+                    page = lights
+                    truncated = offset + len(page) < total
                     print(json.dumps({{
                         "root_path": {_root_path},
                         "count": len(page),
-                        "total": len(lights),
+                        "total": total,
                         "offset": offset,
                         "applied_limit": limit,
                         "truncated": truncated,
@@ -673,17 +680,21 @@ class ExplorationMixin:
         return await self._execute_json_script(script)
 
     async def get_isaac_texture_dependencies(
-        self, root_path: str = "/"
+        self, root_path: str = "/", max_results: int = DEFAULT_MAX_RESULTS
     ) -> Dict[str, Any]:
         """
         List all external texture files referenced by scene materials.
 
         Args:
             root_path: USD path to search under.
+            max_results: Maximum unique texture files to collect. The
+                traversal stops once the cap is reached and ``truncated``
+                is set.
 
         Returns:
             Dict with unique texture file paths and their referencing materials.
         """
+        max_results = max(1, min(max_results, 1000))
         _root_path = _pyval(root_path)
         script = textwrap.dedent(f"""\
             import json
@@ -698,29 +709,44 @@ class ExplorationMixin:
                 if not root.IsValid():
                     print(json.dumps({{"error": "Root path not found: " + {_root_path}}}))
                 else:
+                    max_results = {max_results}
+                    texture_suffixes = (
+                        ".png", ".jpg", ".jpeg", ".tga", ".bmp", ".exr",
+                        ".hdr", ".dds", ".tif", ".tiff",
+                    )
                     textures = {{}}
+                    truncated = False
                     for p in Usd.PrimRange(root):
                         if not p.IsA(UsdShade.Shader):
                             continue
                         shader = UsdShade.Shader(p)
                         mat_path = str(p.GetParent().GetPath()) if p.GetParent() else ""
                         for inp in shader.GetInputs():
+                            # Reading an asset input resolves it; only asset
+                            # inputs can hold a texture, so read nothing else.
+                            if inp.GetTypeName() != Sdf.ValueTypeNames.Asset:
+                                continue
                             val = inp.Get()
-                            if isinstance(val, Sdf.AssetPath):
-                                asset = val.resolvedPath or val.path
-                                if asset and any(asset.lower().endswith(ext) for ext in (
-                                    ".png", ".jpg", ".jpeg", ".tga", ".bmp", ".exr",
-                                    ".hdr", ".dds", ".tif", ".tiff"
-                                )):
-                                    if asset not in textures:
-                                        textures[asset] = []
-                                    textures[asset].append({{
-                                        "material": mat_path,
-                                        "input": inp.GetBaseName(),
-                                    }})
+                            if not isinstance(val, Sdf.AssetPath):
+                                continue
+                            asset = val.resolvedPath or val.path
+                            if not asset or not asset.lower().endswith(texture_suffixes):
+                                continue
+                            if asset not in textures:
+                                if len(textures) >= max_results:
+                                    truncated = True
+                                    break
+                                textures[asset] = []
+                            textures[asset].append({{
+                                "material": mat_path,
+                                "input": inp.GetBaseName(),
+                            }})
+                        if truncated:
+                            break
                     print(json.dumps({{
                         "root_path": {_root_path},
                         "unique_textures": len(textures),
+                        "truncated": truncated,
                         "textures": [
                             {{"path": k, "referenced_by": v}}
                             for k, v in sorted(textures.items())
@@ -813,37 +839,46 @@ class ExplorationMixin:
         """)
         return await self._execute_json_script(script)
 
-    async def get_isaac_selection(self) -> Dict[str, Any]:
+    async def get_isaac_selection(
+        self, max_results: int = DEFAULT_MAX_RESULTS
+    ) -> Dict[str, Any]:
         """
         Get the currently selected prims in the Isaac Sim viewport.
+
+        Args:
+            max_results: Maximum selected prims described in the result.
+                ``total`` still counts the whole selection.
 
         Returns:
             Dict with list of selected prim paths and their types.
         """
-        script = textwrap.dedent("""\
+        max_results = max(1, min(max_results, 1000))
+        script = textwrap.dedent(f"""\
             import json
             import omni.usd
 
             ctx = omni.usd.get_context()
             stage = ctx.get_stage()
             if stage is None:
-                print(json.dumps({"error": "No stage is currently open"}))
+                print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                selection = ctx.get_selection()
-                paths = selection.get_selected_prim_paths()
+                max_results = {max_results}
+                paths = list(ctx.get_selection().get_selected_prim_paths())
                 selected = []
-                for path in paths:
+                for path in paths[:max_results]:
                     prim = stage.GetPrimAtPath(path)
                     if prim.IsValid():
-                        selected.append({
+                        selected.append({{
                             "path": path,
                             "name": prim.GetName(),
                             "type": prim.GetTypeName(),
-                        })
-                print(json.dumps({
+                        }})
+                print(json.dumps({{
                     "count": len(selected),
+                    "total": len(paths),
+                    "truncated": len(paths) > max_results,
                     "selected_prims": selected,
-                }))
+                }}))
         """)
         return await self._execute_json_script(script)
 
@@ -950,9 +985,22 @@ class ExplorationMixin:
         prim_type: Optional[str] = None,
         root_path: str = "/",
         max_results: int = 100,
+        max_depth: int = -1,
     ) -> Dict[str, Any]:
         """
         Find prims whose bounding box center is within a given radius.
+
+        Without ``prim_type`` only prims that carry their own geometry
+        (``UsdGeom.Boundable``: meshes, shapes, point instancers, area lights)
+        are candidates. Containers such as Xform and Scope have no bound of
+        their own — theirs is the union of the subtree and costs a full
+        sub-traversal — so they are considered only when ``prim_type`` names
+        them.
+
+        The traversal stops once ``max_results`` prims are within the radius,
+        so with ``truncated`` set the result is the first matches in stage
+        order sorted by distance, not the nearest across the whole stage.
+        Narrow ``root_path``, ``max_depth`` or ``radius`` to see the rest.
 
         Args:
             center: Center point [x, y, z] to search around.
@@ -960,12 +1008,16 @@ class ExplorationMixin:
             prim_type: Optional prim type filter (e.g. "Mesh", "Xform").
             root_path: USD root path to search under.
             max_results: Maximum number of prims to return.
+            max_depth: Maximum depth below root_path to descend (-1 for
+                unlimited). Deeper subtrees are pruned, not just hidden.
 
         Returns:
             Dict with matching prims sorted by distance from center.
         """
+        max_results = max(1, min(max_results, 1000))
         _root_path = _pyval(root_path)
         _prim_type = _pyval(prim_type or None)
+        _center = _pyval([float(c) for c in center])
         script = textwrap.dedent(f"""\
             import json
             import math
@@ -980,41 +1032,75 @@ class ExplorationMixin:
                 if not root.IsValid():
                     print(json.dumps({{"error": "Root path not found: " + {_root_path}}}))
                 else:
-                    center = Gf.Vec3d({center[0]}, {center[1]}, {center[2]})
-                    radius = {radius}
+                    center = Gf.Vec3d(*{_center})
+                    radius = {float(radius)}
                     prim_type_filter = {_prim_type}
-                    bbox_cache = UsdGeom.BBoxCache(
-                        Usd.TimeCode.Default(), ["default", "render"]
-                    )
+                    max_results = {max_results}
+                    max_depth = {int(max_depth)}
+                    root_depth = len(str(root.GetPath()).rstrip("/").split("/"))
+                    time_code = Usd.TimeCode.Default()
+                    bbox_cache = UsdGeom.BBoxCache(time_code, ["default", "render"])
+                    xform_cache = UsdGeom.XformCache(time_code)
                     matches = []
-                    for p in Usd.PrimRange(root):
-                        if prim_type_filter and p.GetTypeName() != prim_type_filter:
+                    truncated = False
+                    prim_iter = iter(Usd.PrimRange(root))
+                    for p in prim_iter:
+                        depth = len(str(p.GetPath()).rstrip("/").split("/")) - root_depth
+                        if max_depth >= 0 and depth >= max_depth:
+                            prim_iter.PruneChildren()
+                        if max_depth >= 0 and depth > max_depth:
+                            continue
+                        if prim_type_filter:
+                            if p.GetTypeName() != prim_type_filter:
+                                continue
+                        elif not p.IsA(UsdGeom.Boundable):
                             continue
                         try:
-                            bbox = bbox_cache.ComputeWorldBound(p)
-                            rng = bbox.ComputeAlignedRange()
+                            extent = None
+                            if p.IsA(UsdGeom.Boundable):
+                                extent_attr = UsdGeom.Boundable(p).GetExtentAttr()
+                                if extent_attr.HasAuthoredValue():
+                                    extent = extent_attr.Get()
+                            if extent is not None and len(extent) == 2:
+                                # A sphere around the local extent, grown by the
+                                # transform's largest stretch, that cannot reach
+                                # the search sphere rules the prim out before
+                                # the exact world bound is computed.
+                                matrix = xform_cache.GetLocalToWorldTransform(p)
+                                lo = Gf.Vec3d(extent[0])
+                                hi = Gf.Vec3d(extent[1])
+                                local_center = matrix.Transform((lo + hi) * 0.5)
+                                half_diagonal = (hi - lo).GetLength() * 0.5
+                                stretch = math.sqrt(sum(
+                                    matrix[i][j] ** 2 for i in range(3) for j in range(3)
+                                ))
+                                reach = (local_center - center).GetLength() - half_diagonal * stretch
+                                if reach > radius:
+                                    continue
+                            rng = bbox_cache.ComputeWorldBound(p).ComputeAlignedRange()
                             if rng.IsEmpty():
                                 continue
-                            mn = rng.GetMin()
-                            mx = rng.GetMax()
-                            prim_center = (mn + mx) * 0.5
+                            prim_center = (rng.GetMin() + rng.GetMax()) * 0.5
                             dist = (prim_center - center).GetLength()
-                            if dist <= radius:
-                                matches.append({{
-                                    "path": str(p.GetPath()),
-                                    "name": p.GetName(),
-                                    "type": p.GetTypeName(),
-                                    "distance": round(dist, 4),
-                                    "center": [prim_center[0], prim_center[1], prim_center[2]],
-                                }})
                         except Exception:
                             continue
+                        if dist > radius:
+                            continue
+                        if len(matches) >= max_results:
+                            truncated = True
+                            break
+                        matches.append({{
+                            "path": str(p.GetPath()),
+                            "name": p.GetName(),
+                            "type": p.GetTypeName(),
+                            "distance": round(dist, 4),
+                            "center": [prim_center[0], prim_center[1], prim_center[2]],
+                        }})
                     matches.sort(key=lambda x: x["distance"])
-                    truncated = len(matches) > {max_results}
-                    matches = matches[:{max_results}]
                     print(json.dumps({{
-                        "center": [{center[0]}, {center[1]}, {center[2]}],
+                        "center": {_center},
                         "radius": radius,
+                        "max_depth": max_depth,
                         "count": len(matches),
                         "truncated": truncated,
                         "matches": matches,

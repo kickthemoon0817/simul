@@ -95,7 +95,7 @@ def test_granular_tools_are_attributed_without_a_hash(
 ) -> None:
     instance = _server(monkeypatch, tmp_path)
 
-    async def fake_stage_info() -> Dict[str, Any]:
+    async def fake_stage_info(include_prim_count: bool = False) -> Dict[str, Any]:
         return {"success": True}
 
     monkeypatch.setattr(instance._isaac_tools, "get_isaac_stage_info", fake_stage_info)

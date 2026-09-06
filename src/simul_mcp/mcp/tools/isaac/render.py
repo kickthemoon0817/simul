@@ -8,6 +8,7 @@ from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
 from ._shared import (
     BULK_GEOMETRY_ATTRIBUTES,
+    DEFAULT_MAX_RESULTS,
     LOG_SCAN_WINDOW_BYTES,
     MAX_CAPTURE_DIMENSION,
     MAX_INLINE_CAPTURE_BYTES,
@@ -222,22 +223,30 @@ class RenderMixin:
         """)
         return await self._execute_json_script(script)
 
-    async def list_aovs(self) -> Dict[str, Any]:
+    async def list_aovs(self, max_results: int = DEFAULT_MAX_RESULTS) -> Dict[str, Any]:
         """
         List all available AOV annotator names in the current session.
+
+        Args:
+            max_results: Maximum annotator names returned. ``total`` still
+                counts every registered annotator.
 
         Returns:
             Dict with list of available annotator names.
         """
-        script = textwrap.dedent("""\
+        max_results = max(1, min(max_results, 1000))
+        script = textwrap.dedent(f"""\
             import json
             import omni.replicator.core as rep
 
+            max_results = {max_results}
             names = sorted(rep.AnnotatorRegistry.get_registered_annotators())
-            print(json.dumps({
-                "count": len(names),
-                "annotators": names,
-            }))
+            print(json.dumps({{
+                "count": min(len(names), max_results),
+                "total": len(names),
+                "truncated": len(names) > max_results,
+                "annotators": names[:max_results],
+            }}))
         """)
         return await self._execute_json_script(script)
 
@@ -409,26 +418,35 @@ class RenderMixin:
         """)
         return await self._execute_json_script(script)
 
-    async def list_render_vars(self) -> Dict[str, Any]:
+    async def list_render_vars(
+        self, max_results: int = DEFAULT_MAX_RESULTS
+    ) -> Dict[str, Any]:
         """
         List available render variable names from SyntheticData.
+
+        Args:
+            max_results: Maximum names returned per list. The ``*_count``
+                fields still count every registered name.
 
         Returns:
             Dict with render var templates and sensor type names.
         """
-        script = textwrap.dedent("""\
+        max_results = max(1, min(max_results, 1000))
+        script = textwrap.dedent(f"""\
             import json
 
-            result = {}
+            max_results = {max_results}
+            result = {{}}
             try:
                 import omni.syntheticdata as syn
                 sd = syn.SyntheticData.Get()
                 templates = sorted(sd.get_registered_visualization_template_names())
-                result["render_var_templates"] = templates
+                result["render_var_templates"] = templates[:max_results]
                 result["render_var_count"] = len(templates)
                 sensor_types = sorted(sd.get_sensor_type_names())
-                result["sensor_types"] = sensor_types
+                result["sensor_types"] = sensor_types[:max_results]
                 result["sensor_type_count"] = len(sensor_types)
+                result["truncated"] = max(len(templates), len(sensor_types)) > max_results
             except Exception as e:
                 result["syntheticdata_error"] = str(e)
 

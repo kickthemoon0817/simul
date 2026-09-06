@@ -47,19 +47,30 @@ class SceneInspectionMixin:
     # Phase 1: Scene Inspection (Read-only)
     # ------------------------------------------------------------------
 
-    async def get_isaac_stage_info(self) -> Dict[str, Any]:
+    async def get_isaac_stage_info(
+        self, include_prim_count: bool = False
+    ) -> Dict[str, Any]:
         """
         Get current stage metadata from the running Isaac Sim instance.
+
+        Args:
+            include_prim_count: Also count every prim on the stage for
+                ``total_prims``. The count walks the whole stage on Kit's
+                main thread, so it is off unless asked for; the key is then
+                ``None``.
 
         Returns:
             Stage info dict with up_axis, meters_per_unit, total_prims,
             root_prims, layer_count, default_prim, etc.
         """
-        bridge_result = await self._execute_bridge_action("get_stage_info")
+        bridge_result = await self._execute_bridge_action(
+            "get_stage_info", {"include_prim_count": include_prim_count}
+        )
         if bridge_result is not None:
             return bridge_result
 
-        script = textwrap.dedent("""\
+        _include_prim_count = _pyval(bool(include_prim_count))
+        script = textwrap.dedent(f"""\
             import json
             import omni.usd
             from pxr import Usd, UsdGeom
@@ -67,7 +78,7 @@ class SceneInspectionMixin:
             ctx = omni.usd.get_context()
             stage = ctx.get_stage()
             if stage is None:
-                print(json.dumps({"error": "No stage is currently open"}))
+                print(json.dumps({{"error": "No stage is currently open"}}))
             else:
                 root = stage.GetPseudoRoot()
                 root_prims = [str(p.GetPath()) for p in root.GetChildren()]
@@ -77,13 +88,11 @@ class SceneInspectionMixin:
                 start = stage.GetStartTimeCode()
                 end = stage.GetEndTimeCode()
                 fps = stage.GetFramesPerSecond()
-                total = 0
-                for _ in stage.Traverse():
-                    total += 1
+                total = sum(1 for _ in stage.Traverse()) if {_include_prim_count} else None
                 layer_stack = stage.GetLayerStack()
                 default_prim = stage.GetDefaultPrim()
                 dp_path = str(default_prim.GetPath()) if default_prim else None
-                print(json.dumps({
+                print(json.dumps({{
                     "stage_url": str(ctx.get_stage_url()),
                     "up_axis": up_axis,
                     "meters_per_unit": meters,
@@ -95,7 +104,7 @@ class SceneInspectionMixin:
                     "root_prims": root_prims,
                     "layer_count": len(layer_stack),
                     "default_prim": dp_path,
-                }))
+                }}))
         """)
         mode = self._raw_script_transport_mode
         return await self._execute_json_script(script, transport_mode=mode)

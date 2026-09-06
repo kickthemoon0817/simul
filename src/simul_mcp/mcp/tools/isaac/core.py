@@ -48,6 +48,15 @@ class CoreToolsMixin:
                 error_type="ValueError",
             ).model_dump()
 
+        # One bridge round trip reads every aspect; the per-aspect loop below
+        # is the fallback for a bridge that is off, unreachable, or too old to
+        # know the action, and costs one connection per aspect.
+        bridge_result = await self._execute_bridge_action(
+            "get_prim_detail", {"prim_path": prim_path, "aspects": requested}
+        )
+        if bridge_result is not None:
+            return bridge_result
+
         detail: Dict[str, Any] = {
             "success": True,
             "prim_path": prim_path,

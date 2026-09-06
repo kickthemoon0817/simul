@@ -510,7 +510,7 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 ### Isaac Sim — Prim Manipulation
 
-`create_isaac_prim`, `delete_isaac_prim`, `set_isaac_prim_transform`, `set_isaac_prim_visibility`, `set_isaac_prim_attribute`, `duplicate_isaac_prim`, `reparent_isaac_prim`
+`create_isaac_object` (prim + transform + rigid body + collider + mass + material in one call), `create_isaac_prim`, `delete_isaac_prim`, `set_isaac_prim_transform`, `set_isaac_prim_visibility`, `set_isaac_prim_attribute`, `duplicate_isaac_prim`, `reparent_isaac_prim`
 
 ### Isaac Sim — Viewport & Camera
 

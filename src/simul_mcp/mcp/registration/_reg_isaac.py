@@ -137,16 +137,21 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         name="get_isaac_stage_info",
         description=(
             "Get current stage metadata including root layer, up-axis, "
-            "meters-per-unit, total prim count, and default prim."
+            "meters-per-unit, and default prim. Pass include_prim_count=true "
+            "to also count every prim (total_prims); the count walks the whole "
+            "stage, so it is off by default."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_stage_info() -> ToolResult:
+    @with_param_descriptions(IsaacTools.get_isaac_stage_info)
+    async def get_isaac_stage_info(include_prim_count: bool = False) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_stage_info",
-            server._isaac_tools.get_isaac_stage_info(),
+            server._isaac_tools.get_isaac_stage_info(
+                include_prim_count=include_prim_count
+            ),
         )
 
     @server.mcp.tool(
@@ -383,6 +388,57 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 prim_path=prim_path,
                 prim_type=prim_type,
                 attributes=attributes,
+            ),
+        )
+
+    @server.mcp.tool(
+        name="create_isaac_object",
+        description=(
+            "Build a complete object in one call: create a prim, then "
+            "optionally set its transform, apply a rigid body, a collider, a "
+            "mass, and bind a material (reused when material_path exists, "
+            "otherwise created with diffuse_color). Prefer this over chaining "
+            "create_isaac_prim, set_isaac_prim_transform, add_isaac_rigid_body, "
+            "add_isaac_collision, set_isaac_mass_properties, "
+            "create_isaac_material and assign_isaac_material: it runs the same "
+            "steps in a single round trip and reports each step's result under "
+            "'steps'. Stops at the first failing step and names it in "
+            "'failed_step'. collision accepts none, convexHull, "
+            "convexDecomposition, meshSimplification, boundingSphere, "
+            "boundingCube."
+        ),
+        annotations=server._tool_annotations(
+            read_only=False, idempotent=False, open_world=True
+        ),
+    )
+    @with_param_descriptions(IsaacTools.create_isaac_object)
+    async def create_isaac_object(
+        prim_path: str,
+        prim_type: str = "Cube",
+        translation: Optional[List[float]] = None,
+        rotation_euler: Optional[List[float]] = None,
+        scale: Optional[List[float]] = None,
+        rigid_body: bool = False,
+        kinematic: bool = False,
+        collision: Optional[str] = None,
+        mass: Optional[float] = None,
+        material_path: Optional[str] = None,
+        diffuse_color: Optional[List[float]] = None,
+    ) -> ToolResult:
+        return await server._exec_isaac(
+            "create_isaac_object",
+            server._isaac_tools.create_isaac_object(
+                prim_path=prim_path,
+                prim_type=prim_type,
+                translation=translation,
+                rotation_euler=rotation_euler,
+                scale=scale,
+                rigid_body=rigid_body,
+                kinematic=kinematic,
+                collision=collision,
+                mass=mass,
+                material_path=material_path,
+                diffuse_color=diffuse_color,
             ),
         )
 
@@ -1148,10 +1204,14 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         ),
     )
     @with_param_descriptions(IsaacTools.get_isaac_texture_dependencies)
-    async def get_isaac_texture_dependencies(root_path: str = "/") -> ToolResult:
+    async def get_isaac_texture_dependencies(
+        root_path: str = "/", max_results: int = 200
+    ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_texture_dependencies",
-            server._isaac_tools.get_isaac_texture_dependencies(root_path=root_path),
+            server._isaac_tools.get_isaac_texture_dependencies(
+                root_path=root_path, max_results=max_results
+            ),
         )
 
     @server.mcp.tool(
@@ -1181,10 +1241,11 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_selection() -> ToolResult:
+    @with_param_descriptions(IsaacTools.get_isaac_selection)
+    async def get_isaac_selection(max_results: int = 200) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_selection",
-            server._isaac_tools.get_isaac_selection(),
+            server._isaac_tools.get_isaac_selection(max_results=max_results),
         )
 
     @server.mcp.tool(
@@ -1260,11 +1321,14 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="find_isaac_prims_in_area",
         description=(
-            "Find prims whose world-space bounding box center is within a given "
-            "radius of a point (stage units, metres by default). Results sorted "
-            "by distance. Use find_isaac_prims_in_area when you know where "
-            "something is but not what it is called; use search_isaac_prims "
-            "when you know the name or type."
+            "Find prims whose bounding box center is within a given radius "
+            "of a point, sorted by distance. Without prim_type only prims "
+            "with their own geometry (meshes, shapes, point instancers, area "
+            "lights) are candidates; containers such as Xform are matched only "
+            "when prim_type names them. The search stops after max_results "
+            "hits, so a truncated result holds the first matches in stage "
+            "order, not the nearest overall: narrow root_path, max_depth or "
+            "radius to see the rest."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -1277,6 +1341,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         prim_type: Optional[str] = None,
         root_path: str = "/",
         max_results: int = 100,
+        max_depth: int = -1,
     ) -> ToolResult:
         return await server._exec_isaac(
             "find_isaac_prims_in_area",
@@ -1286,6 +1351,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 prim_type=prim_type,
                 root_path=root_path,
                 max_results=max_results,
+                max_depth=max_depth,
             ),
         )
 
@@ -1471,10 +1537,11 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def list_isaac_aovs() -> ToolResult:
+    @with_param_descriptions(IsaacTools.list_aovs)
+    async def list_isaac_aovs(max_results: int = 200) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_aovs",
-            server._isaac_tools.list_aovs(),
+            server._isaac_tools.list_aovs(max_results=max_results),
         )
 
     # ------------------------------------------------------------------
@@ -1555,10 +1622,11 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def list_isaac_render_vars() -> ToolResult:
+    @with_param_descriptions(IsaacTools.list_render_vars)
+    async def list_isaac_render_vars(max_results: int = 200) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_render_vars",
-            server._isaac_tools.list_render_vars(),
+            server._isaac_tools.list_render_vars(max_results=max_results),
         )
 
     # ------------------------------------------------------------------
@@ -1597,13 +1665,13 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @with_param_descriptions(IsaacTools.get_isaac_graph_nodes)
     async def get_isaac_graph_nodes(
         graph_path: str,
-        max_nodes: int = 200,
+        max_results: int = 200,
     ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_graph_nodes",
             server._isaac_tools.get_isaac_graph_nodes(
                 graph_path=graph_path,
-                max_nodes=max_nodes,
+                max_results=max_results,
             ),
         )
 
@@ -1701,13 +1769,13 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @with_param_descriptions(IsaacTools.list_isaac_graph_node_types)
     async def list_isaac_graph_node_types(
         search: Optional[str] = None,
-        max_types: int = 200,
+        max_results: int = 200,
     ) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_graph_node_types",
             server._isaac_tools.list_isaac_graph_node_types(
                 search=search,
-                max_types=max_types,
+                max_results=max_results,
             ),
         )
 
@@ -1797,14 +1865,18 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "(rigid body/articulation/shape counts, CUDA availability), "
             "GPU/renderer info, viewport state, stage summary, and extension "
             "counts. Use this for a quick health check or to understand the "
-            "current state of the simulation environment."
+            "current state of the simulation environment. Pass "
+            "include_prim_count=true to also count every prim on the stage."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def get_isaac_runtime_info() -> ToolResult:
+    @with_param_descriptions(IsaacTools.get_runtime_info)
+    async def get_isaac_runtime_info(include_prim_count: bool = False) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_runtime_info",
-            server._isaac_tools.get_runtime_info(),
+            server._isaac_tools.get_runtime_info(
+                include_prim_count=include_prim_count
+            ),
         )

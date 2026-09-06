@@ -8,6 +8,7 @@ from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
 from ._shared import (
     BULK_GEOMETRY_ATTRIBUTES,
+    DEFAULT_MAX_RESULTS,
     LOG_SCAN_WINDOW_BYTES,
     MAX_CAPTURE_DIMENSION,
     MAX_INLINE_CAPTURE_BYTES,
