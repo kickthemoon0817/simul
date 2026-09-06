@@ -1,5 +1,0 @@
-blender:
-  enabled: true
-  binary_path: null
-  default_collection: null
-  max_scene_objects: 200

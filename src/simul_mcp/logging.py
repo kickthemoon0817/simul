@@ -35,10 +35,11 @@ from typing import Any, Callable, Dict, Optional, TypeVar, Union
 import yaml
 
 from .config import Settings, get_settings
+from .resources import find_checkout_root, resource_filesystem_path
 
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_LOGGING_CONFIG = "config/isaac/logging.yaml"
+_CHECKOUT_ROOT: Optional[Path] = find_checkout_root()
+_DEFAULT_LOGGING_CONFIG: Path = resource_filesystem_path("config", "logging.yaml")
 
 # Context variables that carry per-request correlation across logging records.
 # Defaults of ``-`` keep formatters readable when no MCP call is active
@@ -79,18 +80,15 @@ def setup_logging(
 
     Args:
         settings: Settings instance. If None, uses get_settings()
-        config_file: Path to logging config file. If None, uses config/logging.yaml
+        config_file: Path to logging config file. If None, uses the logging.yaml
+            shipped inside the package.
         log_level: Override log level
         profile: Logging profile to use (development, production, testing, json_logging)
     """
     if settings is None:
         settings = get_settings()
 
-    # Determine config file path
-    if config_file is None:
-        config_file = _resolve_logging_config_path(_DEFAULT_LOGGING_CONFIG)
-    else:
-        config_file = _resolve_logging_config_path(config_file)
+    config_file = _resolve_logging_config_path(config_file or _DEFAULT_LOGGING_CONFIG)
 
     # Load logging configuration
     if config_file.exists():
@@ -167,13 +165,13 @@ def _ensure_log_directories(config: Dict[str, Any]) -> None:
 
 
 def _resolve_logging_config_path(config_file: Union[str, Path]) -> Path:
-    """Resolve logging config relative to cwd first, then the repo root."""
+    """Resolve logging config relative to cwd first, then the source checkout if any."""
     candidate = Path(config_file).expanduser()
     if candidate.is_absolute():
         return candidate
-    if candidate.exists():
+    if candidate.exists() or _CHECKOUT_ROOT is None:
         return candidate.resolve()
-    return (_PROJECT_ROOT / candidate).resolve()
+    return (_CHECKOUT_ROOT / candidate).resolve()
 
 
 def _remove_handlers(config: Dict[str, Any], disabled: set[str]) -> None:

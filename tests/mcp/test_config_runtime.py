@@ -17,6 +17,7 @@ sys.path.insert(0, str(src_path))
 from simul_mcp.cli.main import app
 from simul_mcp.config import Settings, get_settings, load_settings
 from simul_mcp.logging import setup_logging
+from simul_mcp.resources import resource_filesystem_path
 
 
 def test_usd_package_import_requires_pxr() -> None:
@@ -36,10 +37,10 @@ def test_usd_package_import_requires_pxr() -> None:
 def test_load_settings_supports_nested_repo_config_without_isaac_env(
     monkeypatch,
 ) -> None:
-    """The checked-in Isaac YAML should load without ISAAC_SIM_PATH set."""
+    """The packaged default YAML should load without ISAAC_SIM_PATH set."""
     monkeypatch.delenv("ISAAC_SIM_PATH", raising=False)
 
-    settings = load_settings("config/isaac/default.yaml")
+    settings = load_settings(resource_filesystem_path("config", "default.yaml"))
 
     assert settings.isaac_sim.path is None
     assert settings.isaac_sim.headless is False
@@ -56,7 +57,7 @@ def test_load_settings_supports_nested_repo_config_without_isaac_env(
     assert settings.viewport.max_bounces == 4
     assert settings.security.rate_limiting_enabled is True
     assert settings.security.requests_per_minute == 60
-    assert any(path.endswith("/examples") for path in settings.security.allowed_paths)
+    assert "examples" in settings.security.allowed_paths
 
 
 def test_load_settings_normalizes_nested_instance_bridge_config(tmp_path) -> None:

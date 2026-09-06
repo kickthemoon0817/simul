@@ -12,7 +12,9 @@ repo-specific build commands, project layout, and runtime notes only.
 - USD tools: `src/simul_mcp/mcp/tools/usd_tools.py`
 - Adapters: `src/simul_mcp/adapters/`
 - Tests: `tests/`
-- Config: `config/isaac/default.yaml`, `.env.example`
+- Config: `src/simul_mcp/resources/config/default.yaml` (shipped in the wheel; environment
+  variables override it per key), `.env.example`
+- Packaged data (skills document, API docs, default + logging YAML): `src/simul_mcp/resources/`
 
 ## Build / Run
 
@@ -52,4 +54,5 @@ pytest tests/ -v -m unreal_live                               # Unreal live (req
 - Isaac Sim tools require a running Isaac Sim instance (5.1.0, 6.0.0, or 6.0.1) with the bridge on port 8229 or the stock Python socket on port 8226. `simul-mcp isaac launch` starts one with both enabled.
 - Headless USD tools work without Omniverse.
 - Some tests are marked `@pytest.mark.isaac` and need Isaac Sim runtime.
-- `skills.md` documents Isaac Sim 5.1 / 6.0 scripting patterns for `execute_isaac_script`.
+- `src/simul_mcp/resources/skills.md` documents Isaac Sim 5.1 / 6.0 scripting patterns for
+  `execute_isaac_script`; the server exposes it as the `simul://isaac-sim/skills` resource.

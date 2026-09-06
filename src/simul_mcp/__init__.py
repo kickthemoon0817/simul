@@ -12,7 +12,7 @@ __email__ = ""
 # Package metadata
 __title__ = "simul-mcp"
 __description__ = "MCP server for simulation and DCC tools with USD scene understanding"
-__url__ = "https://github.com/khemoo/simul-mcp"
+__url__ = "https://github.com/kickthemoon0817/simul"
 __license__ = "MIT"
 
 # Version info tuple

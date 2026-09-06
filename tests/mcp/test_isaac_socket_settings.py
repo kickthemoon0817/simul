@@ -35,18 +35,15 @@ def test_unknown_protocol_is_rejected() -> None:
 def test_socket_protocol_env_override_survives_the_shipped_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The documented escape hatch must actually work against config/isaac/default.yaml.
+    """The documented escape hatch must work against the shipped default.yaml.
 
-    pydantic-settings lets an explicitly passed value beat the environment, and
-    the loader passes every key the YAML defines. A key added to the shipped
-    config therefore silently disables its own env var.
+    The YAML source ranks below the environment, so a key present in the
+    shipped config must not disable its own env var.
     """
     import simul_mcp.config as config_module
+    from simul_mcp.resources import resource_filesystem_path
 
-    config_path = (
-        Path(__file__).resolve().parents[2] / "config" / "isaac" / "default.yaml"
-    )
-    monkeypatch.setenv("CONFIG_FILE", str(config_path))
+    monkeypatch.setenv("CONFIG_FILE", str(resource_filesystem_path("config", "default.yaml")))
     monkeypatch.setenv("ISAAC_SIM__SOCKET_PROTOCOL", "vscode")
     config_module._get_cached_settings.cache_clear()
     try:
