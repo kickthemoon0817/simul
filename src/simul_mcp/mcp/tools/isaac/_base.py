@@ -243,8 +243,12 @@ class IsaacScriptBase(LoggerMixin):
 
     @property
     def _raw_script_transport_mode(self) -> str:
-        """Route raw-script fallbacks away from the typed bridge by default."""
-        if self._client.bridge_enabled:
-            return "vscode_only"
+        """Choose the transport for raw script execution.
+
+        The bridge is preferred whenever it is enabled: it is the only
+        transport whose executor can bound a script with a timeout and stop
+        it on request, so a runaway loop cannot take Kit down with it. The
+        stock socket stays as the fallback ``execute`` already provides.
+        """
         return "default"
 
