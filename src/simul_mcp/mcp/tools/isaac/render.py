@@ -41,17 +41,19 @@ class RenderMixin:
         numpy data, computes statistics, cleans up, and returns results.
 
         Args:
-            aov_names: AOV names to read (e.g. ["HdrColor", "DirectDiffuse"]).
-                       Maximum 16 entries.
+            aov_names: AOV annotator names to read, as listed by
+                list_isaac_aovs (e.g. ["HdrColor", "DirectDiffuse"]).
+                Maximum 16 entries.
             camera_path: Camera prim path for the render product.
-            resolution: [width, height] for the render product. Defaults to
-                        [256, 256]. Max 3840x2160.
+            resolution: [width, height] in pixels for the render product.
+                Defaults to [256, 256]. Max 3840x2160.
             num_frames: Number of renderer update steps before reading.
-                        Clamped to [1, 60].
+                Clamped to [1, 60].
 
         Returns:
             Dict with per-AOV statistics (shape, dtype, min, max, mean,
-            rgb_max, rgb_mean, nonzero_pixels for color AOVs).
+            rgb_max, rgb_mean, nonzero_pixels for color AOVs) and a
+            ``warnings`` list of cleanup problems that did not lose data.
         """
         if len(aov_names) > 16:
             return {"error": "aov_names must not exceed 16 entries", "error_type": "ValueError"}
@@ -170,37 +172,41 @@ class RenderMixin:
                     return rpobj
                 return None
 
+            # Cleanup problems are collected, never printed on their own: the
+            # caller parses stdout as one JSON object, and a second object
+            # would turn the whole AOV result into a parse error.
+            warnings = []
             rp_path = _extract_rp_path(rp)
             for ann in annotators.values():
                 try:
                     if rp_path is not None:
                         ann.detach([rp_path])
                     else:
-                        # Probing failed — log so a future Kit release that
-                        # changes the wrapper API surfaces the issue rather
-                        # than silently corrupting the cleanup.
-                        print(json.dumps({{
-                            "_detach_warning": (
-                                "Could not extract render-product path "
-                                "string from "
-                                + type(rp).__name__
-                                + "; detach skipped to preserve AOV data."
-                            )
-                        }}))
-                except Exception as _det_err:
-                    print(json.dumps({{
-                        "_detach_warning": (
-                            "Detach raised "
-                            + type(_det_err).__name__
-                            + ": "
-                            + str(_det_err)
-                            + " — preserving AOV data."
+                        # Probing failed — say so, so a future Kit release
+                        # that changes the wrapper API surfaces the issue
+                        # rather than silently corrupting the cleanup.
+                        warnings.append(
+                            "Could not extract render-product path string from "
+                            + type(rp).__name__
+                            + "; detach skipped to preserve AOV data."
                         )
-                    }}))
+                except Exception as _det_err:
+                    warnings.append(
+                        "Detach raised "
+                        + type(_det_err).__name__
+                        + ": "
+                        + str(_det_err)
+                        + " — preserving AOV data."
+                    )
             try:
                 rp.destroy()
-            except Exception:
-                pass  # Destroy is best-effort cleanup.
+            except Exception as _destroy_err:
+                warnings.append(
+                    "Render product destroy raised "
+                    + type(_destroy_err).__name__
+                    + ": "
+                    + str(_destroy_err)
+                )
 
             output = {{
                 "frame_strategy": frame_strategy,
@@ -209,6 +215,7 @@ class RenderMixin:
                 "camera": camera,
                 "resolution": list(res),
                 "num_frames": num_frames,
+                "warnings": warnings,
             }}
             if attach_errors:
                 output["attach_errors"] = attach_errors
@@ -227,7 +234,7 @@ class RenderMixin:
         Returns:
             Dict with list of available annotator names.
         """
-        max_results = max(1, min(max_results, 10000))
+        max_results = max(1, min(max_results, 1000))
         script = textwrap.dedent(f"""\
             import json
             import omni.replicator.core as rep
@@ -252,7 +259,8 @@ class RenderMixin:
         type_name: str,
         attributes: Optional[List[str]] = None,
         root_path: str = "/",
-        max_prims: int = 200,
+        max_results: int = 200,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
         Query prims by USD schema type and read specified attributes.
@@ -262,19 +270,24 @@ class RenderMixin:
 
         Args:
             type_name: USD schema type (e.g. "UsdLux.DistantLight",
-                       "UsdGeom.Mesh", "UsdGeom.PointInstancer").
-            attributes: Attribute names to read from each prim.
-                        If None, returns prim paths only. Max 32 entries.
-            root_path: Root path to start traversal from.
-            max_prims: Maximum number of matching prims to return.
-                       Clamped to [1, 2000]. Defaults to 200.
+                "UsdGeom.Mesh", "UsdGeom.PointInstancer"), or any prim type
+                name as returned by list_isaac_prims.
+            attributes: Attribute names to read from each prim. If None,
+                returns prim paths only. Max 32 entries.
+            root_path: USD prim path to start the traversal from.
+            max_results: Maximum number of matching prims to return per
+                page. Clamped to [1, 2000]; the effective cap is reported
+                as applied_limit.
+            offset: Number of matching prims to skip before the page starts;
+                pass the previous page's next_offset to continue.
 
         Returns:
             Dict with list of matching prims and their attribute values.
         """
         if attributes and len(attributes) > 32:
             return {"error": "attributes must not exceed 32 entries", "error_type": "ValueError"}
-        max_prims = max(1, min(max_prims, 2000))
+        max_results = max(1, min(max_results, 2000))
+        offset = max(0, offset)
 
         _type_name = _pyval(type_name)
         _attributes = _pyval(attributes)
@@ -291,7 +304,8 @@ class RenderMixin:
                 type_str = {_type_name}
                 attr_names = [a for a in ({_attributes} or []) if a]
                 root_path = {_root_path}
-                max_prims = {max_prims}
+                max_results = {max_results}
+                offset = {offset}
 
                 parts = type_str.split(".")
                 schema_cls = None
@@ -304,6 +318,7 @@ class RenderMixin:
                 root_prim = stage.GetPrimAtPath(root_path) if root_path != "/" else stage.GetPseudoRoot()
                 prims_data = []
                 truncated = False
+                matched = 0
 
                 for prim in Usd.PrimRange(root_prim):
                     if schema_cls is not None:
@@ -311,6 +326,12 @@ class RenderMixin:
                             continue
                     elif prim.GetTypeName() != type_str:
                         continue
+                    matched += 1
+                    if matched <= offset:
+                        continue
+                    if len(prims_data) >= max_results:
+                        truncated = True
+                        break
 
                     prim_info = {{"path": str(prim.GetPath()), "type": prim.GetTypeName()}}
 
@@ -350,16 +371,14 @@ class RenderMixin:
                         prim_info["attributes"] = attrs
                     prims_data.append(prim_info)
 
-                    if len(prims_data) >= max_prims:
-                        truncated = True
-                        break
-
                 print(json.dumps({{
                     "type_filter": type_str,
                     "root_path": root_path,
                     "count": len(prims_data),
+                    "offset": offset,
+                    "applied_limit": max_results,
                     "truncated": truncated,
-                    "max_prims": max_prims,
+                    "next_offset": offset + len(prims_data) if truncated else None,
                     "prims": prims_data,
                 }}))
         """)
@@ -412,7 +431,7 @@ class RenderMixin:
         Returns:
             Dict with render var templates and sensor type names.
         """
-        max_results = max(1, min(max_results, 10000))
+        max_results = max(1, min(max_results, 1000))
         script = textwrap.dedent(f"""\
             import json
 

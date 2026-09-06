@@ -10,6 +10,7 @@ from fastmcp.tools.tool import ToolResult
 
 from ..schemas.blender import *
 from ..schemas.simready import *
+from ._helpers import with_param_descriptions
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
 
 def register_blender_tools(server: "SimulMCPServer") -> None:
     """Register Blender runtime specific tools."""
+    from ...adapters.blender_runtime import BlenderRuntimeSession
 
     @server.mcp.tool(
         name="get_blender_info",
@@ -55,6 +57,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def list_blender_scene_objects(
         collection_name: Optional[str] = None,
         include_hidden: bool = False,
@@ -105,6 +108,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.get_object_info)
     async def get_blender_object_info(
         object_name: str,
     ) -> ToolResult:
@@ -133,6 +137,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.get_mesh_info)
     async def get_blender_mesh_info(
         object_name: str,
     ) -> ToolResult:
@@ -161,6 +166,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.get_bounding_box)
     async def get_blender_bounding_box(
         object_name: str,
         world_space: bool = True,
@@ -196,6 +202,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.search_objects)
     async def search_blender_objects(
         name_pattern: Optional[str] = None,
         object_type: Optional[str] = None,
@@ -252,6 +259,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.get_material_info)
     async def get_blender_material_info(
         material_name: str,
     ) -> ToolResult:
@@ -282,6 +290,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.get_distance_between)
     async def get_blender_distance_between(
         object_name_a: str,
         object_name_b: str,
@@ -315,11 +324,24 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def check_blender_object_bounds(
         object_name: str,
         bounds_min: List[float],
         bounds_max: List[float],
     ) -> ToolResult:
+        """
+        Check whether an object's bounding box lies inside an axis-aligned box.
+
+        Args:
+            object_name: Name of the Blender object to test.
+            bounds_min: Minimum corner of the box as [x, y, z] in scene units
+                (Blender is Z-up).
+            bounds_max: Maximum corner of the box as [x, y, z] in scene units.
+
+        Returns:
+            Bounds check response or error response.
+        """
         input_data = server._validate_input(
             BlenderBoundsCheckRequest,
             object_name=object_name,
@@ -353,6 +375,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.capture_viewport)
     async def capture_blender_viewport(
         width: int = 512,
         height: int = 512,
@@ -392,6 +415,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.set_camera_view)
     async def set_blender_camera_view(
         location: List[float],
         rotation_euler: List[float],
@@ -428,6 +452,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.get_camera_info)
     async def get_blender_camera_info(
         camera_name: Optional[str] = None,
     ) -> ToolResult:
@@ -450,6 +475,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.focus_on_object)
     async def focus_blender_on_object(
         object_name: str,
         distance_factor: float = 2.0,
@@ -508,6 +534,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.capture_viewport_sequence)
     async def capture_blender_viewport_sequence(
         start_frame: int,
         end_frame: int,
@@ -555,6 +582,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.create_object)
     async def create_blender_object(
         object_type: str,
         name: Optional[str] = None,
@@ -598,6 +626,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.delete_object)
     async def delete_blender_object(
         object_name: str,
     ) -> ToolResult:
@@ -627,6 +656,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.set_object_transform)
     async def set_blender_object_transform(
         object_name: str,
         location: Optional[List[float]] = None,
@@ -667,6 +697,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.set_object_parent)
     async def set_blender_object_parent(
         child_name: str,
         parent_name: str,
@@ -701,6 +732,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.clear_object_parent)
     async def clear_blender_object_parent(
         object_name: str,
         keep_transform: bool = True,
@@ -735,6 +767,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.assign_material)
     async def assign_blender_material(
         object_name: str,
         material_name: Optional[str] = None,
@@ -777,6 +810,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.add_modifier)
     async def add_blender_modifier(
         object_name: str,
         modifier_type: str,
@@ -817,6 +851,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.set_light_params)
     async def set_blender_light_params(
         light_name: str,
         energy: Optional[float] = None,
@@ -868,6 +903,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.open_blend_file)
     async def open_blender_file(
         file_path: str,
     ) -> ToolResult:
@@ -897,6 +933,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.save_blend_file)
     async def save_blender_file(
         file_path: Optional[str] = None,
     ) -> ToolResult:
@@ -925,6 +962,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.import_file)
     async def import_blender_file(
         file_path: str,
         file_format: str,
@@ -961,6 +999,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.export_file)
     async def export_blender_file(
         file_path: str,
         file_format: str,
@@ -1019,6 +1058,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.set_frame)
     async def set_blender_frame(frame: int) -> ToolResult:
         input_data = server._validate_input(
             BlenderSetFrameRequest,
@@ -1066,6 +1106,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.set_frame_range)
     async def set_blender_frame_range(
         frame_start: int,
         frame_end: int,
@@ -1099,6 +1140,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.play_animation)
     async def play_blender_animation(
         action: str = "play",
     ) -> ToolResult:
@@ -1127,6 +1169,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.insert_keyframe)
     async def insert_blender_keyframe(
         object_name: str,
         data_path: str,
@@ -1167,6 +1210,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.delete_keyframe)
     async def delete_blender_keyframe(
         object_name: str,
         data_path: str,
@@ -1206,6 +1250,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.get_keyframes)
     async def get_blender_keyframes(
         object_name: str,
     ) -> ToolResult:
@@ -1239,6 +1284,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.setup_rigid_body)
     async def setup_blender_rigid_body(
         object_name: str,
         body_type: str = "ACTIVE",
@@ -1290,6 +1336,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.add_force_field)
     async def add_blender_force_field(
         field_type: str,
         strength: float = 1.0,
@@ -1329,6 +1376,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.get_force_field_info)
     async def get_blender_force_field_info(
         object_name: str,
     ) -> ToolResult:
@@ -1359,6 +1407,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.add_rigid_body_constraint)
     async def add_blender_rigid_body_constraint(
         constraint_type: str,
         object1_name: str,
@@ -1401,6 +1450,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.get_constraint_info)
     async def get_blender_constraint_info(
         object_name: str,
     ) -> ToolResult:
@@ -1431,6 +1481,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.get_physics_state)
     async def get_blender_physics_state(
         object_name: str,
     ) -> ToolResult:
@@ -1461,6 +1512,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.get_object_trajectory)
     async def get_blender_object_trajectory(
         object_name: str,
         start_frame: int,
@@ -1500,6 +1552,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.bake_simulation)
     async def bake_blender_simulation(
         frame_start: int,
         frame_end: int,
@@ -1566,6 +1619,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.execute_script)
     async def execute_blender_script(
         script: str,
         timeout: Optional[float] = None,
@@ -1602,6 +1656,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.create_mesh_from_data)
     async def create_blender_mesh_from_data(
         name: str,
         vertices: List[List[float]],
@@ -1654,6 +1709,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.apply_simready_metadata)
     async def apply_simready_metadata(
         object_name: str,
         metadata: Dict[str, Any],
@@ -1691,6 +1747,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.get_simready_metadata)
     async def get_simready_metadata(
         object_name: str,
     ) -> ToolResult:
@@ -1725,6 +1782,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.validate_simready_compliance)
     async def validate_simready_compliance(
         object_names: Optional[List[str]] = None,
         check_naming: bool = True,
@@ -1775,6 +1833,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.export_simready_usd)
     async def export_simready_usd(
         file_path: str,
         object_names: Optional[List[str]] = None,
@@ -1818,6 +1877,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(BlenderRuntimeSession.setup_simready_hierarchy)
     async def setup_simready_hierarchy(
         root_name: str,
         child_names: List[str],

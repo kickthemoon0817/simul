@@ -100,19 +100,24 @@ class MaterialsMixin:
         return await self._execute_json_script(script)
 
     async def list_isaac_materials(
-        self, max_results: int = DEFAULT_MAX_RESULTS
+        self, max_results: int = 200, offset: int = 0
     ) -> Dict[str, Any]:
         """
         List all materials in the current stage.
 
         Args:
-            max_results: Maximum materials described in the result. ``total``
-                still counts every material on the stage.
+            max_results: Maximum number of materials to return per page.
+                Clamped to [1, 1000]; the effective cap is reported as
+                applied_limit.
+            offset: Number of materials to skip before the page starts; pass
+                the previous page's next_offset to continue.
 
         Returns:
-            Dict with list of material paths and basic info.
+            Dict with a page of material paths and basic info plus the total
+            count.
         """
-        max_results = max(1, min(max_results, 10000))
+        max_results = max(1, min(max_results, 1000))
+        offset = max(0, offset)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -122,16 +127,18 @@ class MaterialsMixin:
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                max_results = {max_results}
+                offset = {offset}
+                limit = {max_results}
                 materials = []
                 total = 0
                 for p in stage.Traverse():
                     if not p.IsA(UsdShade.Material):
                         continue
+                    index = total
                     total += 1
                     # Resolving the surface shader is the expensive part of
-                    # each entry, so it only runs for entries that are kept.
-                    if len(materials) >= max_results:
+                    # each entry, so it only runs for entries on the page.
+                    if index < offset or len(materials) >= limit:
                         continue
                     mat = UsdShade.Material(p)
                     shader_result = mat.ComputeSurfaceSource()
@@ -153,11 +160,16 @@ class MaterialsMixin:
                         "name": p.GetName(),
                         "shader_type": shader_type,
                     }})
+                page = materials
+                truncated = offset + len(page) < total
                 print(json.dumps({{
-                    "count": len(materials),
+                    "count": len(page),
                     "total": total,
-                    "truncated": total > len(materials),
-                    "materials": materials,
+                    "offset": offset,
+                    "applied_limit": limit,
+                    "truncated": truncated,
+                    "next_offset": offset + len(page) if truncated else None,
+                    "materials": page,
                 }}))
         """)
         return await self._execute_json_script(script)

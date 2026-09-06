@@ -265,7 +265,7 @@ def test_depth_limited_listing_prunes_instead_of_skipping() -> None:
     )
 
     script = _capture_script(
-        "list_isaac_prims", root_path="/World", max_depth=1, max_items=500
+        "list_isaac_prims", root_path="/World", max_depth=1, max_results=500
     )
     _run_script(script, modules)
 

@@ -126,21 +126,27 @@ class PhysicsMixin:
         return await self._execute_json_script(script)
 
     async def list_isaac_physics_objects(
-        self, root_path: str = "/", max_results: int = DEFAULT_MAX_RESULTS
+        self, root_path: str = "/", max_results: int = 200, offset: int = 0
     ) -> Dict[str, Any]:
         """
         List all prims with physics APIs applied in the stage.
 
         Args:
-            root_path: Root path to search under.
+            root_path: USD prim path to search under.
             max_results: Maximum entries returned per list (rigid bodies,
-                colliders, joints). The counts always cover the whole subtree.
+                colliders and joints are paged independently). Clamped to
+                [1, 1000]; the effective cap is reported as applied_limit.
+            offset: Number of entries to skip in each list before the page
+                starts; pass the previous page's next_offset to continue.
 
         Returns:
-            Dict with lists of rigid bodies, colliders, and joints.
+            Dict with paged lists of rigid bodies, colliders, and joints and
+            the full count of each.
         """
         max_results = max(1, min(max_results, 10000))
         _root_path = _pyval(root_path)
+        max_results = max(1, min(max_results, 1000))
+        offset = max(0, offset)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -151,38 +157,42 @@ class PhysicsMixin:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
                 root = stage.GetPrimAtPath({_root_path})
-                if not root.IsValid():
-                    print(json.dumps({{"error": "Root path not found: " + {_root_path}}}))
-                else:
-                    max_results = {max_results}
-                    counts = {{"rigid_bodies": 0, "colliders": 0, "joints": 0}}
-                    found = {{"rigid_bodies": [], "colliders": [], "joints": []}}
-                    for p in Usd.PrimRange(root):
-                        kinds = []
-                        if p.HasAPI(UsdPhysics.RigidBodyAPI):
-                            kinds.append("rigid_bodies")
-                        if p.HasAPI(UsdPhysics.CollisionAPI):
-                            kinds.append("colliders")
-                        if p.IsA(UsdPhysics.Joint):
-                            kinds.append("joints")
-                        if not kinds:
-                            continue
-                        entry = {{"path": str(p.GetPath()), "type": p.GetTypeName()}}
-                        for kind in kinds:
-                            counts[kind] += 1
-                            if len(found[kind]) < max_results:
-                                found[kind].append(entry)
-                    print(json.dumps({{
-                        "root_path": {_root_path},
-                        "rigid_body_count": counts["rigid_bodies"],
-                        "collider_count": counts["colliders"],
-                        "joint_count": counts["joints"],
-                        "max_results": max_results,
-                        "truncated": any(counts[k] > max_results for k in counts),
-                        "rigid_bodies": found["rigid_bodies"],
-                        "colliders": found["colliders"],
-                        "joints": found["joints"],
-                    }}))
+                rigid_bodies = []
+                colliders = []
+                joints = []
+                for p in Usd.PrimRange(root):
+                    path = str(p.GetPath())
+                    if p.HasAPI(UsdPhysics.RigidBodyAPI):
+                        rigid_bodies.append({{"path": path, "type": p.GetTypeName()}})
+                    if p.HasAPI(UsdPhysics.CollisionAPI):
+                        colliders.append({{"path": path, "type": p.GetTypeName()}})
+                    if p.IsA(UsdPhysics.Joint):
+                        joints.append({{"path": path, "type": p.GetTypeName()}})
+                offset = {offset}
+                limit = {max_results}
+                pages = {{
+                    name: entries[offset:offset + limit]
+                    for name, entries in (
+                        ("rigid_bodies", rigid_bodies),
+                        ("colliders", colliders),
+                        ("joints", joints),
+                    )
+                }}
+                longest = max(len(rigid_bodies), len(colliders), len(joints))
+                truncated = offset + limit < longest
+                print(json.dumps({{
+                    "root_path": {_root_path},
+                    "rigid_body_count": len(rigid_bodies),
+                    "collider_count": len(colliders),
+                    "joint_count": len(joints),
+                    "offset": offset,
+                    "applied_limit": limit,
+                    "truncated": truncated,
+                    "next_offset": offset + limit if truncated else None,
+                    "rigid_bodies": pages["rigid_bodies"],
+                    "colliders": pages["colliders"],
+                    "joints": pages["joints"],
+                }}))
         """)
         return await self._execute_json_script(script)
 
@@ -426,9 +436,10 @@ class PhysicsMixin:
 
         Args:
             prim_path: USD path of the prim.
-            mass: Mass value in kg.
-            density: Density value.
-            center_of_mass: Center of mass as [x, y, z].
+            mass: Mass in kg.
+            density: Density in kg/m^3 (used when mass is not set).
+            center_of_mass: Center of mass as [x, y, z] in the prim's local
+                frame, stage units (metres by default).
 
         Returns:
             Dict confirming updated mass properties.
@@ -508,21 +519,34 @@ class PhysicsMixin:
         self,
         prim_path: str = "/World/PhysicsScene",
         gravity_direction: Optional[FloatList] = None,
-        gravity_magnitude: float = 9.81,
+        gravity_magnitude: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Create a UsdPhysics.Scene prim with gravity settings.
+        Create a UsdPhysics.Scene prim, or update the gravity of an existing one.
 
         Args:
             prim_path: USD path for the physics scene prim.
-            gravity_direction: Gravity direction vector, defaults to [0, 0, -1].
-            gravity_magnitude: Gravity magnitude in m/s^2.
+            gravity_direction: Gravity direction as a unit vector [x, y, z] in
+                stage axes; Isaac Sim stages are Z-up, so straight down is
+                [0, 0, -1]. That is the default for a new scene; an existing
+                scene keeps its direction unless one is passed.
+            gravity_magnitude: Gravity magnitude in m/s^2 (positive, along
+                gravity_direction). Defaults to 9.81 for a new scene; an
+                existing scene keeps its magnitude unless one is passed.
 
         Returns:
-            Dict confirming the physics scene was created with its settings.
+            Dict with the scene's gravity, ``created`` for a new prim, and
+            ``already_existed`` plus ``updated`` for a scene that was there.
         """
         _prim_path = _pyval(prim_path)
-        grav_dir = gravity_direction or [0.0, 0.0, -1.0]
+        _requested_direction = _pyval(
+            [float(component) for component in gravity_direction]
+            if gravity_direction is not None
+            else None
+        )
+        _requested_magnitude = _pyval(
+            float(gravity_magnitude) if gravity_magnitude is not None else None
+        )
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -532,28 +556,62 @@ class PhysicsMixin:
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
+                requested_direction = {_requested_direction}
+                requested_magnitude = {_requested_magnitude}
+
+                def _gravity_of(scene):
+                    direction = scene.GetGravityDirectionAttr().Get()
+                    magnitude = scene.GetGravityMagnitudeAttr().Get()
+                    return {{
+                        "gravity_direction": (
+                            [float(c) for c in direction] if direction is not None else None
+                        ),
+                        "gravity_magnitude": (
+                            float(magnitude) if magnitude is not None else None
+                        ),
+                    }}
+
                 existing = stage.GetPrimAtPath({_prim_path})
                 if existing.IsValid() and existing.IsA(UsdPhysics.Scene):
-                    print(json.dumps({{
+                    scene = UsdPhysics.Scene(existing)
+                    updated = False
+                    if requested_direction is not None:
+                        scene.CreateGravityDirectionAttr().Set(Gf.Vec3f(*requested_direction))
+                        updated = True
+                    if requested_magnitude is not None:
+                        scene.CreateGravityMagnitudeAttr().Set(requested_magnitude)
+                        updated = True
+                    result = {{
                         "prim_path": {_prim_path},
                         "already_existed": True,
-                        "message": "Physics scene already exists at this path",
-                    }}))
+                        "created": False,
+                        "updated": updated,
+                        "message": (
+                            "Physics scene already exists at this path; gravity updated"
+                            if updated
+                            else "Physics scene already exists at this path; gravity unchanged"
+                        ),
+                    }}
+                    result.update(_gravity_of(scene))
+                    print(json.dumps(result))
                 else:
                     scene_prim = stage.DefinePrim({_prim_path}, "PhysicsScene")
                     if not scene_prim.IsValid():
                         print(json.dumps({{"error": "Failed to create physics scene prim"}}))
                     else:
                         scene = UsdPhysics.Scene(scene_prim)
-                        grav_dir = Gf.Vec3f({grav_dir[0]}, {grav_dir[1]}, {grav_dir[2]})
-                        scene.CreateGravityDirectionAttr(grav_dir)
-                        scene.CreateGravityMagnitudeAttr({gravity_magnitude})
-                        print(json.dumps({{
+                        direction = requested_direction or [0.0, 0.0, -1.0]
+                        magnitude = requested_magnitude if requested_magnitude is not None else 9.81
+                        scene.CreateGravityDirectionAttr(Gf.Vec3f(*direction))
+                        scene.CreateGravityMagnitudeAttr(magnitude)
+                        result = {{
                             "prim_path": {_prim_path},
-                            "gravity_direction": [{grav_dir[0]}, {grav_dir[1]}, {grav_dir[2]}],
-                            "gravity_magnitude": {gravity_magnitude},
+                            "already_existed": False,
                             "created": True,
-                        }}))
+                            "updated": False,
+                        }}
+                        result.update(_gravity_of(scene))
+                        print(json.dumps(result))
         """)
         return await self._execute_json_script(script)
 

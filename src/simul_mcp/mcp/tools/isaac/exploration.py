@@ -19,6 +19,7 @@ from ._shared import (
     _pyval,
     logger,
 )
+from .scene import COUNTED_PRIMS_HELPER
 
 
 class ExplorationMixin:
@@ -128,21 +129,26 @@ class ExplorationMixin:
         return await self._execute_json_script(script)
 
     async def list_isaac_lights(
-        self, root_path: str = "/", max_results: int = DEFAULT_MAX_RESULTS
+        self, root_path: str = "/", max_results: int = 200, offset: int = 0
     ) -> Dict[str, Any]:
         """
         List all light prims in the scene under a root path.
 
         Args:
-            root_path: USD path to search under.
-            max_results: Maximum lights described in the result. ``total``
-                still counts every light under root_path.
+            root_path: USD prim path to search under.
+            max_results: Maximum number of lights to return per page. Clamped
+                to [1, 1000]; the effective cap is reported as applied_limit.
+            offset: Number of lights to skip before the page starts; pass the
+                previous page's next_offset to continue.
 
         Returns:
-            Dict with count and list of lights with type, intensity, color.
+            Dict with a page of lights (type, intensity, color) and the total
+            count.
         """
-        max_results = max(1, min(max_results, 10000))
+        max_results = max(1, min(max_results, 1000))
         _root_path = _pyval(root_path)
+        max_results = max(1, min(max_results, 1000))
+        offset = max(0, offset)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -156,14 +162,16 @@ class ExplorationMixin:
                 if not root.IsValid():
                     print(json.dumps({{"error": "Root path not found: " + {_root_path}}}))
                 else:
-                    max_results = {max_results}
+                    offset = {offset}
+                    limit = {max_results}
                     lights = []
                     total = 0
                     for p in Usd.PrimRange(root):
                         if not p.HasAPI(UsdLux.LightAPI):
                             continue
+                        index = total
                         total += 1
-                        if len(lights) >= max_results:
+                        if index < offset or len(lights) >= limit:
                             continue
                         info = {{
                             "path": str(p.GetPath()),
@@ -183,12 +191,17 @@ class ExplorationMixin:
                             if temp and temp.Get() is not None:
                                 info["color_temperature"] = float(temp.Get())
                         lights.append(info)
+                    page = lights
+                    truncated = offset + len(page) < total
                     print(json.dumps({{
                         "root_path": {_root_path},
-                        "count": len(lights),
+                        "count": len(page),
                         "total": total,
-                        "truncated": total > len(lights),
-                        "lights": lights,
+                        "offset": offset,
+                        "applied_limit": limit,
+                        "truncated": truncated,
+                        "next_offset": offset + len(page) if truncated else None,
+                        "lights": page,
                     }}))
         """)
         return await self._execute_json_script(script)
@@ -269,10 +282,15 @@ class ExplorationMixin:
             prim_path: USD path for the new light (e.g. "/World/Lights/DomeLight").
             light_type: One of "DomeLight", "DistantLight", "SphereLight",
                         "RectLight", "DiskLight", "CylinderLight".
-            intensity: Light intensity.
+            intensity: Light intensity written to UsdLux inputs:intensity, a
+                unitless radiance multiplier. RTX-scale starting points:
+                DomeLight ~1000, DistantLight ~3000, SphereLight/RectLight
+                ~30000 or more.
             color: RGB color as [r, g, b] floats 0-1. Defaults to [1, 1, 1].
-            color_temperature: Optional Kelvin color temperature (enables temperature mode).
-            angle: Cone angle for DistantLight (degrees). Ignored for other types.
+            color_temperature: Optional color temperature in Kelvin (enables
+                temperature mode).
+            angle: Angular diameter for DistantLight in degrees. Ignored for
+                other types.
             texture_file: Texture file path for DomeLight (e.g. HDRI map).
 
         Returns:
@@ -394,20 +412,27 @@ class ExplorationMixin:
         self,
         root_path: str = "/",
         max_depth: int = 5,
-        max_prims: int = 150,
+        max_results: int = 150,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
         Get a full subtree as a flat list with depth info.
 
         Args:
-            root_path: USD path of the subtree root.
-            max_depth: Maximum depth to traverse.
-            max_prims: Maximum number of prims to return.
+            root_path: USD prim path of the subtree root.
+            max_depth: Maximum depth to traverse below root_path.
+            max_results: Maximum number of prims to return per page. Clamped
+                to [1, 1000]; the effective cap is reported as applied_limit.
+            offset: Number of prims (in traversal order) to skip before the
+                page starts; pass the previous page's next_offset to continue.
 
         Returns:
-            Dict with tree structure showing path, type, name, and depth.
+            Dict with a page of prims showing path, type, name, depth, and
+            child count.
         """
         _root_path = _pyval(root_path)
+        max_results = max(1, min(max_results, 1000))
+        offset = max(0, offset)
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -424,6 +449,9 @@ class ExplorationMixin:
                     root_depth = len({_root_path}.rstrip("/").split("/")) - 1
                     prims = []
                     truncated = False
+                    matched = 0
+                    offset = {offset}
+                    limit = {max_results}
                     prim_iter = iter(Usd.PrimRange(root))
                     for p in prim_iter:
                         path_str = str(p.GetPath())
@@ -432,7 +460,10 @@ class ExplorationMixin:
                             prim_iter.PruneChildren()
                         if depth > {max_depth}:
                             continue
-                        if len(prims) >= {max_prims}:
+                        matched += 1
+                        if matched <= offset:
+                            continue
+                        if len(prims) >= limit:
                             truncated = True
                             break
                         prims.append({{
@@ -445,7 +476,10 @@ class ExplorationMixin:
                     print(json.dumps({{
                         "root_path": {_root_path},
                         "count": len(prims),
+                        "offset": offset,
+                        "applied_limit": limit,
                         "truncated": truncated,
+                        "next_offset": offset + len(prims) if truncated else None,
                         "max_depth": {max_depth},
                         "prims": prims,
                     }}))
@@ -580,13 +614,14 @@ class ExplorationMixin:
         Get aggregate scene statistics: vertex/face counts, material usage.
 
         Args:
-            root_path: USD path to compute stats under.
+            root_path: USD prim path to compute stats under.
 
         Returns:
-            Dict with total_prims, total_vertices, total_faces, etc.
+            Dict with total_prims, total_vertices, total_faces, etc. Prims are
+            counted the same way as get_isaac_scene_summary.
         """
         _root_path = _pyval(root_path)
-        script = textwrap.dedent(f"""\
+        script = COUNTED_PRIMS_HELPER + textwrap.dedent(f"""\
             import json
             import omni.usd
             from pxr import Usd, UsdGeom, UsdShade, UsdLux
@@ -608,9 +643,9 @@ class ExplorationMixin:
                     total_materials = 0
                     total_xforms = 0
                     type_counts = {{}}
-                    for p in Usd.PrimRange(root):
+                    for p in _counted_prims(stage, {_root_path}):
                         total_prims += 1
-                        tname = p.GetTypeName()
+                        tname = _prim_type_label(p)
                         type_counts[tname] = type_counts.get(tname, 0) + 1
                         if p.IsA(UsdGeom.Mesh):
                             total_meshes += 1
@@ -659,7 +694,7 @@ class ExplorationMixin:
         Returns:
             Dict with unique texture file paths and their referencing materials.
         """
-        max_results = max(1, min(max_results, 10000))
+        max_results = max(1, min(max_results, 1000))
         _root_path = _pyval(root_path)
         script = textwrap.dedent(f"""\
             import json
@@ -817,7 +852,7 @@ class ExplorationMixin:
         Returns:
             Dict with list of selected prim paths and their types.
         """
-        max_results = max(1, min(max_results, 10000))
+        max_results = max(1, min(max_results, 1000))
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -899,9 +934,10 @@ class ExplorationMixin:
         Cast a ray into the scene and return the closest hit.
 
         Args:
-            origin: Ray origin as [x, y, z].
+            origin: Ray origin as [x, y, z] in world-space stage units (metres
+                by default; Isaac Sim stages are Z-up).
             direction: Ray direction as [x, y, z] (will be normalized).
-            max_distance: Maximum ray distance.
+            max_distance: Maximum ray distance in stage units.
 
         Returns:
             Dict with hit prim, position, normal, and distance.
@@ -978,7 +1014,7 @@ class ExplorationMixin:
         Returns:
             Dict with matching prims sorted by distance from center.
         """
-        max_results = max(1, min(max_results, 10000))
+        max_results = max(1, min(max_results, 1000))
         _root_path = _pyval(root_path)
         _prim_type = _pyval(prim_type or None)
         _center = _pyval([float(c) for c in center])

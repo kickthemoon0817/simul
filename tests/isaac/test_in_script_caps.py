@@ -151,5 +151,5 @@ def test_caps_are_clamped_before_reaching_the_script(
     asyncio.run(getattr(tools, method)(max_results=0))
 
     assert "999999" not in captured[-2]
-    assert re.search(r"max_results = 10000\b", captured[-2])
-    assert re.search(r"max_results = 1\b", captured[-1])
+    assert re.search(r"(max_results|limit) = 1000\b", captured[-2])
+    assert re.search(r"(max_results|limit) = 1\b", captured[-1])

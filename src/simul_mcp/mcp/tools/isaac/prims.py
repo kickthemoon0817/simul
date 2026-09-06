@@ -131,9 +131,11 @@ class PrimEditMixin:
 
         Args:
             prim_path: USD path of the prim.
-            translation: Position as [x, y, z].
-            rotation_euler: Rotation in degrees as [x, y, z] (XYZ Euler).
-            scale: Scale as [x, y, z].
+            translation: Local position as [x, y, z] in stage units (metres
+                by default; Isaac Sim stages are Z-up).
+            rotation_euler: Rotation in degrees as [x, y, z], applied in XYZ
+                Euler order.
+            scale: Scale factors as [x, y, z]; 1.0 is unscaled.
 
         Returns:
             Dict with updated transform values.

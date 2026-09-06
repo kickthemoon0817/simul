@@ -11,6 +11,7 @@ from fastmcp.tools.tool import ToolResult
 
 from ..schemas.common import ErrorResponse
 from ..schemas.unreal import *
+from ._helpers import with_param_descriptions
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -28,6 +29,9 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
               ``unreal.tool_surface`` / ``simul-mcp server --unreal-tools``;
               the full set is also reachable via ``simul unreal --help``.
     """
+    # Imported here rather than at module level: the adapter needs aiohttp,
+    # and this module must import even where the Unreal backend is absent.
+    from ...adapters.unreal_runtime import UnrealRuntimeSession
 
     @server.mcp.tool(
         name="unreal_health_check",
@@ -104,6 +108,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def list_unreal_instances(
         scan: bool = True,
     ) -> ToolResult:
@@ -215,6 +220,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def capture_unreal_viewport(
         resolution_x: int = 1920,
         resolution_y: int = 1080,
@@ -278,6 +284,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def execute_unreal_script(
         code: str,
         mode: str = "ExecuteFile",
@@ -395,6 +402,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def list_unreal_actors(
         class_filter: str = "",
         tag_filter: str = "",
@@ -434,6 +442,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def get_unreal_actor_info(actor_path: str) -> ToolResult:
         """
         Get detailed information about a specific actor.
@@ -463,6 +472,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def search_unreal_assets(
         query: str = "",
         class_names: str = "",
@@ -522,6 +532,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def describe_unreal_object(object_path: str) -> ToolResult:
         """
         Describe a UObject's properties and functions.
@@ -551,6 +562,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def get_unreal_actor_thumbnail(
         asset_path: str,
         width: int = 256,
@@ -642,6 +654,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def set_unreal_camera_view(
         location_x: float = 0.0,
         location_y: float = 0.0,
@@ -689,6 +702,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def focus_unreal_on_actor(
         actor_path: str,
         distance: float = 0.0,
@@ -726,6 +740,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def spawn_unreal_actor(
         asset_path: str,
         location_x: float = 0.0,
@@ -736,7 +751,18 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         rotation_roll: float = 0.0,
         label: str = "",
     ) -> ToolResult:
-        """Spawn an actor from class or asset path."""
+        """Spawn an actor from class or asset path.
+
+        Args:
+            asset_path: Asset or class path to spawn from.
+            location_x: Spawn X position in Unreal units (cm).
+            location_y: Spawn Y position in Unreal units (cm).
+            location_z: Spawn Z position in Unreal units (cm); Unreal is Z-up.
+            rotation_pitch: Spawn pitch in degrees (rotation about Y).
+            rotation_yaw: Spawn yaw in degrees (rotation about Z).
+            rotation_roll: Spawn roll in degrees (rotation about X).
+            label: Optional actor label in the outliner.
+        """
         return await server._exec_backend(
             "spawn_unreal_actor",
             server.unreal_adapter,
@@ -762,6 +788,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.delete_actor)
     async def delete_unreal_actor(
         actor_path: str,
     ) -> ToolResult:
@@ -786,6 +813,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def set_unreal_actor_transform(
         actor_path: str,
         location_x: float = 0.0,
@@ -798,7 +826,20 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         scale_y: float = 1.0,
         scale_z: float = 1.0,
     ) -> ToolResult:
-        """Set an actor's transform."""
+        """Set an actor's transform.
+
+        Args:
+            actor_path: Actor object path.
+            location_x: World X position in Unreal units (cm).
+            location_y: World Y position in Unreal units (cm).
+            location_z: World Z position in Unreal units (cm); Unreal is Z-up.
+            rotation_pitch: Pitch in degrees (rotation about Y).
+            rotation_yaw: Yaw in degrees (rotation about Z).
+            rotation_roll: Roll in degrees (rotation about X).
+            scale_x: Scale factor along X (1.0 is unscaled).
+            scale_y: Scale factor along Y (1.0 is unscaled).
+            scale_z: Scale factor along Z (1.0 is unscaled).
+        """
         return await server._exec_backend(
             "set_unreal_actor_transform",
             server.unreal_adapter,
@@ -824,6 +865,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.set_actor_property)
     async def set_unreal_actor_property(
         actor_path: str,
         property_name: str,
@@ -856,6 +898,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.call_actor_function)
     async def call_unreal_actor_function(
         actor_path: str,
         function_name: str,
@@ -886,6 +929,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.set_actor_parent)
     async def set_unreal_actor_parent(
         actor_path: str,
         parent_path: str = "",
@@ -913,6 +957,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.add_component)
     async def add_unreal_component(
         actor_path: str,
         component_class: str,
@@ -943,6 +988,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.set_actor_visibility)
     async def set_unreal_actor_visibility(
         actor_path: str,
         visible: bool = True,
@@ -976,6 +1022,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.get_material_info)
     async def get_unreal_material_info(
         material_path: str,
     ) -> ToolResult:
@@ -1002,13 +1049,24 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def set_unreal_material_params(
         material_path: str,
         scalar_params_json: str = "",
         vector_params_json: str = "",
         texture_params_json: str = "",
     ) -> ToolResult:
-        """Set material instance parameters."""
+        """Set material instance parameters.
+
+        Args:
+            material_path: Material Instance asset path.
+            scalar_params_json: JSON object of scalar parameter name to float
+                value, e.g. '{"Roughness": 0.4}'. Empty string sets none.
+            vector_params_json: JSON object of vector parameter name to an
+                [R, G, B, A] list of floats. Empty string sets none.
+            texture_params_json: JSON object of texture parameter name to a
+                texture asset path. Empty string sets none.
+        """
         import json as json_lib
 
         def _call(session):
@@ -1050,6 +1108,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.create_material_instance)
     async def create_unreal_material_instance(
         parent_path: str,
         instance_name: str,
@@ -1080,6 +1139,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.assign_material)
     async def assign_unreal_material(
         actor_path: str,
         material_path: str,
@@ -1110,6 +1170,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.set_light_params)
     async def set_unreal_light_params(
         actor_path: str,
         intensity: Optional[float] = None,
@@ -1152,6 +1213,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.set_render_settings)
     async def set_unreal_render_settings(
         setting_name: str,
         setting_value: str,
@@ -1181,6 +1243,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.control_simulation)
     async def control_unreal_simulation(
         action: str,
     ) -> ToolResult:
@@ -1226,6 +1289,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.enable_physics)
     async def enable_unreal_physics(
         actor_path: str,
         enable: bool = True,
@@ -1256,6 +1320,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.set_collision)
     async def set_unreal_collision(
         actor_path: str,
         collision_preset: str = "",
@@ -1285,6 +1350,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.apply_force)
     async def apply_unreal_force(
         actor_path: str,
         force_x: float = 0.0,
@@ -1325,6 +1391,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.set_physics_params)
     async def set_unreal_physics_params(
         actor_path: str,
         mass: Optional[float] = None,
@@ -1362,6 +1429,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def import_unreal_usd(
         usd_path: str,
         target_path: Optional[str] = None,
@@ -1369,7 +1437,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         import_materials: bool = True,
         scale_factor: float = 1.0,
     ) -> ToolResult:
-        """Import USD file into Unreal."""
+        """Import USD file into Unreal.
+
+        Args:
+            usd_path: Path to the USD file on disk; must be inside the sandbox.
+            target_path: Content browser destination path (defaults to
+                /Game/Imports).
+            import_animations: Import animation data when true.
+            import_materials: Import materials when true.
+            scale_factor: Uniform scale applied on import; 1.0 keeps the file's
+                units (USD metres become Unreal cm via the Interchange pipeline).
+        """
         return await server._exec_backend(
             "import_unreal_usd",
             server.unreal_adapter,
@@ -1396,6 +1474,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def export_unreal_usd(
         actor_paths: str,
         output_path: str,
@@ -1403,7 +1482,16 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         export_animations: bool = True,
         convert_to_meters: bool = True,
     ) -> ToolResult:
-        """Export actors to USD."""
+        """Export actors to USD.
+
+        Args:
+            actor_paths: Comma-separated actor object paths to export.
+            output_path: Output USD file path; must be inside the sandbox.
+            export_materials: Export materials when true.
+            export_animations: Export animation data when true.
+            convert_to_meters: Write the stage in metres (metersPerUnit=1)
+                instead of Unreal centimetres.
+        """
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -1438,6 +1526,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def convert_to_simready(
         actor_paths: str,
         output_directory: str,
@@ -1445,7 +1534,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         add_collision: bool = True,
         semantic_labels: str = "",
     ) -> ToolResult:
-        """Convert actors to SimReady format."""
+        """Convert actors to SimReady format.
+
+        Args:
+            actor_paths: Comma-separated actor object paths to convert.
+            output_directory: Directory for the SimReady USD output; must be
+                inside the sandbox.
+            add_physics: Add physics schemas (rigid body) to the output.
+            add_collision: Generate collision geometry.
+            semantic_labels: Comma-separated semantic labels to attach, in
+                actor order. Empty string attaches none.
+        """
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -1486,11 +1585,18 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def validate_simready_asset(
         asset_path: str,
         checks: str = "",
     ) -> ToolResult:
-        """Validate asset against SimReady spec."""
+        """Validate asset against SimReady spec.
+
+        Args:
+            asset_path: USD file path to validate; must be inside the sandbox.
+            checks: Comma-separated validation checks to run. Empty string runs
+                every check.
+        """
 
         def _call(session):
             # Parsing stays inside the envelope: malformed input must
@@ -1549,6 +1655,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.batch_operations)
     async def batch_unreal_operations(
         operations: str,
     ) -> ToolResult:
@@ -1582,6 +1689,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.query_scene_graph)
     async def query_unreal_scene_graph(
         root_path: Optional[str] = None,
         max_depth: int = 10,
@@ -1613,6 +1721,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.analyze_scene_for_robotics)
     async def analyze_unreal_scene_for_robotics(
         analysis_types: str = "",
         actor_filter: Optional[str] = None,
@@ -1652,6 +1761,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.generate_procedural_scene)
     async def generate_unreal_procedural_scene(
         scene_type: str,
         parameters: str = "{}",
@@ -1695,6 +1805,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.get_actor_by_semantic_label)
     async def get_unreal_actor_by_semantic_label(
         label: str,
         match_mode: str = "exact",
@@ -1728,6 +1839,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.generate_mesh_primitive)
     async def generate_unreal_mesh_primitive(
         primitive_type: str,
         dimensions: str = "{}",
@@ -1773,6 +1885,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.apply_mesh_boolean)
     async def apply_unreal_mesh_boolean(
         target_mesh_path: str,
         tool_mesh_path: str,
@@ -1802,6 +1915,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.compute_convex_hull)
     async def compute_unreal_convex_hull(
         mesh_path: str,
     ) -> ToolResult:
@@ -1828,6 +1942,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.decompose_convex_hull)
     async def decompose_unreal_convex_hull(
         mesh_path: str,
         max_hulls: int = 16,
@@ -1862,6 +1977,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.edit_mesh_topology)
     async def edit_unreal_mesh_topology(
         mesh_path: str,
         operation: str,
@@ -1910,6 +2026,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.subdivide_mesh)
     async def subdivide_unreal_mesh(
         mesh_path: str,
         level: int = 2,
@@ -1940,6 +2057,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.simplify_mesh)
     async def simplify_unreal_mesh(
         mesh_path: str,
         target_triangle_count: Optional[int] = None,
@@ -1972,6 +2090,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.cut_mesh_plane)
     async def cut_unreal_mesh_plane(
         mesh_path: str,
         plane_origin: str,
@@ -2014,6 +2133,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.validate_mesh)
     async def validate_unreal_mesh(
         mesh_path: str,
         checks: str = "",
@@ -2052,6 +2172,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.convert_mesh_format)
     async def convert_unreal_mesh_format(
         mesh_path: str,
         target_format: str,
@@ -2094,6 +2215,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.remesh_mesh)
     async def remesh_unreal_mesh(
         mesh_path: str,
         mode: str = "uniform",
@@ -2128,6 +2250,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions(UnrealRuntimeSession.compute_mesh_uv)
     async def compute_unreal_mesh_uv(
         mesh_path: str,
         method: str = "auto_uv",

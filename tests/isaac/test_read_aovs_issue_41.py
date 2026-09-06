@@ -124,15 +124,31 @@ def test_read_aovs_script_wraps_cleanup_in_try_except() -> None:
     statistics had already been computed.
     """
     script = _capture_script()
-    # The iter21 marker that the AttributeError no longer aborts the
-    # tool: any detach failure surfaces a `_detach_warning` print and
-    # the per-AOV stats already collected are returned. A regression
-    # that strips the wrap will lose this marker text.
-    assert "_detach_warning" in script, (
-        "Expected the iter21 cleanup marker. Without the try/except "
-        "wrap, a detach failure (e.g. unexpected wrapper type in a "
-        "future Kit release) would lose AOV data again."
+    # Any cleanup failure lands in the payload's ``warnings`` list and the
+    # per-AOV stats already collected are returned. A regression that
+    # strips the wrap will lose this marker text.
+    assert "warnings.append(" in script, (
+        "Expected cleanup failures to be collected into the warnings list. "
+        "Without the try/except wrap, a detach failure (e.g. unexpected "
+        "wrapper type in a future Kit release) would lose AOV data again."
     )
+    assert '"warnings": warnings' in script
+
+
+def test_read_aovs_script_prints_exactly_one_json_object() -> None:
+    """The caller parses stdout as one JSON object.
+
+    A detach warning printed on its own line used to precede the payload,
+    so ``json.loads`` raised ``Extra data`` and the AOV data was dropped.
+    Every warning must ride inside the single payload instead.
+    """
+    script = _capture_script()
+    code_lines = [
+        line for line in script.splitlines() if not line.strip().startswith("#")
+    ]
+    print_calls = [line for line in code_lines if "print(" in line]
+    assert len(print_calls) == 1, print_calls
+    assert "print(json.dumps(output))" in print_calls[0]
 
 
 def test_read_aovs_script_preserves_attach_and_get_data_paths() -> None:

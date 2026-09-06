@@ -288,8 +288,8 @@ class BridgeCommandService:
 
         root_path = str(request.payload.get("root_path", "/"))
         prim_type = request.payload.get("prim_type")
-        max_depth = int(request.payload.get("max_depth", -1))
-        max_items = max(1, min(int(request.payload.get("max_items", 500)), 10000))
+        max_depth = int(request.payload.get("max_depth", 5))
+        max_results, offset = self._page_bounds(request.payload, default_limit=100)
 
         root = stage.GetPrimAtPath(root_path)
         if not root.IsValid():
@@ -301,9 +301,11 @@ class BridgeCommandService:
 
         root_depth = len(str(root.GetPath()).rstrip("/").split("/"))
         prims = []
+        matched = 0
+        truncated = False
         # continue skips emitting a prim but still descends its subtree, so the
         # depth limit bounded the response and not the work. Prune instead —
-        # and the max_items break below is unreachable while we continue past
+        # and the page-full break below is unreachable while we continue past
         # every deep prim on the stage.
         prim_iter = iter(Usd.PrimRange(root))
         for prim in prim_iter:
@@ -316,6 +318,12 @@ class BridgeCommandService:
             prim_type_name = prim.GetTypeName()
             if prim_type and prim_type_name != prim_type:
                 continue
+            matched += 1
+            if matched <= offset:
+                continue
+            if len(prims) >= max_results:
+                truncated = True
+                break
             prims.append(
                 {
                     "path": path_str,
@@ -324,8 +332,6 @@ class BridgeCommandService:
                     "active": prim.IsActive(),
                 }
             )
-            if len(prims) >= max_items:
-                break
 
         return BridgeResponse.success(
             request.request_id,
@@ -333,8 +339,12 @@ class BridgeCommandService:
                 "transport": "simul_bridge",
                 "root_path": root_path,
                 "type_filter": prim_type,
+                "max_depth": max_depth,
                 "count": len(prims),
-                "truncated": len(prims) >= max_items,
+                "offset": offset,
+                "applied_limit": max_results,
+                "truncated": truncated,
+                "next_offset": offset + len(prims) if truncated else None,
                 "prims": prims,
             },
         )
@@ -467,9 +477,21 @@ class BridgeCommandService:
             )
 
         search_type = str(request.payload.get("search_type", "type"))
-        query = str(request.payload.get("query", "Mesh"))
+        query = request.payload.get("query")
+        if not isinstance(query, str) or not query.strip():
+            return BridgeResponse.failure(
+                request.request_id,
+                "InvalidRequest",
+                "search_prims requires a non-empty string payload.query.",
+            )
         root_path = str(request.payload.get("root_path", "/"))
-        max_results = max(1, min(int(request.payload.get("max_results", 100)), 10000))
+        max_results, offset = self._page_bounds(request.payload, default_limit=100)
+        if search_type not in ("type", "name"):
+            return BridgeResponse.failure(
+                request.request_id,
+                "InvalidSearchType",
+                f"Unsupported search_type: {search_type}",
+            )
 
         root = stage.GetPrimAtPath(root_path)
         if not root.IsValid():
@@ -480,27 +502,28 @@ class BridgeCommandService:
             )
 
         matches = []
+        matched = 0
+        truncated = False
         for prim in Usd.PrimRange(root):
             if search_type == "type":
                 match = prim.GetTypeName() == query
-            elif search_type == "name":
-                match = query.lower() in prim.GetName().lower()
             else:
-                return BridgeResponse.failure(
-                    request.request_id,
-                    "InvalidSearchType",
-                    f"Unsupported search_type: {search_type}",
-                )
-            if match:
-                matches.append(
-                    {
-                        "path": str(prim.GetPath()),
-                        "type": prim.GetTypeName(),
-                        "name": prim.GetName(),
-                    }
-                )
+                match = query.lower() in prim.GetName().lower()
+            if not match:
+                continue
+            matched += 1
+            if matched <= offset:
+                continue
             if len(matches) >= max_results:
+                truncated = True
                 break
+            matches.append(
+                {
+                    "path": str(prim.GetPath()),
+                    "type": prim.GetTypeName(),
+                    "name": prim.GetName(),
+                }
+            )
 
         return BridgeResponse.success(
             request.request_id,
@@ -510,7 +533,10 @@ class BridgeCommandService:
                 "query": query,
                 "root_path": root_path,
                 "count": len(matches),
-                "truncated": len(matches) >= max_results,
+                "offset": offset,
+                "applied_limit": max_results,
+                "truncated": truncated,
+                "next_offset": offset + len(matches) if truncated else None,
                 "matches": matches,
             },
         )
@@ -742,3 +768,23 @@ class BridgeCommandService:
             "InvalidSimulationCommand",
             f"Unsupported simulation command: {command}",
         )
+
+    @staticmethod
+    def _page_bounds(payload: dict[str, Any], default_limit: int) -> tuple[int, int]:
+        """Read the page size and offset of a listing request.
+
+        ``max_items`` is the name clients used before ``max_results`` and is
+        honoured when the new name is absent.
+
+        Args:
+            payload: The request payload.
+            default_limit: Page size when the payload names none.
+
+        Returns:
+            ``(applied_limit, offset)`` with the limit clamped to [1, 10000]
+            and the offset to a non-negative integer.
+        """
+        requested = payload.get("max_results", payload.get("max_items", default_limit))
+        applied_limit = max(1, min(int(requested), 10000))
+        offset = max(0, int(payload.get("offset", 0)))
+        return applied_limit, offset
