@@ -4,6 +4,7 @@ Isaac Sim TCP socket tool registration for Simul MCP Server.
 
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from fastmcp.tools.tool import ToolResult
@@ -21,7 +22,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     Isaac Sim instance via the stock isaacsim.code_editor.vscode extension.
     """
 
-    @server.mcp.tool(
+    @server._script_tool(
         name="execute_isaac_script",
         description=(
             "Execute arbitrary Python code inside a running Isaac Sim application. "
@@ -55,6 +56,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "execute_isaac_script",
             server._isaac_tools.execute_script(code),
             params={"code_bytes": len(code)},
+            script_sha256=hashlib.sha256(code.encode("utf-8")).hexdigest(),
         )
 
     @server.mcp.tool(
@@ -269,7 +271,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "captures."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True
+            read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
     async def capture_isaac_viewport(
@@ -312,7 +314,11 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="delete_isaac_prim",
-        description="Delete a prim and all its children from the stage.",
+        description=(
+            "Delete a prim and all its children from the stage. Refuses the "
+            "pseudo-root '/'. Refuses '/World' unless allow_root_delete=true, "
+            "since that removes the whole scene."
+        ),
         annotations=server._tool_annotations(
             read_only=False,
             idempotent=True,
@@ -320,10 +326,14 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             destructive=True,
         ),
     )
-    async def delete_isaac_prim(prim_path: str) -> ToolResult:
+    async def delete_isaac_prim(
+        prim_path: str, allow_root_delete: bool = False
+    ) -> ToolResult:
         return await server._exec_isaac(
             "delete_isaac_prim",
-            server._isaac_tools.delete_isaac_prim(prim_path=prim_path),
+            server._isaac_tools.delete_isaac_prim(
+                prim_path=prim_path, allow_root_delete=allow_root_delete
+            ),
         )
 
     @server.mcp.tool(
@@ -333,7 +343,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "degrees), and/or scale."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True
+            read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
     async def set_isaac_prim_transform(
@@ -356,7 +366,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         name="set_isaac_prim_visibility",
         description="Show or hide a prim in the viewport.",
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True
+            read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
     async def set_isaac_prim_visibility(prim_path: str, visible: bool) -> ToolResult:
@@ -410,7 +420,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         name="reparent_isaac_prim",
         description="Move a prim under a new parent in the hierarchy.",
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True
+            read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
     async def reparent_isaac_prim(prim_path: str, new_parent_path: str) -> ToolResult:
@@ -504,7 +514,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "Applies MassAPI if not already present."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True
+            read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
     async def set_isaac_mass_properties(
@@ -530,7 +540,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "restitution coefficients."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True
+            read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
     async def set_isaac_physics_material(
@@ -697,7 +707,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "with that material's appearance."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True
+            read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
     async def assign_isaac_material(prim_path: str, material_path: str) -> ToolResult:
@@ -717,7 +727,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "roughness_constant)."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True
+            read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
     async def set_isaac_material_property(
@@ -773,7 +783,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         description=(
             "Open a USD stage file in Isaac Sim. Paths must be inside the "
             "configured sandbox (security.allowed_paths); omniverse:// URLs are "
-            "allowed when their scheme is in security.allowed_url_schemes."
+            "allowed when their scheme is in security.allowed_url_schemes. "
+            "Refused while the current stage has unsaved edits unless "
+            "discard_unsaved=true."
         ),
         annotations=server._tool_annotations(
             read_only=False,
@@ -782,20 +794,25 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             destructive=True,
         ),
     )
-    async def open_isaac_stage(file_path: str) -> ToolResult:
+    async def open_isaac_stage(
+        file_path: str, discard_unsaved: bool = False
+    ) -> ToolResult:
         denial = server._sandbox_denial(file_path)
         if denial is not None:
             return denial
         return await server._exec_isaac(
             "open_isaac_stage",
-            server._isaac_tools.open_isaac_stage(file_path=file_path),
+            server._isaac_tools.open_isaac_stage(
+                file_path=file_path, discard_unsaved=discard_unsaved
+            ),
         )
 
     @server.mcp.tool(
         name="save_isaac_stage",
         description=(
             "Save the current stage, overwriting the file on disk. Optionally "
-            "provide a file path to save-as to a new location. Paths must be "
+            "provide a file path to save-as to a new location; an existing file "
+            "there is refused unless overwrite=true. Paths must be "
             "inside the configured sandbox (security.allowed_paths); writes to "
             "URLs are refused unless the scheme is in "
             "security.allowed_write_url_schemes."
@@ -806,18 +823,24 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     )
     async def save_isaac_stage(
         file_path: Optional[str] = None,
+        overwrite: bool = False,
     ) -> ToolResult:
         denial = server._sandbox_denial(file_path, write=True)
         if denial is not None:
             return denial
         return await server._exec_isaac(
             "save_isaac_stage",
-            server._isaac_tools.save_isaac_stage(file_path=file_path),
+            server._isaac_tools.save_isaac_stage(
+                file_path=file_path, overwrite=overwrite
+            ),
         )
 
     @server.mcp.tool(
         name="new_isaac_stage",
-        description="Create a new empty stage in Isaac Sim.",
+        description=(
+            "Create a new empty stage in Isaac Sim. Refused while the current "
+            "stage has unsaved edits unless discard_unsaved=true."
+        ),
         annotations=server._tool_annotations(
             read_only=False,
             idempotent=True,
@@ -825,10 +848,10 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             destructive=True,
         ),
     )
-    async def new_isaac_stage() -> ToolResult:
+    async def new_isaac_stage(discard_unsaved: bool = False) -> ToolResult:
         return await server._exec_isaac(
             "new_isaac_stage",
-            server._isaac_tools.new_isaac_stage(),
+            server._isaac_tools.new_isaac_stage(discard_unsaved=discard_unsaved),
         )
 
     @server.mcp.tool(
@@ -1193,7 +1216,9 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "'worv.env.sun', 'omni.physx') OR the version-suffixed ID returned "
             "by list_isaac_extensions (e.g. 'worv.env.sun-0.3.0'). The bare "
             "name is preferred — it keeps callers decoupled from the installed "
-            "version."
+            "version. Refuses the transport extensions simul-mcp speaks through "
+            "(khemoo.simul.mcp, isaacsim.code_editor.python_server, "
+            "isaacsim.code_editor.vscode)."
         ),
         annotations=server._tool_annotations(
             read_only=False,
@@ -1239,10 +1264,13 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "Write one or more Carbonite (carb) settings by key path. "
             'Takes a dict of key-value pairs (e.g. {"/rtx/fog/enabled": true, '
             '"/rtx/fog/fogEndDist": 200.0}). Returns the verified new values '
-            "after applying. Changes take effect immediately in the renderer."
+            "after applying. Changes take effect immediately in the renderer. "
+            "Keys under /exts/khemoo.simul.mcp/ and "
+            "/exts/isaacsim.code_editor.python_server/ configure the MCP "
+            "transport and are refused."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True
+            read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
     async def set_isaac_carb_settings(settings: Dict[str, Any]) -> ToolResult:
@@ -1267,7 +1295,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "IndirectDiffuse, Reflections, AmbientOcclusion, Depth, Normal."
         ),
         annotations=server._tool_annotations(
-            read_only=True, idempotent=False, open_world=True
+            read_only=False, idempotent=False, open_world=True
         ),
     )
     async def read_isaac_aovs(
@@ -1482,7 +1510,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "Use get_isaac_graph_nodes to discover attribute names first."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=True
+            read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
     async def set_isaac_graph_node_values(
@@ -1587,7 +1615,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "higher levels. Use 'verbose' for maximum detail when debugging."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=False
+            read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
     async def set_isaac_log_level(level: str) -> ToolResult:

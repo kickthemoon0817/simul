@@ -954,7 +954,13 @@ def bridge_set_unsafe(
     enable: bool = typer.Option(
         True,
         "--enable/--disable",
-        help="Enable or disable bridge execute_script permission.",
+        help=(
+            "Enable or disable the bridge transport's raw execute_script action. "
+            "Gates the bridge only: granular tools and raw scripts still run over "
+            "the stock Kit Python socket. Not a security boundary; use "
+            "SECURITY__ALLOW_SCRIPT_EXECUTION=false on the simul-mcp server to "
+            "remove the execute_*_script tools."
+        ),
     ),
     restart: bool = typer.Option(
         True,
@@ -965,7 +971,7 @@ def bridge_set_unsafe(
     port: Optional[int] = _port_opt,
     timeout: Optional[float] = _timeout_opt,
 ) -> None:
-    """Toggle bridge execute_script permission inside the running Isaac Sim instance."""
+    """Toggle the bridge transport's raw execute_script action in the running Isaac Sim instance."""
     tools = _tools(host, port, timeout)
     script = textwrap.dedent(
         f"""\

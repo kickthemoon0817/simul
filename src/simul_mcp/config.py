@@ -527,6 +527,14 @@ class SecurityConfig(BaseModel):
         default_factory=list,
         description="URL schemes that may be written to; empty keeps writes local-only",
     )
+    allow_script_execution: bool = Field(
+        default=True,
+        description=(
+            "Register the arbitrary-code tools (execute_isaac_script, "
+            "execute_unreal_script, execute_blender_script). Granular tools "
+            "stay available when this is off."
+        ),
+    )
     rate_limiting_enabled: bool = Field(
         default=True, description="Enable rate limiting"
     )
@@ -978,6 +986,7 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                         security.get("allowed_write_url_schemes"),
                         security_sandbox.get("allowed_write_url_schemes"),
                     ),
+                    "allow_script_execution": security.get("allow_script_execution"),
                     "rate_limiting_enabled": _coalesce(
                         security.get("rate_limiting_enabled"),
                         security_rate.get("enabled"),

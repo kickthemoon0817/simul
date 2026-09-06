@@ -58,6 +58,8 @@ class CallRecord:
     success: bool
     params: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    agent_id: Optional[str] = None
+    script_sha256: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -70,6 +72,10 @@ class CallRecord:
             out["params"] = self.params
         if self.error:
             out["error"] = self.error
+        if self.agent_id:
+            out["agent_id"] = self.agent_id
+        if self.script_sha256:
+            out["script_sha256"] = self.script_sha256
         return out
 
 
@@ -100,8 +106,23 @@ class ToolUsageTracker:
         success: bool,
         params: Optional[Dict[str, Any]] = None,
         error: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        script_sha256: Optional[str] = None,
     ) -> None:
-        """Record a tool call (in-memory + JSONL)."""
+        """Record a tool call (in-memory + JSONL).
+
+        Args:
+            tool_name: Registered tool name.
+            duration_ms: Wall-clock duration of the call.
+            success: Whether the call succeeded.
+            params: Call parameters worth keeping in the log.
+            error: Error message for a failed call.
+            agent_id: Who made the call, as resolved from the MCP session, so
+                an operator can attribute a damaged scene to one agent.
+            script_sha256: Hex digest of the source for script-execution
+                tools, so identical scripts can be matched across sessions
+                without storing the code itself.
+        """
         now = time.time()
 
         if tool_name not in self._stats:
@@ -123,6 +144,8 @@ class ToolUsageTracker:
             success=success,
             params=params,
             error=error,
+            agent_id=agent_id,
+            script_sha256=script_sha256,
         )
         self._recent.append(rec)
         self._append_log(rec)

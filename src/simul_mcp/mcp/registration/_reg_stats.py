@@ -4,14 +4,19 @@ Tool usage statistics registration for Simul MCP Server.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
 
 
 def register_stats_tools(server: "SimulMCPServer") -> None:
-    """Register tool usage statistics tools."""
+    """Register the read-only tool usage statistics tool.
+
+    Clearing the log is an operator action, done from the CLI with
+    ``simul-mcp stats --reset``; an agent must not be able to erase its own
+    audit trail.
+    """
 
     @server.mcp.tool(
         name="get_tool_usage_stats",
@@ -48,16 +53,3 @@ def register_stats_tools(server: "SimulMCPServer") -> None:
                 limit=limit, tool_name=tool_name,
             )
         return result
-
-    @server.mcp.tool(
-        name="reset_tool_usage_stats",
-        description="Clear all tool usage statistics and the recent call log.",
-        annotations=server._tool_annotations(
-            read_only=False, idempotent=True, open_world=False
-        ),
-        output_schema=None,
-    )
-    async def reset_tool_usage_stats() -> Dict[str, Any]:
-        """Reset all usage tracking data."""
-        server.usage_tracker.reset()
-        return {"success": True, "message": "Tool usage stats cleared"}

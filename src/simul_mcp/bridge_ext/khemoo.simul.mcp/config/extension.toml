@@ -13,6 +13,10 @@ name = "khemoo.simul.mcp.extension"
 [settings]
 exts."khemoo.simul.mcp".host = "127.0.0.1"
 exts."khemoo.simul.mcp".port = 8229
+# Gates only the bridge transport's raw execute_script action. Granular tools
+# and raw scripts still reach the stock Kit Python socket on 8226, so this is
+# a bridge guard, not a security boundary. The operator control for the
+# agent-authored code surface is simul-mcp's security.allow_script_execution.
 exts."khemoo.simul.mcp".allow_unsafe_execution = true
 exts."khemoo.simul.mcp".max_request_bytes = 1048576
 exts."khemoo.simul.mcp".max_response_bytes = 10485760

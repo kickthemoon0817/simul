@@ -88,6 +88,23 @@ class IsaacScriptBase(LoggerMixin):
             details=self._path_policy.denial_details(path, write=write),
         ).model_dump()
 
+    @staticmethod
+    def _refusal(message: str, **details: Any) -> Dict[str, Any]:
+        """Return the RefusedOperation payload for a known-fatal request.
+
+        Args:
+            message: What was refused and which flag, if any, overrides it.
+            **details: Structured context for the caller (paths, keys, ids).
+
+        Returns:
+            An ErrorResponse dict with ``error_type`` ``RefusedOperation``.
+        """
+        return ErrorResponse(
+            error=message,
+            error_type="RefusedOperation",
+            details=details or None,
+        ).model_dump()
+
     async def _execute_json_script(
         self, script: str, transport_mode: str = "default"
     ) -> Dict[str, Any]:
