@@ -400,6 +400,7 @@ class SimulMCPServer(LoggerMixin):
         tool_name: str,
         coro: Coroutine[Any, Any, Dict[str, Any]],
         params: Optional[Dict[str, Any]] = None,
+        script_sha256: Optional[str] = None,
     ) -> ToolResult:
         """
         Execute an Isaac Sim tool coroutine with rate limiting,
@@ -409,10 +410,12 @@ class SimulMCPServer(LoggerMixin):
             tool_name: Name of the tool for rate limiting.
             coro: Awaitable coroutine returned by an IsaacTools method.
             params: Optional dict of call parameters for usage logging.
+            script_sha256: Digest of the agent-authored source for script tools.
 
         Returns:
             Tool result dict or error response dict.
         """
+        agent_id = self._resolve_agent_id(None)
         rate_error = self._check_rate_limit(tool_name)
         if rate_error is not None:
             self.usage_tracker.record(
@@ -421,6 +424,8 @@ class SimulMCPServer(LoggerMixin):
                 False,
                 params=params,
                 error="rate_limited",
+                agent_id=agent_id,
+                script_sha256=script_sha256,
             )
             # Caller already built the coroutine; nothing will await it now.
             coro.close()
@@ -439,6 +444,8 @@ class SimulMCPServer(LoggerMixin):
                 False,
                 params=params,
                 error="instance_busy",
+                agent_id=agent_id,
+                script_sha256=script_sha256,
             )
             coro.close()
             return self._as_text_result(
@@ -462,6 +469,8 @@ class SimulMCPServer(LoggerMixin):
                     success,
                     params=params,
                     error=result.get("error") if not success else None,
+                    agent_id=agent_id,
+                    script_sha256=script_sha256,
                 )
                 binding = self._get_active_binding()
                 if binding is not None:
@@ -480,6 +489,8 @@ class SimulMCPServer(LoggerMixin):
                     False,
                     params=params,
                     error=str(exc),
+                    agent_id=agent_id,
+                    script_sha256=script_sha256,
                 )
                 logger.error("Isaac tool %s failed: %s", tool_name, exc)
                 return self._as_text_result(
@@ -650,6 +661,29 @@ class SimulMCPServer(LoggerMixin):
             content=[TextContent(type="text", text=json.dumps(payload, default=str))]
         )
 
+    def _script_tool(self, **tool_kwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Register an arbitrary-code tool, or leave it off the surface.
+
+        ``security.allow_script_execution`` is the operator's switch for the
+        agent-authored code path. Granular tools are generated scripts and stay
+        registered either way; only the three ``execute_*_script`` tools go
+        through here.
+
+        Args:
+            **tool_kwargs: Keyword arguments for ``FastMCP.tool``.
+
+        Returns:
+            The FastMCP registration decorator, or an identity decorator when
+            script execution is disabled.
+        """
+        if self.settings.security.allow_script_execution:
+            return self.mcp.tool(**tool_kwargs)
+
+        def unregistered(func: Callable[..., Any]) -> Callable[..., Any]:
+            return func
+
+        return unregistered
+
     def _tool_annotations(
         self,
         read_only: bool,
@@ -657,13 +691,32 @@ class SimulMCPServer(LoggerMixin):
         open_world: bool,
         destructive: bool = False,
     ) -> Optional[Any]:
-        # Only the hints that carry information. idempotentHint and
-        # openWorldHint collapsed to a handful of combinations across the whole
-        # surface, and destructiveHint was false on the large majority — all of
-        # it paid for in every session's tool listing.
+        """Build the MCP annotations for one tool.
+
+        Every hint the call site computes is preserved: a hint is omitted only
+        when it equals the value a client assumes for a missing hint
+        (destructive and idempotent false, open world true), so nothing is
+        dropped and the listing stays small. readOnlyHint is always emitted
+        because auto-approval policies key on it.
+
+        Args:
+            read_only: The tool does not modify its environment.
+            idempotent: Repeating the call with the same arguments has no
+                additional effect.
+            open_world: The tool talks to an external process or the network.
+            destructive: The tool overwrites or deletes existing state or files.
+
+        Returns:
+            A ``ToolAnnotations`` instance, or the plain dict when FastMCP does
+            not expose the model.
+        """
         annotations: Dict[str, Any] = {"readOnlyHint": read_only}
         if destructive:
             annotations["destructiveHint"] = True
+        if idempotent:
+            annotations["idempotentHint"] = True
+        if not open_world:
+            annotations["openWorldHint"] = False
         if ToolAnnotations:
             return ToolAnnotations(**annotations)
         return annotations
