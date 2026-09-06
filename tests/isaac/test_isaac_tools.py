@@ -268,7 +268,9 @@ class TestSceneInspection:
 
         assert result["success"] is True
         assert result["stage_url"] == "file:///bridge.usd"
-        tools._client.bridge_request.assert_awaited_once_with("get_stage_info", {})
+        tools._client.bridge_request.assert_awaited_once_with(
+            "get_stage_info", {"include_prim_count": False}
+        )
         tools._client.execute.assert_not_called()
         tools._client.execute_vscode_only.assert_not_called()
 
@@ -296,7 +298,9 @@ class TestSceneInspection:
 
         assert result["success"] is True
         assert result["stage_url"] == "file:///fallback.usd"
-        tools._client.bridge_request.assert_awaited_once_with("get_stage_info", {})
+        tools._client.bridge_request.assert_awaited_once_with(
+            "get_stage_info", {"include_prim_count": False}
+        )
         tools._client.execute_vscode_only.assert_awaited_once()
         tools._client.execute_bridge_script_only.assert_not_called()
 

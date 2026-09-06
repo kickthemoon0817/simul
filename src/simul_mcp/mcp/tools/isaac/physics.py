@@ -7,14 +7,19 @@ from typing import Any, Callable, Dict, List, Optional
 from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
 from ._shared import (
+    APPLY_COLLISION_CORE,
+    APPLY_RIGID_BODY_CORE,
     BULK_GEOMETRY_ATTRIBUTES,
+    DEFAULT_MAX_RESULTS,
     LOG_SCAN_WINDOW_BYTES,
     MAX_CAPTURE_DIMENSION,
     MAX_INLINE_CAPTURE_BYTES,
     MAX_RETAINED_CAPTURES,
     MAX_SCRIPT_BYTES,
     PRIM_DETAIL_ASPECTS,
+    SET_MASS_PROPERTIES_CORE,
     FloatList,
+    _compose_script,
     _pyval,
     logger,
 )
@@ -121,17 +126,20 @@ class PhysicsMixin:
         return await self._execute_json_script(script)
 
     async def list_isaac_physics_objects(
-        self, root_path: str = "/"
+        self, root_path: str = "/", max_results: int = DEFAULT_MAX_RESULTS
     ) -> Dict[str, Any]:
         """
         List all prims with physics APIs applied in the stage.
 
         Args:
             root_path: Root path to search under.
+            max_results: Maximum entries returned per list (rigid bodies,
+                colliders, joints). The counts always cover the whole subtree.
 
         Returns:
             Dict with lists of rigid bodies, colliders, and joints.
         """
+        max_results = max(1, min(max_results, 10000))
         _root_path = _pyval(root_path)
         script = textwrap.dedent(f"""\
             import json
@@ -143,26 +151,38 @@ class PhysicsMixin:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
                 root = stage.GetPrimAtPath({_root_path})
-                rigid_bodies = []
-                colliders = []
-                joints = []
-                for p in Usd.PrimRange(root):
-                    path = str(p.GetPath())
-                    if p.HasAPI(UsdPhysics.RigidBodyAPI):
-                        rigid_bodies.append({{"path": path, "type": p.GetTypeName()}})
-                    if p.HasAPI(UsdPhysics.CollisionAPI):
-                        colliders.append({{"path": path, "type": p.GetTypeName()}})
-                    if p.IsA(UsdPhysics.Joint):
-                        joints.append({{"path": path, "type": p.GetTypeName()}})
-                print(json.dumps({{
-                    "root_path": {_root_path},
-                    "rigid_body_count": len(rigid_bodies),
-                    "collider_count": len(colliders),
-                    "joint_count": len(joints),
-                    "rigid_bodies": rigid_bodies[:200],
-                    "colliders": colliders[:200],
-                    "joints": joints[:200],
-                }}))
+                if not root.IsValid():
+                    print(json.dumps({{"error": "Root path not found: " + {_root_path}}}))
+                else:
+                    max_results = {max_results}
+                    counts = {{"rigid_bodies": 0, "colliders": 0, "joints": 0}}
+                    found = {{"rigid_bodies": [], "colliders": [], "joints": []}}
+                    for p in Usd.PrimRange(root):
+                        kinds = []
+                        if p.HasAPI(UsdPhysics.RigidBodyAPI):
+                            kinds.append("rigid_bodies")
+                        if p.HasAPI(UsdPhysics.CollisionAPI):
+                            kinds.append("colliders")
+                        if p.IsA(UsdPhysics.Joint):
+                            kinds.append("joints")
+                        if not kinds:
+                            continue
+                        entry = {{"path": str(p.GetPath()), "type": p.GetTypeName()}}
+                        for kind in kinds:
+                            counts[kind] += 1
+                            if len(found[kind]) < max_results:
+                                found[kind].append(entry)
+                    print(json.dumps({{
+                        "root_path": {_root_path},
+                        "rigid_body_count": counts["rigid_bodies"],
+                        "collider_count": counts["colliders"],
+                        "joint_count": counts["joints"],
+                        "max_results": max_results,
+                        "truncated": any(counts[k] > max_results for k in counts),
+                        "rigid_bodies": found["rigid_bodies"],
+                        "colliders": found["colliders"],
+                        "joints": found["joints"],
+                    }}))
         """)
         return await self._execute_json_script(script)
 
@@ -340,33 +360,22 @@ class PhysicsMixin:
             Dict confirming the API was applied.
         """
         _prim_path = _pyval(prim_path)
-        kin_str = "True" if kinematic else "False"
-        script = textwrap.dedent(f"""\
+        _kinematic = _pyval(bool(kinematic))
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import UsdPhysics
-
+            """,
+            APPLY_RIGID_BODY_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath({_prim_path})
-                if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
-                else:
-                    if prim.HasAPI(UsdPhysics.RigidBodyAPI):
-                        print(json.dumps({{"error": "RigidBodyAPI already applied: " + {_prim_path}}}))
-                    else:
-                        UsdPhysics.RigidBodyAPI.Apply(prim)
-                        if {kin_str}:
-                            rb = UsdPhysics.RigidBodyAPI(prim)
-                            rb.GetKinematicEnabledAttr().Set(True)
-                        print(json.dumps({{
-                            "prim_path": {_prim_path},
-                            "rigid_body_applied": True,
-                            "kinematic": {kin_str},
-                        }}))
-        """)
+                print(json.dumps(_apply_rigid_body(stage, {_prim_path}, {_kinematic})))
+            """,
+        )
         return await self._execute_json_script(script)
 
     async def add_isaac_collision(
@@ -388,31 +397,21 @@ class PhysicsMixin:
         """
         _prim_path = _pyval(prim_path)
         _approx = _pyval(approximation)
-        script = textwrap.dedent(f"""\
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import UsdPhysics
-
+            """,
+            APPLY_COLLISION_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath({_prim_path})
-                if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
-                else:
-                    UsdPhysics.CollisionAPI.Apply(prim)
-                    approx = {_approx}
-                    if approx != "none":
-                        UsdPhysics.MeshCollisionAPI.Apply(prim)
-                        mesh_col = UsdPhysics.MeshCollisionAPI(prim)
-                        mesh_col.GetApproximationAttr().Set(approx)
-                    print(json.dumps({{
-                        "prim_path": {_prim_path},
-                        "collision_applied": True,
-                        "approximation": approx,
-                    }}))
-        """)
+                print(json.dumps(_apply_collision(stage, {_prim_path}, {_approx})))
+            """,
+        )
         return await self._execute_json_script(script)
 
     async def set_isaac_mass_properties(
@@ -435,41 +434,26 @@ class PhysicsMixin:
             Dict confirming updated mass properties.
         """
         _prim_path = _pyval(prim_path)
-        m_str = str(mass) if mass is not None else "None"
-        d_str = str(density) if density is not None else "None"
-        com_str = str(center_of_mass) if center_of_mass else "None"
-        script = textwrap.dedent(f"""\
+        _mass = _pyval(mass)
+        _density = _pyval(density)
+        _center_of_mass = _pyval(list(center_of_mass) if center_of_mass else None)
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import UsdPhysics, Gf
-
+            """,
+            SET_MASS_PROPERTIES_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath({_prim_path})
-                if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
-                else:
-                    if not prim.HasAPI(UsdPhysics.MassAPI):
-                        UsdPhysics.MassAPI.Apply(prim)
-                    mass_api = UsdPhysics.MassAPI(prim)
-                    m = {m_str}
-                    d = {d_str}
-                    com = {com_str}
-                    if m is not None:
-                        mass_api.GetMassAttr().Set(m)
-                    if d is not None:
-                        mass_api.GetDensityAttr().Set(d)
-                    if com is not None:
-                        mass_api.GetCenterOfMassAttr().Set(Gf.Vec3f(*com))
-                    print(json.dumps({{
-                        "prim_path": {_prim_path},
-                        "mass": mass_api.GetMassAttr().Get(),
-                        "density": mass_api.GetDensityAttr().Get(),
-                        "center_of_mass": list(mass_api.GetCenterOfMassAttr().Get()) if mass_api.GetCenterOfMassAttr().Get() else None,
-                    }}))
-        """)
+                print(json.dumps(_set_mass_properties(
+                    stage, {_prim_path}, {_mass}, {_density}, {_center_of_mass}
+                )))
+            """,
+        )
         return await self._execute_json_script(script)
 
     async def set_isaac_physics_material(

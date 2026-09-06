@@ -8,6 +8,7 @@ from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
 from ._shared import (
     BULK_GEOMETRY_ATTRIBUTES,
+    DEFAULT_MAX_RESULTS,
     LOG_SCAN_WINDOW_BYTES,
     MAX_CAPTURE_DIMENSION,
     MAX_INLINE_CAPTURE_BYTES,
@@ -58,20 +59,20 @@ class OmniGraphMixin:
     async def get_isaac_graph_nodes(
         self,
         graph_path: str,
-        max_nodes: int = 200,
+        max_results: int = DEFAULT_MAX_RESULTS,
     ) -> Dict[str, Any]:
         """
         List nodes in an OmniGraph graph with their types and connections.
 
         Args:
             graph_path: USD path to the graph (e.g. "/World/ActionGraph").
-            max_nodes: Maximum number of nodes to return. Clamped to [1, 1000].
+            max_results: Maximum number of nodes to return. Clamped to [1, 1000].
 
         Returns:
             Dict with node list, each containing path, type, and
             input/output attribute names with connections.
         """
-        max_nodes = max(1, min(max_nodes, 1000))
+        max_results = max(1, min(max_results, 1000))
         _graph_path = _pyval(graph_path)
         script = textwrap.dedent(f"""\
             import json
@@ -82,10 +83,10 @@ class OmniGraphMixin:
                 print(json.dumps({{"error": "Graph not found: " + {_graph_path}}}))
             else:
                 nodes = graph.get_nodes()
-                max_nodes = {max_nodes}
-                truncated = len(nodes) > max_nodes
+                max_results = {max_results}
+                truncated = len(nodes) > max_results
                 result = []
-                for node in nodes[:max_nodes]:
+                for node in nodes[:max_results]:
                     try:
                         attrs = node.get_attributes()
                         inputs = []
@@ -120,6 +121,7 @@ class OmniGraphMixin:
                 print(json.dumps({{
                     "graph_path": {_graph_path},
                     "count": len(result),
+                    "total": len(nodes),
                     "truncated": truncated,
                     "nodes": result,
                 }}))
@@ -255,35 +257,37 @@ class OmniGraphMixin:
     async def list_isaac_graph_node_types(
         self,
         search: Optional[str] = None,
-        max_types: int = 200,
+        max_results: int = DEFAULT_MAX_RESULTS,
     ) -> Dict[str, Any]:
         """
         List available OmniGraph node types.
 
         Args:
             search: Optional substring filter on node type name.
-            max_types: Maximum number of types to return. Clamped to [1, 2000].
+            max_results: Maximum number of types to return. Clamped to [1, 2000].
 
         Returns:
             Dict with list of registered node type names.
         """
-        max_types = max(1, min(max_types, 2000))
+        max_results = max(1, min(max_results, 2000))
         _search = _pyval(search)
         script = textwrap.dedent(f"""\
             import json
             import omni.graph.core as og
 
-            all_types = sorted(og.get_registered_nodes())
+            registered = og.get_registered_nodes()
+            all_types = sorted(registered)
             search = {_search}
             if search:
                 all_types = [t for t in all_types if search.lower() in t.lower()]
-            max_types = {max_types}
-            truncated = len(all_types) > max_types
-            result = all_types[:max_types]
+            max_results = {max_results}
+            truncated = len(all_types) > max_results
+            result = all_types[:max_results]
             print(json.dumps({{
                 "count": len(result),
+                "total": len(all_types),
                 "truncated": truncated,
-                "total_registered": len(og.get_registered_nodes()),
+                "total_registered": len(registered),
                 "node_types": result,
             }}))
         """)

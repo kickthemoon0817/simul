@@ -8,6 +8,8 @@ from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
 from ._shared import (
     DEFAULT_WORLD_PATH,
+    DEFINE_PRIM_CORE,
+    SET_PRIM_TRANSFORM_CORE,
     STAGE_ROOT_PATH,
     BULK_GEOMETRY_ATTRIBUTES,
     LOG_SCAN_WINDOW_BYTES,
@@ -17,6 +19,7 @@ from ._shared import (
     MAX_SCRIPT_BYTES,
     PRIM_DETAIL_ASPECTS,
     FloatList,
+    _compose_script,
     _pyval,
     logger,
 )
@@ -46,35 +49,21 @@ class PrimEditMixin:
         """
         _prim_path = _pyval(prim_path)
         _prim_type = _pyval(prim_type)
-        _attrs_str = _pyval(json.dumps(attributes)) if attributes else '"{}"'
-        script = textwrap.dedent(f"""\
+        _attributes = _pyval(dict(attributes or {}))
+        script = _compose_script(
+            """\
             import json
             import omni.usd
-            from pxr import Usd, UsdGeom, Sdf
-
+            """,
+            DEFINE_PRIM_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                existing = stage.GetPrimAtPath({_prim_path})
-                if existing.IsValid():
-                    print(json.dumps({{"error": "Prim already exists: " + {_prim_path}}}))
-                else:
-                    prim = stage.DefinePrim({_prim_path}, {_prim_type})
-                    if not prim.IsValid():
-                        print(json.dumps({{"error": "Failed to create prim: " + {_prim_path}}}))
-                    else:
-                        attrs = json.loads({_attrs_str})
-                        for name, val in attrs.items():
-                            attr = prim.GetAttribute(name)
-                            if attr.IsValid():
-                                attr.Set(val)
-                        print(json.dumps({{
-                            "prim_path": str(prim.GetPath()),
-                            "prim_type": prim.GetTypeName(),
-                            "created": True,
-                        }}))
-        """)
+                print(json.dumps(_define_prim(stage, {_prim_path}, {_prim_type}, {_attributes})))
+            """,
+        )
         return await self._execute_json_script(script)
 
     async def delete_isaac_prim(
@@ -150,65 +139,26 @@ class PrimEditMixin:
             Dict with updated transform values.
         """
         _prim_path = _pyval(prim_path)
-        t_str = str(translation) if translation else "None"
-        r_str = str(rotation_euler) if rotation_euler else "None"
-        s_str = str(scale) if scale else "None"
-        script = textwrap.dedent(f"""\
+        _translation = _pyval(list(translation) if translation else None)
+        _rotation = _pyval(list(rotation_euler) if rotation_euler else None)
+        _scale = _pyval(list(scale) if scale else None)
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import Usd, UsdGeom, Gf
-
+            """,
+            SET_PRIM_TRANSFORM_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath({_prim_path})
-                if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
-                elif not prim.IsA(UsdGeom.Xformable):
-                    print(json.dumps({{"error": "Prim is not Xformable: " + {_prim_path}}}))
-                else:
-                    xformable = UsdGeom.Xformable(prim)
-                    t = {t_str}
-                    r = {r_str}
-                    s = {s_str}
-                    if t is not None:
-                        found = False
-                        for op in xformable.GetOrderedXformOps():
-                            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
-                                op.Set(Gf.Vec3d(*t))
-                                found = True
-                                break
-                        if not found:
-                            xformable.AddTranslateOp().Set(Gf.Vec3d(*t))
-                    if r is not None:
-                        found = False
-                        for op in xformable.GetOrderedXformOps():
-                            if op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
-                                op.Set(Gf.Vec3f(*r))
-                                found = True
-                                break
-                        if not found:
-                            xformable.AddRotateXYZOp().Set(Gf.Vec3f(*r))
-                    if s is not None:
-                        found = False
-                        for op in xformable.GetOrderedXformOps():
-                            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
-                                op.Set(Gf.Vec3f(*s))
-                                found = True
-                                break
-                        if not found:
-                            xformable.AddScaleOp().Set(Gf.Vec3f(*s))
-                    # Read back
-                    xform = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-                    pos = xform.ExtractTranslation()
-                    print(json.dumps({{
-                        "prim_path": {_prim_path},
-                        "translation": list(pos),
-                        "rotation_euler_set": r,
-                        "scale_set": s,
-                    }}))
-        """)
+                print(json.dumps(_set_prim_transform(
+                    stage, {_prim_path}, {_translation}, {_rotation}, {_scale}
+                )))
+            """,
+        )
         return await self._execute_json_script(script)
 
     async def set_isaac_prim_visibility(

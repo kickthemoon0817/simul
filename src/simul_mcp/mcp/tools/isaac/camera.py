@@ -8,6 +8,7 @@ from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
 from ._shared import (
     BULK_GEOMETRY_ATTRIBUTES,
+    DEFAULT_MAX_RESULTS,
     LOG_SCAN_WINDOW_BYTES,
     MAX_CAPTURE_DIMENSION,
     MAX_INLINE_CAPTURE_BYTES,
@@ -90,32 +91,45 @@ class CameraMixin:
         """)
         return await self._execute_json_script(script)
 
-    async def list_isaac_cameras(self) -> Dict[str, Any]:
+    async def list_isaac_cameras(
+        self, max_results: int = DEFAULT_MAX_RESULTS
+    ) -> Dict[str, Any]:
         """
         List all camera prims in the current Isaac Sim stage.
+
+        Args:
+            max_results: Maximum cameras described in the result. ``total``
+                still counts every camera on the stage.
 
         Returns:
             Dict with list of cameras with paths and basic parameters.
         """
-        script = textwrap.dedent("""\
+        max_results = max(1, min(max_results, 10000))
+        script = textwrap.dedent(f"""\
             import json
             import omni.usd
             from pxr import Usd, UsdGeom
 
             stage = omni.usd.get_context().get_stage()
             if stage is None:
-                print(json.dumps({"error": "No stage is currently open"}))
+                print(json.dumps({{"error": "No stage is currently open"}}))
             else:
+                max_results = {max_results}
                 cameras = []
+                total = 0
                 for p in stage.Traverse():
-                    if p.IsA(UsdGeom.Camera):
-                        cam = UsdGeom.Camera(p)
-                        cameras.append({
-                            "path": str(p.GetPath()),
-                            "name": p.GetName(),
-                            "focal_length": cam.GetFocalLengthAttr().Get(),
-                            "projection": cam.GetProjectionAttr().Get(),
-                        })
+                    if not p.IsA(UsdGeom.Camera):
+                        continue
+                    total += 1
+                    if len(cameras) >= max_results:
+                        continue
+                    cam = UsdGeom.Camera(p)
+                    cameras.append({{
+                        "path": str(p.GetPath()),
+                        "name": p.GetName(),
+                        "focal_length": cam.GetFocalLengthAttr().Get(),
+                        "projection": cam.GetProjectionAttr().Get(),
+                    }})
                 active_cam = None
                 try:
                     import omni.kit.viewport.utility as vp_util
@@ -124,11 +138,13 @@ class CameraMixin:
                         active_cam = str(vp_api.camera_path)
                 except Exception:
                     pass
-                print(json.dumps({
+                print(json.dumps({{
                     "count": len(cameras),
+                    "total": total,
+                    "truncated": total > len(cameras),
                     "active_camera": active_cam,
                     "cameras": cameras,
-                }))
+                }}))
         """)
         return await self._execute_json_script(script)
 

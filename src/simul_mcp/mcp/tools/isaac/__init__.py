@@ -17,6 +17,7 @@ from ._shared import (
     _pyval,
 )
 from .camera import CameraMixin
+from .compound import CompoundMixin
 from .core import CoreToolsMixin
 from .diagnostics import DiagnosticsMixin
 from .exploration import ExplorationMixin
@@ -34,6 +35,7 @@ from .ui import UiObservabilityMixin
 
 class IsaacTools(
     CoreToolsMixin,
+    CompoundMixin,
     SceneInspectionMixin,
     CameraMixin,
     PrimEditMixin,

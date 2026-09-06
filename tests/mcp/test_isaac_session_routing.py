@@ -203,7 +203,7 @@ async def test_same_instance_calls_are_serialized_per_instance(
     running = 0
     max_running = 0
 
-    async def fake_stage_info() -> dict[str, Any]:
+    async def fake_stage_info(include_prim_count: bool = False) -> dict[str, Any]:
         nonlocal running, max_running
         running += 1
         max_running = max(max_running, running)

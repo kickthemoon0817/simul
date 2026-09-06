@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from .executor import ScriptExecutor
+from .prim_detail import BULK_GEOMETRY_ATTRIBUTES, PRIM_DETAIL_ASPECTS, PrimDetailReader
 from .protocol import BridgeRequest, BridgeResponse
 
 
@@ -19,25 +20,12 @@ READ_ONLY_ACTIONS = frozenset(
         "get_stage_info",
         "get_simulation_state",
         "get_prim_info",
+        "get_prim_detail",
         "list_prims",
     }
 )
 
-# Array attributes big enough that pulling their value is the cost being
-# avoided. Gating on names rather than on isArray keeps small arrays such as
-# xformOpOrder and primvars:displayColor readable; skipping those would lose
-# information the caller needs and save nothing.
-BULK_GEOMETRY_ATTRIBUTES = frozenset(
-    {
-        "points", "normals", "velocities", "accelerations",
-        "faceVertexIndices", "faceVertexCounts", "holeIndices",
-        "cornerIndices", "cornerSharpnesses", "creaseIndices",
-        "creaseLengths", "creaseSharpnesses", "curveVertexCounts", "widths",
-        "primvars:st", "primvars:normals",
-        "positions", "orientations", "scales", "protoIndices",
-        "invisibleIds", "ids",
-    }
-)
+__all__ = ["BULK_GEOMETRY_ATTRIBUTES", "READ_ONLY_ACTIONS", "BridgeCommandService"]
 
 
 class BridgeCommandService:
@@ -64,6 +52,7 @@ class BridgeCommandService:
                 "list_prims",
                 "get_prim_info",
                 "get_prim_transform",
+                "get_prim_detail",
                 "search_prims",
                 "get_runtime_info",
                 "get_simulation_state",
@@ -93,6 +82,8 @@ class BridgeCommandService:
             return self._handle_get_prim_info(request)
         if request.action == "get_prim_transform":
             return self._handle_get_prim_transform(request)
+        if request.action == "get_prim_detail":
+            return self._handle_get_prim_detail(request)
         if request.action == "search_prims":
             return self._handle_search_prims(request)
         if request.action == "get_runtime_info":
@@ -246,7 +237,6 @@ class BridgeCommandService:
     def _handle_get_prim_info(self, request: BridgeRequest) -> BridgeResponse:
         """Return detailed information about a single prim."""
         import omni.usd
-        from pxr import Gf, UsdGeom, UsdShade
 
         stage = omni.usd.get_context().get_stage()
         if stage is None:
@@ -265,93 +255,14 @@ class BridgeCommandService:
                 f"Prim not found: {prim_path}",
             )
 
-        child_types: dict[str, int] = {}
-        children = [str(child.GetPath()) for child in prim.GetChildren()]
-        for child in prim.GetChildren():
-            child_type = child.GetTypeName() or "Typeless"
-            child_types[child_type] = child_types.get(child_type, 0) + 1
-
-        attrs: dict[str, Any] = {}
-        for attr in prim.GetAttributes():
-            try:
-                # Bulk geometry only: Get() would decompress the whole array
-                # out of the crate layer just for _serialize_value to replace
-                # it with an element count. Small arrays such as xformOpOrder
-                # still come back in full — they carry information the caller
-                # needs and cost nothing to read.
-                attr_name = attr.GetName()
-                if attr_name in BULK_GEOMETRY_ATTRIBUTES:
-                    type_name = attr.GetTypeName()
-                    if getattr(type_name, "isArray", False):
-                        attrs[attr_name] = f"<array {type_name}>"
-                        continue
-                value = attr.Get()
-                if value is not None:
-                    attrs[attr.GetName()] = self._serialize_value(value)
-            except Exception:
-                attrs[attr.GetName()] = "<unreadable>"
-
-        transform = None
-        if prim.IsA(UsdGeom.Xformable):
-            xformable = UsdGeom.Xformable(prim)
-            matrix = xformable.ComputeLocalToWorldTransform(
-                self._default_time_code()
-            )
-            quat = matrix.ExtractRotation().GetQuat()
-            scale = [1.0, 1.0, 1.0]
-            for op in xformable.GetOrderedXformOps():
-                if op.GetOpType() == UsdGeom.XformOp.TypeScale:
-                    value = op.Get()
-                    if value is not None:
-                        scale = list(Gf.Vec3d(value))
-                    break
-            transform = {
-                "translation": list(matrix.ExtractTranslation()),
-                "rotation_quat": [quat.GetReal()] + list(quat.GetImaginary()),
-                "scale": scale,
-            }
-
-        material_bindings = []
-        try:
-            bindings = UsdShade.MaterialBindingAPI(prim)
-            material, _ = bindings.ComputeBoundMaterial()
-            if material:
-                material_bindings.append(str(material.GetPath()))
-        except Exception:
-            pass
-
-        purpose = None
-        visibility = None
-        if prim.IsA(UsdGeom.Imageable):
-            imageable = UsdGeom.Imageable(prim)
-            purpose = imageable.ComputePurpose()
-            visibility = imageable.ComputeVisibility()
-
-        return BridgeResponse.success(
-            request.request_id,
-            {
-                "transport": "simul_bridge",
-                "path": prim_path,
-                "name": prim.GetName(),
-                "type": prim.GetTypeName(),
-                "is_active": prim.IsActive(),
-                "is_defined": prim.IsDefined(),
-                "is_instance": prim.IsInstance(),
-                "purpose": purpose,
-                "visibility": visibility,
-                "children_count": len(children),
-                "children_types": child_types,
-                "children": children[:50],
-                "material_bindings": material_bindings,
-                "transform": transform,
-                "attributes": attrs,
-            },
-        )
+        payload = PrimDetailReader(stage).info(prim)
+        payload["path"] = prim_path
+        payload["transport"] = "simul_bridge"
+        return BridgeResponse.success(request.request_id, payload)
 
     def _handle_get_prim_transform(self, request: BridgeRequest) -> BridgeResponse:
         """Return local or world transform for a prim."""
         import omni.usd
-        from pxr import Gf, UsdGeom
 
         stage = omni.usd.get_context().get_stage()
         if stage is None:
@@ -370,39 +281,72 @@ class BridgeCommandService:
                 "PrimNotFound",
                 f"Prim not found: {prim_path}",
             )
-        if not prim.IsA(UsdGeom.Xformable):
+
+        payload = PrimDetailReader(stage).transform(prim, world_space)
+        if "error" in payload:
             return BridgeResponse.failure(
                 request.request_id,
                 "PrimNotXformable",
-                f"Prim is not Xformable: {prim_path}",
+                payload["error"],
+            )
+        payload["prim_path"] = prim_path
+        payload["transport"] = "simul_bridge"
+        return BridgeResponse.success(request.request_id, payload)
+
+    def _handle_get_prim_detail(self, request: BridgeRequest) -> BridgeResponse:
+        """Return every requested aspect of one prim in a single response."""
+        import omni.usd
+
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return BridgeResponse.failure(
+                request.request_id,
+                "StageUnavailable",
+                "No stage is currently open.",
             )
 
-        xformable = UsdGeom.Xformable(prim)
-        if world_space:
-            matrix = xformable.ComputeLocalToWorldTransform(self._default_time_code())
-        else:
-            matrix = xformable.GetLocalTransformation(self._default_time_code())
+        prim_path = str(request.payload.get("prim_path", ""))
+        aspects = request.payload.get("aspects") or ["info"]
+        if not isinstance(aspects, list) or not all(isinstance(a, str) for a in aspects):
+            return BridgeResponse.failure(
+                request.request_id,
+                "InvalidRequest",
+                "get_prim_detail requires payload.aspects to be a list of strings.",
+            )
+        unknown = [aspect for aspect in aspects if aspect not in PRIM_DETAIL_ASPECTS]
+        if unknown:
+            return BridgeResponse.failure(
+                request.request_id,
+                "InvalidAspect",
+                f"Unknown aspect(s): {', '.join(unknown)}. "
+                f"Valid aspects: {', '.join(PRIM_DETAIL_ASPECTS)}.",
+            )
 
-        quat = matrix.ExtractRotation().GetQuat()
-        scale = [1.0, 1.0, 1.0]
-        for op in xformable.GetOrderedXformOps():
-            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
-                value = op.Get()
-                if value is not None:
-                    scale = list(Gf.Vec3d(value))
-                break
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            return BridgeResponse.failure(
+                request.request_id,
+                "PrimNotFound",
+                f"Prim not found: {prim_path}",
+            )
 
-        return BridgeResponse.success(
-            request.request_id,
-            {
-                "transport": "simul_bridge",
-                "prim_path": prim_path,
-                "space": "world" if world_space else "local",
-                "translation": list(matrix.ExtractTranslation()),
-                "rotation_quat": [quat.GetReal()] + list(quat.GetImaginary()),
-                "scale": scale,
-            },
-        )
+        reader = PrimDetailReader(stage)
+        payload: dict[str, Any] = {
+            "transport": "simul_bridge",
+            "prim_path": prim_path,
+            "aspects": list(aspects),
+        }
+        for aspect in aspects:
+            # Aspects are independent reads: one that fails is reported in
+            # place rather than discarding the rest of the answer, and each
+            # carries its own success flag like the per-aspect tools do.
+            try:
+                detail = reader.read(prim, aspect)
+            except Exception as exc:
+                detail = {"error": str(exc), "error_type": type(exc).__name__}
+            detail["success"] = "error" not in detail
+            payload[aspect] = detail
+        return BridgeResponse.success(request.request_id, payload)
 
     def _handle_search_prims(self, request: BridgeRequest) -> BridgeResponse:
         """Search for prims by type or name."""
@@ -578,10 +522,17 @@ class BridgeCommandService:
 
             ctx = omni.usd.get_context()
             stage = ctx.get_stage()
+            # Counting prims walks the entire stage on Kit's main thread.
+            # Callers that only need the diagnostics can opt out; the key
+            # stays present so the response shape does not change. Older
+            # clients omit the flag and keep the previous behaviour.
+            include_prim_count = request.payload.get("include_prim_count", True)
             if stage:
                 info["stage"] = {
                     "url": ctx.get_stage_url(),
-                    "prim_count": sum(1 for _ in stage.Traverse()),
+                    "prim_count": (
+                        sum(1 for _ in stage.Traverse()) if include_prim_count else None
+                    ),
                 }
             else:
                 info["stage"] = {"status": "no stage open"}
@@ -686,55 +637,3 @@ class BridgeCommandService:
             "InvalidSimulationCommand",
             f"Unsupported simulation command: {command}",
         )
-
-    @staticmethod
-    def _default_time_code() -> Any:
-        """Return the USD default time code."""
-        from pxr import Usd
-
-        return Usd.TimeCode.Default()
-
-    @staticmethod
-    def _serialize_value(value: Any) -> Any:
-        """Serialize common USD values into JSON-safe Python objects."""
-        from pxr import Gf
-
-        if value is None:
-            return None
-        if isinstance(value, (bool, int, float, str)):
-            return value
-        if isinstance(
-            value,
-            (
-                Gf.Vec2f,
-                Gf.Vec2d,
-                Gf.Vec2h,
-                Gf.Vec2i,
-                Gf.Vec3f,
-                Gf.Vec3d,
-                Gf.Vec3h,
-                Gf.Vec3i,
-                Gf.Vec4f,
-                Gf.Vec4d,
-                Gf.Vec4h,
-                Gf.Vec4i,
-            ),
-        ):
-            return [float(item) for item in value]
-        if isinstance(value, (Gf.Quatf, Gf.Quatd, Gf.Quath)):
-            return [float(value.GetReal())] + [
-                float(item) for item in value.GetImaginary()
-            ]
-        if isinstance(value, (Gf.Matrix4d, Gf.Matrix4f, Gf.Matrix3d, Gf.Matrix3f)):
-            return str(type(value).__name__)
-        try:
-            if hasattr(value, "__len__") and not isinstance(value, str):
-                if len(value) > 16:
-                    return f"[{len(value)} elements]"
-                return [BridgeCommandService._serialize_value(item) for item in value]
-        except Exception:
-            pass
-        try:
-            return float(value)
-        except Exception:
-            return str(value)

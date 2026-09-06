@@ -12,6 +12,7 @@ version: 0.1.0
 
 | Need | Use Instead |
 |------|-------------|
+| Build an object (prim + transform + physics + material) | `create_isaac_object` |
 | Create a prim | `create_isaac_prim` |
 | Move/rotate/scale | `set_isaac_prim_transform` |
 | Set an attribute | `set_isaac_prim_attribute` |

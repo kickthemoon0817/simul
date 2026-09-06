@@ -26,36 +26,47 @@ class DiagnosticsMixin:
     # Runtime diagnostics
     # ------------------------------------------------------------------
 
-    async def get_runtime_info(self) -> Dict[str, Any]:
+    async def get_runtime_info(
+        self, include_prim_count: bool = False
+    ) -> Dict[str, Any]:
         """
         Get consolidated runtime diagnostics from the running Isaac Sim instance.
 
         Collects Kit app info, timeline state, physics stats, GPU/renderer
         info, and viewport state in a single call.
 
+        Args:
+            include_prim_count: Also count every prim on the stage for
+                ``stage.prim_count``. The count walks the whole stage on Kit's
+                main thread, so it is off unless asked for; the key is then
+                ``None``.
+
         Returns:
             Dict with app, timeline, physics, renderer, and viewport sections.
         """
-        bridge_result = await self._execute_bridge_action("get_runtime_info")
+        bridge_result = await self._execute_bridge_action(
+            "get_runtime_info", {"include_prim_count": include_prim_count}
+        )
         if bridge_result is not None:
             return bridge_result
 
-        script = textwrap.dedent("""\
+        _include_prim_count = _pyval(bool(include_prim_count))
+        script = textwrap.dedent(f"""\
             import json
             import sys
             import time as _time
 
-            info = {}
+            info = {{}}
 
             # Kit app info
             try:
                 import omni.kit.app
                 app = omni.kit.app.get_app()
-                info["app"] = {
+                info["app"] = {{
                     "version": str(app.get_build_version()),
                     "python_version": sys.version.split()[0],
                     "update_number": int(app.get_update_number()),
-                }
+                }}
                 # The Kit build string above is not the Isaac Sim release, and
                 # the release is what callers key API namespaces off. The
                 # bridge reports the same field; agents must not have to know
@@ -69,14 +80,14 @@ class DiagnosticsMixin:
             try:
                 import omni.timeline
                 tl = omni.timeline.get_timeline_interface()
-                info["timeline"] = {
+                info["timeline"] = {{
                     "is_playing": tl.is_playing(),
                     "is_stopped": tl.is_stopped(),
                     "current_time": tl.get_current_time(),
                     "start_time": tl.get_start_time(),
                     "end_time": tl.get_end_time(),
                     "fps": tl.get_time_codes_per_second(),
-                }
+                }}
             except Exception as e:
                 info["timeline_error"] = str(e)
 
@@ -87,7 +98,7 @@ class DiagnosticsMixin:
                 # These live on PhysXUnitTests, not on the PhysX object this
                 # returns, in both Kit 107 (5.1) and Kit 110 (6.0). Probe
                 # rather than call blind, and say when neither is reachable.
-                physics = {}
+                physics = {{}}
                 available = False
                 if hasattr(physx, "get_physics_stats"):
                     stats = physx.get_physics_stats()
@@ -113,11 +124,11 @@ class DiagnosticsMixin:
                 gpu_dynamics = settings.get("/physics/gpuDynamicsEnabled")
                 physics_dt = settings.get("/persistent/simulation/defaultPhysicsDt")
                 solver_type = settings.get("/persistent/physics/solverType")
-                info["physics_config"] = {
+                info["physics_config"] = {{
                     "gpu_dynamics_enabled": gpu_dynamics,
                     "physics_dt": physics_dt,
                     "solver_type": solver_type,
-                }
+                }}
             except Exception as e:
                 info["physics_config_error"] = str(e)
 
@@ -125,13 +136,13 @@ class DiagnosticsMixin:
             try:
                 import carb.settings
                 settings = carb.settings.get_settings()
-                info["renderer"] = {
+                info["renderer"] = {{
                     "active_gpu": settings.get("/renderer/activeGpu"),
                     "gpu_name": settings.get("/renderer/gpuName"),
                     "hgi_driver": settings.get("/renderer/hgi/driver"),
                     "raytracing_mode": settings.get("/rtx/rendermode"),
                     "realtime_mode": settings.get("/rtx/ecoMode/enabled"),
-                }
+                }}
             except Exception as e:
                 info["renderer_error"] = str(e)
 
@@ -140,13 +151,13 @@ class DiagnosticsMixin:
                 from omni.kit.viewport.utility import get_active_viewport
                 viewport = get_active_viewport()
                 if viewport:
-                    info["viewport"] = {
+                    info["viewport"] = {{
                         "camera_path": str(viewport.camera_path),
                         "resolution": list(viewport.resolution),
                         "fps": viewport.fps if hasattr(viewport, "fps") else None,
-                    }
+                    }}
                 else:
-                    info["viewport"] = {"status": "no active viewport"}
+                    info["viewport"] = {{"status": "no active viewport"}}
             except Exception as e:
                 info["viewport_error"] = str(e)
 
@@ -156,12 +167,15 @@ class DiagnosticsMixin:
                 ctx = omni.usd.get_context()
                 stage = ctx.get_stage()
                 if stage:
-                    info["stage"] = {
+                    info["stage"] = {{
                         "url": ctx.get_stage_url(),
-                        "prim_count": len(list(stage.Traverse())),
-                    }
+                        "prim_count": (
+                            sum(1 for _ in stage.Traverse())
+                            if {_include_prim_count} else None
+                        ),
+                    }}
                 else:
-                    info["stage"] = {"status": "no stage open"}
+                    info["stage"] = {{"status": "no stage open"}}
             except Exception as e:
                 info["stage_error"] = str(e)
 
@@ -171,10 +185,10 @@ class DiagnosticsMixin:
                 ext_mgr = omni.kit.app.get_app().get_extension_manager()
                 all_exts = ext_mgr.get_extensions()
                 enabled = [e for e in all_exts if e.get("enabled")]
-                info["extensions"] = {
+                info["extensions"] = {{
                     "total": len(all_exts),
                     "enabled": len(enabled),
-                }
+                }}
             except Exception as e:
                 info["extensions_error"] = str(e)
 

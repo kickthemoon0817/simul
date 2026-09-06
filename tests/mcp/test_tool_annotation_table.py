@@ -33,6 +33,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "read_isaac_aovs": (RW, False, True),  # creates render products
     "capture_isaac_viewport": (DESTRUCTIVE, True, True),  # reclaims old captures
     "create_isaac_prim": (RW, False, True),
+    "create_isaac_object": (RW, False, True),
     "duplicate_isaac_prim": (RW, False, True),
     "import_isaac_asset": (RW, False, True),
     "delete_isaac_prim": (DESTRUCTIVE, True, True),

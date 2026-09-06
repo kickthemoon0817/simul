@@ -7,7 +7,10 @@ from typing import Any, Callable, Dict, List, Optional
 from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
 from ._shared import (
+    BIND_MATERIAL_CORE,
     BULK_GEOMETRY_ATTRIBUTES,
+    DEFAULT_MAX_RESULTS,
+    DEFINE_MATERIAL_CORE,
     LOG_SCAN_WINDOW_BYTES,
     MAX_CAPTURE_DIMENSION,
     MAX_INLINE_CAPTURE_BYTES,
@@ -15,6 +18,7 @@ from ._shared import (
     MAX_SCRIPT_BYTES,
     PRIM_DETAIL_ASPECTS,
     FloatList,
+    _compose_script,
     _pyval,
     logger,
 )
@@ -95,51 +99,66 @@ class MaterialsMixin:
         """)
         return await self._execute_json_script(script)
 
-    async def list_isaac_materials(self) -> Dict[str, Any]:
+    async def list_isaac_materials(
+        self, max_results: int = DEFAULT_MAX_RESULTS
+    ) -> Dict[str, Any]:
         """
         List all materials in the current stage.
+
+        Args:
+            max_results: Maximum materials described in the result. ``total``
+                still counts every material on the stage.
 
         Returns:
             Dict with list of material paths and basic info.
         """
-        script = textwrap.dedent("""\
+        max_results = max(1, min(max_results, 10000))
+        script = textwrap.dedent(f"""\
             import json
             import omni.usd
             from pxr import UsdShade
 
             stage = omni.usd.get_context().get_stage()
             if stage is None:
-                print(json.dumps({"error": "No stage is currently open"}))
+                print(json.dumps({{"error": "No stage is currently open"}}))
             else:
+                max_results = {max_results}
                 materials = []
+                total = 0
                 for p in stage.Traverse():
-                    if p.IsA(UsdShade.Material):
-                        mat = UsdShade.Material(p)
-                        shader_result = mat.ComputeSurfaceSource()
+                    if not p.IsA(UsdShade.Material):
+                        continue
+                    total += 1
+                    # Resolving the surface shader is the expensive part of
+                    # each entry, so it only runs for entries that are kept.
+                    if len(materials) >= max_results:
+                        continue
+                    mat = UsdShade.Material(p)
+                    shader_result = mat.ComputeSurfaceSource()
+                    shader_obj = shader_result[0] if shader_result else None
+                    if not shader_obj:
+                        shader_result = mat.ComputeSurfaceSource("mdl")
                         shader_obj = shader_result[0] if shader_result else None
-                        render_ctx = ""
-                        if not shader_obj:
-                            shader_result = mat.ComputeSurfaceSource("mdl")
-                            shader_obj = shader_result[0] if shader_result else None
-                            render_ctx = "mdl"
-                        shader_type = None
-                        if shader_obj:
-                            sp = shader_obj.GetPrim()
-                            sub_id = sp.GetAttribute("info:mdl:sourceAsset:subIdentifier")
-                            if sub_id and sub_id.Get():
-                                shader_type = str(sub_id.Get())
-                            else:
-                                sid = shader_obj.GetIdAttr().Get()
-                                shader_type = str(sid) if sid else None
-                        materials.append({
-                            "path": str(p.GetPath()),
-                            "name": p.GetName(),
-                            "shader_type": shader_type,
-                        })
-                print(json.dumps({
+                    shader_type = None
+                    if shader_obj:
+                        sp = shader_obj.GetPrim()
+                        sub_id = sp.GetAttribute("info:mdl:sourceAsset:subIdentifier")
+                        if sub_id and sub_id.Get():
+                            shader_type = str(sub_id.Get())
+                        else:
+                            sid = shader_obj.GetIdAttr().Get()
+                            shader_type = str(sid) if sid else None
+                    materials.append({{
+                        "path": str(p.GetPath()),
+                        "name": p.GetName(),
+                        "shader_type": shader_type,
+                    }})
+                print(json.dumps({{
                     "count": len(materials),
+                    "total": total,
+                    "truncated": total > len(materials),
                     "materials": materials,
-                }))
+                }}))
         """)
         return await self._execute_json_script(script)
 
@@ -158,30 +177,21 @@ class MaterialsMixin:
         """
         _prim_path = _pyval(prim_path)
         _mat_path = _pyval(material_path)
-        script = textwrap.dedent(f"""\
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import UsdShade
-
+            """,
+            BIND_MATERIAL_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath({_prim_path})
-                mat_prim = stage.GetPrimAtPath({_mat_path})
-                if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
-                elif not mat_prim.IsValid() or not mat_prim.IsA(UsdShade.Material):
-                    print(json.dumps({{"error": "Material not found: " + {_mat_path}}}))
-                else:
-                    mat = UsdShade.Material(mat_prim)
-                    UsdShade.MaterialBindingAPI(prim).Bind(mat)
-                    print(json.dumps({{
-                        "prim_path": {_prim_path},
-                        "material_path": {_mat_path},
-                        "bound": True,
-                    }}))
-        """)
+                print(json.dumps(_bind_material(stage, {_prim_path}, {_mat_path})))
+            """,
+        )
         return await self._execute_json_script(script)
 
     async def set_isaac_material_property(
@@ -282,65 +292,24 @@ class MaterialsMixin:
         """
         _mat_path = _pyval(material_path)
         _shader_type = _pyval(shader_type)
-        color = diffuse_color or [0.8, 0.8, 0.8]
-        script = textwrap.dedent(f"""\
+        _color = _pyval([float(c) for c in (diffuse_color or [0.8, 0.8, 0.8])])
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import UsdShade, Sdf, Gf
-
+            """,
+            DEFINE_MATERIAL_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                existing = stage.GetPrimAtPath({_mat_path})
-                if existing.IsValid():
-                    print(json.dumps({{"error": "Prim already exists at " + {_mat_path}}}))
-                else:
-                    mat_prim = stage.DefinePrim({_mat_path}, "Material")
-                    mat = UsdShade.Material(mat_prim)
-                    shader_type = {_shader_type}
-                    shader_path = {_mat_path} + "/Shader"
-
-                    if shader_type == "OmniPBR":
-                        shader_prim = stage.DefinePrim(shader_path, "Shader")
-                        shader = UsdShade.Shader(shader_prim)
-                        shader.CreateIdAttr("OmniPBR")
-                        shader.CreateImplementationSourceAttr(UsdShade.Tokens.sourceAsset)
-                        shader.SetSourceAsset(Sdf.AssetPath("OmniPBR.mdl"), "mdl")
-                        shader.SetSourceAssetSubIdentifier("OmniPBR", "mdl")
-                        shader.CreateInput("diffuse_color_constant", Sdf.ValueTypeNames.Color3f).Set(
-                            Gf.Vec3f({color[0]}, {color[1]}, {color[2]})
-                        )
-                        shader.CreateInput("reflection_roughness_constant", Sdf.ValueTypeNames.Float).Set({roughness})
-                        shader.CreateInput("metallic_constant", Sdf.ValueTypeNames.Float).Set({metallic})
-                        shader.CreateInput("enable_opacity", Sdf.ValueTypeNames.Bool).Set({opacity} < 1.0)
-                        if {opacity} < 1.0:
-                            shader.CreateInput("opacity_constant", Sdf.ValueTypeNames.Float).Set({opacity})
-                        out = shader.CreateOutput("out", Sdf.ValueTypeNames.Token)
-                        mat.CreateSurfaceOutput("mdl").ConnectToSource(out)
-                    else:
-                        shader_prim = stage.DefinePrim(shader_path, "Shader")
-                        shader = UsdShade.Shader(shader_prim)
-                        shader.CreateIdAttr("UsdPreviewSurface")
-                        shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
-                            Gf.Vec3f({color[0]}, {color[1]}, {color[2]})
-                        )
-                        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set({roughness})
-                        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set({metallic})
-                        shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set({opacity})
-                        out = shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
-                        mat.CreateSurfaceOutput().ConnectToSource(out)
-
-                    print(json.dumps({{
-                        "material_path": {_mat_path},
-                        "shader_path": shader_path,
-                        "shader_type": shader_type,
-                        "diffuse_color": [{color[0]}, {color[1]}, {color[2]}],
-                        "roughness": {roughness},
-                        "metallic": {metallic},
-                        "opacity": {opacity},
-                        "created": True,
-                    }}))
-        """)
+                print(json.dumps(_define_material(
+                    stage, {_mat_path}, {_shader_type}, {_color},
+                    {float(roughness)}, {float(metallic)}, {float(opacity)}
+                )))
+            """,
+        )
         return await self._execute_json_script(script)
 

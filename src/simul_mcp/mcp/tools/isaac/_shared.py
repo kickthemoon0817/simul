@@ -165,3 +165,207 @@ def _pyval(value: Any) -> str:
     return repr(value)
 
 
+def _compose_script(*fragments: str) -> str:
+    """Join dedented source fragments into one module-level script.
+
+    The script cores below are plain Python source. Embedding one inside an
+    f-string template would indent only its first line, so each fragment is
+    dedented on its own and the pieces are concatenated at column zero.
+
+    Args:
+        *fragments: Source fragments, each indented however its literal is.
+
+    Returns:
+        The concatenated script.
+    """
+    return "\n".join(textwrap.dedent(fragment) for fragment in fragments)
+
+
+# Script cores shared by the single-step tools and create_isaac_object. Each
+# defines one module-level function that takes the open stage plus plain
+# parameters and returns the dict the tool prints; a dict carrying "error"
+# reports failure without raising. They are Python *source*, not callables:
+# the tools embed them in the generated script so the logic exists once and
+# runs inside Kit, whichever tool invoked it.
+
+DEFINE_PRIM_CORE = """\
+    def _define_prim(stage, prim_path, prim_type, attributes):
+        existing = stage.GetPrimAtPath(prim_path)
+        if existing.IsValid():
+            return {"error": "Prim already exists: " + prim_path}
+        prim = stage.DefinePrim(prim_path, prim_type)
+        if not prim.IsValid():
+            return {"error": "Failed to create prim: " + prim_path}
+        for name, value in attributes.items():
+            attr = prim.GetAttribute(name)
+            if attr.IsValid():
+                attr.Set(value)
+        return {
+            "prim_path": str(prim.GetPath()),
+            "prim_type": prim.GetTypeName(),
+            "created": True,
+        }
+"""
+
+SET_PRIM_TRANSFORM_CORE = """\
+    def _set_prim_transform(stage, prim_path, translation, rotation_euler, scale):
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            return {"error": "Prim not found: " + prim_path}
+        if not prim.IsA(UsdGeom.Xformable):
+            return {"error": "Prim is not Xformable: " + prim_path}
+        xformable = UsdGeom.Xformable(prim)
+        requested = (
+            (translation, UsdGeom.XformOp.TypeTranslate, xformable.AddTranslateOp, Gf.Vec3d),
+            (rotation_euler, UsdGeom.XformOp.TypeRotateXYZ, xformable.AddRotateXYZOp, Gf.Vec3f),
+            (scale, UsdGeom.XformOp.TypeScale, xformable.AddScaleOp, Gf.Vec3f),
+        )
+        for value, op_type, add_op, vector in requested:
+            if value is None:
+                continue
+            existing = [op for op in xformable.GetOrderedXformOps() if op.GetOpType() == op_type]
+            if existing:
+                existing[0].Set(vector(*value))
+            else:
+                add_op().Set(vector(*value))
+        world = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        return {
+            "prim_path": prim_path,
+            "translation": list(world.ExtractTranslation()),
+            "rotation_euler_set": rotation_euler,
+            "scale_set": scale,
+        }
+"""
+
+APPLY_RIGID_BODY_CORE = """\
+    def _apply_rigid_body(stage, prim_path, kinematic):
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            return {"error": "Prim not found: " + prim_path}
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            return {"error": "RigidBodyAPI already applied: " + prim_path}
+        UsdPhysics.RigidBodyAPI.Apply(prim)
+        if kinematic:
+            UsdPhysics.RigidBodyAPI(prim).GetKinematicEnabledAttr().Set(True)
+        return {
+            "prim_path": prim_path,
+            "rigid_body_applied": True,
+            "kinematic": kinematic,
+        }
+"""
+
+APPLY_COLLISION_CORE = """\
+    def _apply_collision(stage, prim_path, approximation):
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            return {"error": "Prim not found: " + prim_path}
+        UsdPhysics.CollisionAPI.Apply(prim)
+        if approximation != "none":
+            UsdPhysics.MeshCollisionAPI.Apply(prim)
+            UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Set(approximation)
+        return {
+            "prim_path": prim_path,
+            "collision_applied": True,
+            "approximation": approximation,
+        }
+"""
+
+SET_MASS_PROPERTIES_CORE = """\
+    def _set_mass_properties(stage, prim_path, mass, density, center_of_mass):
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            return {"error": "Prim not found: " + prim_path}
+        if not prim.HasAPI(UsdPhysics.MassAPI):
+            UsdPhysics.MassAPI.Apply(prim)
+        mass_api = UsdPhysics.MassAPI(prim)
+        if mass is not None:
+            mass_api.GetMassAttr().Set(mass)
+        if density is not None:
+            mass_api.GetDensityAttr().Set(density)
+        if center_of_mass is not None:
+            mass_api.GetCenterOfMassAttr().Set(Gf.Vec3f(*center_of_mass))
+        # The schema fallback is (-inf, -inf, -inf), meaning "derive from the
+        # shape"; json.dumps would spell that as -Infinity, which is not JSON.
+        com = mass_api.GetCenterOfMassAttr().Get()
+        authored = com is not None and all(abs(c) != float("inf") for c in com)
+        return {
+            "prim_path": prim_path,
+            "mass": mass_api.GetMassAttr().Get(),
+            "density": mass_api.GetDensityAttr().Get(),
+            "center_of_mass": list(com) if authored else None,
+        }
+"""
+
+DEFINE_MATERIAL_CORE = """\
+    def _define_material(stage, material_path, shader_type, diffuse_color, roughness, metallic, opacity):
+        existing = stage.GetPrimAtPath(material_path)
+        if existing.IsValid():
+            return {"error": "Prim already exists at " + material_path}
+        mat = UsdShade.Material(stage.DefinePrim(material_path, "Material"))
+        shader_path = material_path + "/Shader"
+        shader = UsdShade.Shader(stage.DefinePrim(shader_path, "Shader"))
+        color = Gf.Vec3f(*diffuse_color)
+        if shader_type == "OmniPBR":
+            shader.CreateIdAttr("OmniPBR")
+            shader.CreateImplementationSourceAttr(UsdShade.Tokens.sourceAsset)
+            shader.SetSourceAsset(Sdf.AssetPath("OmniPBR.mdl"), "mdl")
+            shader.SetSourceAssetSubIdentifier("OmniPBR", "mdl")
+            shader.CreateInput("diffuse_color_constant", Sdf.ValueTypeNames.Color3f).Set(color)
+            shader.CreateInput("reflection_roughness_constant", Sdf.ValueTypeNames.Float).Set(roughness)
+            shader.CreateInput("metallic_constant", Sdf.ValueTypeNames.Float).Set(metallic)
+            shader.CreateInput("enable_opacity", Sdf.ValueTypeNames.Bool).Set(opacity < 1.0)
+            if opacity < 1.0:
+                shader.CreateInput("opacity_constant", Sdf.ValueTypeNames.Float).Set(opacity)
+            out = shader.CreateOutput("out", Sdf.ValueTypeNames.Token)
+            mat.CreateSurfaceOutput("mdl").ConnectToSource(out)
+        else:
+            shader.CreateIdAttr("UsdPreviewSurface")
+            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(color)
+            shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(roughness)
+            shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(metallic)
+            shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(opacity)
+            out = shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+            mat.CreateSurfaceOutput().ConnectToSource(out)
+        return {
+            "material_path": material_path,
+            "shader_path": shader_path,
+            "shader_type": shader_type,
+            "diffuse_color": list(diffuse_color),
+            "roughness": roughness,
+            "metallic": metallic,
+            "opacity": opacity,
+            "created": True,
+        }
+"""
+
+BIND_MATERIAL_CORE = """\
+    def _bind_material(stage, prim_path, material_path):
+        prim = stage.GetPrimAtPath(prim_path)
+        mat_prim = stage.GetPrimAtPath(material_path)
+        if not prim.IsValid():
+            return {"error": "Prim not found: " + prim_path}
+        if not mat_prim.IsValid() or not mat_prim.IsA(UsdShade.Material):
+            return {"error": "Material not found: " + material_path}
+        UsdShade.MaterialBindingAPI.Apply(prim).Bind(UsdShade.Material(mat_prim))
+        return {
+            "prim_path": prim_path,
+            "material_path": material_path,
+            "bound": True,
+        }
+"""
+
+# Collision approximations UsdPhysics.MeshCollisionAPI accepts, plus "none"
+# for a plain CollisionAPI without a mesh approximation.
+COLLISION_APPROXIMATIONS: tuple[str, ...] = (
+    "none",
+    "convexHull",
+    "convexDecomposition",
+    "meshSimplification",
+    "boundingSphere",
+    "boundingCube",
+)
+
+# Default cap on list-shaped tool results, applied inside the generated script
+# so the trim happens before Kit serialises the payload.
+DEFAULT_MAX_RESULTS = 200
+
