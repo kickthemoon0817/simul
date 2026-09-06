@@ -199,3 +199,41 @@ def test_start_warns_when_bound_port_differs_from_configured(
             await blocker.stop()
 
     asyncio.run(scenario())
+
+
+def test_only_the_bridge_extension_class_is_visible_to_kits_scan(monkeypatch) -> None:
+    """Kit instantiates every module-level IExt subclass, so exactly one may exist.
+
+    Kit's ``omni.ext`` is stood in for by a fake with an ``IExt`` base, and the
+    extension module is re-imported against it, which is how the scan sees it
+    inside the editor.
+    """
+    import importlib
+    import inspect
+    import sys
+    import types
+
+    class IExt:
+        def on_shutdown(self) -> None:
+            pass
+
+    fake_omni = types.ModuleType("omni")
+    fake_omni_ext = types.ModuleType("omni.ext")
+    fake_omni_ext.IExt = IExt
+    fake_omni.ext = fake_omni_ext
+    fake_carb = types.ModuleType("carb")
+    monkeypatch.setitem(sys.modules, "omni", fake_omni)
+    monkeypatch.setitem(sys.modules, "omni.ext", fake_omni_ext)
+    monkeypatch.setitem(sys.modules, "carb", fake_carb)
+    monkeypatch.delitem(sys.modules, "khemoo.simul.mcp.extension", raising=False)
+    try:
+        extension_module = importlib.import_module("khemoo.simul.mcp.extension")
+        exposed = [
+            name
+            for name, obj in vars(extension_module).items()
+            if inspect.isclass(obj) and issubclass(obj, IExt)
+        ]
+        assert exposed == ["IsaacMCPServerExtension"]
+    finally:
+        sys.modules.pop("khemoo.simul.mcp.extension", None)
+        importlib.import_module("khemoo.simul.mcp.extension")
