@@ -92,7 +92,7 @@ def test_create_and_delete_prim_round_trip(live: Tuple[IsaacRuntimeAdapter, Isaa
     try:
         detail = _run(tools.get_isaac_prim_detail(prim_path=prim_path, aspects=["info"]))
         assert detail.get("success") is not False, detail
-        assert detail["info"].get("type_name") == "Cube" or detail["info"].get("prim_type") == "Cube", detail
+        assert detail["info"].get("type") == "Cube", detail
     finally:
         deleted = _run(tools.delete_isaac_prim(prim_path=prim_path))
     assert deleted.get("success") is not False, deleted
