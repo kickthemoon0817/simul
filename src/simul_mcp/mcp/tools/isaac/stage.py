@@ -38,7 +38,7 @@ class StageAssetMixin:
         denial = self._sandbox_denial(file_path)
         if denial is not None:
             return denial
-        _file_path = _pyval(file_path)
+        _file_path = _pyval(self._path_policy.authorize(file_path))
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
@@ -70,11 +70,11 @@ class StageAssetMixin:
         Returns:
             Dict confirming the stage was saved.
         """
-        denial = self._sandbox_denial(file_path)
+        denial = self._sandbox_denial(file_path, write=True)
         if denial is not None:
             return denial
         if file_path:
-            _file_path = _pyval(file_path)
+            _file_path = _pyval(self._path_policy.authorize(file_path, write=True))
             script = textwrap.dedent(f"""\
                 import json
                 import omni.usd
@@ -146,7 +146,7 @@ class StageAssetMixin:
         denial = self._sandbox_denial(asset_path)
         if denial is not None:
             return denial
-        _asset_path = _pyval(asset_path)
+        _asset_path = _pyval(self._path_policy.authorize(asset_path))
         _target_path = _pyval(target_path)
         script = textwrap.dedent(f"""\
             import json
@@ -189,7 +189,7 @@ class StageAssetMixin:
         if denial is not None:
             return denial
         _prim_path = _pyval(prim_path)
-        _ref_path = _pyval(reference_path)
+        _ref_path = _pyval(self._path_policy.authorize(reference_path))
         script = textwrap.dedent(f"""\
             import json
             import omni.usd

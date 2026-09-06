@@ -2,7 +2,7 @@
 
 import json
 import textwrap
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
@@ -237,6 +237,12 @@ class CameraMixin:
         """
         Capture the active viewport to a PNG on the Isaac Sim host.
 
+        The PNG lands in the capture directory (``viewport.capture_dir``, or
+        ``<writable allowed root>/captures`` when unset), which must sit inside
+        the sandbox. Only the oldest captures in that directory are reclaimed.
+        The viewport is rendered at the requested size for the capture and its
+        resolution is restored afterwards.
+
         Args:
             width: Output image width in pixels (1–MAX_CAPTURE_DIMENSION).
             height: Output image height in pixels (1–MAX_CAPTURE_DIMENSION).
@@ -251,6 +257,10 @@ class CameraMixin:
         """
         width = max(1, min(width, MAX_CAPTURE_DIMENSION))
         height = max(1, min(height, MAX_CAPTURE_DIMENSION))
+
+        capture_dir = self._capture_dir_or_denial()
+        if isinstance(capture_dir, dict):
+            return capture_dir
 
         if inline:
             # Encode only below the cap, and say why when skipping. Emitting a
@@ -296,12 +306,12 @@ class CameraMixin:
 
         emit = textwrap.indent(emit_body.rstrip(), " " * 24)
         max_retained = MAX_RETAINED_CAPTURES
+        _capture_dir = _pyval(capture_dir)
 
         script = textwrap.dedent(f"""\
             import json
             import base64
             import os
-            import tempfile
             import uuid
             try:
                 import omni.kit.viewport.utility as vp_util
@@ -313,14 +323,15 @@ class CameraMixin:
                 else:
                     # Unique per capture: a fixed name makes an A/B pair
                     # overwrite itself, and the caller now keeps the file.
-                    capture_dir = tempfile.gettempdir()
+                    capture_dir = {_capture_dir}
+                    os.makedirs(capture_dir, exist_ok=True)
                     out_path = os.path.join(
                         capture_dir,
                         "simul_capture_%s.png" % uuid.uuid4().hex[:12],
                     )
 
-                    # Reclaim earlier captures; the caller keeps the path, so
-                    # nothing else ever deletes them.
+                    # Reclaim earlier captures in this directory only; the
+                    # caller keeps the path, so nothing else ever deletes them.
                     try:
                         previous = sorted(
                             (
@@ -340,22 +351,26 @@ class CameraMixin:
                     except OSError:
                         pass
 
-                    # Set requested resolution on the viewport
-                    vp_api.resolution = ({width}, {height})
-                    # Let the viewport re-render at the new resolution
-                    for _ in range(4):
-                        await omni.kit.app.get_app().next_update_async()
+                    # Render at the requested size for this capture only; the
+                    # viewport goes back to its own resolution afterwards.
+                    original_resolution = tuple(vp_api.resolution)
+                    try:
+                        vp_api.resolution = ({width}, {height})
+                        for _ in range(4):
+                            await omni.kit.app.get_app().next_update_async()
 
-                    # Kit 106+ (Isaac Sim 5.x): use schedule_capture with FileCapture
-                    from omni.kit.widget.viewport.capture import FileCapture
-                    capture = FileCapture(out_path)
-                    vp_api.schedule_capture(capture)
+                        # Kit 106+ (Isaac Sim 5.x): use schedule_capture with FileCapture
+                        from omni.kit.widget.viewport.capture import FileCapture
+                        capture = FileCapture(out_path)
+                        vp_api.schedule_capture(capture)
 
-                    # Wait for the file to be written
-                    for _ in range(60):
-                        await omni.kit.app.get_app().next_update_async()
-                        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-                            break
+                        # Wait for the file to be written
+                        for _ in range(60):
+                            await omni.kit.app.get_app().next_update_async()
+                            if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                                break
+                    finally:
+                        vp_api.resolution = original_resolution
 
                     if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
 {emit}
@@ -368,4 +383,35 @@ class CameraMixin:
         """)
         return await self._execute_json_script(script)
 
+    def _capture_dir_or_denial(self) -> Union[str, Dict[str, Any]]:
+        """Pick the directory captures are written to, or explain why none is.
 
+        ``viewport.capture_dir`` wins when set and must pass the write policy.
+        Otherwise the policy's default is used; when the sandbox is enabled and
+        no allowed root is writable there is nowhere safe to write, and the
+        denial names the roots so the caller can fix the configuration.
+
+        Returns:
+            The capture directory as a string, or a SandboxError payload dict.
+        """
+        configured: Optional[str] = self.settings.viewport.capture_dir
+        if configured:
+            denial = self._sandbox_denial(configured, write=True)
+            if denial is not None:
+                denial["details"]["setting"] = "viewport.capture_dir"
+                return denial
+            return self._path_policy.authorize(configured, write=True)
+        default_dir = self._path_policy.default_capture_dir()
+        if default_dir is None:
+            details = self._path_policy.denial_details("", write=True)
+            details["setting"] = "viewport.capture_dir"
+            details["hint"] = (
+                "No allowed root is writable, so captures have nowhere to go. Set "
+                "viewport.capture_dir to a writable directory inside security.allowed_paths."
+            )
+            return ErrorResponse(
+                error="No writable capture directory inside the sandbox",
+                error_type="SandboxError",
+                details=details,
+            ).model_dump()
+        return default_dir
