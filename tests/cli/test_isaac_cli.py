@@ -865,3 +865,147 @@ def test_launch_readiness_probe_waits_for_kit_app_ready() -> None:
     compile(isaac_cli._APP_READY_PROBE, "<probe>", "exec")
     assert "is_app_ready()" in isaac_cli._APP_READY_PROBE
     assert "app-ready" in isaac_cli._APP_READY_PROBE
+
+
+# ---------------------------------------------------------------------------
+# launch --generate-auth-token: Kit generates the token, the CLI reads it back
+# ---------------------------------------------------------------------------
+def test_launch_generate_auth_token_keeps_the_token_off_argv(tmp_path: Path) -> None:
+    root = _write_isaac_root(tmp_path, "6.0.1", with_bridge=True)
+
+    result = runner.invoke(
+        app, ["--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run", "--generate-auth-token"]
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    command = payload["command"]
+    assert "--/exts/isaacsim.code_editor.python_server/require_auth=true" in command
+    assert not any("auth_token=" in item for item in command)
+    assert payload["auth_token_source"] == "generated"
+    assert payload["auth_required"] is True
+
+
+def test_launch_generate_auth_token_requires_isaac_six(tmp_path: Path) -> None:
+    root = _write_isaac_root(tmp_path, "5.1.0", with_bridge=True)
+
+    result = runner.invoke(
+        app, ["--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run", "--generate-auth-token"]
+    )
+
+    assert result.exit_code != 0
+    assert "InvalidArgument" in result.stdout
+
+
+def test_launch_rejects_conflicting_token_flags(tmp_path: Path) -> None:
+    root = _write_isaac_root(tmp_path, "6.0.1", with_bridge=True)
+
+    both = runner.invoke(
+        app,
+        [
+            "--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run",
+            "--generate-auth-token", "--auth-token", "x",
+        ],
+    )
+    assert both.exit_code != 0
+    assert "exclusive" in both.stdout
+
+    print_only = runner.invoke(
+        app, ["--json", "isaac", "launch", "--isaac-root", str(root), "--dry-run", "--print-token"]
+    )
+    assert print_only.exit_code != 0
+    assert "--print-token" in print_only.stdout
+
+
+class _FakeEditor:
+    """Popen stand-in that prints the python_server token line into the launch log."""
+
+    def __init__(self, command, **kwargs) -> None:
+        import os
+
+        self.pid = os.getpid()
+        self.returncode = None
+        self.command = command
+        kwargs["stdout"].write(
+            b"[Info] [isaacsim.code_editor.python_server.extension] "
+            b"Python server authentication token: s3cret-tok\n"
+        )
+
+    def poll(self):
+        return None
+
+
+class _FakeProbeClient:
+    """Socket client double that only reports app-ready when it carries the generated token."""
+
+    def __init__(self, **kwargs) -> None:
+        self.auth_token = kwargs.get("auth_token")
+
+    @property
+    def socket_protocol(self) -> str:
+        return "python_server"
+
+    async def bridge_request(self, method: str, params: dict) -> dict:
+        return {"status": "ok"}
+
+    async def execute_vscode_only(self, code: str) -> ScriptResult:
+        if self.auth_token == "s3cret-tok":
+            return ScriptResult(success=True, output="app-ready")
+        return ScriptResult(success=False, output="", error_name="PermissionError")
+
+
+def _launch_with_generated_token(tmp_path: Path, monkeypatch, *extra: str):
+    import os
+    import stat
+    import subprocess
+
+    from simul_mcp.config import Settings
+
+    root = _write_isaac_root(tmp_path, "6.0.1", with_bridge=True)
+    discovery_dir = tmp_path / "disc"
+    monkeypatch.delenv("ISAAC_SIM__SOCKET_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr(
+        isaac_cli, "get_settings", lambda: Settings(isaac_sim={"discovery_dir": str(discovery_dir)})
+    )
+    monkeypatch.setattr(subprocess, "Popen", _FakeEditor)
+    monkeypatch.setattr(isaac_cli, "IsaacSocketClient", _FakeProbeClient)
+
+    result = runner.invoke(
+        app,
+        [
+            "--json", "isaac", "launch", "--isaac-root", str(root), "--generate-auth-token",
+            "--wait-timeout", "5", "--poll-interval", "0.01", *extra,
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    token_file = discovery_dir / f"auth-token-{os.getpid()}"
+    assert payload["auth_token_file"] == str(token_file)
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+    assert token_file.read_text().strip() == "s3cret-tok"
+    assert payload["success"] is True
+    assert payload["socket_reachable"] is True
+    assert payload["auth_token_found"] is True
+    return payload, discovery_dir
+
+
+def test_launch_generate_auth_token_stores_token_and_probes_with_it(tmp_path: Path, monkeypatch) -> None:
+    payload, _ = _launch_with_generated_token(tmp_path, monkeypatch)
+
+    assert "auth_token" not in payload
+    assert "s3cret-tok" not in json.dumps(payload)
+
+
+def test_launch_print_token_includes_token_once(tmp_path: Path, monkeypatch) -> None:
+    payload, _ = _launch_with_generated_token(tmp_path, monkeypatch, "--print-token")
+
+    assert payload["auth_token"] == "s3cret-tok"
+
+
+def test_launch_generated_token_is_picked_up_by_settings(tmp_path: Path, monkeypatch) -> None:
+    from simul_mcp.config import Settings
+
+    _, discovery_dir = _launch_with_generated_token(tmp_path, monkeypatch)
+
+    settings = Settings(isaac_sim={"discovery_dir": str(discovery_dir)})
+    assert settings.isaac_sim.socket_auth_token == "s3cret-tok"

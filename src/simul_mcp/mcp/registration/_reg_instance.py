@@ -15,8 +15,25 @@ if TYPE_CHECKING:
     from ..server import SimulMCPServer
 
 
+_CLAIM_MODE_SENTENCE = {
+    True: (
+        "Claims are ENFORCED on this server (isaac_sim.enforce_claims=true): a live "
+        "claim blocks mutating Isaac tools from every other agent with InstanceClaimed."
+    ),
+    False: (
+        "Claims are ADVISORY on this server (isaac_sim.enforce_claims=false): a "
+        "listed session tells you who is working there but does not block you."
+    ),
+}
+
+
 def register_instance_tools(server: "SimulMCPServer") -> None:
-    """Register Isaac Sim instance discovery, routing, and session tools."""
+    """Register Isaac Sim instance discovery, routing, and session tools.
+
+    The claim tools describe the server's actual behaviour: with
+    ``isaac_sim.enforce_claims`` on, a claim is a lock; off, it is a notice.
+    """
+    enforced: bool = server.settings.isaac_sim.enforce_claims
 
     @server.mcp.tool(
         name="list_isaac_instances",
@@ -26,7 +43,8 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             "loaded stage URL, simulation state, and active agent sessions with "
             "their purposes. Use this to find a free or compatible instance "
             "before starting work; unreachable instances report "
-            "instance_status 'unreachable'."
+            "instance_status 'unreachable'. "
+            + _CLAIM_MODE_SENTENCE[enforced]
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -116,7 +134,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             "'isaac') target for the rest of this MCP session. "
             "Use list_isaac_instances first to see available instances and "
             "their session status. Optionally register your purpose so other "
-            "agents can see what you're doing on this instance."
+            "agents can see what you're doing on this instance; with a purpose "
+            "this is the same as claim_isaac_instance. "
+            + _CLAIM_MODE_SENTENCE[enforced]
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False
@@ -154,9 +174,13 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
 
         client = server._isaac_clients[instance_name]
         port = client._port
+        _agent_id = server._resolve_agent_id(agent_id)
 
         compat_info: Dict[str, Any] = {}
         if purpose:
+            holder = server._foreign_claim(instance_name, _agent_id)
+            if holder is not None:
+                return server._claimed_error(instance_name, holder)
             compat_info = server.session_manager.score_compatibility(purpose, port)
 
         server._set_request_active_instance(instance_name)
@@ -165,7 +189,6 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         session_result: Dict[str, Any] = {}
         binding_result: Dict[str, Any] = {}
         if purpose:
-            _agent_id = server._resolve_agent_id(agent_id)
             inst_session = server.session_manager.get_instance_session(port)
             session_result = inst_session.register(_agent_id, purpose)
             binding = server._bind_request_session(
@@ -202,11 +225,25 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="claim_isaac_instance",
         description=(
-            "Register your purpose on the current active Isaac Sim instance. "
-            "Other agents will see your purpose and can decide whether to join "
-            "or pick a different instance. Call this at the start of your work "
-            "to coordinate with other agents. The claim is advisory — it "
-            "informs but does not block other agents."
+            (
+                "Claim the current active Isaac Sim instance for your purpose. "
+                "Claims are ENFORCED on this server (isaac_sim.enforce_claims=true): "
+                "while your claim is live, mutating Isaac tools from any other agent "
+                "fail with InstanceClaimed, and this call fails the same way when "
+                "another agent already holds a live claim. Read-only tools are never "
+                "blocked. A claim expires after 120 s without tool activity; call "
+                "release_isaac_instance when you are done."
+            )
+            if enforced
+            else (
+                "Register your purpose on the current active Isaac Sim instance. "
+                "Claims are ADVISORY on this server (isaac_sim.enforce_claims=false): "
+                "other agents see your purpose in list_isaac_instances and get a "
+                "compatibility score when they claim, but nothing stops them from "
+                "mutating the scene. Set isaac_sim.enforce_claims=true to make a "
+                "claim block other agents' mutating tools. A claim expires after "
+                "120 s without tool activity."
+            )
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False
@@ -238,6 +275,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
 
         port = client._port
         _agent_id = server._resolve_agent_id(agent_id)
+        holder = server._foreign_claim(instance_name, _agent_id)
+        if holder is not None:
+            return server._claimed_error(instance_name, holder)
         inst_session = server.session_manager.get_instance_session(port)
 
         compat = server.session_manager.score_compatibility(purpose, port)
@@ -270,10 +310,17 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="release_isaac_instance",
         description=(
-            "Release your session on an Isaac Sim instance. Call this when "
-            "you're done with your work so other agents know the instance "
-            "is available. Sessions also auto-expire after 120 seconds of "
-            "inactivity."
+            "Release your own claim on the active Isaac Sim instance; an "
+            "agent_id that is not yours is refused. Call this when you're done "
+            "so other agents can use the instance. Claims also expire after "
+            "120 seconds of inactivity. "
+            + (
+                "Claims are ENFORCED on this server (isaac_sim.enforce_claims=true): "
+                "releasing lifts the InstanceClaimed refusal for other agents."
+                if enforced
+                else "Claims are ADVISORY on this server (isaac_sim.enforce_claims=false): "
+                "releasing only changes what other agents see."
+            )
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False
@@ -299,6 +346,16 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         if not _agent_id or not _port:
             return server._as_text_result(
                 {"success": False, "error": "No active session to release"}
+            )
+        if binding is not None and _agent_id != binding.agent_id:
+            return server._as_text_result(
+                ErrorResponse(
+                    error=(
+                        f"agent_id {_agent_id!r} is not this session's claim "
+                        f"({binding.agent_id!r}); only your own claim can be released."
+                    ),
+                    error_type="PermissionError",
+                ).model_dump()
             )
 
         inst_session = server.session_manager.get_instance_session(_port)

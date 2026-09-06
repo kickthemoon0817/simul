@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,6 +13,7 @@ import pytest
 src_path = Path(__file__).resolve().parents[2] / "src"
 sys.path.insert(0, str(src_path))
 
+from simul_mcp.adapters import unreal_setup  # noqa: E402
 from simul_mcp.adapters.unreal_setup import (  # noqa: E402
     HEADLESS_FLAGS,
     HTTP_LISTENERS_SECTION,
@@ -475,3 +478,70 @@ def test_ensure_remote_control_config_writes_engine_ini_when_bind_supplied(
     # The bogus iter1 key must not appear — it doesn't exist on UE's
     # URemoteControlSettings CDO.
     assert "RemoteControlHttpServerHostname" not in rc_text
+
+
+# ---------------------------------------------------------------------------
+# Passphrase digest written into a git-visible ini
+# ---------------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "-C", str(repo), *args],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+
+
+@needs_git
+def test_passphrase_warns_when_ini_is_tracked(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    patch_remote_control_ini(tmp_path, port=30010)
+    _git(tmp_path, "add", "Config/DefaultRemoteControl.ini")
+    _git(tmp_path, "commit", "-q", "-m", "ini")
+
+    result = patch_remote_control_ini(tmp_path, port=30010, passphrase_md5="d41d8cd98f00b204e9800998ecf8427e")
+
+    assert len(result.warnings) == 1
+    assert "tracked by git" in result.warnings[0]
+    assert "passphrase" in result.warnings[0]
+
+
+@needs_git
+def test_passphrase_warns_when_ini_is_untracked_but_not_ignored(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+
+    result = patch_remote_control_ini(tmp_path, port=30010, passphrase_md5="d41d8cd98f00b204e9800998ecf8427e")
+
+    assert len(result.warnings) == 1
+    assert "not ignored" in result.warnings[0]
+
+
+@needs_git
+def test_passphrase_is_quiet_when_ini_is_gitignored(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    (tmp_path / ".gitignore").write_text("Config/\n", encoding="utf-8")
+
+    result = patch_remote_control_ini(tmp_path, port=30010, passphrase_md5="d41d8cd98f00b204e9800998ecf8427e")
+
+    assert result.warnings == []
+
+
+def test_passphrase_is_quiet_outside_a_repository(tmp_path: Path) -> None:
+    result = patch_remote_control_ini(tmp_path, port=30010, passphrase_md5="d41d8cd98f00b204e9800998ecf8427e")
+
+    assert result.warnings == []
+
+
+def test_no_passphrase_never_consults_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def explode(*args, **kwargs):
+        raise AssertionError("git must not be invoked without a passphrase")
+
+    monkeypatch.setattr(unreal_setup.subprocess, "run", explode)
+    result = patch_remote_control_ini(tmp_path, port=30010)
+
+    assert result.warnings == []
