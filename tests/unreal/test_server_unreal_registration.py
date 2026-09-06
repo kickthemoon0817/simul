@@ -1,6 +1,7 @@
 """Tests for Unreal Engine tool registration inside FastMCP server."""
 
 import asyncio
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -261,7 +262,7 @@ class TestIter16WrapperSurfacesAdapterError:
             t for t in instance.mcp.tools if t.name == "unreal_health_check"
         )
 
-        result = asyncio.run(tool.func())
+        result = json.loads(asyncio.run(tool.func()).content[0].text)
 
         assert result["success"] is False, (
             f"iter16 invariant broken: registered unreal_health_check tool "

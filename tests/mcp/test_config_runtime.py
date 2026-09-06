@@ -57,6 +57,7 @@ def test_load_settings_supports_nested_repo_config_without_isaac_env(
     assert settings.viewport.max_bounces == 4
     assert settings.security.rate_limiting_enabled is True
     assert settings.security.requests_per_minute == 60
+    assert settings.security.global_requests_per_minute == 600
     assert "examples" in settings.security.allowed_paths
 
 

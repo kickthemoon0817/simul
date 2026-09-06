@@ -14,6 +14,7 @@ Two defects in one code path:
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -119,9 +120,15 @@ def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServe
 
 
 def _get_tool(instance: server_module.SimulMCPServer, name: str) -> Callable[..., Any]:
+    """Return the tool as a coroutine function yielding its decoded JSON block."""
     for tool in instance.mcp.tools:
         if tool.name == name:
-            return tool.func
+
+            async def _call(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+                result = await tool.func(*args, **kwargs)
+                return json.loads(result.content[0].text)
+
+            return _call
     raise AssertionError(f"Tool {name!r} not found")
 
 

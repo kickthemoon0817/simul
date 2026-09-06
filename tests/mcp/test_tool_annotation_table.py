@@ -55,7 +55,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "focus_isaac_viewport": (RW, True, True),
     "set_active_isaac_instance": (RW, True, False),
     # Headless USD
-    "load_usd_file": (RO, True, True),
+    "load_usd_file": (RO, True, False),
     "get_prim_info": (RO, True, False),
     "create_prim": (RW, False, False),
     "update_prim_attributes": (DESTRUCTIVE, False, False),

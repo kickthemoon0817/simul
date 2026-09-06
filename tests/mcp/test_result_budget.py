@@ -29,7 +29,11 @@ sys.path.insert(0, str(src_path))
 from simul_mcp.adapters.isaac_socket_client import ScriptResult
 from simul_mcp.config import Settings
 from simul_mcp.mcp import server as server_module
-from simul_mcp.mcp.result_budget import DEFAULT_RESULT_BUDGET_BYTES, apply_result_budget
+from simul_mcp.mcp.result_budget import (
+    DEFAULT_RESULT_BUDGET_BYTES,
+    HARD_RESULT_LIMIT_BYTES,
+    apply_result_budget,
+)
 from simul_mcp.mcp.tools.isaac_tools import IsaacTools
 
 
@@ -48,6 +52,63 @@ def _prims(count: int) -> List[Dict[str, Any]]:
 
 def _encoded_size(payload: Dict[str, Any]) -> int:
     return len(json.dumps(payload, default=str))
+
+
+# ---------------------------------------------------------------------------
+# The hard limit: strings that cannot be trimmed are replaced, not passed through
+# ---------------------------------------------------------------------------
+
+
+def test_string_above_the_hard_limit_is_replaced_by_a_marker() -> None:
+    """A 3 MB script output must not arrive whole in the caller's context."""
+    output = "x" * 3_000_000
+    payload = {"success": True, "output": output, "stdout_lines": 1}
+
+    result = apply_result_budget(payload)
+
+    assert result["output"] == {
+        "truncated_field": "output",
+        "original_bytes": 3_000_000,
+        "hint": result["output"]["hint"],
+    }
+    assert "hint" in result["output"]
+    assert result["stdout_lines"] == 1
+    assert result["oversized_bytes"] > HARD_RESULT_LIMIT_BYTES
+    assert _encoded_size(result) <= HARD_RESULT_LIMIT_BYTES
+
+
+def test_string_between_budget_and_hard_limit_passes_through_flagged() -> None:
+    """Below the hard ceiling an opaque blob is still safer whole than cut."""
+    payload = {"success": True, "output": "y" * 100_000}
+
+    result = apply_result_budget(payload)
+
+    assert result["output"] == payload["output"]
+    assert result["oversized_bytes"] == _encoded_size(payload)
+
+
+def test_hard_limit_replaces_strings_largest_first_until_it_fits() -> None:
+    """Only as many strings go as it takes; the rest arrive whole."""
+    payload = {"a": "a" * 250_000, "b": "b" * 260_000, "c": "c" * 270_000, "small": "keep"}
+
+    result = apply_result_budget(payload)
+
+    assert result["c"]["truncated_field"] == "c"
+    assert result["b"]["truncated_field"] == "b"
+    assert result["a"] == payload["a"]
+    assert result["small"] == "keep"
+    assert _encoded_size(result) <= HARD_RESULT_LIMIT_BYTES
+
+
+def test_hard_limit_applies_after_list_trimming_left_a_large_string() -> None:
+    """Trimming the list is not enough when a string carries the bulk."""
+    payload = {"prims": _prims(2000), "log": "z" * 500_000}
+
+    result = apply_result_budget(payload)
+
+    assert result["truncated"] is True
+    assert result["log"]["original_bytes"] == 500_000
+    assert _encoded_size(result) <= HARD_RESULT_LIMIT_BYTES
 
 
 # ---------------------------------------------------------------------------

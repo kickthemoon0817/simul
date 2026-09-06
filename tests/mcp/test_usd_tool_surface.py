@@ -56,8 +56,10 @@ class UsdToolDriver:
         async def _run() -> Dict[str, Any]:
             async with Client(self._server.mcp) as client:
                 result = await client.call_tool(name, arguments)
-                if result.structured_content is not None:
-                    return dict(result.structured_content)
+                # The payload must cross the wire once: as JSON text, with no
+                # structured_content duplicate riding along.
+                assert result.structured_content is None, name
+                assert len(result.content) == 1, name
                 return json.loads(result.content[0].text)
 
         return asyncio.run(_run())
@@ -156,6 +158,25 @@ def test_edit_tools_round_trip(usd_driver: UsdToolDriver) -> None:
     _assert_ok(usd_driver.call("delete_prim", extra))
     gone = usd_driver.call("get_prim_info", extra)
     assert gone["success"] is False
+
+
+def test_stats_tool_is_single_transmission(usd_driver: UsdToolDriver) -> None:
+    """The server-metadata tools convert too, or they keep the duplicate."""
+    payload = usd_driver.call("get_tool_usage_stats", {"include_recent": True})
+
+    assert "total_calls" in payload
+    assert isinstance(payload["recent"], list)
+
+
+def test_usd_tool_calls_are_recorded_with_the_agent(usd_driver: UsdToolDriver) -> None:
+    """Every USD call goes through the envelope, so it lands in the audit log."""
+    usd_driver.call("validate_usd_file", {"file_path": str(FIXTURE_SCENE)})
+
+    recent = usd_driver.call("get_tool_usage_stats", {"include_recent": True})["recent"]
+    validate = next(r for r in recent if r["tool"] == "validate_usd_file")
+    assert validate["success"] is True
+    assert validate["params"] == {"file_path": str(FIXTURE_SCENE)}
+    assert validate["agent_id"]
 
 
 def test_usd_only_server_registers_no_isaac_tools(usd_driver: UsdToolDriver) -> None:

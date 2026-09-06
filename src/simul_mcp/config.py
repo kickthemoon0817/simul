@@ -544,6 +544,11 @@ class SecurityConfig(BaseModel):
     burst_size: int = Field(
         default=10, description="Burst size for rate limiting", ge=1
     )
+    global_requests_per_minute: int = Field(
+        default=600,
+        description="Requests per minute one agent may make across all tools",
+        ge=1,
+    )
 
 
 class NormalisedYamlSettingsSource(YamlConfigSettingsSource):
@@ -997,6 +1002,10 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     ),
                     "burst_size": _coalesce(
                         security.get("burst_size"), security_rate.get("burst_size")
+                    ),
+                    "global_requests_per_minute": _coalesce(
+                        security.get("global_requests_per_minute"),
+                        security_rate.get("global_requests_per_minute"),
                     ),
                 }
             ),

@@ -179,8 +179,10 @@ security:
   # bridge transport and is not a security boundary.
   allow_script_execution: true
 
-  # Rate limiting
+  # Rate limiting. Buckets are per agent (MCP session) and per tool; an
+  # agent's calls across every tool are also capped by global_requests_per_minute.
   rate_limiting:
     enabled: true
     requests_per_minute: 60
     burst_size: 10
+    global_requests_per_minute: 600
