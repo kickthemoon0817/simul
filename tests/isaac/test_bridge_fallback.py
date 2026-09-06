@@ -59,7 +59,7 @@ def test_unreachable_bridge_falls_back_to_script_transport() -> None:
     assert result.get("up_axis") == "Z"
     assert result.get("total_prims") == 754
     assert result.get("error_type") != "ConnectionRefusedError"
-    assert client.execute_vscode_only.await_count == 1
+    assert client.execute.await_count == 1
 
 
 def test_bridge_action_returns_none_when_connection_refused() -> None:
