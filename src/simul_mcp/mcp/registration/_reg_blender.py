@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from fastmcp.tools.tool import ToolResult
 
 from ..schemas.blender import *
-from ..schemas.common import ErrorResponse
 from ..schemas.simready import *
 
 if TYPE_CHECKING:
