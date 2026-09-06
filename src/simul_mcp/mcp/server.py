@@ -81,18 +81,23 @@ _MCP_INSTRUCTIONS: str = (
     "workflows, robotics APIs, warp kernels). Read the "
     "'simul://isaac-sim/skills' resource for scripting patterns and API "
     "reference when writing scripts.\n\n"
-    "ROUTING — tool name prefixes determine the backend:\n"
-    "  isaac_* tools → require a running Isaac Sim instance (TCP socket).\n"
-    "  Non-prefixed USD tools (load_usd_file, get_prim_info, create_prim, "
-    "etc.) → operate on local USD files via the headless adapter; "
-    "they do NOT connect to Isaac Sim.\n"
-    "  blender_* tools → require a connected Blender runtime.\n"
-    "  unreal_* tools → require a connected Unreal Engine instance.\n\n"
+    "ROUTING — the backend name appears somewhere inside the tool name, "
+    "usually as an infix (create_isaac_prim, capture_unreal_viewport, "
+    "get_blender_info):\n"
+    "  Tools containing 'isaac' → require a running Isaac Sim instance (TCP socket).\n"
+    "  Tools containing 'unreal' → require a connected Unreal Engine instance.\n"
+    "  Tools containing 'blender' → require a connected Blender runtime.\n"
+    "  Tools containing 'simready' (SimReady asset helpers) exist for both "
+    "Blender and Unreal; each one's description names the runtime it targets.\n"
+    "  Tools containing none of those names (load_usd_file, get_prim_info, "
+    "create_prim, summarize_scene, etc.) → operate on local USD files via the "
+    "headless adapter; they do NOT connect to any engine. The two "
+    "*_tool_usage_stats tools are server metadata, not a backend.\n\n"
     "MULTI-INSTANCE — when multiple Isaac Sim applications are running:\n"
     "  1. Call list_isaac_instances to discover all running instances "
     "and see which stage each has loaded.\n"
     "  2. Call set_active_isaac_instance to switch within the current MCP session.\n"
-    "  3. All subsequent isaac_* calls in that same session route to that instance.\n"
+    "  3. All subsequent Isaac tool calls in that same session route to that instance.\n"
     "  4. For containerized Isaac Sim, use the host-published bridge / VS Code ports, "
     "not the container-internal ports."
 )
@@ -1078,15 +1083,15 @@ class SimulMCPServer(LoggerMixin):
             register_usd_tools,
         )
 
-        # Instance discovery and routing (always registered)
-        register_instance_tools(self)
-
-        # USD file operations (headless, local files only)
-        if self._backend_enabled("usd"):
+        # USD file operations (headless, local files only). Registering them
+        # without the adapter would expose tools that fail on every call.
+        if self._backend_enabled("usd") and self.headless_adapter is not None:
             register_usd_tools(self)
 
-        # Isaac Sim tools (TCP socket to running instance)
+        # Isaac Sim tools (TCP socket to running instance), including the
+        # instance discovery / routing tools that only make sense with Isaac.
         if self._backend_enabled("isaac"):
+            register_instance_tools(self)
             register_isaac_tools(self)
 
         # Blender tools (if runtime available)
@@ -1094,11 +1099,14 @@ class SimulMCPServer(LoggerMixin):
             if self.blender_adapter and self.blender_adapter.is_available():
                 register_blender_tools(self)
 
-        # Unreal tools — thin MCP set (health, capture, exec script).
-        # Full operations available via CLI: simul unreal --help
+        # Unreal tools. The thin surface (health, ping, instance listing,
+        # capture, exec script) keeps the MCP tool list small; the full
+        # surface is opted into via unreal.tool_surface / --unreal-tools full.
         if self._backend_enabled("unreal"):
             if self.unreal_adapter and self.unreal_adapter.is_available():
-                register_unreal_tools(self, thin=True)
+                register_unreal_tools(
+                    self, thin=self.settings.unreal.tool_surface == "thin"
+                )
 
         # Usage statistics (always available)
         register_stats_tools(self)
@@ -1115,6 +1123,8 @@ class SimulMCPServer(LoggerMixin):
 
     async def shutdown(self) -> None:
         """Release server resources on shutdown."""
+        if self.headless_adapter is not None:
+            self.headless_adapter.close()
         self._isaac_clients.clear()
         self._rate_limiters.clear()
         self.usage_tracker._stats.clear()
@@ -1148,17 +1158,45 @@ class SimulMCPServer(LoggerMixin):
         finally:
             await self.shutdown()
 
-    def get_capabilities(self) -> List[str]:
-        """Get list of server capabilities."""
-        capabilities = []
+    def get_capabilities(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Report every backend's availability and capability names.
 
-        if self.headless_adapter and self.headless_adapter.is_available():
-            capabilities.extend(self.headless_adapter.get_capabilities())
+        Availability here means the backend is wired up in this process
+        (adapter importable and switched on in settings); it is not a
+        liveness probe of the engine, which needs a network round-trip.
 
-        if self.blender_adapter and self.blender_adapter.is_available():
-            capabilities.extend(self.blender_adapter.get_capabilities())
+        Returns:
+            Mapping of backend name (``isaac``, ``usd``, ``blender``,
+            ``unreal``) to ``{"enabled": bool, "available": bool,
+            "capabilities": list[str]}``. ``enabled`` is whether the backend
+            was selected for tool registration.
+        """
+        isaac_transports: List[str] = ["socket"]
+        if self.client.bridge_enabled:
+            isaac_transports.append("bridge")
 
-        return list(set(capabilities))  # Remove duplicates
+        return {
+            "isaac": {
+                "enabled": self._backend_enabled("isaac"),
+                "available": True,
+                "capabilities": isaac_transports,
+            },
+            "usd": self._adapter_capabilities("usd", self.headless_adapter),
+            "blender": self._adapter_capabilities("blender", self.blender_adapter),
+            "unreal": self._adapter_capabilities("unreal", self.unreal_adapter),
+        }
+
+    def _adapter_capabilities(
+        self, backend: str, adapter: Optional[Any]
+    ) -> Dict[str, Any]:
+        """Build one ``get_capabilities`` entry for an adapter-backed backend."""
+        available = adapter is not None and adapter.is_available()
+        return {
+            "enabled": self._backend_enabled(backend),
+            "available": available,
+            "capabilities": sorted(adapter.get_capabilities()) if available else [],
+        }
 
 
 # Convenience functions

@@ -94,6 +94,15 @@ class FakeUnrealAdapter:
         yield session
 
 
+THIN_UNREAL_TOOLS: frozenset[str] = frozenset({
+    "unreal_health_check",
+    "ping_unreal",
+    "list_unreal_instances",
+    "capture_unreal_viewport",
+    "execute_unreal_script",
+})
+
+
 def _coro(value: Dict[str, Any]):
     """Return an async callable that resolves to *value*."""
 
@@ -124,16 +133,41 @@ class TestUnrealToolRegistration:
         assert instance.unreal_adapter is not None
         tool_names = {tool.name for tool in instance.mcp.tools}
 
-        # Thin MCP set: only 3 essential tools
-        assert "unreal_health_check" in tool_names
-        assert "capture_unreal_viewport" in tool_names
-        assert "execute_unreal_script" in tool_names
-        # Full tools should NOT be registered in thin mode
-        assert "get_unreal_engine_info" not in tool_names
-        assert "list_unreal_actors" not in tool_names
-        assert "spawn_unreal_actor" not in tool_names
+        unreal_tools = {name for name in tool_names if "unreal" in name}
+        assert unreal_tools == THIN_UNREAL_TOOLS
         # Blender tools should NOT be registered
         assert "get_blender_info" not in tool_names
+
+    def test_full_tool_surface_registers_every_unreal_tool(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``unreal.tool_surface = "full"`` exposes the granular tools too."""
+        monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
+        monkeypatch.setattr(server_module, "TaskConfig", None)
+        monkeypatch.setattr(server_module, "is_headless_available", lambda: False)
+        monkeypatch.setattr(server_module, "is_blender_available", lambda: False)
+        monkeypatch.setattr(
+            server_module, "UnrealRuntimeAdapter", FakeUnrealAdapter
+        )
+        settings = Settings().model_copy(
+            update={"unreal": Settings().unreal.model_copy(update={"tool_surface": "full"})}
+        )
+
+        instance = server_module.SimulMCPServer(settings=settings)
+        tool_names = {tool.name for tool in instance.mcp.tools}
+
+        assert THIN_UNREAL_TOOLS <= tool_names
+        assert {
+            "get_unreal_engine_info",
+            "list_unreal_actors",
+            "spawn_unreal_actor",
+            "convert_to_simready",
+        } <= tool_names
+        assert len({name for name in tool_names if "unreal" in name}) > len(THIN_UNREAL_TOOLS)
+
+    def test_tool_surface_setting_defaults_to_thin(self) -> None:
+        assert Settings().unreal.tool_surface == "thin"
 
     def test_server_skips_unreal_tools_when_unavailable(
         self,

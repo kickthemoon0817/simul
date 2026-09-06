@@ -18,9 +18,12 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     Args:
         server: The MCP server instance.
-        thin: When True, only register essential MCP tools
-              (health_check, capture_viewport, execute_script).
-              Full operations are available via CLI: ``simul unreal --help``.
+        thin: When True, only register the five essential MCP tools:
+              ``unreal_health_check``, ``ping_unreal``,
+              ``list_unreal_instances``, ``capture_unreal_viewport`` and
+              ``execute_unreal_script``. Selected by
+              ``unreal.tool_surface`` / ``simul-mcp server --unreal-tools``;
+              the full set is also reachable via ``simul unreal --help``.
     """
 
     @server.mcp.tool(
@@ -328,8 +331,8 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             server.logger.error("Error executing Unreal script: %s", e)
             return ErrorResponse(error=str(e), error_type="Exception").model_dump()
 
-    # -- Thin mode: only health_check, capture_viewport, execute_script.
-    #    Full operations available via CLI: simul unreal --help
+    # -- Thin mode ends here: health check, ping, instance listing,
+    #    viewport capture and script execution are registered above.
     if thin:
         return
 
@@ -1470,7 +1473,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @server.mcp.tool(
         name="validate_simready_asset",
-        description="Validate an asset against NVIDIA SimReady requirements.",
+        description="Validate an Unreal asset against NVIDIA SimReady requirements.",
         annotations=server._tool_annotations(
             read_only=True,
             idempotent=True,

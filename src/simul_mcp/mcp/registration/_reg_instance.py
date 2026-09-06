@@ -108,7 +108,8 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="set_active_isaac_instance",
         description=(
-            "Switch which Isaac Sim instance all isaac_* tools target. "
+            "Switch which Isaac Sim instance all Isaac tools (names containing "
+            "'isaac') target for the rest of this MCP session. "
             "Use list_isaac_instances first to see available instances and "
             "their session status. Optionally register your purpose so other "
             "agents can see what you're doing on this instance."

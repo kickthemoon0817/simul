@@ -308,6 +308,9 @@ simul-mcp server
 simul-mcp server --backends unreal
 simul-mcp server --backends isaac,usd
 
+# Register every granular Unreal tool instead of the default thin set
+simul-mcp server --backends unreal --unreal-tools full
+
 # Start with custom configuration
 simul-mcp server --config config/isaac/default.yaml
 
@@ -522,7 +525,7 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 ### Unreal Engine Operations
 
-Unreal Engine integration uses the built-in Remote Control HTTP API. The MCP server registers a thin tool set (3 tools) to minimize context overhead for AI agents; the full operation set is available via CLI.
+Unreal Engine integration uses the built-in Remote Control HTTP API. By default the MCP server registers a thin tool set (5 tools: `unreal_health_check`, `ping_unreal`, `list_unreal_instances`, `capture_unreal_viewport`, `execute_unreal_script`) to minimize context overhead for AI agents. Pass `--unreal-tools full` (or set `unreal.tool_surface: full` / `UNREAL__TOOL_SURFACE=full`) to register every granular Unreal tool; the full operation set is also available via CLI.
 
 **MCP Tools (always available):**
 - `unreal_health_check`: Check connectivity to Unreal Engine
@@ -588,8 +591,9 @@ To use simul with Unreal Engine in Claude Code, add to your project's MCP config
 claude mcp add simul -- /path/to/.venv/bin/simul-mcp server --backends unreal
 ```
 
-The `--backends unreal` flag registers only Unreal tools (3 MCP tools + 2 instance tools),
-keeping agent context minimal. All other operations are available via `simul-mcp unreal <command>`.
+The `--backends unreal` flag registers only the Unreal tools (the thin 5-tool set unless you add
+`--unreal-tools full`) plus the usage-stats tools, keeping agent context minimal. All other
+operations are available via `simul-mcp unreal <command>`.
 
 ## Examples
 
