@@ -31,6 +31,28 @@ def _tracker(max_recent: int = 200) -> tuple[ToolUsageTracker, Path]:
 
 
 # ---------------------------------------------------------------------------
+# Agent attribution
+# ---------------------------------------------------------------------------
+
+
+class TestAgentAttribution:
+    """An operator must be able to tell which agent ran what."""
+
+    def test_agent_id_is_kept_in_memory_and_on_disk(self) -> None:
+        tracker, log_dir = _tracker()
+
+        tracker.record("create_prim", 1.0, True, params={"prim_path": "/A"}, agent_id="agent-7")
+
+        (record,) = tracker.get_recent()
+        assert record["agent_id"] == "agent-7"
+        (line,) = (log_dir / "tool_usage.jsonl").read_text().splitlines()
+        assert json.loads(line)["agent_id"] == "agent-7"
+
+    def test_record_without_agent_omits_the_field(self) -> None:
+        assert "agent_id" not in CallRecord("t", 0.0, 0.0, True).to_dict()
+
+
+# ---------------------------------------------------------------------------
 # ToolStats
 # ---------------------------------------------------------------------------
 

@@ -4,7 +4,10 @@ Unreal Engine runtime tool registration for Simul MCP Server.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+from fastmcp.tools.tool import ToolResult
 
 from ..schemas.common import ErrorResponse
 from ..schemas.unreal import *
@@ -37,7 +40,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def unreal_health_check() -> Dict[str, Any]:
+    async def unreal_health_check() -> ToolResult:
         """
         Check connectivity to the Unreal Engine Remote Control API.
 
@@ -71,7 +74,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def ping_unreal() -> Dict[str, Any]:
+    async def ping_unreal() -> ToolResult:
         """
         Lightweight reachability probe for the Unreal Remote Control API.
 
@@ -103,7 +106,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     )
     async def list_unreal_instances(
         scan: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         Scan configured port range for running Unreal Engine instances.
 
@@ -113,19 +116,8 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         Returns:
             List of discovered instances or error response.
         """
-        import asyncio as _asyncio
 
-        rate_error = server._check_rate_limit("list_unreal_instances")
-        if rate_error:
-            return rate_error
-
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-
+        async def _list_instances(session: Any) -> Dict[str, Any]:
             from ...adapters.unreal_runtime import (
                 UnrealRuntimeSession,
                 _passphrase_to_md5,
@@ -134,10 +126,9 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             cfg = server.settings.unreal
             host = cfg.host
             active_port = cfg.port
-            instances: List[Any] = []
+            instances: List[UnrealInstanceInfo] = []
 
             if scan:
-                probe_tasks = []
                 ports = list(range(cfg.scan_port_start, cfg.scan_port_end))
                 # Always include the active port even if outside scan range
                 if active_port not in ports:
@@ -146,24 +137,24 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 # header — otherwise a passphrase-enforcing editor returns
                 # 401 and discovery silently reports it as unreachable.
                 discovery_md5 = _passphrase_to_md5(cfg.passphrase)
-                for port in ports:
-                    probe_tasks.append(
+                results = await asyncio.gather(
+                    *(
                         UnrealRuntimeSession.probe_port(
                             host,
                             port,
                             timeout=cfg.ping_timeout,
                             passphrase_md5=discovery_md5,
                         )
-                    )
-                results = await _asyncio.gather(*probe_tasks, return_exceptions=True)
-
+                        for port in ports
+                    ),
+                    return_exceptions=True,
+                )
                 for port, probe_result in zip(ports, results):
-                    if isinstance(probe_result, Exception):
+                    if isinstance(probe_result, BaseException):
                         continue
-                    name = "default" if port == active_port else f"unreal-{port}"
                     instances.append(
                         UnrealInstanceInfo(
-                            name=name,
+                            name="default" if port == active_port else f"unreal-{port}",
                             host=host,
                             port=port,
                             reachable=probe_result.get("reachable", False),
@@ -175,41 +166,34 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                         )
                     )
             else:
-                with server.unreal_adapter.create_session() as session:
-                    payload = await session.ping()
-                    instances.append(
-                        UnrealInstanceInfo(
-                            name="default",
-                            host=host,
-                            port=active_port,
-                            reachable=payload.get("reachable", False),
-                            active=True,
-                            latency_ms=payload.get("latency_ms"),
-                        )
+                payload = await session.ping()
+                instances.append(
+                    UnrealInstanceInfo(
+                        name="default",
+                        host=host,
+                        port=active_port,
+                        reachable=payload.get("reachable", False),
+                        active=True,
+                        latency_ms=payload.get("latency_ms"),
                     )
+                )
 
             reachable = [i for i in instances if i.reachable]
-            active_name = next((i.name for i in instances if i.active), None)
-            result = UnrealListInstancesResponse(
+            return UnrealListInstancesResponse(
                 success=True,
                 instances=instances,
-                active_instance=active_name,
+                active_instance=next((i.name for i in instances if i.active), None),
                 total_discovered=len(reachable),
             ).model_dump()
-            return server._validate_output(
-                result,
-                (UnrealListInstancesResponse, ErrorResponse),
-                "list_unreal_instances",
-            )
 
-        except Exception as e:
-            server.logger.error("Error listing Unreal instances: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (UnrealListInstancesResponse, ErrorResponse),
-                "list_unreal_instances",
-            )
+        return await server._exec_backend(
+            "list_unreal_instances",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealListInstancesResponse,
+            _list_instances,
+            params={"scan": scan},
+        )
 
     # ------------------------------------------------------------------
     # Viewport capture
@@ -220,7 +204,8 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         description=(
             "Capture a viewport screenshot via HighResScreenshot and return "
             "its path on the editor host. Pass inline=true to also receive "
-            "base64 image data, included only for small captures."
+            "the image itself as an image content block; captures above the "
+            "inline size cap return the path alone."
         ),
         annotations=server._tool_annotations(
             read_only=True,
@@ -235,7 +220,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         resolution_y: int = 1080,
         format: str = "png",
         inline: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         Capture viewport screenshot.
 
@@ -243,16 +228,19 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             resolution_x: Width in pixels.
             resolution_y: Height in pixels.
             format: Image format (png or jpeg).
+            inline: Also return the image as an image content block.
 
         Returns:
             Capture result or error response.
         """
         _VALID_FORMATS = {"png", "jpeg", "jpg"}
         if format not in _VALID_FORMATS:
-            return ErrorResponse(
-                error=f"Invalid format '{format}'. Must be one of {sorted(_VALID_FORMATS)}",
-                error_type="ValidationError",
-            ).model_dump()
+            return server._as_text_result(
+                ErrorResponse(
+                    error=f"Invalid format '{format}'. Must be one of {sorted(_VALID_FORMATS)}",
+                    error_type="ValidationError",
+                ).model_dump()
+            )
 
         return await server._exec_backend(
             "capture_unreal_viewport",
@@ -265,6 +253,12 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 format=format,
                 inline=inline,
             ),
+            params={
+                "resolution_x": resolution_x,
+                "resolution_y": resolution_y,
+                "format": format,
+                "inline": inline,
+            },
         )
 
     @server.mcp.tool(
@@ -281,12 +275,13 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             open_world=True,
             destructive=True,
         ),
+        output_schema=None,
         task=server._task_optional(),
     )
     async def execute_unreal_script(
         code: str,
         mode: str = "ExecuteFile",
-    ) -> Dict[str, Any]:
+    ) -> ToolResult:
         """
         Execute Python code inside Unreal Engine.
 
@@ -296,40 +291,35 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                   or ExecuteStatement (single statement).
 
         Returns:
-            Execution result with CommandResult, LogOutput, ReturnValue.
+            The JSON object the script printed, or a ScriptError envelope.
         """
         _VALID_EXEC_MODES = {"ExecuteFile", "EvaluateStatement", "ExecuteStatement"}
         if mode not in _VALID_EXEC_MODES:
-            return ErrorResponse(
-                error=f"Invalid mode '{mode}'. Must be one of {sorted(_VALID_EXEC_MODES)}",
-                error_type="ValidationError",
-            ).model_dump()
-
-        rate_error = server._check_rate_limit("execute_unreal_script")
-        if rate_error:
-            return rate_error
-
-        try:
-            if not server.unreal_adapter or not server.unreal_adapter.is_available():
-                return ErrorResponse(
-                    error="Unreal runtime not available",
-                    error_type="RuntimeError",
+            return server._as_text_result(
+                ErrorResponse(
+                    error=f"Invalid mode '{mode}'. Must be one of {sorted(_VALID_EXEC_MODES)}",
+                    error_type="ValidationError",
                 ).model_dump()
+            )
 
-            with server.unreal_adapter.create_session() as session:
-                raw = await session._execute_python(code, mode=mode)
-                parsed = session._parse_python_json(raw)
-                if parsed.get("error"):
-                    return ErrorResponse(
-                        error=parsed["error"],
-                        error_type="ScriptError",
-                    ).model_dump()
-                parsed["success"] = True
-                return parsed
+        async def _run_script(session: Any) -> Dict[str, Any]:
+            raw = await session._execute_python(code, mode=mode)
+            parsed = session._parse_python_json(raw)
+            if parsed.get("error"):
+                return ErrorResponse(
+                    error=parsed["error"],
+                    error_type="ScriptError",
+                ).model_dump()
+            return parsed
 
-        except Exception as e:
-            server.logger.error("Error executing Unreal script: %s", e)
-            return ErrorResponse(error=str(e), error_type="Exception").model_dump()
+        return await server._exec_backend(
+            "execute_unreal_script",
+            server.unreal_adapter,
+            "Unreal",
+            UnrealExecuteScriptResponse,
+            _run_script,
+            params={"code_bytes": len(code), "mode": mode},
+        )
 
     # -- Thin mode ends here: health check, ping, instance listing,
     #    viewport capture and script execution are registered above.

@@ -265,8 +265,8 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "(viewport.capture_dir, default <allowed root>/captures) and reclaims "
             "the oldest captures there; the directory must be inside the "
             "configured sandbox (security.allowed_paths). Pass inline=true to "
-            "also receive base64 image data, which is only included for small "
-            "captures."
+            "also receive the image itself as an image content block; captures "
+            "above the inline size cap return the path alone."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=True
@@ -785,7 +785,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     async def open_isaac_stage(file_path: str) -> ToolResult:
         denial = server._sandbox_denial(file_path)
         if denial is not None:
-            return denial
+            return server._as_text_result(denial)
         return await server._exec_isaac(
             "open_isaac_stage",
             server._isaac_tools.open_isaac_stage(file_path=file_path),
@@ -809,7 +809,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     ) -> ToolResult:
         denial = server._sandbox_denial(file_path, write=True)
         if denial is not None:
-            return denial
+            return server._as_text_result(denial)
         return await server._exec_isaac(
             "save_isaac_stage",
             server._isaac_tools.save_isaac_stage(file_path=file_path),
@@ -849,7 +849,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     ) -> ToolResult:
         denial = server._sandbox_denial(asset_path)
         if denial is not None:
-            return denial
+            return server._as_text_result(denial)
         return await server._exec_isaac(
             "import_isaac_asset",
             server._isaac_tools.import_isaac_asset(
@@ -872,7 +872,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     async def add_isaac_reference(prim_path: str, reference_path: str) -> ToolResult:
         denial = server._sandbox_denial(reference_path)
         if denial is not None:
-            return denial
+            return server._as_text_result(denial)
         return await server._exec_isaac(
             "add_isaac_reference",
             server._isaac_tools.add_isaac_reference(

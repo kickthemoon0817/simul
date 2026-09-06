@@ -1,6 +1,7 @@
 """Tests for Blender tool registration inside FastMCP server."""
 
 import asyncio
+import json
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -203,7 +204,7 @@ class TestIter17WrapperSurfacesAdapterError:
             t for t in instance.mcp.tools if t.name == "get_blender_info"
         )
 
-        result = asyncio.run(tool.func())
+        result = json.loads(asyncio.run(tool.func()).content[0].text)
 
         # iter17 contract: success accurately reflects the presence of
         # an error in the adapter payload. iter18 added `error:

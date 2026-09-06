@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from fastmcp.tools.tool import ToolResult
+
 from ..schemas.blender import *
 from ..schemas.common import ErrorResponse
 from ..schemas.simready import *
@@ -1522,45 +1524,20 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
-    async def free_blender_bake() -> Dict[str, Any]:
-        rate_error = server._check_rate_limit("free_blender_bake")
-        if rate_error:
-            return rate_error
-        try:
-            if not server.blender_adapter or not server.blender_adapter.is_available():
-                return ErrorResponse(
-                    error="Blender runtime not available",
-                    error_type="RuntimeError",
-                ).model_dump()
-            with server.blender_adapter.create_session() as session:
-                # Void side-effect: session.free_bake() returns None,
-                # so there is no payload to inspect for an `error` key.
-                # If the call fails it raises, and the outer except
-                # clause emits ErrorResponse. Reaching this line means
-                # the bake was actually freed — success=True is genuine.
-                session.free_bake()
-                result = BlenderFreeBakeResponse(
-                    success=True,
-                ).model_dump()
-                return server._validate_output(
-                    result,
-                    (
-                        BlenderFreeBakeResponse,
-                        ErrorResponse,
-                    ),
-                    "free_blender_bake",
-                )
-        except Exception as e:
-            server.logger.error("Error freeing bake: %s", e)
-            result = ErrorResponse(error=str(e), error_type="Exception").model_dump()
-            return server._validate_output(
-                result,
-                (
-                    BlenderFreeBakeResponse,
-                    ErrorResponse,
-                ),
-                "free_blender_bake",
-            )
+    async def free_blender_bake() -> ToolResult:
+        def _free_bake(session: Any) -> Dict[str, Any]:
+            # session.free_bake() returns None and raises on failure, so
+            # reaching the return means the bake was actually freed.
+            session.free_bake()
+            return {}
+
+        return await server._exec_backend(
+            "free_blender_bake",
+            server.blender_adapter,
+            "Blender",
+            BlenderFreeBakeResponse,
+            _free_bake,
+        )
 
     # -- Scripting & mesh-from-data tools --------------------------------
 

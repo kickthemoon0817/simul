@@ -58,6 +58,7 @@ class CallRecord:
     success: bool
     params: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    agent_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -70,6 +71,8 @@ class CallRecord:
             out["params"] = self.params
         if self.error:
             out["error"] = self.error
+        if self.agent_id:
+            out["agent_id"] = self.agent_id
         return out
 
 
@@ -100,8 +103,18 @@ class ToolUsageTracker:
         success: bool,
         params: Optional[Dict[str, Any]] = None,
         error: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> None:
-        """Record a tool call (in-memory + JSONL)."""
+        """Record a tool call (in-memory + JSONL).
+
+        Args:
+            tool_name: Registered tool name.
+            duration_ms: Wall time of the call.
+            success: Whether the call produced a non-error payload.
+            params: Call parameters worth keeping in the log.
+            error: Error text when the call failed.
+            agent_id: Calling agent, so an operator can tell who ran what.
+        """
         now = time.time()
 
         if tool_name not in self._stats:
@@ -123,6 +136,7 @@ class ToolUsageTracker:
             success=success,
             params=params,
             error=error,
+            agent_id=agent_id,
         )
         self._recent.append(rec)
         self._append_log(rec)

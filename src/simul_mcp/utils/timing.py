@@ -167,18 +167,36 @@ class RateLimiter:
         Returns:
             True if tokens were acquired, False otherwise
         """
-        now = time.time()
-        elapsed = now - self.last_update
-
-        # Add tokens based on elapsed time
-        self.tokens = min(self.burst, self.tokens + elapsed * self.rate)
-        self.last_update = now
-
+        self._refill()
         if self.tokens >= tokens:
             self.tokens -= tokens
             return True
-        else:
-            return False
+        return False
+
+    def seconds_until_available(self, tokens: int = 1) -> float:
+        """
+        Return how long a caller must wait before ``tokens`` can be acquired.
+
+        Spends nothing, so a caller can consult several buckets and only draw
+        from all of them once every one has room.
+
+        Args:
+            tokens: Number of tokens the caller wants
+
+        Returns:
+            0.0 when the tokens are available now, else the wait in seconds
+        """
+        self._refill()
+        if self.tokens >= tokens:
+            return 0.0
+        return (tokens - self.tokens) / self.rate
+
+    def _refill(self) -> None:
+        """Add the tokens earned since the last update, up to the burst size."""
+        now = time.time()
+        elapsed = now - self.last_update
+        self.tokens = min(self.burst, self.tokens + elapsed * self.rate)
+        self.last_update = now
 
     async def wait_for_token(self, tokens: int = 1) -> None:
         """

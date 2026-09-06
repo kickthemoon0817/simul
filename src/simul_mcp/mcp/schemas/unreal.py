@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +304,20 @@ class UnrealCaptureViewportRequest(BaseModel):
     resolution_x: int = Field(1920, description="Capture width in pixels")
     resolution_y: int = Field(1080, description="Capture height in pixels")
     format: str = Field("png", description="Image format: png or jpeg")
+
+
+class UnrealExecuteScriptResponse(BaseModel):
+    """Whatever JSON object a script printed, with the envelope's status fields.
+
+    The script decides the shape, so every key it emitted is kept.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    success: bool = Field(True, description="Whether the script ran and printed JSON")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
 
 
 class UnrealCaptureViewportResponse(BaseModel):
@@ -1502,6 +1516,7 @@ class UnrealComputeMeshUvResponse(BaseModel):
 
 
 __all__ = [
+    "UnrealExecuteScriptResponse",
     "UnrealPingResponse",
     "UnrealInstanceInfo",
     "UnrealListInstancesResponse",
