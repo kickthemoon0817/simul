@@ -1,0 +1,5 @@
+[flake8]
+max-line-length = 119
+extend-exclude = .venv,build,dist,.git,__pycache__,.mypy_cache
+# E203 and W503 disagree with black's slice and line-break formatting.
+extend-ignore = E203,W503
