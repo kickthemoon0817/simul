@@ -242,8 +242,8 @@ def _default_of(func: Callable[..., Any], param: str) -> Any:
 def test_listing_defaults_are_context_sized(monkeypatch: pytest.MonkeyPatch) -> None:
     instance = _make_server(monkeypatch)
 
-    assert _default_of(_registered(instance, "list_isaac_prims"), "max_items") == 100
-    assert _default_of(_registered(instance, "get_isaac_subtree"), "max_prims") == 150
+    assert _default_of(_registered(instance, "list_isaac_prims"), "max_results") == 100
+    assert _default_of(_registered(instance, "get_isaac_subtree"), "max_results") == 150
     assert (
         _default_of(_registered(instance, "list_isaac_extensions"), "enabled_only")
         is True
@@ -270,10 +270,10 @@ def _tools() -> tuple[IsaacTools, List[str]]:
 def test_list_prims_clamp_is_lowered() -> None:
     """The clamp is the real ceiling; the old one allowed 10000 prims."""
     tools, captured = _tools()
-    asyncio.run(tools.list_isaac_prims(root_path="/World", max_items=99999))
+    asyncio.run(tools.list_isaac_prims(root_path="/World", max_results=99999))
     script = captured[0]
 
-    assert "99999" not in script, "requested max_items reached the script unclamped"
+    assert "99999" not in script, "requested max_results reached the script unclamped"
     assert re.search(r"=\s*1000\b", script), "expected the clamped ceiling of 1000"
 
 

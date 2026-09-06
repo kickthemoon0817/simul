@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from fastmcp.tools.tool import ToolResult
 
+from ..tools.isaac_tools import IsaacTools
+from ._helpers import resolve_deprecated_alias, with_param_descriptions
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -38,6 +40,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.execute_script)
     async def execute_isaac_script(code: str) -> ToolResult:
         """
         Execute Python code inside the running Isaac Sim process.
@@ -83,17 +86,18 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             return server._as_text_result(rate_error)
         client = server._get_request_isaac_client()
         reachable = await client.ping()
-        return server._as_text_result(
-            {
-                "success": reachable,
-                "reachable": reachable,
-                "address": client.address,
-                "bridge_address": client.bridge_address,
-                "bridge_circuit_open": client.bridge_circuit_open,
-                "vscode_address": client.vscode_address,
-                "timeout_seconds": client.timeout_seconds,
-            }
-        )
+        payload: Dict[str, Any] = {
+            "success": reachable,
+            "reachable": reachable,
+            "address": client.address,
+            "bridge_address": client.bridge_address,
+            "bridge_circuit_open": client.bridge_circuit_open,
+            "vscode_address": client.vscode_address,
+            "timeout_seconds": client.timeout_seconds,
+        }
+        if not reachable:
+            payload["error"] = f"Isaac Sim is not reachable at {client.address}"
+        return server._as_text_result(payload)
 
     @server.mcp.tool(
         name="interrupt_isaac_script",
@@ -148,18 +152,29 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="list_isaac_prims",
         description=(
-            "List prims in the current Isaac Sim stage under a given root path. "
-            "Supports depth control and prim type filtering."
+            "List prims in the current Isaac Sim stage under a given root path, "
+            "with depth control, prim type filtering, and paging "
+            "(max_results/offset; applied_limit reports the effective cap). "
+            "Use list_isaac_prims to walk a level of the hierarchy; use "
+            "search_isaac_prims to find prims by name or type anywhere below a "
+            "root, get_isaac_subtree for a depth-annotated tree, and "
+            "get_isaac_scene_summary for counts without listing."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(
+        IsaacTools.list_isaac_prims,
+        max_items="Deprecated alias of max_results; ignored when max_results is given.",
+    )
     async def list_isaac_prims(
         root_path: str = "/",
         prim_type: Optional[str] = None,
-        max_depth: int = -1,
-        max_items: int = 100,
+        max_depth: int = 5,
+        max_results: int = 100,
+        offset: int = 0,
+        max_items: Optional[int] = None,
     ) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_prims",
@@ -167,7 +182,8 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 root_path=root_path,
                 prim_type=prim_type,
                 max_depth=max_depth,
-                max_items=max_items,
+                max_results=resolve_deprecated_alias(max_results, max_items, 100),
+                offset=offset,
             ),
         )
 
@@ -184,6 +200,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions(IsaacTools.get_isaac_prim_detail)
     async def get_isaac_prim_detail(
         prim_path: str,
         aspects: Optional[List[str]] = None,
@@ -198,34 +215,47 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="search_isaac_prims",
         description=(
-            "Search prims by type name or name pattern. "
-            "search_type can be 'type' or 'name'."
+            "Search the whole hierarchy below root_path for prims whose type "
+            "name equals query (search_type='type') or whose name contains "
+            "query (search_type='name'); paged via max_results/offset. Use "
+            "search_isaac_prims when you know a name or type; use "
+            "query_isaac_typed_prims to match by USD schema and read "
+            "attributes in the same call, list_isaac_prims to browse one level, "
+            "and find_isaac_prims_in_area to search by position."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.search_isaac_prims)
     async def search_isaac_prims(
+        query: str,
         search_type: str = "type",
-        query: str = "Mesh",
         root_path: str = "/",
         max_results: int = 100,
+        offset: int = 0,
     ) -> ToolResult:
         return await server._exec_isaac(
             "search_isaac_prims",
             server._isaac_tools.search_isaac_prims(
-                search_type=search_type,
                 query=query,
+                search_type=search_type,
                 root_path=root_path,
                 max_results=max_results,
+                offset=offset,
             ),
         )
 
     @server.mcp.tool(
         name="get_isaac_scene_summary",
         description=(
-            "Get a high-level summary of the current scene: prim type counts, "
-            "total prims, physics objects, cameras, lights, and materials."
+            "Get a high-level summary of the whole stage: total prims and "
+            "counts per prim type, hierarchy depth, has_physics/has_animation "
+            "flags, root prims, up axis and meters per unit. Counts prims the "
+            "same way as get_isaac_scene_stats. Use get_isaac_scene_summary to "
+            "orient before listing; use get_isaac_scene_stats for geometry "
+            "totals (vertices, faces, meshes, lights, cameras, materials) under "
+            "a chosen root."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
@@ -249,6 +279,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.get_isaac_camera_info)
     async def get_isaac_camera_info(
         camera_path: Optional[str] = None,
     ) -> ToolResult:
@@ -264,10 +295,15 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def list_isaac_cameras() -> ToolResult:
+    @with_param_descriptions(IsaacTools.list_isaac_cameras)
+    async def list_isaac_cameras(
+        max_results: int = 200, offset: int = 0
+    ) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_cameras",
-            server._isaac_tools.list_isaac_cameras(),
+            server._isaac_tools.list_isaac_cameras(
+                max_results=max_results, offset=offset
+            ),
         )
 
     @server.mcp.tool(
@@ -280,6 +316,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.set_isaac_camera)
     async def set_isaac_camera(
         position: Optional[List[float]] = None,
         target: Optional[List[float]] = None,
@@ -309,6 +346,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.capture_isaac_viewport)
     async def capture_isaac_viewport(
         width: int = 1280,
         height: int = 720,
@@ -333,6 +371,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.create_isaac_prim)
     async def create_isaac_prim(
         prim_path: str,
         prim_type: str = "Xform",
@@ -361,6 +400,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             destructive=True,
         ),
     )
+    @with_param_descriptions(IsaacTools.delete_isaac_prim)
     async def delete_isaac_prim(
         prim_path: str, allow_root_delete: bool = False
     ) -> ToolResult:
@@ -381,6 +421,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.set_isaac_prim_transform)
     async def set_isaac_prim_transform(
         prim_path: str,
         translation: Optional[List[float]] = None,
@@ -404,6 +445,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.set_isaac_prim_visibility)
     async def set_isaac_prim_visibility(prim_path: str, visible: bool) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_prim_visibility",
@@ -422,6 +464,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.set_isaac_prim_attribute)
     async def set_isaac_prim_attribute(
         prim_path: str,
         attribute_name: str,
@@ -443,6 +486,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.duplicate_isaac_prim)
     async def duplicate_isaac_prim(prim_path: str, new_path: str) -> ToolResult:
         return await server._exec_isaac(
             "duplicate_isaac_prim",
@@ -458,6 +502,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.reparent_isaac_prim)
     async def reparent_isaac_prim(prim_path: str, new_parent_path: str) -> ToolResult:
         return await server._exec_isaac(
             "reparent_isaac_prim",
@@ -495,12 +540,15 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.list_isaac_physics_objects)
     async def list_isaac_physics_objects(
-        root_path: str = "/",
+        root_path: str = "/", max_results: int = 200, offset: int = 0
     ) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_physics_objects",
-            server._isaac_tools.list_isaac_physics_objects(root_path=root_path),
+            server._isaac_tools.list_isaac_physics_objects(
+                root_path=root_path, max_results=max_results, offset=offset
+            ),
         )
 
     # -- Physics Configuration tools --------------------------------------
@@ -512,6 +560,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.add_isaac_rigid_body)
     async def add_isaac_rigid_body(
         prim_path: str, kinematic: bool = False
     ) -> ToolResult:
@@ -532,6 +581,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.add_isaac_collision)
     async def add_isaac_collision(
         prim_path: str, approximation: str = "none"
     ) -> ToolResult:
@@ -552,6 +602,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.set_isaac_mass_properties)
     async def set_isaac_mass_properties(
         prim_path: str,
         mass: Optional[float] = None,
@@ -578,6 +629,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.set_isaac_physics_material)
     async def set_isaac_physics_material(
         prim_path: str,
         static_friction: float = 0.5,
@@ -597,18 +649,21 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="create_isaac_physics_scene",
         description=(
-            "Create a UsdPhysics.Scene prim with configurable gravity. "
-            "This is the prerequisite for any physics simulation — rigid bodies, "
-            "colliders, and joints require a physics scene to function."
+            "Create a UsdPhysics.Scene prim with configurable gravity, or apply "
+            "the requested gravity to a scene that already exists at prim_path "
+            "(reported as updated=true). This is the prerequisite for any "
+            "physics simulation — rigid bodies, colliders, and joints require a "
+            "physics scene to function."
         ),
         annotations=server._tool_annotations(
-            read_only=False, idempotent=False, open_world=True
+            read_only=False, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.create_isaac_physics_scene)
     async def create_isaac_physics_scene(
         prim_path: str = "/World/PhysicsScene",
         gravity_direction: Optional[List[float]] = None,
-        gravity_magnitude: float = 9.81,
+        gravity_magnitude: Optional[float] = None,
     ) -> ToolResult:
         return await server._exec_isaac(
             "create_isaac_physics_scene",
@@ -683,6 +738,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.step_isaac_simulation)
     async def step_isaac_simulation(
         num_steps: int = 1,
     ) -> ToolResult:
@@ -729,10 +785,15 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def list_isaac_materials() -> ToolResult:
+    @with_param_descriptions(IsaacTools.list_isaac_materials)
+    async def list_isaac_materials(
+        max_results: int = 200, offset: int = 0
+    ) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_materials",
-            server._isaac_tools.list_isaac_materials(),
+            server._isaac_tools.list_isaac_materials(
+                max_results=max_results, offset=offset
+            ),
         )
 
     @server.mcp.tool(
@@ -745,6 +806,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.assign_isaac_material)
     async def assign_isaac_material(prim_path: str, material_path: str) -> ToolResult:
         return await server._exec_isaac(
             "assign_isaac_material",
@@ -765,6 +827,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.set_isaac_material_property)
     async def set_isaac_material_property(
         material_path: str,
         property_name: str,
@@ -791,6 +854,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.create_isaac_material)
     async def create_isaac_material(
         material_path: str,
         shader_type: str = "UsdPreviewSurface",
@@ -829,6 +893,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             destructive=True,
         ),
     )
+    @with_param_descriptions(IsaacTools.open_isaac_stage)
     async def open_isaac_stage(
         file_path: str, discard_unsaved: bool = False
     ) -> ToolResult:
@@ -856,6 +921,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.save_isaac_stage)
     async def save_isaac_stage(
         file_path: Optional[str] = None,
         overwrite: bool = False,
@@ -883,6 +949,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             destructive=True,
         ),
     )
+    @with_param_descriptions(IsaacTools.new_isaac_stage)
     async def new_isaac_stage(discard_unsaved: bool = False) -> ToolResult:
         return await server._exec_isaac(
             "new_isaac_stage",
@@ -901,6 +968,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.import_isaac_asset)
     async def import_isaac_asset(
         asset_path: str,
         target_path: str = "/World/ImportedAsset",
@@ -927,6 +995,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.add_isaac_reference)
     async def add_isaac_reference(prim_path: str, reference_path: str) -> ToolResult:
         denial = server._sandbox_denial(reference_path)
         if denial is not None:
@@ -951,10 +1020,15 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
-    async def list_isaac_lights(root_path: str = "/") -> ToolResult:
+    @with_param_descriptions(IsaacTools.list_isaac_lights)
+    async def list_isaac_lights(
+        root_path: str = "/", max_results: int = 200, offset: int = 0
+    ) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_lights",
-            server._isaac_tools.list_isaac_lights(root_path=root_path),
+            server._isaac_tools.list_isaac_lights(
+                root_path=root_path, max_results=max_results, offset=offset
+            ),
         )
 
     @server.mcp.tool(
@@ -969,6 +1043,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.create_isaac_light)
     async def create_isaac_light(
         prim_path: str,
         light_type: str = "DomeLight",
@@ -994,24 +1069,34 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="get_isaac_subtree",
         description=(
-            "Get a full subtree as a flat list with depth info, "
-            "type, and child counts for each prim."
+            "Get a subtree as a flat, traversal-ordered list with depth, type, "
+            "and child count for each prim; paged via max_results/offset. Use "
+            "get_isaac_subtree to see the structure under one prim (a robot, an "
+            "imported asset); use list_isaac_prims to browse with a type "
+            "filter, and search_isaac_prims to find a prim by name."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(
+        IsaacTools.get_isaac_subtree,
+        max_prims="Deprecated alias of max_results; ignored when max_results is given.",
+    )
     async def get_isaac_subtree(
         root_path: str = "/",
         max_depth: int = 5,
-        max_prims: int = 150,
+        max_results: int = 150,
+        offset: int = 0,
+        max_prims: Optional[int] = None,
     ) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_subtree",
             server._isaac_tools.get_isaac_subtree(
                 root_path=root_path,
                 max_depth=max_depth,
-                max_prims=max_prims,
+                max_results=resolve_deprecated_alias(max_results, max_prims, 150),
+                offset=offset,
             ),
         )
 
@@ -1034,13 +1119,18 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="get_isaac_scene_stats",
         description=(
-            "Get aggregate scene statistics: total vertices, faces, "
-            "meshes, lights, cameras, materials, and prim type counts."
+            "Get aggregate geometry statistics under root_path: total prims, "
+            "vertices, faces, meshes, lights, cameras, materials, xforms, and "
+            "prim type counts. Counts prims the same way as "
+            "get_isaac_scene_summary, which adds hierarchy depth, "
+            "physics/animation flags and stage metadata but always covers the "
+            "whole stage."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.get_isaac_scene_stats)
     async def get_isaac_scene_stats(root_path: str = "/") -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_scene_stats",
@@ -1057,6 +1147,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.get_isaac_texture_dependencies)
     async def get_isaac_texture_dependencies(root_path: str = "/") -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_texture_dependencies",
@@ -1073,6 +1164,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.focus_isaac_viewport)
     async def focus_isaac_viewport(prim_path: str) -> ToolResult:
         return await server._exec_isaac(
             "focus_isaac_viewport",
@@ -1125,6 +1217,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.get_isaac_ui_window)
     async def get_isaac_ui_window(
         window_title: str,
         max_depth: int = 4,
@@ -1149,6 +1242,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.raycast_isaac_scene)
     async def raycast_isaac_scene(
         origin: List[float],
         direction: List[float],
@@ -1166,13 +1260,17 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="find_isaac_prims_in_area",
         description=(
-            "Find prims whose bounding box center is within a given "
-            "radius of a point. Results sorted by distance."
+            "Find prims whose world-space bounding box center is within a given "
+            "radius of a point (stage units, metres by default). Results sorted "
+            "by distance. Use find_isaac_prims_in_area when you know where "
+            "something is but not what it is called; use search_isaac_prims "
+            "when you know the name or type."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.find_isaac_prims_in_area)
     async def find_isaac_prims_in_area(
         center: List[float],
         radius: float,
@@ -1208,15 +1306,20 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.list_isaac_extensions)
     async def list_isaac_extensions(
         enabled_only: bool = True,
         search: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> ToolResult:
         return await server._exec_isaac(
             "list_isaac_extensions",
             server._isaac_tools.list_isaac_extensions(
                 enabled_only=enabled_only,
                 search=search,
+                limit=limit,
+                offset=offset,
             ),
         )
 
@@ -1236,6 +1339,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.enable_isaac_extension)
     async def enable_isaac_extension(extension_id: str) -> ToolResult:
         return await server._exec_isaac(
             "enable_isaac_extension",
@@ -1264,6 +1368,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             destructive=True,
         ),
     )
+    @with_param_descriptions(IsaacTools.disable_isaac_extension)
     async def disable_isaac_extension(extension_id: str) -> ToolResult:
         return await server._exec_isaac(
             "disable_isaac_extension",
@@ -1289,6 +1394,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.get_carb_settings)
     async def get_isaac_carb_settings(keys: List[str]) -> ToolResult:
         return await server._exec_isaac(
             "get_isaac_carb_settings",
@@ -1310,6 +1416,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.set_carb_settings)
     async def set_isaac_carb_settings(settings: Dict[str, Any]) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_carb_settings",
@@ -1336,6 +1443,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.read_aovs)
     async def read_isaac_aovs(
         aov_names: List[str],
         camera_path: str = "/OmniverseKit_Persp",
@@ -1383,17 +1491,27 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             "UsdLux.DomeLight, UsdGeom.Mesh, UsdGeom.PointInstancer, "
             "UsdGeom.Xform, UsdShade.Material, or any USD type name. "
             "Attributes are read via schema API first (e.g. 'intensity' -> "
-            "GetIntensityAttr), then fallback to generic and inputs: prefix."
+            "GetIntensityAttr), then fallback to generic and inputs: prefix. "
+            "Paged via max_results/offset. Use query_isaac_typed_prims when you "
+            "need attribute values or schema-based matching (subclasses "
+            "included); use search_isaac_prims for a plain name or exact type "
+            "lookup."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(
+        IsaacTools.query_usd_typed_prims,
+        max_prims="Deprecated alias of max_results; ignored when max_results is given.",
+    )
     async def query_isaac_typed_prims(
         type_name: str,
         attributes: Optional[List[str]] = None,
         root_path: str = "/",
-        max_prims: int = 200,
+        max_results: int = 200,
+        offset: int = 0,
+        max_prims: Optional[int] = None,
     ) -> ToolResult:
         return await server._exec_isaac(
             "query_isaac_typed_prims",
@@ -1401,7 +1519,8 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
                 type_name=type_name,
                 attributes=attributes,
                 root_path=root_path,
-                max_prims=max_prims,
+                max_results=resolve_deprecated_alias(max_results, max_prims, 200),
+                offset=offset,
             ),
         )
 
@@ -1475,6 +1594,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.get_isaac_graph_nodes)
     async def get_isaac_graph_nodes(
         graph_path: str,
         max_nodes: int = 200,
@@ -1500,6 +1620,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=False, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.create_isaac_graph_node)
     async def create_isaac_graph_node(
         graph_path: str,
         node_path: str,
@@ -1527,6 +1648,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.connect_isaac_graph_nodes)
     async def connect_isaac_graph_nodes(
         source_attr_path: str,
         target_attr_path: str,
@@ -1551,6 +1673,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.set_isaac_graph_node_values)
     async def set_isaac_graph_node_values(
         node_path: str,
         values: Dict[str, Any],
@@ -1575,6 +1698,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.list_isaac_graph_node_types)
     async def list_isaac_graph_node_types(
         search: Optional[str] = None,
         max_types: int = 200,
@@ -1600,6 +1724,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             destructive=True,
         ),
     )
+    @with_param_descriptions(IsaacTools.delete_isaac_graph_node)
     async def delete_isaac_graph_node(
         graph_path: str,
         node_path: str,
@@ -1629,6 +1754,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=True, idempotent=True, open_world=True
         ),
     )
+    @with_param_descriptions(IsaacTools.get_isaac_logs)
     async def get_isaac_logs(
         level: str = "warn",
         last_n: int = 50,
@@ -1656,6 +1782,7 @@ def register_isaac_tools(server: "SimulMCPServer") -> None:
             read_only=False, idempotent=True, open_world=True, destructive=True
         ),
     )
+    @with_param_descriptions(IsaacTools.set_isaac_log_level)
     async def set_isaac_log_level(level: str) -> ToolResult:
         return await server._exec_isaac(
             "set_isaac_log_level",

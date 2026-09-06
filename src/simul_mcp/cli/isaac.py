@@ -1588,7 +1588,10 @@ def create_physics_scene(
         emit(result)
         return
     if result.get("already_existed"):
-        console.print(f"[yellow]Physics scene already exists[/yellow] at {prim_path}")
+        console.print(
+            f"[yellow]Physics scene already exists[/yellow] at {prim_path} "
+            f"(gravity updated to {result.get('gravity_magnitude')} m/s^2)"
+        )
     else:
         console.print(f"[green]Physics scene created[/green] at {prim_path} (gravity={gravity} m/s^2)")
 
@@ -1685,6 +1688,8 @@ def create_material(
 def list_extensions(
     enabled_only: bool = typer.Option(False, "--enabled", help="Show only enabled extensions"),
     search: Optional[str] = typer.Option(None, "--search", "-s", help="Filter by extension ID substring"),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max extensions to return per page"),
+    offset: int = typer.Option(0, "--offset", help="Matching extensions to skip before the page"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
@@ -1692,6 +1697,8 @@ def list_extensions(
     result = _run(_tools(host, port).list_isaac_extensions(
         enabled_only=enabled_only,
         search=search,
+        limit=limit,
+        offset=offset,
     ))
     if is_json_mode():
         emit(result)
@@ -1896,7 +1903,8 @@ def query_typed_prims(
     type_name: str = typer.Argument(..., help="USD schema type (e.g. UsdLux.DistantLight, UsdGeom.Mesh)"),
     attributes: Optional[List[str]] = typer.Option(None, "--attr", "-a", help="Attributes to read"),
     root_path: str = typer.Option("/", "--root", "-r", help="Root path to start traversal"),
-    max_prims: int = typer.Option(200, "--max", "-m", help="Max prims to return"),
+    max_results: int = typer.Option(200, "--max", "-m", help="Max prims to return per page"),
+    offset: int = typer.Option(0, "--offset", help="Matching prims to skip before the page"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
@@ -1905,7 +1913,8 @@ def query_typed_prims(
         type_name=type_name,
         attributes=attributes,
         root_path=root_path,
-        max_prims=max_prims,
+        max_results=max_results,
+        offset=offset,
     ))
     if is_json_mode():
         emit(result)
@@ -1914,7 +1923,7 @@ def query_typed_prims(
     truncated = result.get("truncated", False)
     title = f"{result.get('type_filter', type_name)} ({result.get('count', len(prims))} found)"
     if truncated:
-        title += f" [yellow](truncated at {max_prims})[/yellow]"
+        title += f" [yellow](truncated at {result.get('applied_limit', max_results)})[/yellow]"
     table = Table(title=title)
     table.add_column("Path", style="cyan", no_wrap=True)
     table.add_column("Type", style="dim")

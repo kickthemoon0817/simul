@@ -35,6 +35,7 @@ from ..schemas.usd import (
     USDFileRequest,
     USDValidateRequest,
 )
+from ._helpers import with_param_descriptions
 
 if TYPE_CHECKING:
     from ..adapters.headless_usd import HeadlessUSDSession
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 
 def register_usd_tools(server: "SimulMCPServer") -> None:
     """Register USD-related tools."""
+    from ...adapters.headless_usd import HeadlessUSDSession
 
     @server.mcp.tool(
         name="load_usd_file",
@@ -56,6 +58,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def load_usd_file(file_path: str) -> ToolResult:
         """
         Load a USD file and return stage information.
@@ -117,6 +120,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions()
     async def validate_usd_file(file_path: str) -> ToolResult:
         """
         Check that a path names a readable USD file within the size limit.
@@ -165,6 +169,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions()
     async def get_prim_info(stage_id: str, prim_path: str) -> ToolResult:
         """
         Get information about a USD prim.
@@ -236,6 +241,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions()
     async def create_prim(
         stage_id: str,
         prim_path: str,
@@ -301,6 +307,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions()
     async def update_prim_attributes(
         stage_id: str,
         prim_path: str,
@@ -364,6 +371,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions()
     async def delete_prim(stage_id: str, prim_path: str) -> ToolResult:
         """
         Delete a prim from a USD stage.
@@ -412,6 +420,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions()
     async def get_mesh_info(stage_id: str, prim_path: str) -> ToolResult:
         """
         Get mesh information for a mesh prim.
@@ -456,6 +465,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions()
     async def search_prims(
         stage_id: str, search_type: str, query: str, exact_match: bool = False
     ) -> ToolResult:
@@ -518,6 +528,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions()
     async def get_bounding_box(
         stage_id: str, prim_path: Optional[str] = None, world_space: bool = True
     ) -> ToolResult:
@@ -581,6 +592,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         output_schema=None,
         task=server._task_optional(),
     )
+    @with_param_descriptions()
     async def summarize_scene(
         stage_id: str, include_meshes: bool = True, format: str = "json"
     ) -> ToolResult:

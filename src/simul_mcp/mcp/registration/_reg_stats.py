@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Optional
 
 from fastmcp.tools.tool import ToolResult
 
+from ._helpers import with_param_descriptions
+
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
 
@@ -33,6 +35,7 @@ def register_stats_tools(server: "SimulMCPServer") -> None:
         ),
         output_schema=None,
     )
+    @with_param_descriptions()
     async def get_tool_usage_stats(
         tool_name: Optional[str] = None,
         include_recent: bool = False,
