@@ -130,7 +130,7 @@ def test_runtime_info_over_the_bridge_carries_bridge_and_client_sections() -> No
 def test_runtime_info_over_the_script_path_reports_the_open_circuit() -> None:
     client = _client(circuit_open=True)
     client.bridge_request = AsyncMock(side_effect=ConnectionRefusedError("circuit open"))
-    client.execute_vscode_only = AsyncMock(
+    client.execute = AsyncMock(
         return_value=ScriptResult(success=True, output=json.dumps({"app": {"version": "x"}}))
     )
 
