@@ -20,12 +20,23 @@ try:
     import omni.ext
 
     OMNI_AVAILABLE = True
-    OmniExtBase: type[Any] = omni.ext.IExt
 except Exception:  # pragma: no cover - exercised by import smoke tests
     carb = None
     omni = None
     OMNI_AVAILABLE = False
-    OmniExtBase = object
+
+
+def _extension_base() -> type[Any]:
+    """Return the Kit extension base class, or ``object`` outside Kit.
+
+    Kit starts every module attribute that is an ``IExt`` subclass, so the base
+    class must not be bound to a module-level name: a bare ``IExt`` alias gets
+    instantiated too, and its shutdown raises before this extension's own
+    ``on_shutdown`` runs, leaving the bridge listener alive.
+    """
+    if OMNI_AVAILABLE:
+        return omni.ext.IExt
+    return object
 
 
 #: Carb settings that hold the stock Python socket port, newest flavour first:
@@ -56,7 +67,7 @@ def resolve_python_socket_port(get_setting: Callable[[str], Any]) -> int:
     return DEFAULT_PYTHON_SOCKET_PORT
 
 
-class IsaacMCPServerExtension(OmniExtBase):
+class IsaacMCPServerExtension(_extension_base()):
     """Typed bridge transport for Simul MCP running inside Isaac Sim."""
 
     def __init__(self) -> None:
