@@ -99,6 +99,7 @@ class _PingClient:
         self._reachable = reachable
         self.address = "127.0.0.1:8229"
         self.bridge_address = "127.0.0.1:8229"
+        self.bridge_circuit_open = False
         self.vscode_address = "127.0.0.1:8226"
         self.timeout_seconds = 5.0
 
