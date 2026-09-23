@@ -72,6 +72,14 @@ files next to it whatever `simul-mcp` is installed in the interpreter.
 
 ## Runtime Notes
 
+- Unreal attached mode: `simul unreal instances` / `attach` select an existing
+  editor, map and level viewport. `simul server --backends unreal --unreal-mode attached`
+  uses that selection; `control_unreal_ui` provides named editor controls even with
+  scripting disabled. Optional `simul unreal setup <project> --agent-overlay --yes`
+  builds the native Slate overlay with Unreal's C++ toolchain. Use unique `agent_id`
+  labels and `move_cursor` for visible activity; never move the OS cursor.
+  See `docs/unreal-attachment.md`.
+
 - Blender attached mode: `simul blender install-bridge` builds an add-on ZIP to enable
   in the existing editor, then `simul blender instances` / `attach` select its window.
   Run `simul server --backends blender --blender-mode attached`; no server-side bpy is

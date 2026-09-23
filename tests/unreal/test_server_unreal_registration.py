@@ -57,6 +57,7 @@ THIN_UNREAL_TOOLS: frozenset[str] = frozenset({
     "unreal_health_check",
     "ping_unreal",
     "list_unreal_instances",
+    "control_unreal_ui",
     "capture_unreal_viewport",
     "execute_unreal_script",
 })

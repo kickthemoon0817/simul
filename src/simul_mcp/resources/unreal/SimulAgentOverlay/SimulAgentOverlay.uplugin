@@ -1,0 +1,11 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "1.0",
+  "FriendlyName": "Simul Agent Overlay",
+  "Description": "Transient per-agent viewport pointers and activity labels. Never injects mouse input or modifies scene assets.",
+  "Category": "Editor",
+  "CanContainContent": false,
+  "EnabledByDefault": true,
+  "Modules": [{"Name": "SimulAgentOverlay", "Type": "Editor", "LoadingPhase": "PostEngineInit"}]
+}

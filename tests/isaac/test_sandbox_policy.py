@@ -176,7 +176,7 @@ def test_file_urls_are_converted_and_policy_checked() -> None:
     tools, client = _tools()
     asyncio.run(tools.open_isaac_stage(file_path=f"file://{INSIDE_SANDBOX}"))
     assert client.execute.await_count == 1
-    assert repr(INSIDE_SANDBOX) in client.execute.await_args.args[0]
+    assert repr(str(Path(INSIDE_SANDBOX).resolve())) in client.execute.await_args.args[0]
 
     result = asyncio.run(tools.open_isaac_stage(file_path=f"file://{OUTSIDE_SANDBOX}"))
     assert _denied(result)

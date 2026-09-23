@@ -119,6 +119,7 @@ class UnrealRuntimeSession(LoggerMixin):
 
         self._base_url: str = f"http://{self.host}:{self.port}"
         self._session: Optional[Any] = None  # aiohttp.ClientSession, lazily created
+        self._attachment: Optional[Dict[str, Any]] = None
         # Enforced in the session layer so MCP registration, the CLI and tests
         # all sit above the same check.
         self._path_policy: PathPolicy = PathPolicy.from_settings(self.settings)
@@ -204,6 +205,7 @@ class UnrealRuntimeSession(LoggerMixin):
         timeout_override: Optional[float] = None,
         max_retries: Optional[int] = None,
         response_kind: str = "json",
+        _skip_attachment: bool = False,
     ) -> Dict[str, Any]:
         """
         Perform an HTTP request with retry and exponential backoff.
@@ -222,6 +224,8 @@ class UnrealRuntimeSession(LoggerMixin):
         Returns:
             Parsed JSON response as a dictionary.
         """
+        if self.settings.unreal.mode == "attached" and not _skip_attachment:
+            body = await self._guard_attachment(method, path, body)
         # Remote Control uses PUT even for arbitrary Python and actor mutations.
         # Once sent, a timeout cannot establish that the operation did not run.
         retry_safe = (
@@ -332,6 +336,195 @@ class UnrealRuntimeSession(LoggerMixin):
 
         raise last_exc  # type: ignore[misc]
 
+    def _load_attachment(self) -> Dict[str, Any]:
+        """Pin one attachment for this tool session; never fall back to host/port."""
+        if self.settings.unreal.mode != "attached":
+            raise RuntimeError(
+                "Named editor control requires UNREAL__MODE=attached and simul unreal attach"
+            )
+        if self._attachment is None:
+            from .unreal_connection import read_attachment
+
+            self._attachment = read_attachment(
+                Path(self.settings.unreal.attachment_path).expanduser()
+            )
+            self.host, self.port = self._attachment["host"], self._attachment["port"]
+            self._base_url = f"http://{self.host}:{self.port}"
+        return self._attachment["target"]
+
+    async def _guard_attachment(
+        self,
+        method: str,
+        path: str,
+        body: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Guard scripts in their execution call; preflight legacy HTTP operations."""
+        from ._unreal_attach_scripts import EDITOR_STATE
+
+        target = self._load_attachment()
+        guard = EDITOR_STATE + f"_simul_editor.verify({target!r})\n"
+        is_python = (
+            path == "/remote/object/call"
+            and body is not None
+            and body.get("objectPath")
+            == "/Script/PythonScriptPlugin.Default__PythonScriptLibrary"
+            and body.get("functionName") == "ExecutePythonCommandEx"
+        )
+        if is_python:
+            parameters = dict(body.get("parameters", {}))
+            code = parameters.get("PythonCommand", "")
+            mode = parameters.get("ExecutionMode", "ExecuteFile")
+            if mode == "EvaluateStatement":
+                parameters["PythonCommand"] = f"(exec({guard!r}), eval({code!r}))[1]"
+            elif mode in {"ExecuteFile", "ExecuteStatement"}:
+                parameters["PythonCommand"] = f"exec({(guard + code)!r})"
+            else:
+                raise ValueError("Unsupported Unreal Python execution mode")
+            return {**body, "parameters": parameters}
+        if body and (
+            body.get("functionName")
+            in {"GetLevelViewportCameraInfo", "SetLevelViewportCameraInfo"}
+            or (
+                body.get("functionName") == "ExecuteConsoleCommand"
+                and str(body.get("parameters", {}).get("Command", "")).startswith(
+                    "HighResShot"
+                )
+            )
+        ):
+            guard += (
+                "if str(unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).get_active_viewport_config_key()) "
+                f"!= {target['viewport']!r}:\n"
+                "    raise RuntimeError('This operation uses the active viewport; "
+                "activate the attached viewport first')\n"
+            )
+        checked = await self._http_request(
+            "PUT",
+            "/remote/object/call",
+            {
+                "objectPath": "/Script/PythonScriptPlugin.Default__PythonScriptLibrary",
+                "functionName": "ExecutePythonCommandEx",
+                "parameters": {
+                    "PythonCommand": guard + "print(json.dumps({'verified': True}))",
+                    "ExecutionMode": "ExecuteFile",
+                    "FileExecutionScope": "Public",
+                },
+            },
+            _skip_attachment=True,
+        )
+        result = self._parse_python_json(checked)
+        if result.get("error") or result.get("verified") is not True:
+            raise RuntimeError(
+                result.get("error", "Unreal attachment verification failed")
+            )
+        return body
+
+    async def attachment_status(self) -> Dict[str, Any]:
+        """Verify and inspect the saved editor selection."""
+        from ._unreal_attach_scripts import EDITOR_STATE
+
+        target = self._load_attachment()
+        result = await self._execute_json_script(
+            EDITOR_STATE + "print(json.dumps(_simul_editor.identity()))"
+        )
+        return {
+            **result,
+            "mode": "attached",
+            "host": self.host,
+            "port": self.port,
+            "viewport": target["viewport"],
+        }
+
+    async def control_ui(
+        self,
+        agent_control: str,
+        target: Optional[str] = None,
+        property_name: Optional[str] = None,
+        value: Optional[List[float]] = None,
+        enabled: Optional[bool] = None,
+        agent_id: str = "agent",
+        position: Optional[List[float]] = None,
+        activity: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Perform a bounded action in the attached map and level viewport."""
+        from ._unreal_attach_scripts import CONTROL_UI, EDITOR_STATE
+
+        actions = (
+            "inspect",
+            "select_actor",
+            "clear_selection",
+            "set_property",
+            "pilot_actor",
+            "eject_actor",
+            "set_game_view",
+            "move_cursor",
+            "clear_cursor",
+        )
+        if (
+            not isinstance(agent_id, str)
+            or not 1 <= len(agent_id) <= 64
+            or not agent_id.isprintable()
+            or not agent_id.strip()
+        ):
+            raise ValueError("agent_id must be a printable label of 1 to 64 characters")
+        if position is not None and (
+            agent_control != "move_cursor"
+            or len(position) != 2
+            or not all(math.isfinite(n) and 0 <= n <= 1 for n in position)
+        ):
+            raise ValueError(
+                "position is only valid for move_cursor: two finite coordinates in [0, 1], from bottom-left"
+            )
+        if activity is not None and (
+            agent_control != "move_cursor"
+            or not activity.isprintable()
+            or len(activity) > 256
+        ):
+            raise ValueError(
+                "activity is only valid for move_cursor: a printable label of up to 256 characters"
+            )
+        if agent_control not in actions:
+            raise ValueError(f"Unsupported agent_control; choose from {actions}")
+        if target is not None and agent_control not in {
+            "select_actor",
+            "set_property",
+            "pilot_actor",
+        }:
+            raise ValueError("target is only valid for actor actions")
+        if agent_control == "set_property":
+            if property_name not in {"location", "rotation", "scale"}:
+                raise ValueError("property_name must be location, rotation or scale")
+            if (
+                value is None
+                or len(value) != 3
+                or not all(math.isfinite(v) for v in value)
+            ):
+                raise ValueError(
+                    "value must contain three finite numbers; rotation uses degrees"
+                )
+        elif property_name is not None or value is not None:
+            raise ValueError("property_name and value are only valid for set_property")
+        if agent_control == "set_game_view":
+            if type(enabled) is not bool:
+                raise ValueError("set_game_view requires enabled=true or false")
+        elif enabled is not None:
+            raise ValueError("enabled is only valid for set_game_view")
+        attached = self._load_attachment()
+        args = {
+            "action": agent_control,
+            "target": target,
+            "property_name": property_name,
+            "value": value,
+            "enabled": enabled,
+            "viewport": attached["viewport"],
+            "actions": actions,
+            "agent_id": agent_id,
+            "position": position,
+            "activity": activity,
+        }
+        return await self._execute_json_script(
+            EDITOR_STATE + f"args = {args!r}\n" + CONTROL_UI
+        )
+
     async def _http_get(
         self,
         path: str,
@@ -416,6 +609,9 @@ class UnrealRuntimeSession(LoggerMixin):
         address = f"{self.host}:{self.port}"
         t0 = time.monotonic()
         try:
+            if self.settings.unreal.mode == "attached":
+                self._load_attachment()
+                address = f"{self.host}:{self.port}"
             await self._http_get(
                 "/remote/info",
                 timeout_override=self.ping_timeout,

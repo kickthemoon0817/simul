@@ -48,6 +48,7 @@ def _session(
     timeout: Optional[int] = None,
     *,
     passphrase: Optional[str] = None,
+    mode: Optional[str] = None,
 ) -> UnrealRuntimeSession:
     """Build an UnrealRuntimeSession with optional overrides.
 
@@ -59,6 +60,13 @@ def _session(
     """
     settings = get_settings()
     overrides: Dict[str, Any] = {}
+    if mode is not None:
+        overrides["mode"] = mode
+    elif settings.unreal.mode == "attached" and (host is not None or port is not None):
+        emit_error(
+            "Host/port overrides cannot replace an attached editor; attach the desired endpoint first",
+            "ValueError",
+        )
     if host is not None:
         overrides["host"] = host
     if port is not None:
@@ -110,6 +118,114 @@ def _run(coro: Any) -> Dict[str, Any]:
 _host_opt = typer.Option(None, "--host", "-H", help="Remote Control API host")
 _port_opt = typer.Option(None, "--port", "-p", help="Remote Control API port")
 _timeout_opt = typer.Option(None, "--timeout", "-t", help="HTTP timeout in seconds")
+
+
+async def _attached_call(method: str, **kwargs: Any) -> Dict[str, Any]:
+    settings = get_settings()
+    settings = settings.model_copy(
+        update={"unreal": settings.unreal.model_copy(update={"mode": "attached"})}
+    )
+    session = UnrealRuntimeSession(settings)
+    try:
+        return await getattr(session, method)(**kwargs)
+    finally:
+        await session.close()
+
+
+@app.command("instances")
+def instances(host: Optional[str] = _host_opt, port: Optional[int] = _port_opt) -> None:
+    """Discover running editors and their level viewport identifiers."""
+    from ..adapters.unreal_connection import UnrealAttachments
+
+    async def inspect() -> Dict[str, Any]:
+        return {
+            "instances": await UnrealAttachments(get_settings()).instances(host, port)
+        }
+
+    emit(_run(inspect()))
+
+
+@app.command("attach")
+def attach(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+    viewport: Optional[str] = typer.Option(
+        None, "--viewport", help="Viewport config key from instances"
+    ),
+) -> None:
+    """Select an existing editor/map/viewport without loading, saving or launching."""
+    from ..adapters.unreal_connection import UnrealAttachments
+
+    emit(_run(UnrealAttachments(get_settings()).attach(host, port, viewport)))
+
+
+@app.command("status")
+def status() -> None:
+    """Verify the saved editor selection and report current identity."""
+    emit(_run(_attached_call("attachment_status")))
+
+
+@app.command("detach")
+def detach() -> None:
+    """Forget the selected editor, leaving its scene and process untouched."""
+    from ..adapters.unreal_connection import UnrealAttachments
+
+    try:
+        emit(UnrealAttachments(get_settings()).detach())
+    except (OSError, ValueError) as exc:
+        emit_error(str(exc), type(exc).__name__)
+
+
+@app.command("control")
+def control(
+    action: str = typer.Argument(
+        ...,
+        help="inspect, select_actor, clear_selection, set_property, "
+        "pilot_actor, eject_actor, set_game_view, move_cursor or clear_cursor",
+    ),
+    target: Optional[str] = typer.Option(
+        None, "--target", help="Actor path or unique label"
+    ),
+    property_name: Optional[str] = typer.Option(
+        None, "--property", help="location, rotation or scale"
+    ),
+    value: Optional[str] = typer.Option(
+        None, "--value", help="JSON vector, e.g. '[100,0,200]'"
+    ),
+    enabled: Optional[bool] = typer.Option(
+        None, "--enabled/--disabled", help="Game view state"
+    ),
+    agent_id: str = typer.Option(
+        "agent", "--agent-id", help="Unique label for this agent"
+    ),
+    position: Optional[str] = typer.Option(
+        None,
+        "--position",
+        help="move_cursor: normalized JSON [x,y], bottom-left origin",
+    ),
+    activity: Optional[str] = typer.Option(
+        None, "--activity", help="move_cursor: current activity label"
+    ),
+) -> None:
+    """Apply a named control to the explicitly attached editor."""
+    try:
+        parsed = json.loads(value) if value is not None else None
+        from ..mcp.schemas.unreal_ui import UnrealUIRequest
+
+        request = UnrealUIRequest(
+            agent_control=action,
+            target=target,
+            property_name=property_name,
+            value=parsed,
+            enabled=enabled,
+            agent_id=agent_id,
+            position=json.loads(position) if position is not None else None,
+            activity=activity,
+        )
+    except ValueError as exc:
+        emit_error(str(exc), "ValueError")
+        return
+    emit(_run(_attached_call("control_ui", **request.model_dump())))
 
 
 # ---------------------------------------------------------------------------
@@ -711,7 +827,9 @@ def _is_loopback_bind(host: str) -> bool:
 @app.command("setup")
 def setup(
     uproject: Path = typer.Argument(..., help="Path to the .uproject file"),
-    port: int = typer.Option(30010, "--port", "-p", help="Remote Control HTTP port to configure"),
+    port: int = typer.Option(
+        30010, "--port", "-p", help="Remote Control HTTP port to configure"
+    ),
     engine_path: Optional[Path] = typer.Option(
         None,
         "--engine-path",
@@ -769,7 +887,14 @@ def setup(
             "LAN setups."
         ),
     ),
-    launch: bool = typer.Option(True, "--launch/--no-launch", help="Launch the editor after configuring"),
+    agent_overlay: bool = typer.Option(
+        False,
+        "--agent-overlay",
+        help="Build/install visible agent cursors (C++ toolchain required; close this project first)",
+    ),
+    launch: bool = typer.Option(
+        True, "--launch/--no-launch", help="Launch the editor after configuring"
+    ),
     headless: bool = typer.Option(
         True,
         "--headless/--no-headless",
@@ -931,12 +1056,18 @@ def setup(
 
     # Patch config files.
     try:
+        overlay = None
+        if agent_overlay:
+            from ..adapters.unreal_overlay import install_agent_overlay
+
+            overlay = install_agent_overlay(uproject, engine_path)
         patch = ensure_remote_control_config(
             uproject,
             port=port,
             bind=bind,
             websocket_port=websocket_port,
             passphrase_md5=passphrase_md5,
+            **({"agent_overlay": True} if agent_overlay else {}),
         )
     except Exception as exc:
         if is_json_mode():
@@ -971,13 +1102,14 @@ def setup(
     # editor enforces auth on /remote/info, so the polling session must
     # also carry the Passphrase header — otherwise the editor is healthy
     # but the poller hits 401 and times out at --wait-timeout.
-    session = _session(port=port, passphrase=passphrase)
+    session = _session(port=port, passphrase=passphrase, mode="endpoint")
     if not is_json_mode():
         console.print(f"Waiting for Remote Control @ {session.settings.unreal.host}:{port} ...")
     health = asyncio.run(_poll_health(session, wait_timeout, poll_interval))
 
     payload: Dict[str, Any] = {
         "uproject": str(uproject),
+        "agent_overlay": overlay,
         "port": port,
         "bind": bind,
         "websocket_port": websocket_port,

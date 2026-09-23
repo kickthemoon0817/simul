@@ -69,7 +69,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "simul_mcp" = ["py.typed"]
 "simul_mcp.bridge_ext" = ["khemoo.simul.mcp/**/*"]
-"simul_mcp.resources" = ["skills.md", "config/*.yaml", "docs/api/*.md"]
+"simul_mcp.resources" = ["skills.md", "config/*.yaml", "docs/api/*.md", "unreal/SimulAgentOverlay/SimulAgentOverlay.uplugin", "unreal/SimulAgentOverlay/Source/**/*"]
 
 [tool.setuptools.exclude-package-data]
 # Bytecode lives only inside __pycache__/ on Python 3 — one glob covers

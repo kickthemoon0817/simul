@@ -316,6 +316,13 @@ class UnrealConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    mode: Literal["endpoint", "attached"] = Field(
+        "endpoint", description="Use configured host/port or the explicitly attached editor"
+    )
+    attachment_path: str = Field(
+        "~/.simul/unreal/attachment.json", description="Saved editor/map/viewport selection"
+    )
+
     enabled: bool = Field(default=True, description="Enable Unreal Engine runtime tools")
     host: str = Field(default="localhost", description="Remote Control API host")
     port: int = Field(
@@ -344,7 +351,7 @@ class UnrealConfig(BaseModel):
         description=(
             "Which Unreal tools the MCP server registers. 'thin' exposes only "
             "unreal_health_check, ping_unreal, list_unreal_instances, "
-            "capture_unreal_viewport and execute_unreal_script; 'full' exposes "
+            "control_unreal_ui, capture_unreal_viewport and execute_unreal_script; 'full' exposes "
             "every granular Unreal tool. Env: UNREAL__TOOL_SURFACE."
         ),
     )

@@ -285,9 +285,12 @@ def server(
         None,
         "--unreal-tools",
         help=(
-            "Unreal MCP tool surface: 'thin' (health, ping, instances, capture, "
+            "Unreal MCP tool surface: 'thin' (health, ping, instances, editor control, capture, "
             "exec script) or 'full' (every granular tool). Overrides unreal.tool_surface."
         ),
+    ),
+    unreal_mode: Optional[str] = typer.Option(
+        None, "--unreal-mode", help="Unreal connection: endpoint or attached (explicitly selected editor)"
     ),
     blender_mode: Optional[str] = typer.Option(
         None, "--blender-mode", help="Blender connection: embedded (local bpy) or attached (selected existing window)"
@@ -305,6 +308,13 @@ def server(
             settings = load_settings(config)
         else:
             settings = get_settings()
+
+        if unreal_mode is not None:
+            if unreal_mode not in {"endpoint", "attached"}:
+                emit_error("--unreal-mode must be endpoint or attached", "ValueError")
+            settings = settings.model_copy(update={
+                "unreal": settings.unreal.model_copy(update={"mode": unreal_mode})
+            })
 
         if blender_mode is not None:
             if blender_mode not in ("embedded", "attached"):
