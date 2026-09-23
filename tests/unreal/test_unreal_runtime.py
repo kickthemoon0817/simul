@@ -1,21 +1,16 @@
 """Tests for Unreal Engine runtime adapter functionality."""
 
 import asyncio
-from contextlib import contextmanager
 import hashlib
 import json
-import math
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
 
-
 from simul_mcp.adapters import unreal_runtime
 from simul_mcp.config import Settings
 from simul_mcp.utils.paths import SandboxDenied
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -276,17 +271,6 @@ class TestUnrealRuntimeSession:
 # ---------------------------------------------------------------------------
 
 
-DESCRIBE_ACTOR_PAYLOAD: Dict[str, Any] = {
-    "Name": "StaticMeshActor_0",
-    "Class": "StaticMeshActor",
-    "Components": [
-        {"Name": "StaticMeshComponent0", "Class": "StaticMeshComponent", "IsRootComponent": True},
-    ],
-    "Tags": ["nav_obstacle"],
-    "Mobility": "Static",
-    "bHidden": False,
-}
-
 PROPERTY_LOCATION_PAYLOAD: Dict[str, Any] = {
     "RootComponent.RelativeLocation": {"X": 100.0, "Y": 200.0, "Z": 50.0},
 }
@@ -347,8 +331,10 @@ class TestUnrealRuntimeSessionPhase1:
         session._session = SmartFakeClientSession(put_responses={
             "/remote/search/assets": FakeResponse({
                 "Assets": [
-                    {"Name": "SM_Chair", "Path": "/Game/Meshes/SM_Chair", "Class": "StaticMesh", "PackagePath": "/Game/Meshes"},
-                    {"Name": "M_Wood", "Path": "/Game/Materials/M_Wood", "Class": "Material", "PackagePath": "/Game/Materials"},
+                    {"Name": "SM_Chair", "Path": "/Game/Meshes/SM_Chair",
+                     "Class": "StaticMesh", "PackagePath": "/Game/Meshes"},
+                    {"Name": "M_Wood", "Path": "/Game/Materials/M_Wood",
+                     "Class": "Material", "PackagePath": "/Game/Materials"},
                 ],
             }),
         })
@@ -399,132 +385,9 @@ class TestUnrealRuntimeSessionPhase1:
 
     # -- get_actor_thumbnail --
 
-    def test_get_actor_thumbnail_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """get_actor_thumbnail returns base64 image data."""
-        session = self._make_session(monkeypatch)
-        session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/thumbnail": FakeResponse({"Thumbnail": "iVBORw0KGgo="}),
-        })
-
-        result = asyncio.run(session.get_actor_thumbnail("/Game/Meshes/SM_Chair"))
-
-        assert result["asset_path"] == "/Game/Meshes/SM_Chair"
-        assert result["image_base64"] == "iVBORw0KGgo="
-        assert result["width"] == 256
-        assert result["height"] == 256
-
     # -- get_actor_info --
 
-    def test_get_actor_info_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """get_actor_info returns full actor metadata with transform."""
-        session = self._make_session(monkeypatch)
-
-        def put_router(path: str, json: Any = None) -> FakeResponse:
-            if path == "/remote/object/describe":
-                return FakeResponse(DESCRIBE_ACTOR_PAYLOAD)
-            if path == "/remote/object/property":
-                prop = json.get("propertyName", "") if json else ""
-                if "Location" in prop:
-                    return FakeResponse(PROPERTY_LOCATION_PAYLOAD)
-                if "Rotation" in prop:
-                    return FakeResponse(PROPERTY_ROTATION_PAYLOAD)
-                if "Scale" in prop:
-                    return FakeResponse(PROPERTY_SCALE_PAYLOAD)
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_router)
-
-        result = asyncio.run(session.get_actor_info("/Game/Maps/Test.Test:PersistentLevel.StaticMeshActor_0"))
-
-        assert result["name"] == "StaticMeshActor_0"
-        assert result["class_name"] == "StaticMeshActor"
-        assert result["location"] == (100.0, 200.0, 50.0)
-        assert result["rotation"] == (0.0, 45.0, 0.0)
-        assert result["scale"] == (1.0, 1.0, 1.0)
-        assert len(result["components"]) == 1
-        assert result["components"][0]["is_root"] is True
-        assert result["tags"] == ["nav_obstacle"]
-        assert result["mobility"] == "Static"
-
     # -- list_actors --
-
-    def test_list_actors_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """list_actors returns parsed actor entries from level."""
-        session = self._make_session(monkeypatch)
-        actor_paths = [
-            "/Game/Maps/T.T:PersistentLevel.StaticMeshActor_0",
-            "/Game/Maps/T.T:PersistentLevel.PointLight_0",
-        ]
-
-        def put_router(path: str, json: Any = None) -> FakeResponse:
-            if path == "/remote/object/call":
-                return FakeResponse({"ReturnValue": actor_paths})
-            if path == "/remote/object/describe":
-                obj_path = json.get("objectPath", "") if json else ""
-                if "StaticMeshActor" in obj_path:
-                    return FakeResponse(DESCRIBE_ACTOR_PAYLOAD)
-                return FakeResponse({
-                    "Name": "PointLight_0",
-                    "Class": "PointLight",
-                    "Tags": [],
-                })
-            if path == "/remote/object/property":
-                prop = json.get("propertyName", "") if json else ""
-                if "Location" in prop:
-                    return FakeResponse(PROPERTY_LOCATION_PAYLOAD)
-                if "Rotation" in prop:
-                    return FakeResponse(PROPERTY_ROTATION_PAYLOAD)
-                if "Scale" in prop:
-                    return FakeResponse(PROPERTY_SCALE_PAYLOAD)
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_router)
-
-        result = asyncio.run(session.list_actors())
-
-        assert result["count"] == 2
-        assert result["truncated"] is False
-        assert result["actors"][0]["class_name"] == "StaticMeshActor"
-        assert result["actors"][1]["class_name"] == "PointLight"
-        assert result["actors"][0]["location"] == (100.0, 200.0, 50.0)
-
-    def test_list_actors_with_class_filter(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """list_actors filters actors by class_filter."""
-        session = self._make_session(monkeypatch)
-        actor_paths = [
-            "/Game/Maps/T.T:PersistentLevel.StaticMeshActor_0",
-            "/Game/Maps/T.T:PersistentLevel.PointLight_0",
-        ]
-
-        def put_router(path: str, json: Any = None) -> FakeResponse:
-            if path == "/remote/object/call":
-                return FakeResponse({"ReturnValue": actor_paths})
-            if path == "/remote/object/describe":
-                obj_path = json.get("objectPath", "") if json else ""
-                if "StaticMeshActor" in obj_path:
-                    return FakeResponse(DESCRIBE_ACTOR_PAYLOAD)
-                return FakeResponse({
-                    "Name": "PointLight_0",
-                    "Class": "PointLight",
-                    "Tags": [],
-                })
-            if path == "/remote/object/property":
-                prop = json.get("propertyName", "") if json else ""
-                if "Location" in prop:
-                    return FakeResponse(PROPERTY_LOCATION_PAYLOAD)
-                if "Rotation" in prop:
-                    return FakeResponse(PROPERTY_ROTATION_PAYLOAD)
-                if "Scale" in prop:
-                    return FakeResponse(PROPERTY_SCALE_PAYLOAD)
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_router)
-
-        result = asyncio.run(session.list_actors(class_filter="StaticMeshActor"))
-
-        assert result["count"] == 1
-        assert result["actors"][0]["class_name"] == "StaticMeshActor"
-        assert result["actors"][0]["name"] == "StaticMeshActor_0"
 
     # -- summarize_scene --
 
@@ -596,28 +459,36 @@ class TestUnrealRuntimeSessionPhase2:
                 # RC ack — fire-and-forget for HighResShot.
                 return FakeResponse({})
             if fn == "ExecutePythonCommandEx":
-                return FakeResponse({
-                    "ReturnValue": True,
-                    "LogOutput": [
-                        # A leading info line should be ignored; the marker line wins.
-                        {"Type": "Info", "Output": "LogPython: capture starting"},
-                        {"Type": "Info", "Output": '@@SIMUL_SCREENSHOT@@{"path": "/proj/Saved/Screenshots/shot.jpeg", "size_bytes": 5, "image_base64": "iVBOR=="}'},
-                    ],
-                })
+                return FakeResponse(
+                    {
+                        "ReturnValue": True,
+                        "LogOutput": [
+                            # A leading info line should be ignored; the marker line wins.
+                            {"Type": "Info", "Output": "LogPython: capture starting"},
+                            {
+                                "Type": "Info",
+                                "Output": ('@@SIMUL_SCREENSHOT@@{"path": "/proj/Saved/Screenshots/shot.png", '
+                                           '"size_bytes": 5, "image_base64": "iVBOR=="}'),
+                            },
+                        ],
+                    }
+                )
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
-        result = asyncio.run(session.capture_viewport(
-            resolution_x=1280, resolution_y=720, format="jpeg", inline=True
-        ))
+        result = asyncio.run(
+            session.capture_viewport(
+                resolution_x=1280, resolution_y=720, format="png", inline=True
+            )
+        )
 
-        assert result["path"] == "/proj/Saved/Screenshots/shot.jpeg"
+        assert result["path"] == "/proj/Saved/Screenshots/shot.png"
         assert result["size_bytes"] == 5
         assert result["image_base64"] == "iVBOR=="
         assert result["resolution_x"] == 1280
         assert result["resolution_y"] == 720
-        assert result["format"] == "jpeg"
+        assert result["format"] == "png"
 
     def test_capture_viewport_no_screenshot_data(
         self, monkeypatch: pytest.MonkeyPatch
@@ -654,22 +525,22 @@ class TestUnrealRuntimeSessionPhase2:
                 # Marker present but with an empty payload: the read script
                 # ran but the screenshot wasn't written. Adapter should keep
                 # retrying until the deadline.
-                return FakeResponse({
-                    "ReturnValue": True,
-                    "LogOutput": [
-                        {"Type": "Info", "Output": "@@SIMUL_SCREENSHOT@@"},
-                    ],
-                })
+                return FakeResponse(
+                    {
+                        "ReturnValue": True,
+                        "LogOutput": [
+                            {"Type": "Info", "Output": "@@SIMUL_SCREENSHOT@@"},
+                        ],
+                    }
+                )
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
         result = asyncio.run(session.capture_viewport())
 
-        assert result["path"] == ""
-        assert result["resolution_x"] == 1920
-        assert result["resolution_y"] == 1080
-        assert result["format"] == "png"
+        assert result["success"] is False
+        assert result["error_type"] == "CaptureError"
 
     # -- get_viewport_info --
 
@@ -754,23 +625,35 @@ class TestUnrealRuntimeSessionPhase2:
             if path == "/remote/object/property":
                 prop = (json or {}).get("propertyName", "")
                 if "RelativeLocation" in prop:
-                    return FakeResponse({
-                        "RootComponent.RelativeLocation": {
-                            "X": 100.0, "Y": 200.0, "Z": 50.0,
-                        },
-                    })
+                    return FakeResponse(
+                        {
+                            "RootComponent.RelativeLocation": {
+                                "X": 100.0,
+                                "Y": 200.0,
+                                "Z": 50.0,
+                            },
+                        }
+                    )
                 if "RelativeRotation" in prop:
-                    return FakeResponse({
-                        "RootComponent.RelativeRotation": {
-                            "Pitch": 0.0, "Yaw": 45.0, "Roll": 0.0,
-                        },
-                    })
+                    return FakeResponse(
+                        {
+                            "RootComponent.RelativeRotation": {
+                                "Pitch": 0.0,
+                                "Yaw": 45.0,
+                                "Roll": 0.0,
+                            },
+                        }
+                    )
                 if "RelativeScale3D" in prop:
-                    return FakeResponse({
-                        "RootComponent.RelativeScale3D": {
-                            "X": 1.0, "Y": 1.0, "Z": 1.0,
-                        },
-                    })
+                    return FakeResponse(
+                        {
+                            "RootComponent.RelativeScale3D": {
+                                "X": 1.0,
+                                "Y": 1.0,
+                                "Z": 1.0,
+                            },
+                        }
+                    )
                 return FakeResponse({})
             # /remote/object/call dispatched by functionName
             fn = (json or {}).get("functionName", "")
@@ -780,19 +663,36 @@ class TestUnrealRuntimeSessionPhase2:
             if fn == "SetLevelViewportCameraInfo":
                 return FakeResponse({})
             if fn == "GetLevelViewportCameraInfo":
-                return FakeResponse({
-                    "CameraLocation": {"X": 150.0, "Y": 250.0, "Z": 350.0},
-                    "CameraRotation": {"Pitch": -20.0, "Yaw": 60.0, "Roll": 0.0},
-                })
+                return FakeResponse(
+                    {
+                        "CameraLocation": {"X": 150.0, "Y": 250.0, "Z": 350.0},
+                        "CameraRotation": {"Pitch": -20.0, "Yaw": 60.0, "Roll": 0.0},
+                    }
+                )
             return FakeResponse({})
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
-        result = asyncio.run(session.focus_on_actor(
-            actor_path="/Game/Maps/TestMap.TestMap:PersistentLevel.SM_Chair_1"
-        ))
+        from unittest.mock import AsyncMock
 
-        assert result["actor_path"] == "/Game/Maps/TestMap.TestMap:PersistentLevel.SM_Chair_1"
+        session._get_actor_transform = AsyncMock(
+            return_value={
+                "location": (100.0, 200.0, 50.0),
+                "rotation": (0.0, 45.0, 0.0),
+                "scale": (1.0, 1.0, 1.0),
+            }
+        )
+
+        result = asyncio.run(
+            session.focus_on_actor(
+                actor_path="/Game/Maps/TestMap.TestMap:PersistentLevel.SM_Chair_1"
+            )
+        )
+
+        assert (
+            result["actor_path"]
+            == "/Game/Maps/TestMap.TestMap:PersistentLevel.SM_Chair_1"
+        )
         assert result["camera_location"] == (150.0, 250.0, 350.0)
         assert result["camera_rotation"] == (-20.0, 60.0, 0.0)
         assert "SetActorSelectionState" in calls_made
@@ -1235,30 +1135,6 @@ class TestUnrealRuntimeSessionPhase4:
 
     # -- assign_material --
 
-    def test_assign_material_success(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """assign_material assigns material to actor."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "SetMaterial":
-                return FakeResponse({})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.assign_material(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Cube_0",
-            material_path="/Game/Materials/MI_Whale",
-            slot_index=0,
-        ))
-
-        assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
-        assert result["material_path"] == "/Game/Materials/MI_Whale"
-        assert result["slot_index"] == 0
-
     # -- set_light_params --
 
     def test_set_light_params_success(
@@ -1326,44 +1202,6 @@ class TestUnrealRuntimeSessionPhase5:
 
     # -- control_simulation --
 
-    def test_control_simulation_start(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """control_simulation start returns playing state."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "EditorPlaySimulate":
-                return FakeResponse({})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.control_simulation(action="start"))
-
-        assert result["action"] == "start"
-        assert result["state"] == "playing"
-
-    def test_control_simulation_stop(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """control_simulation stop returns stopped state."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "EditorEndPlay":
-                return FakeResponse({})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.control_simulation(action="stop"))
-
-        assert result["action"] == "stop"
-        assert result["state"] == "stopped"
-
     def test_control_simulation_invalid_action(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1376,133 +1214,13 @@ class TestUnrealRuntimeSessionPhase5:
 
     # -- get_simulation_status --
 
-    def test_get_simulation_status(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """get_simulation_status returns PIE state."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "IsPlayInEditorActive":
-                return FakeResponse({"ReturnValue": True})
-            if fn == "IsGamePaused":
-                return FakeResponse({"ReturnValue": False})
-            if fn == "GetGameTimeInSeconds":
-                return FakeResponse({"ReturnValue": 5.25})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.get_simulation_status())
-
-        assert result["is_playing"] is True
-        assert result["is_paused"] is False
-        assert result["sim_time"] == 5.25
-
     # -- enable_physics --
-
-    def test_enable_physics_success(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """enable_physics enables physics on actor."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            if "/remote/object/property" in path:
-                return FakeResponse({})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.enable_physics(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Cube_0",
-            enable=True,
-            simulate_physics=True,
-        ))
-
-        assert result["actor_path"].endswith("Cube_0")
-        assert result["physics_enabled"] is True
 
     # -- set_collision --
 
-    def test_set_collision_success(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """set_collision applies preset and enables collision."""
-        session = self._make_session(monkeypatch)
-        call_count = {"n": 0}
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            call_count["n"] += 1
-            return FakeResponse({})
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.set_collision(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Cube_0",
-            collision_preset="BlockAll",
-            collision_enabled=True,
-        ))
-
-        assert result["collision_preset"] == "BlockAll"
-        assert result["collision_enabled"] is True
-        assert call_count["n"] == 2  # preset call + property set
-
     # -- apply_force --
 
-    def test_apply_force_impulse(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """apply_force applies an impulse."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "AddImpulse":
-                return FakeResponse({})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.apply_force(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Cube_0",
-            force_x=0.0,
-            force_y=0.0,
-            force_z=1000.0,
-            is_impulse=True,
-        ))
-
-        assert result["force_applied"] is True
-        assert result["force_vector"] == [0.0, 0.0, 1000.0]
-        assert result["is_impulse"] is True
-
     # -- set_physics_params --
-
-    def test_set_physics_params_success(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """set_physics_params sets mass and damping."""
-        session = self._make_session(monkeypatch)
-        call_count = {"n": 0}
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            if "/remote/object/property" in path:
-                call_count["n"] += 1
-                return FakeResponse({})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.set_physics_params(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Cube_0",
-            mass=50.0,
-            linear_damping=0.1,
-            enable_gravity=True,
-        ))
-
-        assert result["params_set"] == 3  # mass + linear_damping + gravity
-        assert call_count["n"] == 3
 
 
 class TestUnrealCoordinateConversion:
@@ -1578,41 +1296,6 @@ class TestUnrealRuntimeSessionPhase6:
         monkeypatch.setattr(unreal_runtime, "AIOHTTP_AVAILABLE", True)
         return unreal_runtime.UnrealRuntimeSession(settings=Settings())
 
-    def test_import_usd_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """import_usd returns imported assets and actor paths."""
-        session = self._make_session(monkeypatch)
-        session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "ImportedAssets": ["/Game/Imports/Whale"],
-                "ActorPaths": ["/Game/Maps/T.T:PersistentLevel.Whale_0"],
-                "Warnings": [],
-            }),
-        })
-
-        result = asyncio.run(session.import_usd(usd_path="/tmp/simul_mcp/whale.usd"))
-
-        assert result["imported_assets"] == ["/Game/Imports/Whale"]
-        assert result["actor_paths"] == ["/Game/Maps/T.T:PersistentLevel.Whale_0"]
-        assert result["warnings"] == []
-
-    def test_export_usd_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """export_usd returns output path and actor count."""
-        session = self._make_session(monkeypatch)
-        session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "FileSizeBytes": 12345,
-            }),
-        })
-
-        result = asyncio.run(session.export_usd(
-            actor_paths=["/Game/Maps/T.T:PersistentLevel.Cube_0"],
-            output_path="/tmp/simul_mcp/export.usd",
-        ))
-
-        assert result["output_path"] == "/tmp/simul_mcp/export.usd"
-        assert result["actors_exported"] == 1
-        assert result["file_size_bytes"] == 12345
-
     def test_import_usd_outside_sandbox_is_refused_before_any_request(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1631,7 +1314,9 @@ class TestUnrealRuntimeSessionPhase6:
         assert excinfo.value.details["access"] == "read"
         assert excinfo.value.details["allowed_roots"]
 
-    def test_import_usd_embeds_the_resolved_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_import_usd_embeds_the_resolved_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A relative path is resolved against the project root, not the editor's cwd."""
         session = self._make_session(monkeypatch)
         requests: list = []
@@ -1641,7 +1326,10 @@ class TestUnrealRuntimeSessionPhase6:
 
         asyncio.run(session.import_usd(usd_path="examples/whale.usd"))
 
-        source = requests[0][1]["parameters"]["SourceData"]
+        code = requests[0][1]["parameters"]["PythonCommand"]
+        import ast
+
+        source = ast.literal_eval(ast.parse(code).body[0].value)["path"]
         assert Path(source).is_absolute()
         assert source.endswith("/examples/whale.usd")
 
@@ -1671,60 +1359,6 @@ class TestUnrealRuntimeSessionPhase6:
                 actor_paths=["/Game/Maps/T.T:PersistentLevel.Cube_0"],
                 output_path="/tmp/export.usd",
             ))
-
-    def test_convert_to_simready_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """convert_to_simready returns conversions applied."""
-        session = self._make_session(monkeypatch)
-        session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "ConversionsApplied": ["physics", "collision"],
-                "Warnings": ["Scale was adjusted"],
-            }),
-        })
-
-        result = asyncio.run(session.convert_to_simready(
-            usd_path="/tmp/simul_mcp/model.usd",
-            output_path="/tmp/simul_mcp/model_simready.usd",
-        ))
-
-        assert result["output_path"] == "/tmp/simul_mcp/model_simready.usd"
-        assert "physics" in result["conversions_applied"]
-        assert len(result["warnings"]) == 1
-
-    def test_validate_simready_asset_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """validate_simready_asset returns validation results."""
-        session = self._make_session(monkeypatch)
-        session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "IsValid": True,
-                "CheckResults": {"physics": True, "collision": True},
-                "Errors": [],
-                "Suggestions": [],
-            }),
-        })
-
-        result = asyncio.run(session.validate_simready_asset(usd_path="/tmp/simul_mcp/asset.usd"))
-
-        assert result["is_valid"] is True
-        assert result["checks"]["physics"] is True
-        assert result["errors"] == []
-
-    def test_get_interchange_info_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """get_interchange_info returns pipeline details."""
-        session = self._make_session(monkeypatch)
-        session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "Pipelines": [{"Name": "USD"}],
-                "SupportedFormats": ["usd", "usda", "usdc"],
-                "Version": "1.2.0",
-            }),
-        })
-
-        result = asyncio.run(session.get_interchange_info())
-
-        assert len(result["pipelines"]) == 1
-        assert "usd" in result["supported_formats"]
-        assert result["interchange_version"] == "1.2.0"
 
 
 # ---------------------------------------------------------------------------

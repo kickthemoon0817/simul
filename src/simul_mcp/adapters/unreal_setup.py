@@ -61,6 +61,7 @@ def _required_ini_values(
         "RemoteControlHttpServerPort": str(port),
         "bRestrictServerAccess": "True",
         "bEnableRemotePythonExecution": "True",
+        "bAllowConsoleCommandRemoteExecution": "True",
     }
     # NOTE: HTTP bind hostname does NOT live on URemoteControlSettings —
     # iter6 traced it to FHttpListenerConfig.BindAddress, populated from
@@ -81,6 +82,36 @@ def _required_ini_values(
 
 
 HTTP_LISTENERS_SECTION = "HTTPServer.Listeners"
+
+
+def _insert_ini_entries(lines: List[str], section: str, entries: List[str]) -> None:
+    """Insert entries inside the target section, before the next header."""
+    if not entries:
+        return
+    starts = [i for i, line in enumerate(lines) if line.strip() == f"[{section}]"]
+    if not starts:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend([f"[{section}]", *entries])
+        return
+    start = starts[-1] + 1
+    end = next(
+        (i for i in range(start, len(lines)) if lines[i].strip().startswith("[")),
+        len(lines),
+    )
+    lines[end:end] = entries
+
+
+def _section_has_entry(lines: List[str], section: str, entry: str) -> bool:
+    """Ignore matching entries that belong to an unrelated INI section."""
+    inside = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            inside = stripped == f"[{section}]"
+        elif inside and stripped == entry:
+            return True
+    return False
 
 
 def patch_default_engine_ini(
@@ -110,9 +141,7 @@ def patch_default_engine_ini(
     result = PatchResult(path=ini_path)
 
     original_lines: List[str] = (
-        ini_path.read_text(encoding="utf-8").splitlines()
-        if ini_path.is_file()
-        else []
+        ini_path.read_text(encoding="utf-8").splitlines() if ini_path.is_file() else []
     )
 
     out_lines, touched = _rewrite_ini_section(
@@ -120,16 +149,10 @@ def patch_default_engine_ini(
     )
 
     missing = [k for k in required if k not in touched]
-    if missing:
-        if not any(
-            line.strip() == f"[{HTTP_LISTENERS_SECTION}]" for line in out_lines
-        ):
-            if out_lines and out_lines[-1].strip() != "":
-                out_lines.append("")
-            out_lines.append(f"[{HTTP_LISTENERS_SECTION}]")
-        for key in missing:
-            out_lines.append(f"{key}={required[key]}")
-            result.added.append(key)
+    _insert_ini_entries(
+        out_lines, HTTP_LISTENERS_SECTION, [f"{key}={required[key]}" for key in missing]
+    )
+    result.added.extend(missing)
 
     if result.added or result.updated:
         result.changed = True
@@ -326,9 +349,7 @@ def patch_remote_control_ini(
     result = PatchResult(path=ini_path)
 
     original_lines: List[str] = (
-        ini_path.read_text(encoding="utf-8").splitlines()
-        if ini_path.is_file()
-        else []
+        ini_path.read_text(encoding="utf-8").splitlines() if ini_path.is_file() else []
     )
 
     out_lines, touched = _rewrite_ini_section(
@@ -337,14 +358,10 @@ def patch_remote_control_ini(
 
     # Track keys we didn't encounter — they need to be appended.
     missing = [k for k in required if k not in touched]
-    if missing:
-        if not any(line.strip() == f"[{REMOTE_CONTROL_SECTION}]" for line in out_lines):
-            if out_lines and out_lines[-1].strip() != "":
-                out_lines.append("")
-            out_lines.append(f"[{REMOTE_CONTROL_SECTION}]")
-        for key in missing:
-            out_lines.append(f"{key}={required[key]}")
-            result.added.append(key)
+    _insert_ini_entries(
+        out_lines, REMOTE_CONTROL_SECTION, [f"{key}={required[key]}" for key in missing]
+    )
+    result.added.extend(missing)
 
     # +Passphrases is a UE config-array entry, not a key=value setting, so
     # the standard rewriter doesn't touch it. Append idempotently — same hash
@@ -355,12 +372,8 @@ def patch_remote_control_ini(
         if git_warning is not None:
             result.warnings.append(git_warning)
         passphrase_line = _passphrase_array_line(passphrase_md5)
-        if passphrase_line not in (line.strip() for line in out_lines):
-            if not any(line.strip() == f"[{REMOTE_CONTROL_SECTION}]" for line in out_lines):
-                if out_lines and out_lines[-1].strip() != "":
-                    out_lines.append("")
-                out_lines.append(f"[{REMOTE_CONTROL_SECTION}]")
-            out_lines.append(passphrase_line)
+        if not _section_has_entry(out_lines, REMOTE_CONTROL_SECTION, passphrase_line):
+            _insert_ini_entries(out_lines, REMOTE_CONTROL_SECTION, [passphrase_line])
             result.added.append("Passphrases")
 
     if result.added or result.updated:

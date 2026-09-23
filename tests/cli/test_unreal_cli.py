@@ -9,10 +9,8 @@ from typing import Any, Dict
 import pytest
 from typer.testing import CliRunner
 
-
 from simul_mcp.cli import unreal_cli
 from simul_mcp.cli.main import app
-
 
 runner = CliRunner()
 
@@ -417,11 +415,35 @@ def _stub_session_factory(monkeypatch, raw_result):
     """
 
     class _StubSession:
+        settings = unreal_cli.get_settings()
+
         async def _execute_python(self, code, mode):  # noqa: D401
             del code, mode
             return raw_result
 
     monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: _StubSession())
+
+
+def test_exec_refuses_when_script_execution_disabled(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
+
+    base = unreal_cli.get_settings()
+    settings = base.model_copy(
+        update={
+            "security": base.security.model_copy(
+                update={"allow_script_execution": False}
+            )
+        }
+    )
+    session = UnrealRuntimeSession(settings)
+    session._execute_python = AsyncMock()
+    monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: session)
+    result = runner.invoke(app, ["--json", "unreal", "exec", "print('must not run')"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error_type"] == "ScriptExecutionDisabled"
+    session._execute_python.assert_not_called()
 
 
 def test_exec_plain_print_succeeds_and_renders_output(monkeypatch) -> None:

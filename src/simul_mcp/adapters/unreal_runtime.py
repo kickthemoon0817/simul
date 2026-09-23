@@ -6,13 +6,27 @@ Remote Control API (HTTP on port 30010) or the embedded ``unreal`` Python module
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import math
 import re
+import tempfile
 import time
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from ..config import Settings, get_settings
+from ..logging import LoggerMixin, get_logger
+from ..utils.paths import PathPolicy
+from ._unreal_scripts import (
+    ACTOR_HELPERS,
+    INTERCHANGE_INFO,
+    SIMULATION_STATUS,
+    USD_EXPORT,
+    USD_IMPORT,
+)
 
 # UE's FMD5 hex output is lowercase. Accept either case from configured
 # input and normalize. Anything that isn't a clean 32-char hex digest is
@@ -35,6 +49,7 @@ def _passphrase_to_md5(value: Optional[str]) -> Optional[str]:
         return value.lower()
     return hashlib.md5(value.encode("ascii", errors="strict")).hexdigest()
 
+
 try:
     import aiohttp
 
@@ -53,9 +68,6 @@ except ImportError:
 
 UNREAL_AVAILABLE = AIOHTTP_AVAILABLE or UNREAL_EMBEDDED_AVAILABLE
 
-from ..config import Settings, get_settings
-from ..utils.paths import PathPolicy
-from ..logging import LoggerMixin, get_logger
 
 logger = get_logger(__name__)
 
@@ -191,13 +203,14 @@ class UnrealRuntimeSession(LoggerMixin):
         body: Optional[Dict[str, Any]] = None,
         timeout_override: Optional[float] = None,
         max_retries: Optional[int] = None,
+        response_kind: str = "json",
     ) -> Dict[str, Any]:
         """
         Perform an HTTP request with retry and exponential backoff.
 
-        On transient failures (connection errors, timeouts, 5xx) the session
-        is recycled and the request is retried up to *max_retries* times with
-        exponential backoff (base delay * 2^attempt, capped at 8 s).
+        Read-only requests retry transient failures (connection errors, timeouts,
+        5xx) with exponential backoff. Mutations are sent once because a failed
+        response does not establish whether the editor applied the operation.
 
         Args:
             method: HTTP method (``GET``, ``PUT``, ``POST``).
@@ -209,7 +222,26 @@ class UnrealRuntimeSession(LoggerMixin):
         Returns:
             Parsed JSON response as a dictionary.
         """
-        retries = max_retries if max_retries is not None else self.max_retries
+        # Remote Control uses PUT even for arbitrary Python and actor mutations.
+        # Once sent, a timeout cannot establish that the operation did not run.
+        retry_safe = (
+            method == "GET"
+            or path
+            in {
+                "/remote/object/describe",
+                "/remote/search/assets",
+                "/remote/object/thumbnail",
+            }
+            or (
+                path == "/remote/object/property"
+                and (body or {}).get("access") == "READ_ACCESS"
+            )
+        )
+        retries = (
+            (max_retries if max_retries is not None else self.max_retries)
+            if retry_safe
+            else 0
+        )
         last_exc: Optional[Exception] = None
 
         for attempt in range(retries + 1):
@@ -223,16 +255,40 @@ class UnrealRuntimeSession(LoggerMixin):
                     if resp.status >= 500 and attempt < retries:
                         self.logger.warning(
                             "HTTP %s %s returned %d, retrying (%d/%d)",
-                            method, path, resp.status, attempt + 1, retries,
+                            method,
+                            path,
+                            resp.status,
+                            attempt + 1,
+                            retries,
                         )
                         # Don't recycle session on 5xx — the connection is
                         # fine, the server just errored.  Only sleep + retry.
                         await asyncio.sleep(
-                            min(self.retry_base_delay * (2 ** attempt), 8.0)
+                            min(self.retry_base_delay * (2**attempt), 8.0)
                         )
                         continue
                     # 4xx errors are client bugs — never retry them
                     resp.raise_for_status()
+                    if response_kind == "image":
+                        from io import BytesIO
+
+                        from PIL import Image
+
+                        image_bytes = await resp.read()
+                        with Image.open(BytesIO(image_bytes)) as image:
+                            image_format = (image.format or "").lower()
+                            if image_format not in {"png", "jpeg"}:
+                                raise ValueError(
+                                    f"Unsupported thumbnail format: {image_format}"
+                                )
+                            return {
+                                "image_base64": base64.b64encode(image_bytes).decode(
+                                    "ascii"
+                                ),
+                                "format": image_format,
+                                "width": image.width,
+                                "height": image.height,
+                            }
                     data: Dict[str, Any] = await resp.json()
                     return data
 
@@ -248,17 +304,26 @@ class UnrealRuntimeSession(LoggerMixin):
                 )
                 if aiohttp is not None and isinstance(exc, aiohttp.ClientError):
                     # ClientResponseError with 4xx status is a client bug, not transient
-                    if hasattr(exc, "status") and isinstance(exc.status, int) and exc.status < 500:
+                    if (
+                        hasattr(exc, "status")
+                        and isinstance(exc.status, int)
+                        and exc.status < 500
+                    ):
                         is_transient = False
                     else:
                         is_transient = True
 
                 if is_transient and attempt < retries:
-                    delay = min(self.retry_base_delay * (2 ** attempt), 8.0)
+                    delay = min(self.retry_base_delay * (2**attempt), 8.0)
                     self.logger.warning(
                         "HTTP %s %s failed (%s), recycling session and retrying "
                         "in %.1fs (%d/%d)",
-                        method, path, exc, delay, attempt + 1, retries,
+                        method,
+                        path,
+                        exc,
+                        delay,
+                        attempt + 1,
+                        retries,
                     )
                     await self._recycle_session()
                     await asyncio.sleep(delay)
@@ -470,7 +535,6 @@ class UnrealRuntimeSession(LoggerMixin):
                 "error": str(exc),
             }
 
-
     # ------------------------------------------------------------------
     # Internal helpers — Remote Control wrappers
     # ------------------------------------------------------------------
@@ -526,6 +590,40 @@ class UnrealRuntimeSession(LoggerMixin):
                 "FileExecutionScope": "Public",
             },
         )
+
+    async def _execute_json_script(self, code: str) -> Dict[str, Any]:
+        """Run a fixed tool script and preserve failures as error envelopes."""
+        result = self._parse_python_json(await self._execute_python(code))
+        if result.get("error"):
+            self.logger.error("Unreal tool script failed: %s", result["error"])
+            return {"success": False, "error_type": "ScriptError", **result}
+        return result
+
+    async def _component_operation(
+        self,
+        actor_path: str,
+        code: str,
+        payload: Dict[str, Any],
+        *,
+        mesh: bool = False,
+    ) -> Dict[str, Any]:
+        """Resolve an unambiguous compatible component before a fixed operation."""
+        cls = "MeshComponent" if mesh else "PrimitiveComponent"
+        script = (
+            ACTOR_HELPERS + f"\nactor = actor_at({actor_path!r})\n"
+            f"component = actor_component(actor, unreal.{cls})\n"
+            + code
+            + f"\nprint(json.dumps({payload!r}))"
+        )
+        return await self._execute_json_script(script)
+
+    @staticmethod
+    def _script_execution_denied() -> Dict[str, Any]:
+        return {
+            "success": False,
+            "error": "Arbitrary Unreal calls are disabled by SECURITY__ALLOW_SCRIPT_EXECUTION.",
+            "error_type": "ScriptExecutionDisabled",
+        }
 
     @staticmethod
     def _parse_python_json(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -681,102 +779,33 @@ class UnrealRuntimeSession(LoggerMixin):
         tag_filter: Optional[str] = None,
         max_results: int = 200,
     ) -> Dict[str, Any]:
-        """
-        List actors in the current level.
-
-        Uses Remote Control ``PUT /remote/object/call`` on
-        ``EditorActorSubsystem.GetAllLevelActors``.
-
-        Args:
-            class_filter: Optional UClass name filter.
-            tag_filter: Optional tag filter.
-            max_results: Maximum actors to return.
-
-        Returns:
-            Dictionary with ``actors`` list, ``count``, ``truncated`` flag.
-        """
-        data = await self._call_function(
-            "/Script/UnrealEd.Default__EditorActorSubsystem",
-            "GetAllLevelActors",
-        )
-        raw_actors: list = data.get("ReturnValue", [])
-
-        actors: list = []
-        for actor_path in raw_actors:
-            if len(actors) >= max_results:
-                break
-            # Fetch minimal info per actor via describe
-            try:
-                info = await self._describe_actor_brief(actor_path)
-            except Exception:
-                info = {
-                    "name": actor_path.rsplit(".", 1)[-1] if "." in actor_path else actor_path,
-                    "path": actor_path,
-                    "class_name": "Unknown",
-                    "location": (0.0, 0.0, 0.0),
-                    "rotation": (0.0, 0.0, 0.0),
-                    "scale": (1.0, 1.0, 1.0),
-                    "tags": [],
-                }
-
-            if class_filter and info.get("class_name") != class_filter:
-                continue
-            if tag_filter and tag_filter not in info.get("tags", []):
-                continue
-            actors.append(info)
-
-        return {
-            "actors": actors,
-            "count": len(actors),
-            "truncated": len(raw_actors) > max_results,
-        }
+        """List actors with actual world transforms, class names and actor tags."""
+        if not 1 <= max_results <= 5000:
+            raise ValueError("max_results must be between 1 and 5000")
+        code = ACTOR_HELPERS + f"""
+class_filter = {class_filter!r}
+tag_filter = {tag_filter!r}
+actors = []
+truncated = False
+for actor in unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors():
+    cls = actor.get_class()
+    if class_filter and class_filter not in (cls.get_name(), cls.get_path_name()):
+        continue
+    if tag_filter and not actor.actor_has_tag(tag_filter):
+        continue
+    if len(actors) == {max_results!r}:
+        truncated = True
+        break
+    actors.append(actor_info(actor))
+print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncated}}))
+"""
+        return await self._execute_json_script(code)
 
     async def get_actor_info(self, actor_path: str) -> Dict[str, Any]:
-        """
-        Get detailed information about a specific actor.
-
-        Args:
-            actor_path: Full object path of the actor.
-
-        Returns:
-            Dictionary with actor properties, components, and transform.
-        """
-        # Describe the object to get class + properties
-        describe_body: Dict[str, Any] = {"objectPath": actor_path}
-        desc_data = await self._http_put("/remote/object/describe", describe_body)
-
-        class_name: str = desc_data.get("Class", "Unknown")
-        name: str = desc_data.get("Name", actor_path.rsplit(".", 1)[-1])
-
-        # Get transform properties
-        transform = await self._get_actor_transform(actor_path)
-
-        # Get components list
-        components: list = []
-        for comp in desc_data.get("Components", []):
-            components.append({
-                "name": comp.get("Name", ""),
-                "class_name": comp.get("Class", ""),
-                "is_root": comp.get("IsRootComponent", False),
-            })
-
-        # Tags
-        tags: list = desc_data.get("Tags", [])
-        mobility: str = desc_data.get("Mobility", "Static")
-        is_hidden: bool = desc_data.get("bHidden", False)
-
-        return {
-            "name": name,
-            "path": actor_path,
-            "class_name": class_name,
-            "location": transform["location"],
-            "rotation": transform["rotation"],
-            "scale": transform["scale"],
-            "components": components,
-            "tags": tags,
-            "mobility": mobility,
-            "is_hidden": is_hidden,
-        }
+        """Read an actor's world transform, components, tags and visibility."""
+        return await self._execute_json_script(
+            ACTOR_HELPERS + f"\nprint(json.dumps(actor_info(actor_at({actor_path!r}))))"
+        )
 
     async def search_assets(
         self,
@@ -878,14 +907,10 @@ class UnrealRuntimeSession(LoggerMixin):
             "Width": width,
             "Height": height,
         }
-        data = await self._http_put("/remote/object/thumbnail", body)
-
-        return {
-            "asset_path": asset_path,
-            "image_base64": data.get("Thumbnail", ""),
-            "width": width,
-            "height": height,
-        }
+        data = await self._http_request(
+            "PUT", "/remote/object/thumbnail", body, response_kind="image"
+        )
+        return {"asset_path": asset_path, **data}
 
     async def summarize_scene(self) -> Dict[str, Any]:
         """
@@ -960,11 +985,19 @@ class UnrealRuntimeSession(LoggerMixin):
         Args:
             resolution_x: Capture width in pixels.
             resolution_y: Capture height in pixels.
-            format: Image format — ``png`` or ``jpeg``.
+            format: Image format — ``png``. The CLI can convert to JPEG.
 
         Returns:
             Dictionary with image_base64, resolution_x, resolution_y, format.
         """
+        if format != "png":
+            return {
+                "success": False,
+                "error_type": "UnsupportedFormat",
+                "error": "Unreal HighResShot captures PNG. Use CLI capture --format jpeg to convert locally.",
+            }
+        if not 1 <= resolution_x <= 16384 or not 1 <= resolution_y <= 16384:
+            raise ValueError("Capture dimensions must be between 1 and 16384")
         # The trigger goes through Remote Control's ExecuteConsoleCommand
         # RPC (NOT through Python's unreal.SystemLibrary.execute_console_command
         # — empirically that path doesn't fire HighResShot in the editor).
@@ -985,19 +1018,13 @@ class UnrealRuntimeSession(LoggerMixin):
                     "Command": f"HighResShot {resolution_x}x{resolution_y}",
                 },
             )
-        except Exception:
-            return {
-                "path": "",
-                "size_bytes": 0,
-                "resolution_x": resolution_x,
-                "resolution_y": resolution_y,
-                "format": format,
-            }
+        except Exception as exc:
+            return {"success": False, "error_type": "CaptureError", "error": str(exc)}
 
         max_inline = MAX_INLINE_CAPTURE_BYTES
         read_code = f"""
 import os, glob, base64, json, unreal
-saved = unreal.Paths.project_saved_dir()
+saved = os.path.abspath(unreal.Paths.project_saved_dir())
 ss_root = os.path.join(saved, 'Screenshots')
 candidates = {candidates_repr}
 threshold = {threshold!r}
@@ -1030,7 +1057,7 @@ if target:
             'Read the file at path, or lower the resolution.'
             % (payload['size_bytes'], {max_inline})
         )
-print('{marker}' + json.dumps(payload))
+print({marker!r} + json.dumps(payload))
 """
 
         capture_payload: Dict[str, Any] = {}
@@ -1046,7 +1073,7 @@ print('{marker}' + json.dumps(payload))
                 output = entry.get("Output", "")
                 idx = output.find(marker)
                 if idx >= 0:
-                    raw = output[idx + len(marker):].strip()
+                    raw = output[idx + len(marker) :].strip()
                     try:
                         capture_payload = json.loads(raw)
                     except ValueError:
@@ -1065,12 +1092,82 @@ print('{marker}' + json.dumps(payload))
             "resolution_y": resolution_y,
             "format": format,
         }
+        if not result["path"] or not result["size_bytes"]:
+            return {
+                "success": False,
+                "error_type": "CaptureError",
+                "error": "Unreal did not produce a nonempty screenshot before the capture deadline.",
+            }
         if "image_base64" in capture_payload:
             result["image_base64"] = capture_payload["image_base64"]
             result["encoding"] = "base64"
         if "inline_skipped" in capture_payload:
             result["inline_skipped"] = capture_payload["inline_skipped"]
         return result
+
+    async def capture_to_file(
+        self,
+        output: Path,
+        resolution_x: int = 1920,
+        resolution_y: int = 1080,
+        format: str = "png",
+    ) -> Dict[str, Any]:
+        """Download a capture in bounded chunks, independently of the MCP inline cap.
+
+        Always transfer from the editor host; a coincident local pathname is
+        not proof that the editor is local. Atomically replace output only after
+        the download and image validation succeed.
+        """
+        if format not in {"png", "jpeg", "jpg"}:
+            raise ValueError("format must be png, jpeg or jpg")
+        result = await self.capture_viewport(resolution_x, resolution_y, inline=False)
+        if result.get("error"):
+            return result
+        output = Path(output).expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        capture_path = result["path"]
+        size = result["size_bytes"]
+        temporary: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=output.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                for offset in range(0, size, 128 * 1024):
+                    length = min(128 * 1024, size - offset)
+                    chunk = await self._execute_json_script(f"""
+import os, json, base64, unreal
+root = os.path.realpath(os.path.join(unreal.Paths.project_saved_dir(), 'Screenshots'))
+path = os.path.realpath({capture_path!r})
+if os.path.commonpath([root, path]) != root:
+    raise ValueError('Capture path is outside the editor screenshot directory')
+with open(path, 'rb') as stream:
+    stream.seek({offset!r})
+    data = stream.read({length!r})
+print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
+""")
+                    if chunk.get("error"):
+                        return chunk
+                    data = base64.b64decode(chunk["data"], validate=True)
+                    if len(data) != length:
+                        raise IOError(
+                            "Screenshot changed or was truncated during transfer"
+                        )
+                    stream.write(data)
+            from PIL import Image
+
+            with Image.open(temporary) as captured:
+                captured.load()
+                if format in {"jpeg", "jpg"}:
+                    captured.convert("RGB").save(temporary, format="JPEG")
+            temporary.replace(output)
+            return {
+                **result,
+                "file_path": str(output),
+                "format": format,
+                "size_bytes": output.stat().st_size,
+            }
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     async def get_viewport_info(self) -> Dict[str, Any]:
         """
@@ -1189,13 +1286,6 @@ print('{marker}' + json.dumps(payload))
         # Position camera to look at actor. Read actor location, compute
         # a camera position offset behind and above, then set camera.
         dist = distance if distance > 0.0 else 500.0
-        focus_code = (
-            "import unreal, math\n"
-            f"actor = unreal.EditorActorSubsystem().get_default_object()"
-            " # unused\n"
-            f"loc_body = {{'objectPath': '{actor_path}', "
-            "'functionName': 'GetActorLocation'}}\n"
-        )
         # Simpler approach: read location, set camera via subsystem
         transform = await self._get_actor_transform(actor_path)
         actor_loc = transform["location"]
@@ -1446,6 +1536,9 @@ print('{marker}' + json.dumps(payload))
         Returns:
             Dictionary with actor_path, function_name, return_value.
         """
+        if not self.settings.security.allow_script_execution:
+            return self._script_execution_denied()
+
         import json as json_lib
 
         body: Dict[str, Any] = {
@@ -1667,7 +1760,7 @@ print('{marker}' + json.dumps(payload))
             for name, value in scalar_params.items():
                 body: Dict[str, Any] = {
                     "objectPath": material_path,
-                    "propertyName": f"ScalarParameterValues",
+                    "propertyName": "ScalarParameterValues",
                     "propertyValue": {
                         "ParameterInfo": {"Name": name},
                         "ParameterValue": value,
@@ -1783,21 +1876,25 @@ print('{marker}' + json.dumps(payload))
         Returns:
             Dictionary with actor_path, material_path, slot_index.
         """
-        body: Dict[str, Any] = {
-            "objectPath": actor_path,
-            "functionName": "SetMaterial",
-            "parameters": {
-                "ElementIndex": slot_index,
-                "Material": material_path,
-            },
-        }
-        await self._http_put("/remote/object/call", body)
 
-        return {
-            "actor_path": actor_path,
-            "material_path": material_path,
-            "slot_index": slot_index,
-        }
+        code = f"""
+material = unreal.load_asset({material_path!r})
+if material is None or not isinstance(material, unreal.MaterialInterface):
+    raise ValueError("Material not found: " + {material_path!r})
+if not 0 <= {slot_index!r} < component.get_num_materials():
+    raise ValueError("Material slot out of range")
+component.set_material({slot_index!r}, material)
+"""
+        return await self._component_operation(
+            actor_path,
+            code,
+            {
+                "actor_path": actor_path,
+                "material_path": material_path,
+                "slot_index": slot_index,
+            },
+            mesh=True,
+        )
 
     async def set_light_params(
         self,
@@ -1885,11 +1982,19 @@ print('{marker}' + json.dumps(payload))
         Returns:
             Dictionary with setting_name, applied status.
         """
+        # This is a fixed rendering tool, not another arbitrary console/code
+        # dispatcher when SECURITY__ALLOW_SCRIPT_EXECUTION is false.
+        if not re.fullmatch(r"(?:r|sg)\.[A-Za-z0-9_.]+", setting_name):
+            raise ValueError(
+                "setting_name must be an r.* or sg.* rendering console variable"
+            )
+        if not re.fullmatch(
+            r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", setting_value
+        ):
+            raise ValueError("setting_value must be a single numeric value")
         command = f"{setting_name} {setting_value}"
         body: Dict[str, Any] = {
-            "objectPath": (
-                "/Script/Engine.Default__KismetSystemLibrary"
-            ),
+            "objectPath": ("/Script/Engine.Default__KismetSystemLibrary"),
             "functionName": "ExecuteConsoleCommand",
             "parameters": {
                 "WorldContextObject": None,
@@ -1917,69 +2022,70 @@ print('{marker}' + json.dumps(payload))
         Returns:
             Dict with action executed and resulting state.
         """
-        action_lower = action.lower().strip()
-        valid_actions = ("start", "stop", "pause", "resume", "step")
-        if action_lower not in valid_actions:
-            raise ValueError(
-                f"Invalid PIE action '{action_lower}'. "
-                f"Must be one of: {', '.join(valid_actions)}"
+
+        action = action.lower().strip()
+        if action not in {"start", "stop", "pause", "resume", "step"}:
+            raise ValueError(f"Invalid PIE action: {action}")
+        if action == "step":
+            return {
+                "success": False,
+                "error_type": "UnsupportedOperation",
+                "error": "Exact single-frame PIE stepping is not exposed by the supported Unreal Python API.",
+            }
+        status = await self.get_simulation_status()
+        if status.get("error"):
+            return status
+        if action in {"pause", "resume"} and not status["is_playing"]:
+            return {
+                "success": False,
+                "error_type": "InvalidState",
+                "error": "PIE is not running",
+            }
+        if action == "start" and not status["is_playing"]:
+            command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_play_simulate()"
+        elif action == "stop" and status["is_playing"]:
+            command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_end_play()"
+        elif action in {"pause", "resume"}:
+            command = (
+                "world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()\n"
+                f"if not unreal.GameplayStatics.set_game_paused(world, {action == 'pause'!r}):\n"
+                "    raise RuntimeError('Unreal refused the pause state change')"
             )
-
-        object_path = "/Script/UnrealEd.Default__EditorLevelLibrary"
-
-        if action_lower == "start":
-            body: Dict[str, Any] = {
-                "objectPath": object_path,
-                "functionName": "EditorPlaySimulate",
-            }
-            await self._http_put("/remote/object/call", body)
-            state = "playing"
-
-        elif action_lower == "stop":
-            body = {
-                "objectPath": object_path,
-                "functionName": "EditorEndPlay",
-            }
-            await self._http_put("/remote/object/call", body)
-            state = "stopped"
-
-        elif action_lower == "pause":
-            body = {
-                "objectPath": object_path,
-                "functionName": "EditorSetGamePaused",
-                "parameters": {"bPaused": True},
-            }
-            await self._http_put("/remote/object/call", body)
-            state = "paused"
-
-        elif action_lower == "resume":
-            body = {
-                "objectPath": object_path,
-                "functionName": "EditorSetGamePaused",
-                "parameters": {"bPaused": False},
-            }
-            await self._http_put("/remote/object/call", body)
-            state = "playing"
-
-        else:  # step
-            body = {
-                "objectPath": "/Script/UnrealEd.Default__EditorLevelLibrary",
-                "functionName": "EditorPlaySimulate",
-            }
-            await self._http_put("/remote/object/call", body)
-            # Immediately pause after one tick
-            pause_body: Dict[str, Any] = {
-                "objectPath": object_path,
-                "functionName": "EditorSetGamePaused",
-                "parameters": {"bPaused": True},
-            }
-            await self._http_put("/remote/object/call", pause_body)
-            state = "paused"
-
-        return {
-            "action": action_lower,
-            "state": state,
-        }
+        else:
+            command = "pass"
+        requested = await self._execute_json_script(
+            "import unreal, json\n"
+            + command
+            + "\nprint(json.dumps({'requested': True}))"
+        )
+        if requested.get("error"):
+            return requested
+        # Editor lifecycle requests are deferred until after this HTTP request's frame.
+        deadline = asyncio.get_running_loop().time() + self.timeout
+        while True:
+            status = await self.get_simulation_status()
+            if status.get("error"):
+                return status
+            state = (
+                "stopped"
+                if not status["is_playing"]
+                else ("paused" if status["is_paused"] else "playing")
+            )
+            target = {
+                "start": "playing",
+                "stop": "stopped",
+                "pause": "paused",
+                "resume": "playing",
+            }[action]
+            if state == target:
+                return {"action": action, "state": state}
+            if asyncio.get_running_loop().time() >= deadline:
+                return {
+                    "success": False,
+                    "error_type": "TimeoutError",
+                    "error": f"PIE did not reach {target}; current state: {state}",
+                }
+            await asyncio.sleep(0.1)
 
     async def get_simulation_status(self) -> Dict[str, Any]:
         """
@@ -1988,57 +2094,8 @@ print('{marker}' + json.dumps(payload))
         Returns:
             Dict with is_playing, is_paused, frame_count, sim_time.
         """
-        object_path = "/Script/UnrealEd.Default__EditorLevelLibrary"
 
-        # Check if PIE is active via EditorGetGameView
-        try:
-            body: Dict[str, Any] = {
-                "objectPath": object_path,
-                "functionName": "IsPlayInEditorActive",
-            }
-            data = await self._http_put("/remote/object/call", body)
-            is_playing = bool(data.get("ReturnValue", False))
-        except Exception:
-            is_playing = False
-
-        # Check pause state
-        is_paused = False
-        if is_playing:
-            try:
-                body = {
-                    "objectPath": object_path,
-                    "functionName": "IsGamePaused",
-                }
-                data = await self._http_put("/remote/object/call", body)
-                is_paused = bool(data.get("ReturnValue", False))
-            except Exception:
-                is_paused = False
-
-        # Get frame count and sim time from GameState if available
-        frame_count = 0
-        sim_time = 0.0
-        if is_playing:
-            try:
-                body = {
-                    "objectPath": (
-                        "/Script/Engine.Default__KismetSystemLibrary"
-                    ),
-                    "functionName": "GetGameTimeInSeconds",
-                    "parameters": {
-                        "WorldContextObject": object_path,
-                    },
-                }
-                data = await self._http_put("/remote/object/call", body)
-                sim_time = float(data.get("ReturnValue", 0.0))
-            except Exception:
-                sim_time = 0.0
-
-        return {
-            "is_playing": is_playing,
-            "is_paused": is_paused,
-            "frame_count": frame_count,
-            "sim_time": sim_time,
-        }
+        return await self._execute_json_script(SIMULATION_STATUS)
 
     async def enable_physics(
         self,
@@ -2057,18 +2114,21 @@ print('{marker}' + json.dumps(payload))
         Returns:
             Dict with actor_path and physics_enabled state.
         """
-        body: Dict[str, Any] = {
-            "objectPath": actor_path,
-            "propertyName": "SimulatePhysics",
-            "propertyValue": {"SimulatePhysics": simulate_physics and enable},
-            "access": "WRITE_TRANSACTION_ACCESS",
-        }
-        await self._http_put("/remote/object/property", body)
 
-        return {
-            "actor_path": actor_path,
-            "physics_enabled": enable and simulate_physics,
-        }
+        target = bool(enable and simulate_physics)
+        code = f"""
+component.set_simulate_physics({target!r})
+if component.is_simulating_physics() != {target!r}:
+    raise RuntimeError("Physics state did not change; check mobility and collision geometry")
+"""
+        return await self._component_operation(
+            actor_path,
+            code,
+            {
+                "actor_path": actor_path,
+                "physics_enabled": target,
+            },
+        )
 
     async def set_collision(
         self,
@@ -2087,31 +2147,21 @@ print('{marker}' + json.dumps(payload))
         Returns:
             Dict with actor_path, collision_preset, collision_enabled.
         """
+
+        code = ""
         if collision_preset:
-            body: Dict[str, Any] = {
-                "objectPath": actor_path,
-                "functionName": "SetCollisionProfileName",
-                "parameters": {"InCollisionProfileName": collision_preset},
-            }
-            await self._http_put("/remote/object/call", body)
-
-        body = {
-            "objectPath": actor_path,
-            "propertyName": "CollisionEnabled",
-            "propertyValue": {
-                "CollisionEnabled": (
-                    "QueryAndPhysics" if collision_enabled else "NoCollision"
-                )
+            code += f"component.set_collision_profile_name({collision_preset!r})\n"
+        mode = "QUERY_AND_PHYSICS" if collision_enabled else "NO_COLLISION"
+        code += f"component.set_collision_enabled(unreal.CollisionEnabled.{mode})\n"
+        return await self._component_operation(
+            actor_path,
+            code,
+            {
+                "actor_path": actor_path,
+                "collision_preset": collision_preset or "Custom",
+                "collision_enabled": collision_enabled,
             },
-            "access": "WRITE_TRANSACTION_ACCESS",
-        }
-        await self._http_put("/remote/object/property", body)
-
-        return {
-            "actor_path": actor_path,
-            "collision_preset": collision_preset or "Custom",
-            "collision_enabled": collision_enabled,
-        }
+        )
 
     async def apply_force(
         self,
@@ -2140,36 +2190,34 @@ print('{marker}' + json.dumps(payload))
         Returns:
             Dict with actor_path, force_applied, force_vector, is_impulse.
         """
-        force_vector = {"X": force_x, "Y": force_y, "Z": force_z}
 
-        if is_impulse:
-            fn_name = "AddImpulse"
-        else:
-            fn_name = "AddForce"
-
-        params: Dict[str, Any] = {fn_name[3:]: force_vector}
-
+        location = (location_x, location_y, location_z)
+        if any(v is not None for v in location) and not all(
+            v is not None for v in location
+        ):
+            raise ValueError("Provide all three force application coordinates or none")
+        name = "add_impulse" if is_impulse else "add_force"
+        args = (
+            f"unreal.Vector({float(force_x)!r}, {float(force_y)!r}, {float(force_z)!r})"
+        )
         if location_x is not None and location_y is not None and location_z is not None:
-            fn_name = fn_name + "AtLocation"
-            params["Location"] = {
-                "X": location_x,
-                "Y": location_y,
-                "Z": location_z,
-            }
-
-        body: Dict[str, Any] = {
-            "objectPath": actor_path,
-            "functionName": fn_name,
-            "parameters": params,
-        }
-        await self._http_put("/remote/object/call", body)
-
-        return {
-            "actor_path": actor_path,
-            "force_applied": True,
-            "force_vector": [force_x, force_y, force_z],
-            "is_impulse": is_impulse,
-        }
+            name += "_at_location"
+            args += f", unreal.Vector({float(location_x)!r}, {float(location_y)!r}, {float(location_z)!r})"
+        code = (
+            "if not component.is_simulating_physics():\n"
+            "    raise RuntimeError('Component is not simulating physics')\n"
+            f"component.{name}({args})\n"
+        )
+        return await self._component_operation(
+            actor_path,
+            code,
+            {
+                "actor_path": actor_path,
+                "force_applied": True,
+                "force_vector": (force_x, force_y, force_z),
+                "is_impulse": is_impulse,
+            },
+        )
 
     async def set_physics_params(
         self,
@@ -2192,29 +2240,32 @@ print('{marker}' + json.dumps(payload))
         Returns:
             Dict with actor_path and params_set count.
         """
-        property_map: list[tuple[str, Any]] = []
+
+        calls = []
         if mass is not None:
-            property_map.append(("MassInKg", mass))
-        if linear_damping is not None:
-            property_map.append(("LinearDamping", linear_damping))
-        if angular_damping is not None:
-            property_map.append(("AngularDamping", angular_damping))
+            if mass <= 0:
+                raise ValueError("mass must be positive")
+            calls.append(
+                f"component.set_mass_override_in_kg('None', {float(mass)!r}, True)"
+            )
+        for method, value in (
+            ("set_linear_damping", linear_damping),
+            ("set_angular_damping", angular_damping),
+        ):
+            if value is not None:
+                if value < 0:
+                    raise ValueError("damping must be nonnegative")
+                calls.append(f"component.{method}({float(value)!r})")
         if enable_gravity is not None:
-            property_map.append(("bEnableGravity", enable_gravity))
-
-        for prop_name, prop_value in property_map:
-            body: Dict[str, Any] = {
-                "objectPath": actor_path,
-                "propertyName": prop_name,
-                "propertyValue": {prop_name: prop_value},
-                "access": "WRITE_TRANSACTION_ACCESS",
-            }
-            await self._http_put("/remote/object/property", body)
-
-        return {
-            "actor_path": actor_path,
-            "params_set": len(property_map),
-        }
+            calls.append(f"component.set_enable_gravity({bool(enable_gravity)!r})")
+        return await self._component_operation(
+            actor_path,
+            "\n".join(calls),
+            {
+                "actor_path": actor_path,
+                "params_set": len(calls),
+            },
+        )
 
     # ------------------------------------------------------------------
     # Coordinate conversion helpers
@@ -2304,7 +2355,7 @@ print('{marker}' + json.dumps(payload))
         import_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Import a USD file via Interchange Framework.
+        Import a USD file with the optional USDImporter plugin.
 
         Args:
             usd_path: Path to the USD file on disk.
@@ -2317,24 +2368,26 @@ print('{marker}' + json.dumps(payload))
         Raises:
             SandboxDenied: If ``usd_path`` is outside the sandbox.
         """
-        usd_path = self._path_policy.authorize(usd_path)
-        body: Dict[str, Any] = {
-            "objectPath": "/Script/InterchangeEngine.Default__InterchangeManager",
-            "functionName": "ImportAssetAsync",
-            "parameters": {
-                "SourceData": usd_path,
-                "DestinationPath": destination_path,
-            },
-        }
-        if import_options:
-            body["parameters"]["PipelineOptions"] = import_options
 
-        response = await self._http_put("/remote/object/call", body)
-        return {
-            "imported_assets": response.get("ImportedAssets", []),
-            "actor_paths": response.get("ActorPaths", []),
-            "warnings": response.get("Warnings", []),
+        usd_path = self._path_policy.authorize(usd_path)
+        if not destination_path.startswith("/Game/") or ".." in destination_path.split(
+            "/"
+        ):
+            raise ValueError("destination_path must be a /Game/ content directory")
+        options = import_options or {}
+        allowed = {
+            "import_actors",
+            "import_geometry",
+            "import_materials",
+            "import_lights",
+            "import_cameras",
         }
+        if set(options) - allowed or any(type(v) is not bool for v in options.values()):
+            raise ValueError(
+                f"import_options accepts boolean values for: {sorted(allowed)}"
+            )
+        args = {"path": usd_path, "destination": destination_path, "options": options}
+        return await self._execute_json_script(f"args = {args!r}\n" + USD_IMPORT)
 
     async def export_usd(
         self,
@@ -2343,7 +2396,7 @@ print('{marker}' + json.dumps(payload))
         export_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Export actors to USD via Interchange Framework.
+        Export selected actors with the optional USDImporter plugin.
 
         Args:
             actor_paths: Actor paths to export.
@@ -2356,24 +2409,22 @@ print('{marker}' + json.dumps(payload))
         Raises:
             SandboxDenied: If ``output_path`` is outside the sandbox.
         """
-        output_path = self._path_policy.authorize(output_path, write=True)
-        body: Dict[str, Any] = {
-            "objectPath": "/Script/InterchangeEngine.Default__InterchangeManager",
-            "functionName": "ExportAsset",
-            "parameters": {
-                "ActorPaths": actor_paths,
-                "OutputPath": output_path,
-            },
-        }
-        if export_options:
-            body["parameters"]["PipelineOptions"] = export_options
 
-        response = await self._http_put("/remote/object/call", body)
-        return {
-            "output_path": response.get("OutputPath", output_path),
-            "actors_exported": len(actor_paths),
-            "file_size_bytes": response.get("FileSizeBytes", 0),
-        }
+        output_path = self._path_policy.authorize(output_path, write=True)
+        if not actor_paths or any(not path for path in actor_paths):
+            raise ValueError("At least one actor path is required")
+        if Path(output_path).suffix.lower() not in {".usd", ".usda", ".usdc"}:
+            raise ValueError("Output must have a .usd, .usda or .usdc extension")
+        options = export_options or {}
+        allowed = {"export_actor_folders", "export_sublayers"}
+        if set(options) - allowed or any(type(v) is not bool for v in options.values()):
+            raise ValueError(
+                f"export_options accepts boolean values for: {sorted(allowed)}"
+            )
+        args = {"path": output_path, "actors": actor_paths, "options": options}
+        return await self._execute_json_script(
+            ACTOR_HELPERS + f"\nargs = {args!r}\n" + USD_EXPORT
+        )
 
     async def convert_to_simready(
         self,
@@ -2386,10 +2437,9 @@ print('{marker}' + json.dumps(payload))
         target_units: str = "meters",
     ) -> Dict[str, Any]:
         """
-        Convert a USD asset to NVIDIA SimReady format.
+        Compatibility entry point for unavailable SimReady conversion.
 
-        Applies physics schema, collision geometry, unit/axis correction,
-        and semantic labels as needed.
+        Returns UnsupportedOperation; no file is read or written.
 
         Args:
             usd_path: Source USD file.
@@ -2406,26 +2456,13 @@ print('{marker}' + json.dumps(payload))
         Raises:
             SandboxDenied: If either path is outside the sandbox.
         """
-        usd_path = self._path_policy.authorize(usd_path)
-        output_path = self._path_policy.authorize(output_path, write=True)
-        body: Dict[str, Any] = {
-            "objectPath": "/Script/InterchangeEngine.Default__InterchangeManager",
-            "functionName": "ConvertToSimReady",
-            "parameters": {
-                "SourcePath": usd_path,
-                "OutputPath": output_path,
-                "AddPhysics": add_physics,
-                "AddCollision": add_collision,
-                "AddSemanticLabels": add_semantic_labels,
-                "TargetUpAxis": target_up_axis,
-                "TargetUnits": target_units,
-            },
-        }
-        response = await self._http_put("/remote/object/call", body)
+
+        self._path_policy.authorize(usd_path)
+        self._path_policy.authorize(output_path, write=True)
         return {
-            "output_path": response.get("OutputPath", output_path),
-            "conversions_applied": response.get("ConversionsApplied", []),
-            "warnings": response.get("Warnings", []),
+            "success": False,
+            "error_type": "UnsupportedOperation",
+            "error": "SimReady conversion is not implemented. Unreal Interchange has no ConvertToSimReady API.",
         }
 
     async def validate_simready_asset(
@@ -2434,7 +2471,7 @@ print('{marker}' + json.dumps(payload))
         checks: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
-        Validate a USD asset against SimReady spec.
+        Compatibility entry point for unavailable SimReady validation.
 
         Args:
             usd_path: USD file path to validate.
@@ -2443,51 +2480,23 @@ print('{marker}' + json.dumps(payload))
         Returns:
             Dict with is_valid, per-check results, errors, suggestions.
         """
-        if checks is None:
-            checks = [
-                "physics",
-                "collision",
-                "materials",
-                "scale",
-                "up_axis",
-                "semantics",
-            ]
-        usd_path = self._path_policy.authorize(usd_path)
-        body: Dict[str, Any] = {
-            "objectPath": "/Script/InterchangeEngine.Default__InterchangeManager",
-            "functionName": "ValidateSimReadyAsset",
-            "parameters": {
-                "UsdPath": usd_path,
-                "Checks": checks,
-            },
-        }
-        response = await self._http_put("/remote/object/call", body)
+
+        self._path_policy.authorize(usd_path)
         return {
-            "usd_path": usd_path,
-            "is_valid": response.get("IsValid", False),
-            "checks": response.get("CheckResults", {}),
-            "errors": response.get("Errors", []),
-            "suggestions": response.get("Suggestions", []),
+            "success": False,
+            "error_type": "UnsupportedOperation",
+            "error": "SimReady validation is not implemented. Unreal Interchange has no ValidateSimReadyAsset API.",
         }
 
     async def get_interchange_info(self) -> Dict[str, Any]:
         """
-        Query available Interchange pipelines and supported formats.
+        Query supported Interchange formats and USD plugin availability.
 
         Returns:
             Dict with pipelines, supported_formats, interchange_version.
         """
-        body: Dict[str, Any] = {
-            "objectPath": "/Script/InterchangeEngine.Default__InterchangeManager",
-            "functionName": "GetPipelineInfo",
-            "parameters": {},
-        }
-        response = await self._http_put("/remote/object/call", body)
-        return {
-            "pipelines": response.get("Pipelines", []),
-            "supported_formats": response.get("SupportedFormats", []),
-            "interchange_version": response.get("Version", "unknown"),
-        }
+
+        return await self._execute_json_script(INTERCHANGE_INFO)
 
     # ------------------------------------------------------------------
     # Phase 7: Advanced Agent Tools
@@ -2507,12 +2516,12 @@ print('{marker}' + json.dumps(payload))
         Returns:
             Dict with results, total, succeeded, failed.
         """
+        if not self.settings.security.allow_script_execution:
+            return self._script_execution_denied()
         body: Dict[str, Any] = {"Requests": operations}
         response = await self._http_put("/remote/batch", body)
         responses = response.get("Responses", [])
-        succeeded = sum(
-            1 for r in responses if r.get("ResponseCode", 500) < 400
-        )
+        succeeded = sum(1 for r in responses if r.get("ResponseCode", 500) < 400)
         return {
             "results": responses,
             "total": len(operations),
@@ -2782,7 +2791,7 @@ print('{marker}' + json.dumps(payload))
             location = [0.0, 0.0, 0.0]
         label = actor_label or f"DynMesh_{primitive_type}"
         seg = max(segments, 4)
-        d = dimensions
+        d = {key: float(value) for key, value in dimensions.items()}
 
         # Build the append call depending on primitive_type
         ptype = primitive_type.lower()
@@ -2834,7 +2843,7 @@ print('{marker}' + json.dumps(payload))
                 "error": f"Unsupported primitive type: {primitive_type}",
             }
 
-        lx, ly, lz = location[0], location[1], location[2]
+        lx, ly, lz = (float(value) for value in location)
         code = (
             "import unreal, json\n"
             "gs_prim = unreal.GeometryScript_Primitives\n"
@@ -2851,14 +2860,14 @@ print('{marker}' + json.dumps(payload))
             f"actor = subsys.spawn_actor_from_class("
             f"unreal.DynamicMeshActor, "
             f"unreal.Vector({lx}, {ly}, {lz}))\n"
-            f"actor.set_actor_label('{label}')\n"
+            f"actor.set_actor_label({label!r})\n"
             "comp = actor.dynamic_mesh_component\n"
             "comp.set_dynamic_mesh(mesh)\n"
             "tris = gs_q.get_num_triangle_i_ds(mesh)\n"
             "verts = gs_q.get_vertex_count(mesh)\n"
             "print(json.dumps({"
             "'actor_path': actor.get_path_name(),"
-            f"'primitive_type': '{ptype}',"
+            f"'primitive_type': {ptype!r},"
             "'triangle_count': tris,"
             "'vertex_count': verts"
             "}))\n"
@@ -2899,9 +2908,9 @@ print('{marker}' + json.dumps(payload))
             "tool_actor = None\n"
             "for a in subsys.get_all_level_actors():\n"
             "    p = a.get_path_name()\n"
-            f"    if p == '{target_mesh_path}':\n"
+            f"    if p == {target_mesh_path!r}:\n"
             "        target_actor = a\n"
-            f"    elif p == '{tool_mesh_path}':\n"
+            f"    elif p == {tool_mesh_path!r}:\n"
             "        tool_actor = a\n"
             "if target_actor is None or tool_actor is None:\n"
             "    print(json.dumps({'error': 'Actor(s) not found'}))\n"
@@ -2921,8 +2930,8 @@ print('{marker}' + json.dumps(payload))
             "    tris = gs_q.get_num_triangle_i_ds(t_mesh)\n"
             "    verts = gs_q.get_vertex_count(t_mesh)\n"
             "    print(json.dumps({"
-            f"'target_mesh_path': '{target_mesh_path}',"
-            f"'operation': '{operation}',"
+            f"'target_mesh_path': {target_mesh_path!r},"
+            f"'operation': {operation!r},"
             "'result_triangle_count': tris,"
             "'result_vertex_count': verts"
             "}))\n"
@@ -2951,12 +2960,13 @@ print('{marker}' + json.dumps(payload))
             "unreal.EditorActorSubsystem)\n"
             "src = None\n"
             "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == '{mesh_path}':\n"
+            f"    if a.get_path_name() == {mesh_path!r}:\n"
             "        src = a\n"
             "        break\n"
             "if src is None:\n"
             "    print(json.dumps({'error': "
-            f"'Actor not found: {mesh_path}'""}))\n"
+            f"{('Actor not found: ' + mesh_path)!r}"
+            "}))\n"
             "else:\n"
             "    mesh = src.dynamic_mesh_component.get_dynamic_mesh()\n"
             "    hull_mesh = unreal.DynamicMesh()\n"
@@ -2974,7 +2984,7 @@ print('{marker}' + json.dumps(payload))
             "    h_verts = gs_q.get_vertex_count(hull_mesh)\n"
             "    s_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
             "    print(json.dumps({"
-            f"'mesh_path': '{mesh_path}',"
+            f"'mesh_path': {mesh_path!r},"
             "'hull_actor_path': hull_actor.get_path_name(),"
             "'hull_vertex_count': h_verts,"
             "'hull_triangle_count': h_tris,"
@@ -3016,12 +3026,13 @@ print('{marker}' + json.dumps(payload))
             "unreal.EditorActorSubsystem)\n"
             "src = None\n"
             "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == '{mesh_path}':\n"
+            f"    if a.get_path_name() == {mesh_path!r}:\n"
             "        src = a\n"
             "        break\n"
             "if src is None:\n"
             "    print(json.dumps({'error': "
-            f"'Actor not found: {mesh_path}'""}))\n"
+            f"{('Actor not found: ' + mesh_path)!r}"
+            "}))\n"
             "else:\n"
             "    mesh = src.dynamic_mesh_component.get_dynamic_mesh()\n"
             "    decomp_mesh = unreal.DynamicMesh()\n"
@@ -3041,7 +3052,7 @@ print('{marker}' + json.dumps(payload))
             "    n_comp = gs_q.get_num_connected_components("
             "decomp_mesh)\n"
             "    print(json.dumps({"
-            f"'mesh_path': '{mesh_path}',"
+            f"'mesh_path': {mesh_path!r},"
             "'hull_count': n_comp,"
             "'decomp_actor_path': d_actor.get_path_name(),"
             "'total_triangles': d_tris,"
@@ -3128,12 +3139,13 @@ print('{marker}' + json.dumps(payload))
             "unreal.EditorActorSubsystem)\n"
             "actor = None\n"
             "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == '{mesh_path}':\n"
+            f"    if a.get_path_name() == {mesh_path!r}:\n"
             "        actor = a\n"
             "        break\n"
             "if actor is None:\n"
             "    print(json.dumps({'error': "
-            f"'Actor not found: {mesh_path}'""}))\n"
+            f"{('Actor not found: ' + mesh_path)!r}"
+            "}))\n"
             "else:\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
@@ -3144,8 +3156,8 @@ print('{marker}' + json.dumps(payload))
             "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
             "    verts = gs_q.get_vertex_count(mesh)\n"
             "    print(json.dumps({"
-            f"'mesh_path': '{mesh_path}',"
-            f"'operation': '{operation}',"
+            f"'mesh_path': {mesh_path!r},"
+            f"'operation': {operation!r},"
             "'result_triangle_count': tris,"
             "'result_vertex_count': verts,"
             "'previous_triangle_count': before_tris"
@@ -3194,12 +3206,13 @@ print('{marker}' + json.dumps(payload))
             "unreal.EditorActorSubsystem)\n"
             "actor = None\n"
             "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == '{mesh_path}':\n"
+            f"    if a.get_path_name() == {mesh_path!r}:\n"
             "        actor = a\n"
             "        break\n"
             "if actor is None:\n"
             "    print(json.dumps({'error': "
-            f"'Actor not found: {mesh_path}'""}))\n"
+            f"{('Actor not found: ' + mesh_path)!r}"
+            "}))\n"
             "else:\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
@@ -3210,9 +3223,9 @@ print('{marker}' + json.dumps(payload))
             "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
             "    verts = gs_q.get_vertex_count(mesh)\n"
             "    print(json.dumps({"
-            f"'mesh_path': '{mesh_path}',"
+            f"'mesh_path': {mesh_path!r},"
             f"'level': {lvl},"
-            f"'scheme': '{scheme}',"
+            f"'scheme': {scheme!r},"
             "'result_triangle_count': tris,"
             "'result_vertex_count': verts,"
             "'previous_triangle_count': before_tris"
@@ -3260,12 +3273,13 @@ print('{marker}' + json.dumps(payload))
             "unreal.EditorActorSubsystem)\n"
             "actor = None\n"
             "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == '{mesh_path}':\n"
+            f"    if a.get_path_name() == {mesh_path!r}:\n"
             "        actor = a\n"
             "        break\n"
             "if actor is None:\n"
             "    print(json.dumps({'error': "
-            f"'Actor not found: {mesh_path}'""}))\n"
+            f"{('Actor not found: ' + mesh_path)!r}"
+            "}))\n"
             "else:\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
@@ -3281,7 +3295,7 @@ print('{marker}' + json.dumps(payload))
             "    ratio = round(1.0 - tris / before_tris, 4)"
             " if before_tris > 0 else 0.0\n"
             "    print(json.dumps({"
-            f"'mesh_path': '{mesh_path}',"
+            f"'mesh_path': {mesh_path!r},"
             "'original_triangles': before_tris,"
             "'result_triangles': tris,"
             "'result_vertex_count': verts,"
@@ -3324,12 +3338,13 @@ print('{marker}' + json.dumps(payload))
             "unreal.EditorActorSubsystem)\n"
             "actor = None\n"
             "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == '{mesh_path}':\n"
+            f"    if a.get_path_name() == {mesh_path!r}:\n"
             "        actor = a\n"
             "        break\n"
             "if actor is None:\n"
             "    print(json.dumps({'error': "
-            f"'Actor not found: {mesh_path}'""}))\n"
+            f"{('Actor not found: ' + mesh_path)!r}"
+            "}))\n"
             "else:\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
@@ -3351,7 +3366,7 @@ print('{marker}' + json.dumps(payload))
             "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
             "    verts = gs_q.get_vertex_count(mesh)\n"
             "    print(json.dumps({"
-            f"'mesh_path': '{mesh_path}',"
+            f"'mesh_path': {mesh_path!r},"
             "'result_triangle_count': tris,"
             "'result_vertex_count': verts,"
             "'previous_triangle_count': before_tris"
@@ -3383,12 +3398,13 @@ print('{marker}' + json.dumps(payload))
             "unreal.EditorActorSubsystem)\n"
             "actor = None\n"
             "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == '{mesh_path}':\n"
+            f"    if a.get_path_name() == {mesh_path!r}:\n"
             "        actor = a\n"
             "        break\n"
             "if actor is None:\n"
             "    print(json.dumps({'error': "
-            f"'Actor not found: {mesh_path}'""}))\n"
+            f"{('Actor not found: ' + mesh_path)!r}"
+            "}))\n"
             "else:\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
@@ -3414,7 +3430,7 @@ print('{marker}' + json.dumps(payload))
             "    if not has_normals:\n"
             "        issues.append('Missing triangle normals')\n"
             "    print(json.dumps({"
-            f"'mesh_path': '{mesh_path}',"
+            f"'mesh_path': {mesh_path!r},"
             "'is_valid': is_valid,"
             "'triangle_count': tris,"
             "'vertex_count': verts,"
@@ -3456,12 +3472,13 @@ print('{marker}' + json.dumps(payload))
                 "unreal.EditorActorSubsystem)\n"
                 "actor = None\n"
                 "for a in subsys.get_all_level_actors():\n"
-                f"    if a.get_path_name() == '{mesh_path}':\n"
+                f"    if a.get_path_name() == {mesh_path!r}:\n"
                 "        actor = a\n"
                 "        break\n"
                 "if actor is None:\n"
                 "    print(json.dumps({'error': "
-                f"'Actor not found: {mesh_path}'"'}))\n'
+                f"{('Actor not found: ' + mesh_path)!r}"
+                "}))\n"
                 "else:\n"
                 "    mesh = actor.dynamic_mesh_component"
                 ".get_dynamic_mesh()\n"
@@ -3473,7 +3490,7 @@ print('{marker}' + json.dumps(payload))
                 ".does_asset_exist(pkg_name)\n"
                 "    # For now report conversion info\n"
                 "    print(json.dumps({"
-                f"'source_path': '{mesh_path}',"
+                f"'source_path': {mesh_path!r},"
                 "'target_format': 'static_mesh',"
                 "'triangle_count': tris,"
                 "'note': 'copy_mesh_to_static_mesh requires "
@@ -3489,10 +3506,11 @@ print('{marker}' + json.dumps(payload))
                 "subsys = unreal.get_editor_subsystem("
                 "unreal.EditorActorSubsystem)\n"
                 f"sm_asset = unreal.EditorAssetLibrary"
-                f".load_asset('{mesh_path}')\n"
+                f".load_asset({mesh_path!r})\n"
                 "if sm_asset is None:\n"
                 "    print(json.dumps({'error': "
-                f"'Asset not found: {mesh_path}'"'}))\n'
+                f"{('Asset not found: ' + mesh_path)!r}"
+                "}))\n"
                 "else:\n"
                 "    dyn_mesh = unreal.DynamicMesh()\n"
                 "    asset_opts = unreal"
@@ -3508,7 +3526,7 @@ print('{marker}' + json.dumps(payload))
                 "    tris = gs_q.get_num_triangle_i_ds(dyn_mesh)\n"
                 "    verts = gs_q.get_vertex_count(dyn_mesh)\n"
                 "    print(json.dumps({"
-                f"'source_path': '{mesh_path}',"
+                f"'source_path': {mesh_path!r},"
                 "'result_path': actor.get_path_name(),"
                 "'target_format': 'dynamic_mesh',"
                 "'triangle_count': tris,"
@@ -3573,12 +3591,13 @@ print('{marker}' + json.dumps(payload))
             "unreal.EditorActorSubsystem)\n"
             "actor = None\n"
             "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == '{mesh_path}':\n"
+            f"    if a.get_path_name() == {mesh_path!r}:\n"
             "        actor = a\n"
             "        break\n"
             "if actor is None:\n"
             "    print(json.dumps({'error': "
-            f"'Actor not found: {mesh_path}'"'}))\n'
+            f"{('Actor not found: ' + mesh_path)!r}"
+            "}))\n"
             "else:\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
@@ -3596,8 +3615,8 @@ print('{marker}' + json.dumps(payload))
             "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
             "    verts = gs_q.get_vertex_count(mesh)\n"
             "    print(json.dumps({"
-            f"'mesh_path': '{mesh_path}',"
-            f"'mode': '{mode}',"
+            f"'mesh_path': {mesh_path!r},"
+            f"'mode': {mode!r},"
             "'original_triangles': before_tris,"
             "'result_triangles': tris,"
             "'result_vertex_count': verts"
@@ -3652,23 +3671,22 @@ print('{marker}' + json.dumps(payload))
             "unreal.EditorActorSubsystem)\n"
             "actor = None\n"
             "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == '{mesh_path}':\n"
+            f"    if a.get_path_name() == {mesh_path!r}:\n"
             "        actor = a\n"
             "        break\n"
             "if actor is None:\n"
             "    print(json.dumps({'error': "
-            f"'Actor not found: {mesh_path}'"'}))\n'
+            f"{('Actor not found: ' + mesh_path)!r}"
+            "}))\n"
             "else:\n"
             "    mesh = actor.dynamic_mesh_component"
-            ".get_dynamic_mesh()\n"
-            + uv_block
-            + "    actor.dynamic_mesh_component"
+            ".get_dynamic_mesh()\n" + uv_block + "    actor.dynamic_mesh_component"
             ".notify_mesh_modified()\n"
             "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
             "    verts = gs_q.get_vertex_count(mesh)\n"
             "    print(json.dumps({"
-            f"'mesh_path': '{mesh_path}',"
-            f"'method': '{method_label}',"
+            f"'mesh_path': {mesh_path!r},"
+            f"'method': {method_label!r},"
             f"'uv_channel': {uv_channel},"
             "'triangle_count': tris,"
             "'vertex_count': verts"
@@ -3682,83 +3700,18 @@ print('{marker}' + json.dumps(payload))
     # ------------------------------------------------------------------
 
     async def _describe_actor_brief(self, actor_path: str) -> Dict[str, Any]:
-        """
-        Minimal actor description for listing purposes.
-
-        Args:
-            actor_path: Full object path.
-
-        Returns:
-            Dictionary with name, path, class_name, transform, tags.
-        """
-        body: Dict[str, Any] = {"objectPath": actor_path}
-        desc = await self._http_put("/remote/object/describe", body)
-
-        transform = await self._get_actor_transform(actor_path)
-        name_part = actor_path.rsplit(".", 1)[-1] if "." in actor_path else actor_path
-
-        return {
-            "name": desc.get("Name", name_part),
-            "path": actor_path,
-            "class_name": desc.get("Class", "Unknown"),
-            "location": transform["location"],
-            "rotation": transform["rotation"],
-            "scale": transform["scale"],
-            "tags": desc.get("Tags", []),
-        }
-
-    async def _get_actor_transform(self, actor_path: str) -> Dict[str, Any]:
-        """
-        Read actor transform (location, rotation, scale) via property access.
-
-        Args:
-            actor_path: Full object path.
-
-        Returns:
-            Dictionary with location, rotation, scale tuples.
-        """
-        result: Dict[str, Any] = {
-            "location": (0.0, 0.0, 0.0),
-            "rotation": (0.0, 0.0, 0.0),
-            "scale": (1.0, 1.0, 1.0),
-        }
-
-        for prop_name, key, default in (
-            ("RootComponent.RelativeLocation", "location", (0.0, 0.0, 0.0)),
-            ("RootComponent.RelativeRotation", "rotation", (0.0, 0.0, 0.0)),
-            ("RootComponent.RelativeScale3D", "scale", (1.0, 1.0, 1.0)),
-        ):
-            try:
-                body: Dict[str, Any] = {
-                    "objectPath": actor_path,
-                    "propertyName": prop_name,
-                    "access": "READ_ACCESS",
-                }
-                prop_data = await self._http_put("/remote/object/property", body)
-                val = prop_data.get(prop_name, {})
-                if isinstance(val, dict):
-                    result[key] = (
-                        val.get("X", default[0]),
-                        val.get("Y", default[1]),
-                        val.get("Z", default[2]),
-                    )
-                    if key == "rotation":
-                        result[key] = (
-                            val.get("Pitch", default[0]),
-                            val.get("Yaw", default[1]),
-                            val.get("Roll", default[2]),
-                        )
-            except Exception as e:
-                self.logger.warning(
-                    "Failed to fetch %s property: %s", key, e
-                )
-                result[key] = default
-
+        """Read actual actor state rather than property-description metadata."""
+        result = await self.get_actor_info(actor_path)
+        if result.get("error"):
+            raise RuntimeError(result["error"])
         return result
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
+    async def _get_actor_transform(self, actor_path: str) -> Dict[str, Any]:
+        """Return the world transform, failing when the actor cannot be read."""
+        result = await self.get_actor_info(actor_path)
+        if result.get("error"):
+            raise RuntimeError(result["error"])
+        return {key: tuple(result[key]) for key in ("location", "rotation", "scale")}
 
     async def close(self) -> None:
         """Close the underlying HTTP session if open."""

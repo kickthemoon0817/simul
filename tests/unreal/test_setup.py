@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-
 from simul_mcp.adapters import unreal_setup
 from simul_mcp.adapters.unreal_setup import (
     HEADLESS_FLAGS,
@@ -20,7 +19,6 @@ from simul_mcp.adapters.unreal_setup import (
     patch_remote_control_ini,
     patch_uproject,
 )
-
 
 # ---------------------------------------------------------------------------
 # .uproject patching
@@ -202,6 +200,57 @@ def test_patch_ini_idempotent_with_bind_and_websocket_port(tmp_path: Path) -> No
     assert (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text() == before
 
 
+def test_missing_keys_and_passphrase_stay_inside_existing_section(
+    tmp_path: Path,
+) -> None:
+    """A following section must not capture newly inserted settings (#195)."""
+    import configparser
+
+    config = tmp_path / "Config"
+    config.mkdir()
+    ini = config / "DefaultRemoteControl.ini"
+    digest = "a" * 32
+    entry = f'+Passphrases=(Identifier="simul",Passphrase="{digest}")'
+    ini.write_text(
+        f"[{REMOTE_CONTROL_SECTION}]\nbAutoStartWebServer=True\n[Other.Section]\n{entry}\nKeep=1\n"
+    )
+    patch_remote_control_ini(tmp_path, port=30018, passphrase_md5=digest)
+    parsed = configparser.ConfigParser(interpolation=None)
+    parsed.read(ini)
+    assert parsed[REMOTE_CONTROL_SECTION]["RemoteControlHttpServerPort"] == "30018"
+    assert parsed[REMOTE_CONTROL_SECTION]["bEnableRemotePythonExecution"] == "True"
+    assert (
+        parsed[REMOTE_CONTROL_SECTION]["bAllowConsoleCommandRemoteExecution"] == "True"
+    )
+    assert "Passphrase=" in parsed[REMOTE_CONTROL_SECTION]["+Passphrases"]
+    assert dict(parsed["Other.Section"]) == {
+        "+passphrases": entry.split("=", 1)[1],
+        "keep": "1",
+    }
+    before = ini.read_text()
+    assert not patch_remote_control_ini(
+        tmp_path, port=30018, passphrase_md5=digest
+    ).changed
+    assert ini.read_text() == before
+
+
+def test_missing_http_bind_stays_inside_listener_section(tmp_path: Path) -> None:
+    import configparser
+
+    from simul_mcp.adapters.unreal_setup import patch_default_engine_ini
+
+    config = tmp_path / "Config"
+    config.mkdir()
+    ini = config / "DefaultEngine.ini"
+    ini.write_text("[HTTPServer.Listeners]\nKeep=1\n[Other.Section]\nOther=2\n")
+    patch_default_engine_ini(tmp_path, bind="127.0.0.1")
+    parsed = configparser.ConfigParser()
+    parsed.read(ini)
+    assert parsed["HTTPServer.Listeners"]["DefaultBindAddress"] == "127.0.0.1"
+    assert dict(parsed["Other.Section"]) == {"other": "2"}
+    assert not patch_default_engine_ini(tmp_path, bind="127.0.0.1").changed
+
+
 def test_patch_ini_writes_passphrase_array_and_enforce_flag(tmp_path: Path) -> None:
     """--passphrase appends a single +Passphrases array entry under the
     correct section AND pins bEnforcePassphraseForRemoteClients=True so
@@ -289,7 +338,8 @@ def test_patch_ini_noop_when_already_correct(tmp_path: Path) -> None:
         "bAutoStartWebSocketServer=True\n"
         "RemoteControlHttpServerPort=30010\n"
         "bRestrictServerAccess=True\n"
-        "bEnableRemotePythonExecution=True\n",
+        "bEnableRemotePythonExecution=True\n"
+        "bAllowConsoleCommandRemoteExecution=True\n",
         encoding="utf-8",
     )
     before = target.read_text()

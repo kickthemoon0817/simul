@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-
 # ---------------------------------------------------------------------------
 # Unreal Engine schemas -- Phase 0
 # ---------------------------------------------------------------------------
@@ -293,7 +292,8 @@ class UnrealGetThumbnailResponse(BaseModel):
         None, description="Error message when success is False"
     )
     asset_path: str = Field(..., description="Asset path queried")
-    image_base64: str = Field(..., description="Base64-encoded PNG image")
+    image_base64: str = Field(..., description="Base64-encoded thumbnail image")
+    format: str = Field("png", description="Image format: png or jpeg")
     width: int = Field(..., description="Image width in pixels")
     height: int = Field(..., description="Image height in pixels")
 
@@ -328,7 +328,9 @@ class UnrealCaptureViewportRequest(BaseModel):
 
     resolution_x: int = Field(1920, description="Capture width in pixels")
     resolution_y: int = Field(1080, description="Capture height in pixels")
-    format: str = Field("png", description="Image format: png or jpeg")
+    format: str = Field(
+        "png", description="Image format: png; CLI capture can convert to JPEG"
+    )
 
 
 class UnrealExecuteScriptResponse(BaseModel):
@@ -790,7 +792,7 @@ class UnrealControlSimulationRequest(BaseModel):
 
     action: str = Field(
         ...,
-        description="PIE action: start, stop, pause, resume, or step",
+        description="PIE action: start, stop, pause, resume; step returns UnsupportedOperation",
     )
 
 
@@ -823,7 +825,9 @@ class UnrealGetSimulationStatusResponse(BaseModel):
     )
     is_playing: bool = Field(False, description="Whether PIE is running")
     is_paused: bool = Field(False, description="Whether PIE is paused")
-    frame_count: int = Field(0, description="Number of simulated frames")
+    frame_count: Optional[int] = Field(
+        None, description="Simulated frame count, unavailable when null"
+    )
     sim_time: float = Field(0.0, description="Elapsed simulation time in seconds")
 
 
@@ -1052,6 +1056,18 @@ class UnrealGetInterchangeInfoResponse(BaseModel):
     )
     supported_formats: List[str] = Field(..., description="Supported file formats")
     interchange_version: str = Field(..., description="Interchange Framework version")
+    pipeline_enumeration_available: bool = Field(
+        False, description="Whether pipeline enumeration is available"
+    )
+    usd_import_available: bool = Field(
+        False, description="USD import plugin available in the editor"
+    )
+    usd_export_available: bool = Field(
+        False, description="USD exporter available in the editor"
+    )
+    simready_available: bool = Field(
+        False, description="SimReady conversion/validation implemented"
+    )
 
 
 # ----------------------------------------------------------------------

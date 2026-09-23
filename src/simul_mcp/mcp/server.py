@@ -962,8 +962,8 @@ class SimulMCPServer(LoggerMixin):
 
         ``security.allow_script_execution`` is the operator's switch for the
         agent-authored code path. Granular tools are generated scripts and stay
-        registered either way; only the three ``execute_*_script`` tools go
-        through here.
+        registered either way. Script execution and generic Unreal function/batch
+        dispatch tools go through here.
 
         Args:
             **tool_kwargs: Keyword arguments for ``FastMCP.tool``.
