@@ -2016,6 +2016,9 @@ component.set_material({slot_index!r}, material)
         """
         Control a Play-In-Editor (PIE) session.
 
+        Starting an already paused session resumes it. Commands targeting the
+        current state leave the session unchanged.
+
         Args:
             action: One of start, stop, pause, resume, step.
 
@@ -2045,7 +2048,9 @@ component.set_material({slot_index!r}, material)
             command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_play_simulate()"
         elif action == "stop" and status["is_playing"]:
             command = "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_end_play()"
-        elif action in {"pause", "resume"}:
+        elif action in {"start", "pause", "resume"} and status["is_paused"] != (
+            action == "pause"
+        ):
             command = (
                 "world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()\n"
                 f"if not unreal.GameplayStatics.set_game_paused(world, {action == 'pause'!r}):\n"

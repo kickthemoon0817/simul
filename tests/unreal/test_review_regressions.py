@@ -442,6 +442,24 @@ async def test_simulation_lifecycle_and_query_errors(script_session, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_simulation_start_resumes_paused_session(script_session):
+    session, _, _ = script_session
+    session.timeout = 0
+    for action, state in [
+        ("start", "playing"),
+        ("start", "playing"),
+        ("pause", "paused"),
+        ("pause", "paused"),
+        ("start", "playing"),
+        ("resume", "playing"),
+        ("stop", "stopped"),
+        ("stop", "stopped"),
+    ]:
+        result = await session.control_simulation(action)
+        assert result.get("state") == state, result
+
+
+@pytest.mark.asyncio
 async def test_usd_plugin_missing_and_simready_explicitly_unsupported(
     script_session, tmp_path
 ):

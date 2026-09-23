@@ -114,8 +114,14 @@ def test_simulation_lifecycle():
             assert not (await client.get_simulation_status())["is_playing"]
             for action, state in [
                 ("start", "playing"),
+                ("start", "playing"),
+                ("pause", "paused"),
+                ("pause", "paused"),
+                ("start", "playing"),
                 ("pause", "paused"),
                 ("resume", "playing"),
+                ("resume", "playing"),
+                ("stop", "stopped"),
                 ("stop", "stopped"),
             ]:
                 result = await client.control_simulation(action)
