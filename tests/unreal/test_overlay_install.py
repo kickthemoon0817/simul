@@ -77,3 +77,34 @@ def test_setup_enables_previously_disabled_overlay(project):
     assert patch_uproject(uproject, agent_overlay=True).changed
     assert not patch_uproject(uproject, agent_overlay=True).changed
     assert all(p["Enabled"] for p in json.loads(uproject.read_text())["Plugins"])
+
+
+def test_overlay_auto_detection_bypasses_macos_launchservices(project, monkeypatch):
+    from simul_mcp.adapters import unreal_setup
+
+    uproject, engine = project
+    binary = engine / "Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor"
+    monkeypatch.setattr(unreal_setup, "_macos_macos_binary", lambda root: binary)
+    monkeypatch.setattr(unreal_setup.shutil, "which", lambda name: "/usr/bin/open")
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        if command[0] == "open":
+            return SimpleNamespace(returncode=0)  # LaunchServices knows Unreal.
+        package = Path(
+            next(
+                s.removeprefix("-Package=")
+                for s in command
+                if s.startswith("-Package=")
+            )
+        )
+        (package / "Binaries/Mac").mkdir(parents=True)
+        (package / "SimulAgentOverlay.uplugin").write_text("{}")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(unreal_overlay.subprocess, "run", run)
+    result = unreal_overlay.install_agent_overlay(uproject, None)
+    assert result["changed"]
+    assert len(commands) == 1
+    assert commands[0][0] == str(engine / "Engine/Build/BatchFiles/RunUAT.sh")

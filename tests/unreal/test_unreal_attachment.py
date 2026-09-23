@@ -232,3 +232,16 @@ def test_cli_status_refuses_missing_attachment(monkeypatch, settings):
     result = CliRunner().invoke(app, ["--json", "unreal", "status"])
     assert result.exit_code == 1
     assert "No Unreal editor attached" in json.loads(result.stdout)["error"]
+
+
+@pytest.mark.parametrize("option,value", [("--host", "localhost"), ("--port", "30019")])
+def test_cli_attached_endpoint_override_returns_json_error(
+    monkeypatch, settings, option, value
+):
+    monkeypatch.setattr("simul_mcp.cli.unreal_cli.get_settings", lambda: settings)
+    result = CliRunner().invoke(app, ["--json", "unreal", "health", option, value])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["success"] is False
+    assert payload["error_type"] == "ValueError"
+    assert "Host/port overrides cannot replace an attached editor" in payload["error"]

@@ -16,7 +16,9 @@ def install_agent_overlay(uproject: Path, engine_path: Path | None) -> dict[str,
     """Build bundled sources for this engine, then install without replacing user plugins."""
     source = Path(__file__).parents[1] / "resources/unreal/SimulAgentOverlay"
     if engine_path is None:
-        executable = Path(resolve_launch_argv(uproject)[0]).resolve()
+        # Resolve the binary, not macOS's GUI `open -a` launcher. This does
+        # not launch the editor or change the requested UI mode.
+        executable = Path(resolve_launch_argv(uproject, headless=True)[0]).resolve()
         engine = next((p for p in executable.parents if p.name == "Engine"), None)
         if engine is None:
             raise ValueError(

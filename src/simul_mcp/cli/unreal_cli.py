@@ -63,8 +63,9 @@ def _session(
     if mode is not None:
         overrides["mode"] = mode
     elif settings.unreal.mode == "attached" and (host is not None or port is not None):
-        raise ValueError(
-            "Host/port overrides cannot replace an attached editor; attach the desired endpoint first"
+        emit_error(
+            "Host/port overrides cannot replace an attached editor; attach the desired endpoint first",
+            "ValueError",
         )
     if host is not None:
         overrides["host"] = host
