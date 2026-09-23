@@ -25,7 +25,9 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         name="control_blender_ui",
         description=(
             "Perform a named agent_control action in the explicitly attached Blender window. "
-            "Use inspect to discover editor IDs, supported menus, tools and properties. "
+            "Use inspect for editor IDs, active tool, Properties tabs, shared workspace and agent cursors. "
+            "Actions display labelled agent pointers; move_cursor moves this overlay, never the OS cursor. "
+            "Before set_tool on a shared workspace, use isolate_workspace then inspect for new editor IDs. "
             "Uses Blender UI APIs, not physical key/click events or arbitrary button lookup. "
             "Requires attached mode; does not launch Blender or execute arbitrary scripts."
         ),
@@ -40,20 +42,26 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         area_id: Optional[str] = None,
         position: Optional[List[float]] = None,
         value: Optional[List[float]] = None,
+        agent_id: Optional[str] = None,
     ) -> ToolResult:
         """Control the selected Blender UI without generating a Python script.
 
         Args:
-            agent_control: inspect, move_cursor, open_menu, select_object, set_tool, show_properties or set_property.
+            agent_control: inspect, move_cursor, clear_cursor, open_menu, select_object,
+                set_tool, show_properties, set_property or isolate_workspace.
             target: Menu add/object/view, tool select_box/move/rotate/scale, object name,
                 Properties tab such as OBJECT, or active-object property location/rotation_euler/scale.
-            area_id: Editor ID from inspect. Required when multiple matching editors exist.
-            position: move_cursor only: normalized viewport coordinates [x, y], bottom-left origin; default center.
+            area_id: Editor ID from inspect; required for editor actions with multiple matches.
+                Object selection/property writes do not require it. Re-inspect after workspace isolation.
+            position: move_cursor only: agent overlay coordinates [x, y] in [0, 1], bottom-left origin; default center.
             value: set_property only: three finite values for the active object; rotations in radians.
+            agent_id: Visible agent label, 1 to 64 printable characters; defaults to the MCP session identity.
+                Use distinct stable labels for named agents across connections.
+                clear_cursor removes only this agent's marker in the attached window; markers expire after 120 seconds.
         """
         input_data = server._validate_input(
             BlenderUIRequest, agent_control=agent_control, target=target,
-            area_id=area_id, position=position, value=value,
+            area_id=area_id, position=position, value=value, agent_id=server._resolve_agent_id(agent_id),
         )
         if isinstance(input_data, dict):
             return server._as_text_result(input_data)

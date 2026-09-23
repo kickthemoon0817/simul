@@ -187,6 +187,7 @@ class BlenderAttachments:
             "blender_bridge/__init__.py": "blender_bridge/__init__.py",
             "blender_bridge/bridge.py": "blender_bridge/bridge.py",
             "blender_bridge/agent_control.py": "blender_bridge/agent_control.py",
+            "blender_bridge/agent_cursor.py": "blender_bridge/agent_cursor.py",
             "blender_bridge/protocol.py": "blender_bridge/protocol.py",
             "adapters/blender_runtime.py": "adapters/blender_runtime.py",
             "utils/paths.py": "utils/paths.py",

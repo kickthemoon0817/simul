@@ -23,6 +23,8 @@ from bpy.app.handlers import persistent
 
 from ..adapters.blender_runtime import BlenderRuntimeSession
 from ..utils.paths import PathPolicy
+from .agent_control import reset_ui
+from .agent_cursor import cursors
 from .protocol import MAX_MESSAGE_BYTES, PROTOCOL_VERSION, BridgeFiles, BridgeWire
 
 logger = logging.getLogger(__name__)
@@ -86,6 +88,7 @@ class BlenderBridge:
 
     def stop(self) -> None:
         """Detach transport resources; never quit Blender or save its data."""
+        reset_ui()
         if bpy.app.timers.is_registered(self._timer):
             bpy.app.timers.unregister(self._timer)
         if self._load_handler in bpy.app.handlers.load_post:
@@ -102,6 +105,7 @@ class BlenderBridge:
         """Read and execute bounded requests from Blender's main-thread timer."""
         if self.listener is None:
             return None
+        cursors.prune()
         for _ in range(8):
             try:
                 connection, _address = self.listener.accept()
@@ -282,6 +286,7 @@ class BlenderBridge:
         return dict(result)
 
     def _on_load(self, _unused: Any) -> None:
+        reset_ui()
         self.document_id = uuid.uuid4().hex
 
     def _close(self, pending: PendingConnection) -> None:

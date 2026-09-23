@@ -70,30 +70,84 @@ supported actions:
 {"agent_control": "select_object", "target": "Cube"}
 {"agent_control": "show_properties", "target": "OBJECT"}
 {"agent_control": "set_property", "target": "location", "value": [1, 2, 3]}
-{"agent_control": "move_cursor", "target": "viewport"}
+{"agent_control": "move_cursor", "position": [0.3, 0.7], "agent_id": "builder"}
+{"agent_control": "move_cursor", "position": [0.8, 0.6], "agent_id": "reviewer"}
+{"agent_control": "clear_cursor", "agent_id": "reviewer"}
 ```
 
 Each line is a separate tool call. `inspect` reports live editor IDs, mode,
-active object, and supported targets. If the window has multiple 3D Views or
-Properties editors, supply `area_id` from that result; the tool rejects an
+active object, active tool, Properties tabs, workspace sharing, visible agent
+marker records, and supported targets. For editor actions with multiple matching
+3D Views or Properties editors, supply `area_id`; the tool rejects an
 ambiguous or stale editor instead of guessing. UI controls require attached
-mode and inherit its process, document, window and scene checks.
+mode and inherit its process, document, window and scene checks. Object selection
+and property writes do not need a 3D View or `area_id`; when available, their
+annotation appears in the largest viewport, or the explicitly selected viewport.
 
 | Action | Target / behavior |
 |---|---|
-| `inspect` | Current editors, active object, mode and supported actions |
+| `inspect` | Editors, active object/tool, Properties tabs, workspace sharing and agent markers |
 | `open_menu` | `add`, `object`, `view`; Object Mode only; reports menu requested |
-| `set_tool` | `select_box`, `move`, `rotate`, `scale`; verifies active tool |
+| `set_tool` | `select_box`, `move`, `rotate`, `scale`; refuses shared workspaces and verifies active tool |
+| `isolate_workspace` | Explicitly duplicate the attached window's shared workspace; call `inspect` again for new editor IDs |
 | `select_object` | Visible, selectable object name in the current view layer; replaces selection in Object Mode |
 | `show_properties` | Blender tab identifier such as `OBJECT`, `RENDER`, `MODIFIER`; unavailable tabs return an error |
 | `set_property` | Active editable object's `location`, `rotation_euler` or `scale`; three finite values, radians for rotation, Object Mode only |
-| `move_cursor` | `viewport`; center by default, optional normalized `position: [x, y]` measured from bottom-left |
+| `move_cursor` | Draw the agent's virtual pointer; center by default, optional normalized `position: [x, y]` measured from bottom-left |
+| `clear_cursor` | Remove only `agent_id`'s marker in the attached window |
 
-These actions use Blender's UI/data APIs. Menu and toolbar targets invoke
-their named Blender operations directly; they do not move the mouse to an
-estimated button. Only `move_cursor` moves the physical cursor, using the live
-editor region to compute window-relative coordinates via
-[`Window.cursor_warp`](https://docs.blender.org/api/5.0/bpy.types.Window.html#bpy.types.Window.cursor_warp).
+### Agent cursors and action visibility
+
+`move_cursor` now draws a **virtual agent pointer** inside Blender. It never
+calls `Window.cursor_warp`, injects OS mouse events, or changes Blender's 3D
+cursor. It returns `cursor_kind: "agent_overlay"` and `system_cursor_moved: false`.
+The pointer is an annotation, not an input device or a button hit-test target.
+
+Each `agent_id` has its own colored pointer and label, plus a latest-action
+status in the editor. Named actions update that status; subsequent actions in
+the same editor preserve the pointer's chosen position. Labels describe
+completed actions or requested menus, not a guarantee that an agent is still
+working. Inspection/isolation/clear operations do not create a new marker.
+
+Use stable distinct labels such as `builder` and `reviewer`. Omitting `agent_id`
+uses the MCP session identity. Labels are display identifiers, not authentication
+or locks; Blender operations still execute sequentially. Each agent has one
+latest marker per window. Markers expire after 120 seconds, are capped at 64
+across the process, and disappear when their scene/workspace/editor becomes
+stale, another file loads, or the bridge stops. They are transient overlays,
+not saved scene objects. Popups may cover them, as with other editor overlays.
+
+The implementation uses Blender's
+[`SpaceView3D.draw_handler_add`](https://docs.blender.org/api/4.2/bpy.types.SpaceView3D.html#bpy.types.SpaceView3D.draw_handler_add)
+and Properties draw handlers. These annotations are independent of native menu
+placement: menus still open through Blender's UI API using Blender's event
+context, not at the virtual pointer as if it were a physical mouse.
+
+### Workspace tool isolation
+
+Blender's active tool belongs to a workspace and mode, so an editor context
+alone cannot confine it to one window. `inspect.shared_window_ids` reports
+other windows using the selected workspace. `set_tool` refuses to change a
+shared workspace. To work independently, call:
+
+```json
+{"agent_control": "isolate_workspace"}
+{"agent_control": "inspect"}
+```
+
+Isolation explicitly creates a workspace copy for the target window; it does
+not copy scene objects or save the file. Blender switches workspaces after the
+request returns, so `workspace_copy_requested` requires a fresh inspection and
+new editor IDs before further editor actions. Other windows retain their
+workspace/tool state. Repeating isolation after the switch is a no-op. Linked
+child windows follow their parent's workspace and cannot be isolated this way;
+use an independent main Blender window. Within a single workspace, all views
+of the same mode still share the active tool. Shared scene/object datablocks
+also retain Blender's usual sharing semantics.
+
+These actions use Blender's UI/data APIs. Menu and toolbar targets invoke their
+named operations; the virtual marker indicates the action's editor, not an
+estimated button coordinate.
 The response identifies `execution_method: "blender_ui_api"`. The tool does
 not find arbitrary buttons, inject clicks/keystrokes, provide strict
 mouse/keyboard-only replay, or dismiss modal dialogs. Menu completion means

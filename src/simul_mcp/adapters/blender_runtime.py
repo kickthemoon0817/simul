@@ -173,13 +173,14 @@ class BlenderRuntimeSession:
         area_id: Optional[str] = None,
         position: Optional[List[float]] = None,
         value: Optional[List[float]] = None,
+        agent_id: str = "agent",
     ) -> Dict[str, Any]:
         """Perform a named UI action only in an explicitly attached GUI window."""
         if not self._scene_scope:
             raise RuntimeError("Agent control requires --blender-mode attached and simul blender attach")
         from ..blender_bridge.agent_control import control_ui
 
-        return control_ui(agent_control, target, area_id, position, value)
+        return control_ui(agent_control, target, area_id, position, value, agent_id)
 
     def get_runtime_info(self) -> Dict[str, Any]:
         """

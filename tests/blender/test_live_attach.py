@@ -198,9 +198,38 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             )
             assert base64.b64decode(capture["image_base64"]).startswith(b"\xff\xd8")
 
+            # Virtual cursors belong to their agent and window, independently.
+            ui("move_cursor", agent_id="planner", position=[0.25, 0.5])
+            ui("move_cursor", agent_id="builder", position=[0.75, 0.5])
+            markers = ui("inspect")["agent_cursors"]
+            assert {m["agent_id"] for m in markers} >= {"planner", "builder"}
+            assert ui("clear_cursor", agent_id="planner")["removed"] is True
+            assert "builder" in {m["agent_id"] for m in ui("inspect")["agent_cursors"]}
+
+            # A different main window may share workspace tools even when its
+            # scene differs. Refuse that mutation and explicitly isolate first.
+            client.execute_script("bpy.ops.wm.window_new_main()")
+            shared = ui("inspect")
+            assert shared["shared_window_ids"]
+            assert ui("set_tool", target="scale")["success"] is False
+            isolation = ui("isolate_workspace")
+            assert isolation["completion"] == "workspace_copy_requested"
+            isolated = ui("inspect")
+            assert isolated["shared_window_ids"] == []
+            assert isolated["workspace_id"] != shared["workspace_id"]
+            assert isolated["agent_cursors"] == []  # old editor markers are stale
+            assert ui("set_tool", target="scale")["tool_id"] == "builtin.scale"
+            other_tool = client.execute_script(
+                "__result__ = [w.workspace.tools.from_space_view3d_mode('OBJECT', create=False).idname "
+                "for w in bpy.context.window_manager.windows if w != bpy.context.window]"
+            )
+            assert other_tool["return_value"] == "['builtin.move']"
+            assert ui("isolate_workspace")["completion"] == "already_isolated"
+
             # A second window requires explicit selection; changing the original
             # window's scene invalidates the existing attachment.
             client.execute_script("bpy.ops.wm.window_new()")
+            assert ui("isolate_workspace")["success"] is False
             with pytest.raises(ValueError, match="--window"):
                 manager.attach()
             manager.attach(window_id=info["window_id"])
@@ -236,10 +265,24 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             layout = ui("inspect")
             views = [a for a in layout["areas"] if a["type"] == "VIEW_3D"]
             assert len(views) == 2
+            ui(
+                "move_cursor",
+                area_id=views[0]["area_id"],
+                position=[0.3, 0.7],
+                agent_id="builder",
+            )
             assert (
-                ui("open_menu", target="add", area_id=views[0]["area_id"])["completion"]
+                ui(
+                    "open_menu",
+                    target="add",
+                    area_id=views[0]["area_id"],
+                    agent_id="builder",
+                )["completion"]
                 == "menu_requested"
             )
+            assert next(
+                m for m in ui("inspect")["agent_cursors"] if m["agent_id"] == "builder"
+            )["position"] == [0.3, 0.7]
             manager.detach()
             assert process.poll() is None
             with pytest.raises(RuntimeError, match="No Blender window attached"):

@@ -122,6 +122,7 @@ def test_wheel_ships_blender_attachment_sources(tmp_path: Path) -> None:
     for member in (
         "blender_bridge/addon.py", "blender_bridge/bridge.py", "blender_bridge/protocol.py",
         "blender_bridge/agent_control.py", "mcp/schemas/blender_ui.py",
+        "blender_bridge/agent_cursor.py",
         "adapters/blender_runtime.py", "adapters/blender_connection.py", "utils/paths.py",
         "resources/__init__.py", "cli/blender_cli.py",
     ):
