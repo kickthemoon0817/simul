@@ -22,9 +22,9 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     Args:
         server: The MCP server instance.
-        thin: When True, only register the five essential MCP tools:
+        thin: When True, only register the essential MCP tools:
               ``unreal_health_check``, ``ping_unreal``,
-              ``list_unreal_instances``, ``capture_unreal_viewport`` and
+              ``list_unreal_instances``, ``control_unreal_ui``, ``capture_unreal_viewport`` and
               ``execute_unreal_script``. Selected by
               ``unreal.tool_surface`` / ``simul-mcp server --unreal-tools``;
               the full set is also reachable via ``simul unreal --help``.
@@ -326,6 +326,41 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             UnrealExecuteScriptResponse,
             _run_script,
             params={"code_bytes": len(code), "mode": mode},
+        )
+
+    @server.mcp.tool(
+        name="control_unreal_ui",
+        description="Named controls in the explicitly attached Unreal editor: inspect, select actors, "
+                    "edit transforms, pilot/eject actors, and set game view. Requires simul unreal attach.",
+        annotations=server._tool_annotations(read_only=False, idempotent=False, open_world=True),
+        output_schema=None,
+        task=server._task_optional(),
+    )
+    @with_param_descriptions()
+    async def control_unreal_ui(
+        agent_control: str, target: Optional[str] = None,
+        property_name: Optional[str] = None, value: Optional[List[float]] = None,
+        enabled: Optional[bool] = None,
+    ) -> ToolResult:
+        """Use named editor actions without arbitrary scripts or screen coordinates.
+
+        Args:
+            agent_control: inspect, select_actor, clear_selection, set_property,
+                pilot_actor, eject_actor, or set_game_view.
+            target: Actor full path or unique label; otherwise the sole selected actor.
+            property_name: location, rotation (Pitch/Yaw/Roll degrees), or scale.
+            value: Three finite numbers for set_property; location is in cm.
+            enabled: Required boolean for set_game_view.
+        """
+        from ..schemas.unreal_ui import UnrealUIRequest, UnrealUIResponse
+
+        def call(session):
+            request = UnrealUIRequest(agent_control=agent_control, target=target,
+                                      property_name=property_name, value=value, enabled=enabled)
+            return session.control_ui(**request.model_dump())
+
+        return await server._exec_backend(
+            "control_unreal_ui", server.unreal_adapter, "Unreal", UnrealUIResponse, call,
         )
 
     # -- Thin mode ends here: health check, ping, instance listing,

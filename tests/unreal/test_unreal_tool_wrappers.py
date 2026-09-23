@@ -77,6 +77,8 @@ class _Adapter(AvailableAdapter):
 
 def _sample(name: str, annotation: Any) -> Any:
     """Build one plausible argument for a required wrapper parameter."""
+    if name == "agent_control":
+        return "inspect"
     origin = get_origin(annotation)
     if origin is typing.Union:
         return _sample(name, next(arg for arg in get_args(annotation) if arg is not type(None)))

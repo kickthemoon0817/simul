@@ -283,9 +283,12 @@ def server(
         None,
         "--unreal-tools",
         help=(
-            "Unreal MCP tool surface: 'thin' (health, ping, instances, capture, "
+            "Unreal MCP tool surface: 'thin' (health, ping, instances, editor control, capture, "
             "exec script) or 'full' (every granular tool). Overrides unreal.tool_surface."
         ),
+    ),
+    unreal_mode: Optional[str] = typer.Option(
+        None, "--unreal-mode", help="Unreal connection: endpoint or attached (explicitly selected editor)"
     ),
     log_level: Optional[str] = typer.Option(
         None, "--log-level", "-l", help="Log level (DEBUG, INFO, WARNING, ERROR)"
@@ -300,6 +303,13 @@ def server(
             settings = load_settings(config)
         else:
             settings = get_settings()
+
+        if unreal_mode is not None:
+            if unreal_mode not in {"endpoint", "attached"}:
+                emit_error("--unreal-mode must be endpoint or attached", "ValueError")
+            settings = settings.model_copy(update={
+                "unreal": settings.unreal.model_copy(update={"mode": unreal_mode})
+            })
 
         # LoggingConfig is frozen on purpose, so rebuild the section rather
         # than assigning into it — assignment raises ValidationError and took

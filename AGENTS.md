@@ -72,6 +72,11 @@ files next to it whatever `simul-mcp` is installed in the interpreter.
 
 ## Runtime Notes
 
+- Unreal attached mode: `simul unreal instances` / `attach` select an existing
+  editor, map and level viewport. `simul server --backends unreal --unreal-mode attached`
+  uses that selection; `control_unreal_ui` provides named editor controls even with
+  scripting disabled. See `docs/unreal-attachment.md`.
+
 - Isaac Sim tools require a running Isaac Sim instance (5.1.0, 6.0.0, or 6.0.1) with the bridge on port 8229 or the stock Python socket on port 8226. `simul-mcp isaac launch` starts one with both enabled.
 - Headless USD tools work without Omniverse.
 - `tests/isaac/live/` is the `@pytest.mark.isaac` tier: ping, stage info,

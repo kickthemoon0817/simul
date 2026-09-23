@@ -192,3 +192,8 @@ security:
     requests_per_minute: 60
     burst_size: 10
     global_requests_per_minute: 600
+
+# Unreal connection: endpoint uses host/port; attached uses simul unreal attach.
+unreal:
+  mode: endpoint
+  attachment_path: "~/.simul/unreal/attachment.json"

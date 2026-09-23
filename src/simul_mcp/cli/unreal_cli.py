@@ -112,6 +112,75 @@ _port_opt = typer.Option(None, "--port", "-p", help="Remote Control API port")
 _timeout_opt = typer.Option(None, "--timeout", "-t", help="HTTP timeout in seconds")
 
 
+async def _attached_call(method: str, **kwargs: Any) -> Dict[str, Any]:
+    settings = get_settings()
+    settings = settings.model_copy(update={"unreal": settings.unreal.model_copy(update={"mode": "attached"})})
+    session = UnrealRuntimeSession(settings)
+    try:
+        return await getattr(session, method)(**kwargs)
+    finally:
+        await session.close()
+
+
+@app.command("instances")
+def instances(host: Optional[str] = _host_opt, port: Optional[int] = _port_opt) -> None:
+    """Discover running editors and their level viewport identifiers."""
+    from ..adapters.unreal_connection import UnrealAttachments
+
+    async def inspect() -> Dict[str, Any]:
+        return {"instances": await UnrealAttachments(get_settings()).instances(host, port)}
+    emit(_run(inspect()))
+
+
+@app.command("attach")
+def attach(
+    host: Optional[str] = _host_opt, port: Optional[int] = _port_opt,
+    viewport: Optional[str] = typer.Option(None, "--viewport", help="Viewport config key from instances"),
+) -> None:
+    """Select an existing editor/map/viewport without loading, saving or launching."""
+    from ..adapters.unreal_connection import UnrealAttachments
+
+    emit(_run(UnrealAttachments(get_settings()).attach(host, port, viewport)))
+
+
+@app.command("status")
+def status() -> None:
+    """Verify the saved editor selection and report current identity."""
+    emit(_run(_attached_call("attachment_status")))
+
+
+@app.command("detach")
+def detach() -> None:
+    """Forget the selected editor, leaving its scene and process untouched."""
+    from ..adapters.unreal_connection import UnrealAttachments
+
+    try:
+        emit(UnrealAttachments(get_settings()).detach())
+    except (OSError, ValueError) as exc:
+        emit_error(str(exc), type(exc).__name__)
+
+
+@app.command("control")
+def control(
+    action: str = typer.Argument(..., help="inspect, select_actor, clear_selection, set_property, "
+                                "pilot_actor, eject_actor or set_game_view"),
+    target: Optional[str] = typer.Option(None, "--target", help="Actor path or unique label"),
+    property_name: Optional[str] = typer.Option(None, "--property", help="location, rotation or scale"),
+    value: Optional[str] = typer.Option(None, "--value", help="JSON vector, e.g. '[100,0,200]'"),
+    enabled: Optional[bool] = typer.Option(None, "--enabled/--disabled", help="Game view state"),
+) -> None:
+    """Apply a named control to the explicitly attached editor."""
+    try:
+        parsed = json.loads(value) if value is not None else None
+        from ..mcp.schemas.unreal_ui import UnrealUIRequest
+        request = UnrealUIRequest(agent_control=action, target=target, property_name=property_name,
+                                  value=parsed, enabled=enabled)
+    except ValueError as exc:
+        emit_error(str(exc), "ValueError")
+        return
+    emit(_run(_attached_call("control_ui", **request.model_dump())))
+
+
 # ---------------------------------------------------------------------------
 # health
 # ---------------------------------------------------------------------------

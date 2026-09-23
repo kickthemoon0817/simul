@@ -568,7 +568,7 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 ### Unreal Engine Operations
 
-Unreal Engine integration uses the built-in Remote Control HTTP API. By default the MCP server registers a thin tool set (5 tools: `unreal_health_check`, `ping_unreal`, `list_unreal_instances`, `capture_unreal_viewport`, `execute_unreal_script`) to minimize context overhead for AI agents. Pass `--unreal-tools full` (or set `unreal.tool_surface: full` / `UNREAL__TOOL_SURFACE=full`) to register every granular Unreal tool; the full operation set is also available via CLI.
+Unreal Engine integration uses the built-in Remote Control HTTP API. By default the MCP server registers a thin tool set (6 tools: `unreal_health_check`, `ping_unreal`, `list_unreal_instances`, `control_unreal_ui`, `capture_unreal_viewport`, `execute_unreal_script`) to minimize context overhead for AI agents. Pass `--unreal-tools full` (or set `unreal.tool_surface: full` / `UNREAL__TOOL_SURFACE=full`) to register every granular Unreal tool; the full operation set is also available via CLI.
 
 **MCP Tools (always available):**
 - `unreal_health_check`: Check connectivity to Unreal Engine
@@ -581,6 +581,11 @@ Unreal Engine integration uses the built-in Remote Control HTTP API. By default 
 - `spawn`, `delete`, `set-transform`, `set-property`, `set-visibility` — manipulation
 - `sim`, `sim-status` — Play-In-Editor control
 - `capture`, `exec`, `materials` — viewport, scripting, materials
+
+For explicit editor/map/viewport selection and named controls, see
+[Attach to an existing Unreal editor](docs/unreal-attachment.md). Start with
+`simul unreal instances`, `simul unreal attach`, and `simul unreal control inspect`;
+run the MCP server with `--unreal-mode attached`.
 
 #### Unreal Engine Setup
 
@@ -653,7 +658,7 @@ To use simul with Unreal Engine in Claude Code, add to your project's MCP config
 claude mcp add simul -- /path/to/.venv/bin/simul-mcp server --backends unreal
 ```
 
-The `--backends unreal` flag registers only the Unreal tools (the thin 5-tool set unless you add
+The `--backends unreal` flag registers only the Unreal tools (the thin 6-tool set unless you add
 `--unreal-tools full`) plus the usage-stats tools, keeping agent context minimal. All other
 operations are available via `simul-mcp unreal <command>`.
 
