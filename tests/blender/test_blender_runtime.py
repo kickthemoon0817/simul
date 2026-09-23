@@ -1950,19 +1950,19 @@ class TestFileIOTools:
         session = blender_runtime.BlenderRuntimeSession()
         result = session.save_blend_file(file_path="/tmp/simul_mcp/out.blend")
 
-        assert result["file_path"] == "/tmp/simul_mcp/out.blend"
+        assert result["file_path"] == str(Path("/tmp/simul_mcp/out.blend").resolve())
         assert fake_bpy._ops_calls[0]["op"] == "wm.save_as_mainfile"
 
     def test_save_blend_file_in_place(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Save without path calls save_mainfile when filepath is set."""
-        fake_bpy = self._make_fake_bpy_with_file_io(filepath="/existing.blend")
+        fake_bpy = self._make_fake_bpy_with_file_io(filepath="/tmp/simul_mcp/existing.blend")
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
         result = session.save_blend_file()
 
-        assert result["file_path"] == "/existing.blend"
+        assert result["file_path"] == "/tmp/simul_mcp/existing.blend"
         assert fake_bpy._ops_calls[0]["op"] == "wm.save_mainfile"
 
     def test_save_blend_file_no_path_unsaved(
@@ -2118,7 +2118,7 @@ class TestFileIOTools:
         result = session.export_file("/tmp/simul_mcp/out.obj", "OBJ")
 
         assert result["file_format"] == "OBJ"
-        assert result["file_path"] == "/tmp/simul_mcp/out.obj"
+        assert result["file_path"] == str(Path("/tmp/simul_mcp/out.obj").resolve())
         assert fake_bpy._ops_calls[0]["op"] == "wm.obj_export"
 
     def test_export_obj_v36(self, monkeypatch: pytest.MonkeyPatch) -> None:
