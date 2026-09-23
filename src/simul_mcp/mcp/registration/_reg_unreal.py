@@ -233,13 +233,13 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         Args:
             resolution_x: Width in pixels.
             resolution_y: Height in pixels.
-            format: Image format (png or jpeg).
+            format: Image format (png). Use CLI capture to convert to JPEG.
             inline: Also return the image as an image content block.
 
         Returns:
             Capture result or error response.
         """
-        _VALID_FORMATS = {"png", "jpeg", "jpg"}
+        _VALID_FORMATS = {"png"}
         if format not in _VALID_FORMATS:
             return server._as_text_result(
                 ErrorResponse(
@@ -886,7 +886,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @server._script_tool(
         name="call_unreal_actor_function",
         description="Call a BlueprintCallable UFUNCTION on an actor.",
         annotations=server._tool_annotations(
@@ -1234,7 +1234,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @server.mcp.tool(
         name="control_unreal_simulation",
-        description="Control Play-In-Editor (PIE) session: start, stop, pause, resume, step.",
+        description="Control Play-In-Editor: start, stop, pause or resume. Exact frame stepping is unsupported.",
         annotations=server._tool_annotations(
             read_only=False,
             idempotent=False,
@@ -1420,7 +1420,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @server.mcp.tool(
         name="import_unreal_usd",
-        description="Import a USD file into Unreal via Interchange Framework.",
+        description="Import USD with Unreal's optional USDImporter plugin, enabled at editor startup.",
         annotations=server._tool_annotations(
             read_only=False,
             idempotent=False,
@@ -1440,8 +1440,8 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         Args:
             usd_path: Path to the USD file on disk; must be inside the sandbox.
             destination_path: Content browser destination path.
-            import_options: Interchange pipeline options passed through as the
-                import's PipelineOptions; omit for the pipeline defaults.
+            import_options: Boolean USD options: import_actors, import_geometry,
+                import_materials, import_lights, import_cameras.
         """
         return await server._exec_backend(
             "import_unreal_usd",
@@ -1457,7 +1457,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @server.mcp.tool(
         name="export_unreal_usd",
-        description="Export Unreal actors to USD via Interchange Framework.",
+        description="Export selected Unreal actors with the optional USDImporter plugin's LevelExporterUSD.",
         annotations=server._tool_annotations(
             read_only=False,
             idempotent=False,
@@ -1478,8 +1478,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         Args:
             actor_paths: Comma-separated actor object paths to export.
             output_path: Output USD file path; must be inside the sandbox.
-            export_options: Interchange pipeline options passed through as the
-                export's PipelineOptions; omit for the pipeline defaults.
+            export_options: Boolean USD options: export_actor_folders, export_sublayers.
         """
 
         def _call(session):
@@ -1503,7 +1502,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @server.mcp.tool(
         name="convert_to_simready",
-        description="Convert Unreal actors to NVIDIA SimReady asset format.",
+        description="Unavailable in Unreal: SimReady conversion returns UnsupportedOperation without writing files.",
         annotations=server._tool_annotations(
             read_only=False,
             idempotent=False,
@@ -1554,7 +1553,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @server.mcp.tool(
         name="validate_simready_asset",
-        description="Validate an Unreal asset against NVIDIA SimReady requirements.",
+        description="Unavailable in Unreal: SimReady validation returns UnsupportedOperation.",
         annotations=server._tool_annotations(
             read_only=True,
             idempotent=True,
@@ -1622,7 +1621,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     # Phase 7: Advanced Agent Tools
     # ----------------------------------------------------------
 
-    @server.mcp.tool(
+    @server._script_tool(
         name="batch_unreal_operations",
         description="Execute multiple Remote Control operations in one HTTP call.",
         annotations=server._tool_annotations(

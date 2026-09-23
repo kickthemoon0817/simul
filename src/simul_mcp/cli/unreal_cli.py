@@ -24,10 +24,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
-from simul_mcp.adapters.unreal_runtime import (
-    UnrealRuntimeSession,
-    is_unreal_available,
-)
+from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
 from simul_mcp.adapters.unreal_setup import (
     LauncherNotFound,
     ensure_remote_control_config,
@@ -74,6 +71,10 @@ def _session(
         unreal_cfg = settings.unreal.model_copy(update=overrides)
         settings = settings.model_copy(update={"unreal": unreal_cfg})
     return UnrealRuntimeSession(settings)
+
+
+async def _script_refusal(session: UnrealRuntimeSession) -> Dict[str, Any]:
+    return session._script_execution_denied()
 
 
 def _run(coro: Any) -> Dict[str, Any]:
@@ -127,7 +128,9 @@ def health(
         return
     connected = result.get("connected", False)
     if connected:
-        console.print(f"[green]Connected[/green] to UE5 @ {session.settings.unreal.host}:{session.settings.unreal.port}")
+        console.print(
+            f"[green]Connected[/green] to UE5 @ {session.settings.unreal.host}:{session.settings.unreal.port}"
+        )
         if result.get("engine_version"):
             console.print(f"  Engine: {result['engine_version']}")
         if result.get("project_name"):
@@ -449,43 +452,26 @@ def capture(
     output: Path = typer.Argument("capture.png", help="Output file path"),
     width: int = typer.Option(1920, "--width", "-W", help="Width in pixels"),
     height: int = typer.Option(1080, "--height", help="Height in pixels"),
-    format: str = typer.Option("png", "--format", "-f", help="Image format (png, jpeg)"),
+    format: str = typer.Option(
+        "png", "--format", "-f", help="Image format (png, jpeg)"
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
     """Capture viewport screenshot to a file."""
-    import base64
-
-    valid_formats = {"png", "jpeg", "jpg"}
-    if format not in valid_formats:
-        msg = f"Invalid format '{format}'. Must be one of: {', '.join(sorted(valid_formats))}"
-        if is_json_mode():
-            emit_error(msg, "ValueError")
-        console.print(f"[red]{msg}[/red]")
-        raise typer.Exit(1)
-
     session = _session(host, port)
-    result = _run(session.capture_viewport(
-        resolution_x=width,
-        resolution_y=height,
-        format=format,
-    ))
-    image_b64 = result.get("image_base64") or result.get("image", "")
-    if image_b64:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(base64.b64decode(image_b64))
-    else:
-        if is_json_mode():
-            emit_error("Viewport capture returned no image data", "CaptureError")
-        console.print("[red]Viewport capture returned no image data[/red]")
-        raise typer.Exit(1)
 
+    async def save() -> Dict[str, Any]:
+        try:
+            return await session.capture_to_file(output, width, height, format)
+        finally:
+            await session.close()
+
+    result = _run(save())
     if is_json_mode():
-        out = {k: v for k, v in result.items() if k not in ("image_base64", "image")}
-        out["file_path"] = str(output.resolve())
-        emit(out)
+        emit(result)
         return
-    console.print(f"[green]Captured[/green] {output.resolve()}")
+    console.print(f"[green]Captured[/green] {result['file_path']}")
 
 
 # ---------------------------------------------------------------------------
@@ -493,9 +479,18 @@ def capture(
 # ---------------------------------------------------------------------------
 @app.command("exec")
 def exec_script(
-    script: Optional[str] = typer.Argument(None, help="Python code string or path to .py file"),
-    mode: str = typer.Option("ExecuteFile", "--mode", "-m", help="ExecuteFile, EvaluateStatement, ExecuteStatement"),
-    raw: bool = typer.Option(False, "--raw", "-r", help="Print raw output without formatting"),
+    script: Optional[str] = typer.Argument(
+        None, help="Python code string or path to .py file"
+    ),
+    mode: str = typer.Option(
+        "ExecuteFile",
+        "--mode",
+        "-m",
+        help="ExecuteFile, EvaluateStatement, ExecuteStatement",
+    ),
+    raw: bool = typer.Option(
+        False, "--raw", "-r", help="Print raw output without formatting"
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
@@ -513,8 +508,13 @@ def exec_script(
             code = sys.stdin.read()
         else:
             if is_json_mode():
-                emit_error("Provide a script string, .py file path, or pipe code via stdin.", "InputError")
-            console.print("[red]Provide a script string, .py file path, or pipe code via stdin.[/red]")
+                emit_error(
+                    "Provide a script string, .py file path, or pipe code via stdin.",
+                    "InputError",
+                )
+            console.print(
+                "[red]Provide a script string, .py file path, or pipe code via stdin.[/red]"
+            )
             raise typer.Exit(1)
     elif Path(script).is_file() and script.endswith(".py"):
         code = Path(script).read_text(encoding="utf-8")
@@ -522,6 +522,8 @@ def exec_script(
         code = script
 
     session = _session(host, port)
+    if not session.settings.security.allow_script_execution:
+        _run(_script_refusal(session))
     try:
         raw_result = asyncio.run(session._execute_python(code, mode=mode))
     except Exception as e:
@@ -903,7 +905,7 @@ def setup(
             f"  port:       {port}\n"
             + (f"  bind:       {bind}\n" if bind is not None else "")
             + (f"  ws port:    {websocket_port}\n" if websocket_port is not None else "")
-            + (f"  [yellow]allow-public:[/yellow] yes\n" if allow_public else "")
+            + ("  [yellow]allow-public:[/yellow] yes\n" if allow_public else "")
             + (
                 # Don't echo the MD5 hash to the terminal — it's a credential
                 # equivalent (UE's CheckPassphrase compares the header verbatim
@@ -1024,7 +1026,7 @@ def setup(
 
     if payload["connected"]:
         console.print(
-            f"[green]Remote Control is up[/green] — simul can now talk to this editor."
+            "[green]Remote Control is up[/green] — simul can now talk to this editor."
         )
         return
     console.print(

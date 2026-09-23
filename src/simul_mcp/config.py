@@ -8,9 +8,9 @@ environment variables, YAML files, and validation.
 import logging
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union, cast
-from functools import lru_cache
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -22,7 +22,6 @@ from pydantic_settings import (
 )
 
 from .resources import find_checkout_root, resource_filesystem_path
-
 
 _CHECKOUT_ROOT: Optional[Path] = find_checkout_root()
 _DEFAULT_CONFIG_FILE: Path = resource_filesystem_path("config", "default.yaml")
@@ -433,6 +432,8 @@ class USDConfig(BaseModel):
     max_file_size_mb: int = Field(
         default=500, description="Maximum USD file size in MB", ge=1
     )
+
+
 class ViewportConfig(BaseModel):
     """Viewport configuration."""
 
@@ -547,8 +548,8 @@ class SecurityConfig(BaseModel):
         default=True,
         description=(
             "Register the arbitrary-code tools (execute_isaac_script, "
-            "execute_unreal_script, execute_blender_script). Granular tools "
-            "stay available when this is off."
+            "execute_unreal_script, execute_blender_script) and Unreal's generic "
+            "function/batch dispatch. Fixed granular tools stay available when this is off."
         ),
     )
     rate_limiting_enabled: bool = Field(

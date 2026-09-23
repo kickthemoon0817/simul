@@ -25,10 +25,8 @@ import json as _json
 
 import pytest
 
-
 from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
 from simul_mcp.config import Settings
-
 
 pytestmark = pytest.mark.unreal_live
 
@@ -209,7 +207,7 @@ def test_c5_capture_viewport_returns_nonempty_image() -> None:
         session = UnrealRuntimeSession(_settings())
         try:
             result = await session.capture_viewport(
-                resolution_x=256, resolution_y=256, format="png"
+                resolution_x=256, resolution_y=256, format="png", inline=True
             )
             assert result.get("resolution_x") == 256
             assert result.get("resolution_y") == 256

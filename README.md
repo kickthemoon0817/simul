@@ -473,8 +473,10 @@ isaac_sim:
 - `security.allow_script_execution` (env `SECURITY__ALLOW_SCRIPT_EXECUTION`,
   default `true`): when `false`, the server does not register
   `execute_isaac_script`, `execute_unreal_script`, or `execute_blender_script`,
-  and `simul-mcp isaac exec` returns a `ScriptExecutionDisabled` error. Granular
-  tools keep working. This is the only switch that removes the agent-authored
+  or Unreal's `call_unreal_actor_function` and `batch_unreal_operations` dispatchers.
+  `simul-mcp isaac exec` and `simul-mcp unreal exec` return a
+  `ScriptExecutionDisabled` error. Fixed granular tools keep working.
+  This is the only switch that removes the agent-authored
   code surface; the bridge extension's `allow_unsafe_execution` setting (and
   `simul-mcp isaac bridge-set-unsafe`) only gates raw scripts sent over the
   bridge transport on 8229. Raw scripts and every generated tool script still
@@ -581,6 +583,25 @@ Unreal Engine integration uses the built-in Remote Control HTTP API. By default 
 - `capture`, `exec`, `materials` — viewport, scripting, materials
 
 #### Unreal Engine Setup
+
+The full Unreal surface uses editor Python APIs for actor inspection, physics,
+materials, and PIE start/stop/pause/resume. Unsupported single-frame stepping
+returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
+engine cannot provide a simulation-specific count.
+
+USD import/export requires the optional **USDImporter** plugin enabled when the
+editor starts. These operations use `AssetImportTask` and `LevelExporterUSD`;
+`get_unreal_interchange_info` reports plugin availability. Import options accept
+boolean `import_actors`, `import_geometry`, `import_materials`, `import_lights`,
+and `import_cameras`; export options accept boolean `export_actor_folders` and
+`export_sublayers`. SimReady conversion and validation are not implemented;
+their compatibility tools return `UnsupportedOperation` without changing files.
+
+MCP viewport captures produce PNG; `simul unreal capture --format jpeg` converts
+the downloaded screenshot locally. The CLI transfers captures from the editor
+in bounded chunks, including files above the MCP inline size limit. Re-run
+`simul unreal setup` and restart the editor to apply the console-execution
+setting required by screenshots when upgrading an older project configuration.
 
 **Prerequisites:** Unreal Engine 5.x with a project open in the editor.
 

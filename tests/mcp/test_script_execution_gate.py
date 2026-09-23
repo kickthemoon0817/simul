@@ -18,7 +18,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from typer.testing import CliRunner
 
-
 from simul_mcp.adapters.isaac_socket_client import ScriptResult
 from simul_mcp.cli import isaac as isaac_cli
 from simul_mcp.cli.main import app
@@ -28,7 +27,13 @@ from simul_mcp.mcp import server as server_module
 from simul_mcp.mcp.tools.isaac_tools import IsaacTools
 from tests.fakes import AvailableAdapter, FakeFastMCP
 
-SCRIPT_TOOLS = ("execute_isaac_script", "execute_unreal_script", "execute_blender_script")
+SCRIPT_TOOLS = (
+    "execute_isaac_script",
+    "execute_unreal_script",
+    "execute_blender_script",
+    "call_unreal_actor_function",
+    "batch_unreal_operations",
+)
 
 
 def _settings(allow_script_execution: bool) -> Settings:
