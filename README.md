@@ -572,6 +572,7 @@ Unreal Engine integration uses the built-in Remote Control HTTP API. By default 
 
 **MCP Tools (always available):**
 - `unreal_health_check`: Check connectivity to Unreal Engine
+- `control_unreal_ui`: Named controls and per-agent viewport pointers in attached mode
 - `capture_unreal_viewport`: Capture viewport screenshot (returns image data)
 - `execute_unreal_script`: Execute arbitrary Python inside the UE5 editor
 
@@ -586,6 +587,10 @@ For explicit editor/map/viewport selection and named controls, see
 [Attach to an existing Unreal editor](docs/unreal-attachment.md). Start with
 `simul unreal instances`, `simul unreal attach`, and `simul unreal control inspect`;
 run the MCP server with `--unreal-mode attached`.
+For colored agent pointers and activity labels, install the optional editor overlay
+using `simul unreal setup <project.uproject> --agent-overlay --no-headless --yes`
+(requires Unreal's C++ toolchain). Pass a distinct `agent_id` for each agent; the
+overlay never moves the system mouse or adds scene objects.
 
 #### Unreal Engine Setup
 

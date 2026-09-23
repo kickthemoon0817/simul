@@ -47,6 +47,8 @@ with `SECURITY__ALLOW_SCRIPT_EXECUTION=false`, using a bounded list of actions:
 | `pilot_actor` | Pilot `target` in the attached level viewport |
 | `eject_actor` | Stop piloting in that viewport |
 | `set_game_view` | `enabled`: boolean; returns the state read from the viewport |
+| `move_cursor` | `agent_id`, normalized `position: [x,y]` from bottom-left, optional `activity` label |
+| `clear_cursor` | Remove only this `agent_id`'s marker in the attached viewport |
 
 For actor actions, omit `target` to use the sole selected actor. Ambiguous labels,
 missing actors and stale attachments fail explicitly. Location uses centimeters;
@@ -70,6 +72,54 @@ operations use it as well, set `UNREAL__MODE=attached`. Existing MCP tools also 
 the selected endpoint when the server runs with `--unreal-mode attached`.
 The default `endpoint` mode continues to use host/port configuration.
 
+## Visible agent cursors
+
+For Blender-style pointers inside Unreal, close the project after saving your work
+and install the bundled **Simul Agent Overlay** editor plugin through setup:
+
+```sh
+simul unreal setup /absolute/path/MyProject.uproject --agent-overlay --no-headless --yes
+```
+
+This compiles the plugin using that Unreal installation's C++ toolchain (Xcode on
+macOS, Visual Studio on Windows, clang on Linux). Supply `--engine-path` if the
+installation cannot be located. The source ships in the Python wheel; binaries are
+built for your installed engine. Build failures report a log in the project's
+`Saved/Logs`. Identical installations are reused; a different existing plugin is
+preserved and setup explains how to move it aside before rebuilding.
+
+Attach again after the editor restarts. Choose the visible viewport; `instances`
+reports `active_viewport` as well as all layout keys, including hidden viewports.
+Each concurrent agent should use a unique, stable `agent_id` on every call:
+
+```sh
+simul unreal control move_cursor --agent-id builder --position '[0.3,0.6]' --activity 'Placing scene actors'
+simul unreal control move_cursor --agent-id reviewer --position '[0.7,0.4]' --activity 'Reviewing transforms'
+simul unreal control select_actor --agent-id builder --target Cube
+simul unreal control inspect
+simul unreal control clear_cursor --agent-id reviewer
+```
+
+The overlay draws a colored pointer, agent name and activity row in the attached
+level viewport. Named mutations update that agent's activity to the completed
+action and preserve its last pointer position (center initially). `move_cursor`
+only moves this virtual pointer; it does not click or move the OS mouse. Position
+is an annotation, not automatic actor projection or a button selector.
+
+Markers expire after 120 seconds without updates, are bounded to 64 per viewport,
+and clear on map replacement, viewport destruction or editor shutdown. They live
+only in Slate widgets, never in scene actors or saved assets, and cannot intercept
+mouse input. Coincident pointers have separate activity rows. Scene screenshots
+from `capture_unreal_viewport` exclude editor UI; use an editor-window screenshot
+to see the overlay.
+
+`inspect` returns `overlay_available` and all `agent_cursors` in the attached
+viewport. Without the plugin, existing named controls still work and report
+`overlay_available: false`; explicit cursor actions fail with the setup command.
+Automatic labels cover named controls, not arbitrary scripts or all legacy tools.
+Use `move_cursor` with an activity label around other work. Markers identify
+callers; agent IDs do not isolate shared scene edits or actor selection.
+
 ## Identity checks and limits
 
 The first discovery call installs a small in-memory Python module and a map-change
@@ -84,6 +134,8 @@ dispatch in a separate request: attachment is not an editor lock, so avoid repla
 maps concurrently with those calls. Viewport config keys can be reused by Unreal
 layouts; reattach after reorganizing level-editor windows. An explicit arbitrary
 script can still change maps or perform other actions allowed by its execution policy.
+Legacy camera and screenshot operations require the attached viewport to be active;
+they refuse to use a different active viewport.
 
 Named controls use Unreal's editor APIs. They do not inject OS mouse/keyboard input,
 open arbitrary menus, address asset-editor tabs, or dismiss modal dialogs. A busy
@@ -100,10 +152,11 @@ Use distinct `UNREAL__ATTACHMENT_PATH` values for clients targeting different ed
 ## Verification
 
 ```sh
-pytest tests/unreal/test_attachment.py --no-cov
+pytest tests/unreal/test_unreal_attachment.py --no-cov
 # Only against a copied, disposable project: this test replaces the scratch map.
 SIMUL_UNREAL_ATTACH_LIVE=1 UNREAL__PORT=30019 \
   pytest tests/unreal/test_live_attachment.py -m unreal_live --no-cov
+# Add SIMUL_UNREAL_OVERLAY_LIVE=1 when setup installed the native overlay.
 ```
 
 The live test exercises the named MCP actions with arbitrary scripting disabled,

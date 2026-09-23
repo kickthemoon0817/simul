@@ -260,7 +260,7 @@ class SetupResult:
         )
 
 
-def patch_uproject(uproject_path: Path) -> PatchResult:
+def patch_uproject(uproject_path: Path, *, agent_overlay: bool = False) -> PatchResult:
     """Enable RemoteControl and PythonScriptPlugin in ``.uproject``.
 
     Writes the file back only when something actually changed. Preserves
@@ -287,7 +287,7 @@ def patch_uproject(uproject_path: Path) -> PatchResult:
         if isinstance(entry, dict) and entry.get("Name")
     }
 
-    for name in REQUIRED_PLUGINS:
+    for name in REQUIRED_PLUGINS + (("SimulAgentOverlay",) if agent_overlay else ()):
         existing = by_name.get(name)
         if existing is None:
             plugins.append({"Name": name, "Enabled": True})
@@ -427,6 +427,7 @@ def ensure_remote_control_config(
     bind: Optional[str] = None,
     websocket_port: Optional[int] = None,
     passphrase_md5: Optional[str] = None,
+    agent_overlay: bool = False,
 ) -> SetupResult:
     """Run both patches; caller decides what to do with the result.
 
@@ -435,7 +436,7 @@ def ensure_remote_control_config(
     (untouched).
     """
     uproject_path = Path(uproject_path)
-    u = patch_uproject(uproject_path)
+    u = patch_uproject(uproject_path, agent_overlay=agent_overlay)
     i = patch_remote_control_ini(
         uproject_path.parent,
         port=port,

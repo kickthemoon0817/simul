@@ -124,6 +124,11 @@ def test_wheel_ships_blender_attachment_sources(tmp_path: Path) -> None:
         "blender_bridge/agent_control.py", "mcp/schemas/blender_ui.py",
         "adapters/blender_runtime.py", "adapters/blender_connection.py", "utils/paths.py",
         "resources/__init__.py", "cli/blender_cli.py",
+        "adapters/unreal_overlay.py", "adapters/unreal_connection.py",
+        "resources/unreal/SimulAgentOverlay/SimulAgentOverlay.uplugin",
+        "resources/unreal/SimulAgentOverlay/Source/SimulAgentOverlay/SimulAgentOverlay.Build.cs",
+        "resources/unreal/SimulAgentOverlay/Source/SimulAgentOverlay/Public/SimulAgentOverlayLibrary.h",
+        "resources/unreal/SimulAgentOverlay/Source/SimulAgentOverlay/Private/SimulAgentOverlay.cpp",
     ):
         assert f"simul_mcp/{member}" in names
 
@@ -351,5 +356,5 @@ def test_wheel_install_serves_settings_and_resources(tmp_path: Path) -> None:
     assert payload["api_core_is_file"] is True
     assert payload["socket_protocol"] == "vscode"
     assert payload["cors_origins"][-1] == "http://localhost:8229", "packaged default.yaml was not loaded"
-    assert payload["allowed_roots"] == ["/tmp/simul_mcp"]
+    assert payload["allowed_roots"] == [str(Path("/tmp/simul_mcp").resolve())]
     assert payload["bare_settings_ok"] is True
