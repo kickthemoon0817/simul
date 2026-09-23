@@ -150,6 +150,7 @@ markers = [
     "integration: marks tests as integration tests",
     "isaac: marks tests that require Isaac Sim environment",
     "unreal_live: marks tests that require a running Unreal Engine editor (Remote Control reachable on the configured host:port)",
+    "blender_live: opt-in tests that launch and clean up a disposable Blender GUI (SIMUL_BLENDER_LIVE=1)",
     "packaging: marks tests that build the wheel; require uv (or python -m build) on PATH and run for many seconds (deselect with '-m \"not packaging\"' — already in addopts default; explicit override with '-m packaging')",
 ]
 

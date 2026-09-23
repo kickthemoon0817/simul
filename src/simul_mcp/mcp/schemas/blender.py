@@ -16,6 +16,12 @@ class BlenderInfoResponse(BaseModel):
     binary_path: Optional[str] = Field(None, description="Blender binary path")
     background: bool = Field(..., description="Whether Blender runs in background mode")
     blend_file_path: Optional[str] = Field(None, description="Current .blend file path")
+    instance_id: Optional[str] = Field(None, description="Attached Blender process identity")
+    document_id: Optional[str] = Field(None, description="Changes when Blender loads another file")
+    window_id: Optional[str] = Field(None, description="Attached Blender window identity")
+    scene_name: Optional[str] = Field(None, description="Scene shown in the attached window")
+    pid: Optional[int] = Field(None, description="Blender process ID")
+    is_dirty: Optional[bool] = Field(None, description="Whether the open file has unsaved changes")
 
 
 class BlenderObjectInfo(BaseModel):

@@ -5,14 +5,17 @@ This module provides an adapter for Blender runtime operations through the
 optional `bpy` Python module.
 """
 
+from __future__ import annotations
+
 import base64
 import io
+import logging
 import math
 import os
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, overload
 
 try:
     import bpy
@@ -22,11 +25,11 @@ except ImportError:
     bpy = None
     BLENDER_AVAILABLE = False
 
-from ..config import Settings, get_settings
-from ..logging import LoggerMixin, get_logger
-from ..utils.paths import PathPolicy
+if TYPE_CHECKING:
+    from ..config import Settings
+    from ..utils.paths import PathPolicy
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,7 +42,7 @@ class BlenderObjectEntry:
     visible: bool
 
 
-class BlenderRuntimeSession(LoggerMixin):
+class BlenderRuntimeSession:
     """
     Blender runtime session for scene inspection operations.
 
@@ -47,12 +50,22 @@ class BlenderRuntimeSession(LoggerMixin):
     where Blender is running as a Python module.
     """
 
-    def __init__(self, settings: Optional[Settings] = None):
+    logger = logger
+
+    def __init__(
+        self,
+        settings: Optional[Settings] = None,
+        *,
+        path_policy: Optional[PathPolicy] = None,
+        scene_scope: bool = False,
+    ):
         """
         Initialize Blender runtime session.
 
         Args:
             settings: Configuration settings.
+            path_policy: Injected policy for a standalone Blender add-on.
+            scene_scope: Restrict object lookup to the selected window's scene.
         """
         if not BLENDER_AVAILABLE:
             raise ImportError(
@@ -60,7 +73,12 @@ class BlenderRuntimeSession(LoggerMixin):
                 "where the bpy module is installed."
             )
 
-        self.settings = settings or get_settings()
+        if settings is None and path_policy is None:
+            from ..config import get_settings
+
+            settings = get_settings()
+        self.settings = settings
+        self._scene_scope = scene_scope
 
         blender_module: Any = bpy
         version_raw = blender_module.app.version
@@ -75,7 +93,18 @@ class BlenderRuntimeSession(LoggerMixin):
         self.logger.info(
             "Blender runtime session initialized (v%s)", self._blender_version
         )
-        self._path_policy = PathPolicy.from_settings(self.settings)
+        if path_policy is None:
+            from ..utils.paths import PathPolicy
+
+            assert self.settings is not None
+            path_policy = PathPolicy.from_settings(self.settings)
+        self._path_policy = path_policy
+
+    @overload
+    def _deny_outside_sandbox(self, path: str, *, write: bool = False) -> str: ...
+
+    @overload
+    def _deny_outside_sandbox(self, path: None, *, write: bool = False) -> None: ...
 
     def _deny_outside_sandbox(
         self, path: Optional[str], *, write: bool = False
@@ -136,6 +165,21 @@ class BlenderRuntimeSession(LoggerMixin):
             True when Blender version >= 5.0.0.
         """
         return self._is_blender_5_plus
+
+    def control_ui(
+        self,
+        agent_control: str,
+        target: Optional[str] = None,
+        area_id: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        value: Optional[List[float]] = None,
+    ) -> Dict[str, Any]:
+        """Perform a named UI action only in an explicitly attached GUI window."""
+        if not self._scene_scope:
+            raise RuntimeError("Agent control requires --blender-mode attached and simul blender attach")
+        from ..blender_bridge.agent_control import control_ui
+
+        return control_ui(agent_control, target, area_id, position, value)
 
     def get_runtime_info(self) -> Dict[str, Any]:
         """
@@ -343,8 +387,7 @@ class BlenderRuntimeSession(LoggerMixin):
         Returns:
             Dictionary with matched objects and truncation flag.
         """
-        blender_module: Any = bpy
-        all_objects = blender_module.data.objects
+        all_objects = self._resolve_object_source(None)
 
         compiled_pattern = re.compile(name_pattern) if name_pattern else None
         matches: List[Dict[str, Any]] = []
@@ -383,7 +426,7 @@ class BlenderRuntimeSession(LoggerMixin):
             active camera, and frame range.
         """
         blender_module: Any = bpy
-        all_objects = blender_module.data.objects
+        all_objects = self._resolve_object_source(None)
         type_counts: Dict[str, int] = {}
 
         for obj in all_objects:
@@ -1144,6 +1187,7 @@ class BlenderRuntimeSession(LoggerMixin):
                 "No file path provided and the file has never been saved. "
                 "Pass a file_path argument."
             )
+        self._deny_outside_sandbox(current, write=True)
         try:
             blender_module.ops.wm.save_mainfile()
         except Exception as exc:
@@ -1723,10 +1767,10 @@ class BlenderRuntimeSession(LoggerMixin):
             "object_name": object_name,
             "location": [float(v) for v in obj.location],
             "rotation_euler": [float(v) for v in obj.rotation_euler],
-            "is_active": has_rb and rb.type == "ACTIVE",
+            "is_active": rb is not None and rb.type == "ACTIVE",
             "has_rigid_body": has_rb,
-            "mass": float(rb.mass) if has_rb else None,
-            "collision_shape": rb.collision_shape if has_rb else None,
+            "mass": float(rb.mass) if rb is not None else None,
+            "collision_shape": rb.collision_shape if rb is not None else None,
         }
 
     def get_object_trajectory(
@@ -2227,11 +2271,10 @@ class BlenderRuntimeSession(LoggerMixin):
         Returns:
             Dict with compliant flag, object_count, issue_count, issues list.
         """
-        blender_module: Any = bpy
         issues: List[Dict[str, Any]] = []
 
         if object_names is None:
-            targets = [o for o in blender_module.data.objects if o.type == "MESH"]
+            targets = [o for o in self._resolve_object_source(None) if o.type == "MESH"]
         else:
             targets = [self._get_object_or_raise(n) for n in object_names]
 
@@ -2386,14 +2429,13 @@ class BlenderRuntimeSession(LoggerMixin):
             PermissionError: If the path is outside the sandbox policy.
         """
         file_path = self._deny_outside_sandbox(file_path, write=True)
-        blender_module: Any = bpy
         issues: Optional[List[Dict[str, Any]]] = None
         validation_passed = True
 
         if object_names:
             targets = [self._get_object_or_raise(n) for n in object_names]
         else:
-            targets = list(blender_module.data.objects)
+            targets = list(self._resolve_object_source(None))
 
         if validate_before_export:
             names = [o.name for o in targets]
@@ -2402,7 +2444,7 @@ class BlenderRuntimeSession(LoggerMixin):
             validation_passed = result.get("compliant", True)
 
         # Select only the requested objects
-        for obj in blender_module.data.objects:
+        for obj in self._resolve_object_source(None):
             obj.select_set(False)
         for obj in targets:
             obj.select_set(True)
@@ -2501,7 +2543,12 @@ class BlenderRuntimeSession(LoggerMixin):
             The Blender object reference.
         """
         blender_module: Any = bpy
-        obj = blender_module.data.objects.get(object_name)
+        objects = (
+            blender_module.context.scene.objects
+            if self._scene_scope
+            else blender_module.data.objects
+        )
+        obj = objects.get(object_name)
         if obj is None:
             raise ValueError(f"Object not found: {object_name}")
         return obj
@@ -2554,8 +2601,7 @@ class BlenderRuntimeSession(LoggerMixin):
                 )
         return not bool(getattr(scene_object, "hide_viewport", False))
 
-    @staticmethod
-    def _resolve_object_source(collection_name: Optional[str]) -> Any:
+    def _resolve_object_source(self, collection_name: Optional[str]) -> Any:
         """
         Resolve object iterable from collection or global object list.
 
@@ -2571,11 +2617,21 @@ class BlenderRuntimeSession(LoggerMixin):
         blender_module: Any = bpy
 
         if not collection_name:
-            return blender_module.data.objects
+            return (
+                blender_module.context.scene.objects
+                if self._scene_scope
+                else blender_module.data.objects
+            )
 
         collection = blender_module.data.collections.get(collection_name)
         if collection is None:
             raise ValueError(f"Collection not found: {collection_name}")
+        if self._scene_scope:
+            return [
+                obj
+                for obj in collection.objects
+                if obj.name in blender_module.context.scene.objects
+            ]
         return collection.objects
 
     def _resolve_camera(self, camera_name: Optional[str] = None) -> Any:
@@ -2590,7 +2646,12 @@ class BlenderRuntimeSession(LoggerMixin):
         """
         blender_module: Any = bpy
         if camera_name:
-            cam = blender_module.data.objects.get(camera_name)
+            objects = (
+                blender_module.context.scene.objects
+                if self._scene_scope
+                else blender_module.data.objects
+            )
+            cam = objects.get(camera_name)
             if cam is None or cam.type != "CAMERA":
                 raise ValueError(f"Camera not found: {camera_name}")
             return cam
@@ -2619,7 +2680,7 @@ class BlenderRuntimeSession(LoggerMixin):
         Returns:
             Dictionary with image_base64, dimensions, engine, capture_method.
         """
-        import gpu
+        import gpu  # type: ignore[import-not-found]
 
         blender_module: Any = bpy
         scene = blender_module.context.scene
@@ -2678,8 +2739,9 @@ class BlenderRuntimeSession(LoggerMixin):
         """
         Capture viewport via bpy.ops.render.render (slow path, all engines).
 
-        Temporarily adjusts render resolution, renders to an in-memory image,
-        converts to JPEG base64, then restores original settings.
+        Temporarily adjusts render settings and lets Blender encode the JPEG.
+        Render Result.pixels can be empty even after a successful render. Using
+        save_render also avoids requiring Pillow inside the Blender add-on.
 
         Args:
             width: Image width.
@@ -2698,6 +2760,7 @@ class BlenderRuntimeSession(LoggerMixin):
         orig_y = render.resolution_y
         orig_pct = render.resolution_percentage
         orig_fmt = render.image_settings.file_format
+        orig_quality = render.image_settings.quality
 
         try:
             render.resolution_x = width
@@ -2712,19 +2775,22 @@ class BlenderRuntimeSession(LoggerMixin):
             if result_image is None:
                 raise RuntimeError("Render Result image not available")
 
-            pixels = list(result_image.pixels)
-            import numpy as np
+            import tempfile
+            from pathlib import Path
 
-            arr = np.array(pixels, dtype=np.float32).reshape(height, width, 4)
-            arr = np.flipud(arr)
-            rgb = (arr[:, :, :3] * 255).clip(0, 255).astype(np.uint8)
-
-            from PIL import Image as PILImage
-
-            img = PILImage.fromarray(rgb, "RGB")
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=jpeg_quality)
-            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            capture_dir = self._path_policy.default_capture_dir()
+            if capture_dir is None:
+                raise PermissionError(
+                    "No writable capture directory is allowed by the sandbox"
+                )
+            capture_dir = self._deny_outside_sandbox(capture_dir, write=True)
+            Path(capture_dir).mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                prefix="blender-", dir=capture_dir
+            ) as temporary:
+                output = Path(temporary) / "capture.jpg"
+                result_image.save_render(filepath=str(output), scene=scene)
+                b64 = base64.b64encode(output.read_bytes()).decode("ascii")
 
             return {
                 "image_base64": b64,
@@ -2738,12 +2804,14 @@ class BlenderRuntimeSession(LoggerMixin):
             render.resolution_y = orig_y
             render.resolution_percentage = orig_pct
             render.image_settings.file_format = orig_fmt
+            render.image_settings.quality = orig_quality
 
 
-class BlenderRuntimeAdapter(LoggerMixin):
+class BlenderRuntimeAdapter:
     """Adapter for Blender runtime operations."""
 
     name: str = "blender"
+    logger = logger
 
     def __init__(self, settings: Optional[Settings] = None):
         """
@@ -2752,6 +2820,8 @@ class BlenderRuntimeAdapter(LoggerMixin):
         Args:
             settings: Configuration settings.
         """
+        from ..config import get_settings
+
         self.settings = settings or get_settings()
         self.logger.info("Blender runtime adapter initialized")
 
@@ -2763,6 +2833,11 @@ class BlenderRuntimeAdapter(LoggerMixin):
         Yields:
             BlenderRuntimeSession instance.
         """
+        if self.settings.blender.mode == "attached":
+            from .blender_connection import BlenderConnection
+
+            yield BlenderConnection(self.settings)
+            return
         session = BlenderRuntimeSession(self.settings)
         try:
             yield session
@@ -2774,9 +2849,11 @@ class BlenderRuntimeAdapter(LoggerMixin):
         Check whether Blender runtime is available.
 
         Returns:
-            True when bpy module is available.
+            True when configured for attachment or the local bpy module is available.
         """
-        return BLENDER_AVAILABLE and self.settings.blender.enabled
+        return self.settings.blender.enabled and (
+            self.settings.blender.mode == "attached" or BLENDER_AVAILABLE
+        )
 
     def close(self) -> None:
         """Nothing is held between sessions; each one cleans up after itself."""

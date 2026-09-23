@@ -276,7 +276,7 @@ class SimulMCPServer(LoggerMixin):
 
     @property
     def blender_adapter(self) -> Optional[BackendAdapter]:
-        """The Blender adapter, or None when bpy is not importable."""
+        """The attached/embedded Blender adapter, or None when unavailable."""
         return self._adapters["blender"]
 
     @blender_adapter.setter
@@ -886,7 +886,12 @@ class SimulMCPServer(LoggerMixin):
             with adapter.create_session() as session:
                 # Unreal sessions are async, Blender sessions are sync; accept
                 # both so one envelope serves every backend.
-                payload = call(session)
+                if adapter_label == "Blender" and self.settings.blender.mode == "attached":
+                    # Only socket I/O runs here, never bpy. Keep other MCP
+                    # requests responsive while the editor executes its work.
+                    payload = await asyncio.to_thread(call, session)
+                else:
+                    payload = call(session)
                 if inspect.isawaitable(payload):
                     payload = await payload
                 apply_success_from_error(payload)

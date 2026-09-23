@@ -16,7 +16,7 @@ Simul-MCP is designed for multi-engine workflows. Isaac Sim is the primary runti
 - **Mesh Operations**: Analyze mesh topology, materials, and geometry
 - **Isaac Sim Integration**: Viewport capture, simulation control, camera management
 - **Unreal Engine Integration**: Scene control, actor manipulation, viewport capture, Python execution via Remote Control HTTP API
-- **Blender Integration**: Scene and object manipulation via bpy
+- **Blender Integration**: Scene and object manipulation via bpy, or [attach to an existing Blender window](docs/blender-attachment.md)
 - **Backend Selection**: `--backends` flag to register only the engines you need, minimizing AI agent context overhead
 - **Flexible Architecture**: Works in both headless and runtime environments
 - **Comprehensive Logging**: Structured logging with multiple output formats
@@ -564,7 +564,7 @@ The server provides 75+ tools across multiple backends. Key tool categories:
 
 ### Blender (when runtime connected)
 
-52 tools for scene objects, materials, rigid bodies, constraints, modifiers, mesh operations, animation, physics baking, viewport capture, and SimReady compliance.
+53 tools for scene objects, materials, rigid bodies, constraints, modifiers, mesh operations, animation, physics baking, viewport capture, named UI controls, and SimReady compliance.
 
 ### Unreal Engine Operations
 

@@ -114,6 +114,20 @@ def _run_build(tmp_path: Path) -> Path:
 pytestmark = pytest.mark.packaging
 
 
+def test_wheel_ships_blender_attachment_sources(tmp_path: Path) -> None:
+    """The CLI must be able to construct the add-on from a wheel installation."""
+    wheel = _run_build(tmp_path)
+    with zipfile.ZipFile(wheel) as archive:
+        names = set(archive.namelist())
+    for member in (
+        "blender_bridge/addon.py", "blender_bridge/bridge.py", "blender_bridge/protocol.py",
+        "blender_bridge/agent_control.py", "mcp/schemas/blender_ui.py",
+        "adapters/blender_runtime.py", "adapters/blender_connection.py", "utils/paths.py",
+        "resources/__init__.py", "cli/blender_cli.py",
+    ):
+        assert f"simul_mcp/{member}" in names
+
+
 def test_wheel_ships_bundled_bridge_ext(tmp_path: Path) -> None:
     """Build a wheel and assert the bundled bridge ext is present.
 

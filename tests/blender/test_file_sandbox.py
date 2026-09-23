@@ -10,6 +10,7 @@ review chose for Isaac after finding registration-level checks bypassable.
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+from pathlib import Path
 
 import pytest
 
@@ -48,13 +49,14 @@ def test_out_of_sandbox_paths_are_refused(
         getattr(session, method)(**kwargs)
 
 
-def test_save_without_a_path_is_not_policed(
+def test_save_without_a_path_checks_the_open_file(
     session: blender_runtime.BlenderRuntimeSession,
 ) -> None:
-    """An in-place save names no path; there is nothing to police. With the
-    MagicMock bpy it completes — a PermissionError here would mean the policy
-    fired on nothing."""
-    session.save_blend_file()
+    """Attaching to an outside file must not grant permission to overwrite it."""
+    blender_runtime.bpy.data.filepath = "/outside/project.blend"
+    with pytest.raises(PermissionError, match="sandbox"):
+        session.save_blend_file()
+    blender_runtime.bpy.ops.wm.save_mainfile.assert_not_called()
 
 
 def test_in_sandbox_path_passes_the_policy(
@@ -74,7 +76,7 @@ def test_checked_path_is_the_used_path(
     admits it — but to bpy the ``~`` is a literal path component anchored at
     the server cwd. Whatever the policy checked is what must be used."""
     result = session.save_blend_file("~/../../tmp/simul_mcp/out.blend")
-    assert result["file_path"] == "/tmp/simul_mcp/out.blend"
+    assert result["file_path"] == str(Path("/tmp/simul_mcp/out.blend").resolve())
 
 
 def test_disabled_sandbox_passes_raw_paths_through(
