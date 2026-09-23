@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from fastmcp.tools.tool import ToolResult
 
 from ..schemas.blender import *
+from ..schemas.blender_ui import AgentControl, BlenderUIRequest, BlenderUIResponse
 from ..schemas.simready import *
 from ._helpers import with_param_descriptions
 
@@ -19,6 +20,48 @@ if TYPE_CHECKING:
 def register_blender_tools(server: "SimulMCPServer") -> None:
     """Register Blender runtime specific tools."""
     from ...adapters.blender_runtime import BlenderRuntimeSession
+
+    @server.mcp.tool(
+        name="control_blender_ui",
+        description=(
+            "Perform a named agent_control action in the explicitly attached Blender window. "
+            "Use inspect to discover editor IDs, supported menus, tools and properties. "
+            "Uses Blender UI APIs, not physical key/click events or arbitrary button lookup. "
+            "Requires attached mode; does not launch Blender or execute arbitrary scripts."
+        ),
+        annotations=server._tool_annotations(read_only=False, idempotent=False, open_world=True),
+        output_schema=None,
+        task=server._task_optional(),
+    )
+    @with_param_descriptions()
+    async def control_blender_ui(
+        agent_control: AgentControl,
+        target: Optional[str] = None,
+        area_id: Optional[str] = None,
+        position: Optional[List[float]] = None,
+        value: Optional[List[float]] = None,
+    ) -> ToolResult:
+        """Control the selected Blender UI without generating a Python script.
+
+        Args:
+            agent_control: inspect, move_cursor, open_menu, select_object, set_tool, show_properties or set_property.
+            target: Menu add/object/view, tool select_box/move/rotate/scale, object name,
+                Properties tab such as OBJECT, or active-object property location/rotation_euler/scale.
+            area_id: Editor ID from inspect. Required when multiple matching editors exist.
+            position: move_cursor only: normalized viewport coordinates [x, y], bottom-left origin; default center.
+            value: set_property only: three finite values for the active object; rotations in radians.
+        """
+        input_data = server._validate_input(
+            BlenderUIRequest, agent_control=agent_control, target=target,
+            area_id=area_id, position=position, value=value,
+        )
+        if isinstance(input_data, dict):
+            return server._as_text_result(input_data)
+        assert isinstance(input_data, BlenderUIRequest)
+        return await server._exec_backend(
+            "control_blender_ui", server.blender_adapter, "Blender", BlenderUIResponse,
+            lambda session: session.control_ui(**input_data.model_dump()),
+        )
 
     @server.mcp.tool(
         name="get_blender_info",
@@ -672,6 +715,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
         if isinstance(input_data, dict):
             return server._as_text_result(input_data)
+        assert isinstance(input_data, BlenderSetTransformRequest)
         return await server._exec_backend(
             "set_blender_object_transform",
             server.blender_adapter,
@@ -679,9 +723,9 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             BlenderSetTransformResponse,
             lambda session: session.set_object_transform(
                 input_data.object_name,
-                loc,
-                rot,
-                sc,
+                input_data.location,
+                input_data.rotation_euler,
+                input_data.scale,
             ),
         )
 

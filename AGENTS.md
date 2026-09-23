@@ -77,6 +77,11 @@ files next to it whatever `simul-mcp` is installed in the interpreter.
   uses that selection; `control_unreal_ui` provides named editor controls even with
   scripting disabled. See `docs/unreal-attachment.md`.
 
+- Blender attached mode: `simul blender install-bridge` builds an add-on ZIP to enable
+  in the existing editor, then `simul blender instances` / `attach` select its window.
+  Run `simul server --backends blender --blender-mode attached`; no server-side bpy is
+  required. See `docs/blender-attachment.md`. `SIMUL_BLENDER_LIVE=1 pytest
+  tests/blender/test_live_attach.py -m blender_live` launches and closes a disposable GUI.
 - Isaac Sim tools require a running Isaac Sim instance (5.1.0, 6.0.0, or 6.0.1) with the bridge on port 8229 or the stock Python socket on port 8226. `simul-mcp isaac launch` starts one with both enabled.
 - Headless USD tools work without Omniverse.
 - `tests/isaac/live/` is the `@pytest.mark.isaac` tier: ping, stage info,

@@ -275,6 +275,14 @@ class BlenderConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     enabled: bool = Field(default=True, description="Enable Blender runtime tools")
+    mode: Literal["embedded", "attached"] = Field(
+        default="embedded", description="Use local bpy or an explicitly attached Blender window"
+    )
+    discovery_dir: str = Field(default="~/.simul/blender", description="Local Blender bridge discovery directory")
+    attachment_path: str = Field(
+        default="~/.simul/blender/attachment.json", description="Target written by simul blender attach"
+    )
+    connection_timeout: float = Field(default=30.0, gt=0, le=3600)
     binary_path: Optional[str] = Field(
         default=None,
         description="Path to Blender binary when explicitly configured",

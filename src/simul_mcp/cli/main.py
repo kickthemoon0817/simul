@@ -43,6 +43,7 @@ from simul_mcp.adapters import is_blender_available, is_headless_available
 from simul_mcp.cli.isaac import app as isaac_app
 from simul_mcp.cli.usd_cli import app as usd_app
 from simul_mcp.cli.unreal_cli import app as unreal_app
+from simul_mcp.cli.blender_cli import app as blender_app
 
 
 def _is_isaac_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -90,6 +91,7 @@ console = Console(stderr=True)
 # Register sub-apps
 app.add_typer(isaac_app, name="isaac", help="Isaac Sim commands")
 app.add_typer(usd_app, name="usd", help="USD file commands (headless)")
+app.add_typer(blender_app, name="blender", help="Attach to existing Blender windows")
 app.add_typer(
     unreal_app, name="unreal", help="Unreal Engine commands (Remote Control API)"
 )
@@ -290,6 +292,9 @@ def server(
     unreal_mode: Optional[str] = typer.Option(
         None, "--unreal-mode", help="Unreal connection: endpoint or attached (explicitly selected editor)"
     ),
+    blender_mode: Optional[str] = typer.Option(
+        None, "--blender-mode", help="Blender connection: embedded (local bpy) or attached (selected existing window)"
+    ),
     log_level: Optional[str] = typer.Option(
         None, "--log-level", "-l", help="Log level (DEBUG, INFO, WARNING, ERROR)"
     ),
@@ -309,6 +314,13 @@ def server(
                 emit_error("--unreal-mode must be endpoint or attached", "ValueError")
             settings = settings.model_copy(update={
                 "unreal": settings.unreal.model_copy(update={"mode": unreal_mode})
+            })
+
+        if blender_mode is not None:
+            if blender_mode not in ("embedded", "attached"):
+                emit_error("--blender-mode must be embedded or attached", "ValueError")
+            settings = settings.model_copy(update={
+                "blender": settings.blender.model_copy(update={"mode": blender_mode})
             })
 
         # LoggingConfig is frozen on purpose, so rebuild the section rather
@@ -368,7 +380,7 @@ def server(
         isaac_host = settings.isaac_sim.socket_host
         isaac_port = settings.isaac_sim.socket_port
         isaac_reachable = _is_isaac_reachable(isaac_host, isaac_port)
-        blender_available = is_blender_available()
+        blender_available = settings.blender.mode == "attached" or is_blender_available()
         usd_available = is_headless_available()
 
         backends_label = (
@@ -424,7 +436,7 @@ def info(
         isaac_host = settings.isaac_sim.socket_host
         isaac_port = settings.isaac_sim.socket_port
         isaac_reachable = _is_isaac_reachable(isaac_host, isaac_port)
-        blender_available = is_blender_available()
+        blender_available = settings.blender.mode == "attached" or is_blender_available()
         usd_available = is_headless_available()
 
         # Instantiate the server so the listing is what actually registered,
@@ -447,7 +459,7 @@ def info(
                         "install_path": isaac_install_path,
                         "install_path_error": isaac_install_error,
                     },
-                    "blender": {"available": blender_available},
+                    "blender": {"available": blender_available, "mode": settings.blender.mode},
                     "usd_headless": {"available": usd_available},
                 },
                 "tool_count": len(tool_names),
@@ -480,9 +492,12 @@ def info(
             "Blender Runtime",
             "Available" if blender_available else "Not Available",
             (
-                "Blender scene tools through bpy"
-                if blender_available
-                else "Install bpy to enable Blender tools"
+                "Selected window bridge; use simul blender status to check liveness"
+                if settings.blender.mode == "attached"
+                else (
+                    "Blender scene tools through local bpy"
+                    if blender_available else "Install bpy or use attached mode"
+                )
             ),
         )
         system_table.add_row(
@@ -705,7 +720,7 @@ def version() -> None:
     settings = get_settings()
     isaac_port = settings.isaac_sim.socket_port
     isaac_reachable = _is_isaac_reachable(settings.isaac_sim.socket_host, isaac_port)
-    blender_available = is_blender_available()
+    blender_available = settings.blender.mode == "attached" or is_blender_available()
     usd_available = is_headless_available()
 
     if is_json_mode():

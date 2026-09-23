@@ -73,8 +73,10 @@ def _headless_adapter(settings: Settings) -> Optional[BackendAdapter]:
 
 
 def _blender_adapter(settings: Settings) -> Optional[BackendAdapter]:
-    """Build the Blender adapter when bpy imports."""
-    return BlenderRuntimeAdapter(settings) if is_blender_available() else None
+    """Attached mode does not require bpy in the MCP server interpreter."""
+    if settings.blender.mode == "attached" or is_blender_available():
+        return BlenderRuntimeAdapter(settings)
+    return None
 
 
 def _unreal_adapter(settings: Settings) -> Optional[BackendAdapter]:
@@ -122,7 +124,10 @@ BACKENDS: Tuple[BackendSpec, ...] = (
         settings_attribute="blender",
         adapter_factory=_blender_adapter,
         register_tools=register_blender_tools,
-        routing_rule="Tools containing 'blender' → require a connected Blender runtime.",
+        routing_rule=(
+            "Tools containing 'blender' or 'simready' → use local bpy in embedded mode, or the exact "
+            "window selected with 'simul blender attach' in attached mode; never switch targets automatically."
+        ),
     ),
     BackendSpec(
         name="unreal",

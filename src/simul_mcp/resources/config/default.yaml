@@ -68,6 +68,15 @@ isaac_sim:
       width: 1920
       height: 1080
 
+# Blender Configuration
+blender:
+  enabled: true
+  mode: embedded  # attached controls the existing window selected by `simul blender attach`
+  discovery_dir: "~/.simul/blender"
+  attachment_path: "~/.simul/blender/attachment.json"
+  connection_timeout: 30.0
+  max_scene_objects: 200
+
 # USD Configuration
 usd:
   # Stage settings
