@@ -7,11 +7,13 @@ from pydantic import BaseModel, ConfigDict, Field
 AgentControl = Literal[
     "inspect",
     "move_cursor",
+    "clear_cursor",
     "open_menu",
     "select_object",
     "set_tool",
     "show_properties",
     "set_property",
+    "isolate_workspace",
 ]
 
 
@@ -23,6 +25,7 @@ class BlenderUIRequest(BaseModel):
     area_id: str | None = None
     position: list[float] | None = Field(None, min_length=2, max_length=2)
     value: list[float] | None = Field(None, min_length=3, max_length=3)
+    agent_id: str = Field("agent", min_length=1, max_length=64)
 
 
 class BlenderUIResponse(BaseModel):
