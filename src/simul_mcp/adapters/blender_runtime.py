@@ -922,9 +922,11 @@ class BlenderRuntimeSession:
         obj = self._get_object_or_raise(object_name)
         prev_parent = obj.parent.name if obj.parent else None
         if keep_transform and obj.parent:
-            world_loc = list(obj.matrix_world.translation)
+            # Keep rotation and scale as well as translation: the full world
+            # matrix, not just its translation, becomes the local transform.
+            world_matrix = obj.matrix_world.copy()
             obj.parent = None
-            obj.location = tuple(world_loc)
+            obj.matrix_world = world_matrix
         else:
             obj.parent = None
         return {"object_name": object_name, "previous_parent": prev_parent}
@@ -1267,6 +1269,20 @@ class BlenderRuntimeSession:
             ValueError: If the format is unsupported.
         """
         file_path = self._deny_outside_sandbox(file_path, write=True)
+        return self._run_export(file_path, file_format, selected_only)
+
+    def _run_export(
+        self,
+        file_path: str,
+        file_format: str,
+        selected_only: bool = False,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Dispatch the version-aware export operator.
+
+        ``options`` are extra operator properties, passed only when this
+        Blender's operator defines them.
+        """
         fmt = file_format.upper()
         if fmt not in self._SUPPORTED_FORMATS:
             raise ValueError(
@@ -1290,6 +1306,9 @@ class BlenderRuntimeSession:
                 else self._SELECTION_KW_LEGACY
             )
             kwargs[sel_kw_map[fmt]] = True
+        if options:
+            supported = op_func.get_rna_type().properties.keys()
+            kwargs.update({k: v for k, v in options.items() if k in supported})
 
         op_func(**kwargs)
         return {"file_path": file_path, "file_format": fmt}
@@ -1661,7 +1680,7 @@ class BlenderRuntimeSession:
             "strength": float(field.strength),
             "shape": field.shape,
             "flow": float(field.flow),
-            "location": [float(v) for v in obj.location],
+            "location": self._world_location(obj),
         }
 
     def add_rigid_body_constraint(
@@ -1753,6 +1772,32 @@ class BlenderRuntimeSession:
             "disable_collisions": rbc.disable_collisions,
         }
 
+    @staticmethod
+    def _evaluated_world_matrix(obj: Any) -> Any:
+        """World matrix after animation, constraints, parents and rigid bodies.
+
+        ``obj.location`` is the authored local value: it misses parent space
+        and never moves under a rigid-body simulation, which writes only the
+        evaluated matrix.
+        """
+        blender_module: Any = bpy
+        depsgraph = blender_module.context.evaluated_depsgraph_get()
+        return obj.evaluated_get(depsgraph).matrix_world
+
+    @classmethod
+    def _world_location(cls, obj: Any) -> List[float]:
+        return [float(v) for v in cls._evaluated_world_matrix(obj).translation]
+
+    @classmethod
+    def _world_pose(cls, obj: Any) -> Tuple[List[float], List[float]]:
+        """World location and XYZ-order (or the object's own Euler order) rotation."""
+        matrix = cls._evaluated_world_matrix(obj)
+        order = obj.rotation_mode if len(obj.rotation_mode) == 3 else "XYZ"
+        return (
+            [float(v) for v in matrix.translation],
+            [float(v) for v in matrix.to_euler(order)],
+        )
+
     def get_physics_state(self, object_name: str) -> Dict[str, Any]:
         """
         Get current physics state of an object.
@@ -1768,10 +1813,11 @@ class BlenderRuntimeSession:
         rb = getattr(obj, "rigid_body", None)
         has_rb = rb is not None
 
+        location, rotation = self._world_pose(obj)
         return {
             "object_name": object_name,
-            "location": [float(v) for v in obj.location],
-            "rotation_euler": [float(v) for v in obj.rotation_euler],
+            "location": location,
+            "rotation_euler": rotation,
             "is_active": rb is not None and rb.type == "ACTIVE",
             "has_rigid_body": has_rb,
             "mass": float(rb.mass) if rb is not None else None,
@@ -1786,7 +1832,10 @@ class BlenderRuntimeSession:
         step: int = 1,
     ) -> Dict[str, Any]:
         """
-        Record object position and rotation across a frame range.
+        Record object world position and rotation across a frame range.
+
+        Samples the evaluated world matrix, so parenting, constraints and
+        rigid-body simulation are reflected (``obj.location`` is none of these).
 
         Args:
             object_name: Name of the object to track.
@@ -1805,12 +1854,27 @@ class BlenderRuntimeSession:
 
         points: List[Dict[str, Any]] = []
         prev_location: Optional[List[float]] = None
+        sampled = set(range(start_frame, end_frame + 1, max(step, 1)))
+        # An unbaked rigid-body world only advances one frame at a time from
+        # its cache start; jumping straight to a sample frame leaves bodies
+        # at rest. Walk every frame from there and sample the requested ones.
+        walk: range = range(start_frame, end_frame + 1, max(step, 1))
+        rigidbody_world = getattr(scene, "rigidbody_world", None)
+        if (
+            sampled
+            and rigidbody_world is not None
+            and getattr(rigidbody_world, "enabled", True)
+            and not rigidbody_world.point_cache.is_baked
+        ):
+            cache_start = int(rigidbody_world.point_cache.frame_start)
+            walk = range(min(start_frame, cache_start), end_frame + 1)
 
         try:
-            for frame in range(start_frame, end_frame + 1, max(step, 1)):
+            for frame in walk:
                 scene.frame_set(frame)
-                loc = [float(v) for v in obj.location]
-                rot = [float(v) for v in obj.rotation_euler]
+                if frame not in sampled:
+                    continue
+                loc, rot = self._world_pose(obj)
                 time_sec = frame / fps
 
                 velocity: Optional[List[float]] = None
@@ -1863,9 +1927,10 @@ class BlenderRuntimeSession:
         pc.frame_start = frame_start
         pc.frame_end = frame_end
 
-        override = {"scene": scene, "point_cache": pc}
+        # Blender 4.0 removed the positional context-override dict.
         try:
-            blender_module.ops.ptcache.bake(override, bake=True)
+            with blender_module.context.temp_override(scene=scene, point_cache=pc):
+                blender_module.ops.ptcache.bake(bake=True)
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to bake simulation (frames {frame_start}-{frame_end}): {exc}"
@@ -1890,9 +1955,9 @@ class BlenderRuntimeSession:
             raise ValueError("No rigid body world to free")
 
         pc = scene.rigidbody_world.point_cache
-        override = {"scene": scene, "point_cache": pc}
         try:
-            blender_module.ops.ptcache.free_bake(override)
+            with blender_module.context.temp_override(scene=scene, point_cache=pc):
+                blender_module.ops.ptcache.free_bake()
         except Exception as exc:
             raise RuntimeError(f"Failed to free baked simulation data: {exc}") from exc
 
@@ -2365,8 +2430,9 @@ class BlenderRuntimeSession:
                         }
                     )
 
-            if check_materials and hasattr(obj, "data") and obj.data:
-                mat_count = len(getattr(obj.data, "materials", []))
+            if check_materials and hasattr(getattr(obj, "data", None), "materials"):
+                # Cameras, lights and empties carry no material slots.
+                mat_count = len(obj.data.materials)
                 if mat_count == 0:
                     issues.append(
                         {
@@ -2443,7 +2509,9 @@ class BlenderRuntimeSession:
             targets = list(self._resolve_object_source(None))
 
         if validate_before_export:
-            names = [o.name for o in targets]
+            # SimReady rules apply to mesh prims; cameras and lights would
+            # only produce spurious "No material" errors.
+            names = [o.name for o in targets if o.type == "MESH"]
             result = self.validate_simready_compliance(object_names=names)
             issues = result.get("issues")
             validation_passed = result.get("compliant", True)
@@ -2454,10 +2522,11 @@ class BlenderRuntimeSession:
         for obj in targets:
             obj.select_set(True)
 
-        self.export_file(
-            file_path=file_path,
-            file_format="USD",
+        self._run_export(
+            file_path,
+            "USD",
             selected_only=bool(object_names),
+            options={"export_custom_properties": embed_metadata},
         )
 
         return {
@@ -2732,6 +2801,7 @@ class BlenderRuntimeSession:
             "height": height,
             "engine": engine,
             "capture_method": "gpu_offscreen",
+            "format": "jpeg",
         }
 
     def _capture_render_fallback(
@@ -2803,6 +2873,7 @@ class BlenderRuntimeSession:
                 "height": height,
                 "engine": engine,
                 "capture_method": "render_fallback",
+                "format": "jpeg",
             }
         finally:
             render.resolution_x = orig_x

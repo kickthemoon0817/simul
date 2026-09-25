@@ -26,7 +26,13 @@ from ..adapters.blender_runtime import BlenderRuntimeSession
 from ..utils.paths import PathPolicy
 from .agent_control import reset_ui
 from .agent_cursor import cursors, hide_annotations, observations
-from .protocol import MAX_MESSAGE_BYTES, PROTOCOL_VERSION, BridgeFiles, BridgeWire
+from .protocol import (
+    MAX_MESSAGE_BYTES,
+    PROTOCOL_VERSION,
+    BridgeFiles,
+    BridgeWire,
+    protocol_mismatch_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +141,7 @@ class BlenderBridge:
                     if b"\n" not in pending.incoming:
                         continue
                     request = json.loads(pending.incoming.split(b"\n", 1)[0])
-                    pending.outgoing = BridgeWire.encode(self.dispatch(request))
+                    pending.outgoing = self._encode_reply(request, self.dispatch(request))
                     pending.expires = time.monotonic() + 5
                 sent = pending.socket.send(pending.outgoing)
                 pending.outgoing = pending.outgoing[sent:]
@@ -152,11 +158,12 @@ class BlenderBridge:
         """Validate identity before invoking a public session operation."""
         request_id = request.get("request_id") if isinstance(request, dict) else None
         try:
-            if (
-                not isinstance(request, dict)
-                or request.get("protocol") != PROTOCOL_VERSION
-            ):
+            if not isinstance(request, dict):
                 raise ValueError("Unsupported Blender bridge protocol")
+            if request.get("protocol") != PROTOCOL_VERSION:
+                raise ValueError(
+                    protocol_mismatch_message(PROTOCOL_VERSION, request.get("protocol"))
+                )
             token = request.get("token")
             if not isinstance(token, str) or not secrets.compare_digest(
                 token, self.token
@@ -184,6 +191,34 @@ class BlenderBridge:
                 "error_type": type(exc).__name__,
                 "details": getattr(exc, "details", {}),
             }
+
+    @staticmethod
+    def _encode_reply(request: Any, response: dict[str, Any]) -> bytes:
+        """Encode a reply; an unencodable result still gets a small error reply.
+
+        Closing the socket without a reply would leave the client with a bare
+        connection error. The operation may already have run, so the error
+        says so instead of inviting a blind retry.
+        """
+        try:
+            return BridgeWire.encode(response)
+        except (ValueError, TypeError) as exc:
+            logger.error("Blender bridge reply could not be encoded: %s", exc)
+            request_id = request.get("request_id") if isinstance(request, dict) else None
+            return BridgeWire.encode(
+                {
+                    "request_id": request_id,
+                    "success": False,
+                    "error": (
+                        "Blender handled the request, but its reply could not be encoded "
+                        f"({exc}); the operation may already have run. Request a smaller "
+                        "result (fewer frames, lower resolution) or inspect Blender before "
+                        "retrying."
+                    ),
+                    "error_type": "ResponseEncodingError",
+                    "details": {},
+                }
+            )
 
     def describe(self) -> dict[str, Any]:
         """Report live windows and unsaved state without choosing a target."""
@@ -276,16 +311,10 @@ class BlenderBridge:
                     "Attached window is not in Object Mode; leave Edit/Pose Mode before this operation"
                 )
             capturing = method in {"capture_viewport", "capture_viewport_sequence"}
+            # The label only drives cosmetic feedback. The MCP request models
+            # validate it for both modes; an odd label here must not cost the
+            # capture, so observations.show() rejects it inside the guard below.
             agent_id = arguments.arguments.get("agent_id", "agent")
-            if capturing and (
-                not isinstance(agent_id, str)
-                or not 1 <= len(agent_id) <= 64
-                or not agent_id.isprintable()
-                or not agent_id.strip()
-            ):
-                raise ValueError(
-                    "agent_id must be a printable label of 1 to 64 characters"
-                )
             with hide_annotations() if capturing else nullcontext():
                 result = operation(*arguments.args, **arguments.kwargs)
             if (

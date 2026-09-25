@@ -1563,17 +1563,24 @@ class TestSceneManipulationTools:
         assert child.parent is parent
 
     def test_clear_parent_keep_transform(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Unparent with keep_transform preserves world location."""
+        """Unparent with keep_transform re-applies the full world matrix.
+
+        Copying only the translation dropped the parent's rotation and scale;
+        the whole matrix must be written back once the parent is gone.
+        """
+        world_matrix = SimpleNamespace(label="rotated+scaled world")
+        assigned: List[Any] = []
+
+        class RecordingChild(FakeObject):
+            def __setattr__(self, name: str, value: Any) -> None:
+                if name == "matrix_world" and "parent" in self.__dict__:
+                    assigned.append((value, self.parent))
+                super().__setattr__(name, value)
+
         parent = FakeObject("Parent", "MESH", True, location=(10.0, 0.0, 0.0))
-        child = FakeObject(
-            "Child",
-            "MESH",
-            True,
-            location=(5.0, 0.0, 0.0),
-            parent=parent,
-        )
-        # matrix_world translation simulates the world-space location
-        child.matrix_world = FakeMatrix((15.0, 0.0, 0.0))
+        child = RecordingChild("Child", "MESH", True, location=(5.0, 0.0, 0.0), parent=parent)
+        child.__dict__["matrix_world"] = SimpleNamespace(copy=lambda: world_matrix)
+        assigned.clear()  # ignore the constructor's own assignment
         objs = {"Child": child, "Parent": parent}
         fake_bpy = self._make_fake_bpy_with_manipulation(objects=objs)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
@@ -1584,8 +1591,8 @@ class TestSceneManipulationTools:
 
         assert result["previous_parent"] == "Parent"
         assert child.parent is None
-        # location should be set to world translation
-        assert list(child.location) == [15.0, 0.0, 0.0]
+        # The copied world matrix is written after the parent is cleared.
+        assert assigned == [(world_matrix, None)]
 
     def test_clear_parent_no_keep(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Unparent without keeping transform just sets parent to None."""
