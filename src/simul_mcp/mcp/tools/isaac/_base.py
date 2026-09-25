@@ -81,13 +81,7 @@ class IsaacScriptBase(LoggerMixin):
         Returns:
             The SandboxError payload, or None when the path may be used.
         """
-        if path is None or self._path_policy.is_allowed(path, write=write):
-            return None
-        return ErrorResponse(
-            error="File path is not allowed by sandbox policy",
-            error_type="SandboxError",
-            details=self._path_policy.denial_details(path, write=write),
-        ).model_dump()
+        return self._path_policy.denial(path, write=write)
 
     @staticmethod
     def _refusal(message: str, **details: Any) -> Dict[str, Any]:
@@ -104,6 +98,54 @@ class IsaacScriptBase(LoggerMixin):
             error=message,
             error_type="RefusedOperation",
             details=details or None,
+        ).model_dump()
+
+    @staticmethod
+    def _script_failure(result: ScriptResult) -> Dict[str, Any]:
+        """Return the error envelope for a script that raised inside Isaac Sim.
+
+        Args:
+            result: A ScriptResult whose ``success`` is False.
+
+        Returns:
+            An ErrorResponse dict carrying the remote exception name, message
+            and traceback.
+        """
+        return ErrorResponse(
+            error=result.error_value or "Script execution failed",
+            error_type=result.error_name or "RuntimeError",
+            details={"traceback": result.traceback} if result.traceback else None,
+        ).model_dump()
+
+    @staticmethod
+    def _bridge_response_envelope(response: Dict[str, Any]) -> Dict[str, Any]:
+        """Turn a bridge response frame into a tool envelope.
+
+        An ``ok`` frame yields its payload, marked by the same rule as the
+        script path: a typed action that reports ``timeline_error`` beside its
+        other sections is a failure. Any other frame yields an ErrorResponse
+        naming the remote error.
+
+        Args:
+            response: The decoded bridge response.
+
+        Returns:
+            The payload dict or an ErrorResponse dict.
+        """
+        if response.get("status") == "ok":
+            result_payload = response.get("payload", {})
+            if not isinstance(result_payload, dict):
+                return ErrorResponse(
+                    error="Bridge response payload must be an object.",
+                    error_type="BridgeProtocolError",
+                ).model_dump()
+            return apply_success_from_error(result_payload)
+
+        error = response.get("error", {})
+        return ErrorResponse(
+            error=str(error.get("message", "Bridge request failed")),
+            error_type=str(error.get("name", "BridgeError")),
+            details={"traceback": error.get("traceback")} if error.get("traceback") else None,
         ).model_dump()
 
     async def _execute_json_script(
@@ -149,15 +191,7 @@ class IsaacScriptBase(LoggerMixin):
             ).model_dump()
 
         if not result.success:
-            return ErrorResponse(
-                error=result.error_value or "Script execution failed",
-                error_type=result.error_name or "RuntimeError",
-                details=(
-                    {"traceback": result.traceback}
-                    if result.traceback
-                    else None
-                ),
-            ).model_dump()
+            return self._script_failure(result)
 
         output = result.output.strip()
         if not output:
@@ -220,26 +254,13 @@ class IsaacScriptBase(LoggerMixin):
                 error_type=type(exc).__name__,
             ).model_dump()
 
-        if response.get("status") == "ok":
-            result_payload = response.get("payload", {})
-            if not isinstance(result_payload, dict):
-                return ErrorResponse(
-                    error="Bridge response payload must be an object.",
-                    error_type="BridgeProtocolError",
-                ).model_dump()
-            # Same envelope rule as the script path: a typed action that
-            # reports `timeline_error` beside its other sections is a failure.
-            return apply_success_from_error(result_payload)
-
-        error = response.get("error", {})
-        error_name = str(error.get("name", "BridgeError"))
-        if error_name == "UnknownAction":
+        if (
+            response.get("status") != "ok"
+            and str(response.get("error", {}).get("name", "BridgeError")) == "UnknownAction"
+        ):
+            # An older bridge without this action; the caller falls back.
             return None
-        return ErrorResponse(
-            error=str(error.get("message", "Bridge request failed")),
-            error_type=error_name,
-            details={"traceback": error.get("traceback")} if error.get("traceback") else None,
-        ).model_dump()
+        return self._bridge_response_envelope(response)
 
     @property
     def _raw_script_transport_mode(self) -> str:

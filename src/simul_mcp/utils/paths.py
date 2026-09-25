@@ -65,6 +65,34 @@ class SandboxDenied(PermissionError):
         self.details: Dict[str, Any] = details
 
 
+SANDBOX_DENIED_MESSAGE = "File path is not allowed by sandbox policy"
+
+
+def sandbox_error(
+    details: Dict[str, Any], *, error: str = SANDBOX_DENIED_MESSAGE
+) -> Dict[str, Any]:
+    """Build the ``SandboxError`` tool envelope every layer reports.
+
+    The dict has the shape of ``ErrorResponse(...).model_dump()``; it is built
+    by hand so this module keeps no dependency on the MCP schemas (the Blender
+    add-on bundles it without pydantic).
+
+    Args:
+        details: The denial details, usually from ``PathPolicy.denial_details``
+            or ``SandboxDenied.details``.
+        error: The message; the default names a refused path.
+
+    Returns:
+        The error envelope with ``error_type`` ``SandboxError``.
+    """
+    return {
+        "success": False,
+        "error": error,
+        "error_type": "SandboxError",
+        "details": details,
+    }
+
+
 class PathPolicy:
     """Decide whether a path may be opened, written, or referenced."""
 
@@ -198,6 +226,25 @@ class PathPolicy:
         except SandboxDenied:
             return False
         return True
+
+    def denial(
+        self, path_str: Optional[str], *, write: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """Return the SandboxError envelope for ``path_str``, or None when allowed.
+
+        ``None`` also means there is no path to police (an optional target
+        that was not supplied).
+
+        Args:
+            path_str: Path or URL supplied by the caller, or None.
+            write: Whether the caller intends to write to the location.
+
+        Returns:
+            The error envelope naming the allowed roots and URL schemes, or None.
+        """
+        if path_str is None or self.is_allowed(path_str, write=write):
+            return None
+        return sandbox_error(self.denial_details(path_str, write=write))
 
     def resolve(self, path_str: str) -> Path:
         """Normalize a local path exactly the way the containment test sees it.

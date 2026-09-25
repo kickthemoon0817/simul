@@ -202,3 +202,26 @@ def test_sandbox_disabled_allows_any_path() -> None:
 
     assert not _denied(result)
     assert client.execute.await_count == 1
+
+
+def test_sandbox_error_matches_the_error_response_schema() -> None:
+    """The one SandboxError builder stays byte-compatible with ErrorResponse."""
+    from simul_mcp.mcp.schemas.common import ErrorResponse
+    from simul_mcp.utils.paths import SANDBOX_DENIED_MESSAGE, sandbox_error
+
+    details = {"file_path": OUTSIDE_SANDBOX}
+    assert sandbox_error(details) == ErrorResponse(
+        error=SANDBOX_DENIED_MESSAGE, error_type="SandboxError", details=details
+    ).model_dump()
+
+
+def test_policy_denial_is_none_for_allowed_or_absent_paths() -> None:
+    from simul_mcp.utils.paths import PathPolicy
+
+    policy = PathPolicy.from_settings(Settings())
+    assert policy.denial(None) is None
+    assert policy.denial(INSIDE_SANDBOX) is None
+    denial = policy.denial(OUTSIDE_SANDBOX, write=True)
+    assert denial is not None
+    assert denial["error_type"] == "SandboxError"
+    assert denial["details"]["access"] == "write"

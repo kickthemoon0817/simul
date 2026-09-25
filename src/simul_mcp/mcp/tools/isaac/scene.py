@@ -261,7 +261,7 @@ class SceneInspectionMixin:
             return bridge_result
 
         _prim_path = _pyval(prim_path)
-        _bulk_attrs = repr(set(BULK_GEOMETRY_ATTRIBUTES))
+        _bulk_attrs = _pyval(set(BULK_GEOMETRY_ATTRIBUTES))
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
