@@ -229,3 +229,72 @@ async def test_release_refuses_someone_elses_claim(monkeypatch: pytest.MonkeyPat
 
     sessions = instance.session_manager.get_instance_session(8226).get_status()["sessions"]
     assert sorted(s["agent_id"] for s in sessions) == ["agent-a", "agent-b"]
+
+
+# ---------------------------------------------------------------------------
+# agent_id is a label: a claim stays bound to the MCP session that made it
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reusing_the_holders_agent_id_does_not_inherit_its_claim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    instance, ctx = _make_server(monkeypatch, tmp_path, enforce=True)
+    claim = _tool(instance, "claim_isaac_instance").func
+    set_active = _tool(instance, "set_active_isaac_instance").func
+    execute = _tool(instance, "execute_isaac_script").func
+
+    held = _payload(await _as(ctx, "session-a", lambda: claim(purpose="RL training run", agent_id="trainer")))
+    assert held["success"] is True
+
+    # The label is public: list_isaac_instances shows it to every agent.
+    hijack = _payload(
+        await _as(ctx, "session-b", lambda: claim(purpose="scene cleanup", agent_id="trainer"))
+    )
+    assert hijack["error_type"] == "InstanceClaimed"
+    assert "bound to a different MCP session" in hijack["error"]
+    via_switch = _payload(
+        await _as(
+            ctx,
+            "session-b",
+            lambda: set_active(instance_name="default", purpose="scene cleanup", agent_id="trainer"),
+        )
+    )
+    assert via_switch["error_type"] == "InstanceClaimed"
+    refused = _payload(await _as(ctx, "session-b", lambda: execute(code="print(1)")))
+    assert refused["error_type"] == "InstanceClaimed"
+
+    # The record was not taken over: the holder's purpose and session stand.
+    (record,) = instance.session_manager.get_instance_session(8226).get_status()["sessions"]
+    assert record["purpose"] == "RL training run"
+    assert _payload(await _as(ctx, "session-a", lambda: execute(code="print(2)")))["success"] is True
+    again = _payload(await _as(ctx, "session-a", lambda: claim(purpose="RL training run", agent_id="trainer")))
+    assert again["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_session_records_carry_an_opaque_owner_not_the_session_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    instance, ctx = _make_server(monkeypatch, tmp_path, enforce=True)
+    claim = _tool(instance, "claim_isaac_instance").func
+
+    await _as(ctx, "secret-session-id", lambda: claim(purpose="RL training run", agent_id="trainer"))
+
+    (record,) = instance.session_manager.get_instance_session(8226).get_status()["sessions"]
+    assert record["owner"]
+    assert "secret-session-id" not in json.dumps(record)
+
+
+@pytest.mark.asyncio
+async def test_legacy_record_without_owner_still_matches_by_agent_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Claims written before owners existed keep working until they expire."""
+    instance, ctx = _make_server(monkeypatch, tmp_path, enforce=True)
+    execute = _tool(instance, "execute_isaac_script").func
+    instance.session_manager.get_instance_session(8226).register("session-a", "RL training run")
+
+    assert _payload(await _as(ctx, "session-a", lambda: execute(code="print(1)")))["success"] is True
+    assert _payload(await _as(ctx, "session-b", lambda: execute(code="print(1)")))["error_type"] == "InstanceClaimed"
