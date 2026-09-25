@@ -14,6 +14,7 @@ import secrets
 import socket
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,7 @@ from bpy.app.handlers import persistent
 from ..adapters.blender_runtime import BlenderRuntimeSession
 from ..utils.paths import PathPolicy
 from .agent_control import reset_ui
-from .agent_cursor import cursors
+from .agent_cursor import cursors, hide_annotations, observations
 from .protocol import MAX_MESSAGE_BYTES, PROTOCOL_VERSION, BridgeFiles, BridgeWire
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,7 @@ class BlenderBridge:
         if self.listener is None:
             return None
         cursors.prune()
+        observations.prune()
         for _ in range(8):
             try:
                 connection, _address = self.listener.accept()
@@ -273,7 +275,30 @@ class BlenderBridge:
                 raise ValueError(
                     "Attached window is not in Object Mode; leave Edit/Pose Mode before this operation"
                 )
-            result = operation(*arguments.args, **arguments.kwargs)
+            capturing = method in {"capture_viewport", "capture_viewport_sequence"}
+            agent_id = arguments.arguments.get("agent_id", "agent")
+            if capturing and (
+                not isinstance(agent_id, str)
+                or not 1 <= len(agent_id) <= 64
+                or not agent_id.isprintable()
+                or not agent_id.strip()
+            ):
+                raise ValueError(
+                    "agent_id must be a printable label of 1 to 64 characters"
+                )
+            with hide_annotations() if capturing else nullcontext():
+                result = operation(*arguments.args, **arguments.kwargs)
+            if (
+                capturing
+                and area is not None
+                and (result.get("image_base64") or result.get("frame_count", 0) > 0)
+            ):
+                # The image is complete before feedback appears in the editor.
+                # Cosmetic feedback must never turn a completed capture into an error.
+                try:
+                    observations.show(window, area, agent_id)
+                except Exception:
+                    logger.exception("Could not display Blender capture feedback")
             if method == "get_runtime_info":
                 result.update(
                     instance_id=self.instance_id,

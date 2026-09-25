@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 AgentControl = Literal[
     "inspect",
+    "observe",
     "move_cursor",
     "clear_cursor",
     "open_menu",

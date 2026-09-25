@@ -349,6 +349,8 @@ class BlenderBoundsCheckResponse(BaseModel):
 class BlenderCaptureViewportRequest(BaseModel):
     """Request to capture the current viewport as a JPEG image."""
 
+    agent_id: str = Field("agent", min_length=1, max_length=64)
+
     width: int = Field(512, description="Output image width in pixels", ge=64, le=4096)
     height: int = Field(
         512, description="Output image height in pixels", ge=64, le=4096
@@ -505,6 +507,8 @@ class BlenderViewportInfoResponse(BaseModel):
 
 class BlenderCaptureSequenceRequest(BaseModel):
     """Request for multi-frame viewport capture."""
+
+    agent_id: str = Field("agent", min_length=1, max_length=64)
 
     start_frame: int = Field(..., description="First frame to capture")
     end_frame: int = Field(..., description="Last frame to capture")

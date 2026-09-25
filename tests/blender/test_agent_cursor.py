@@ -80,3 +80,41 @@ def test_expiry_workspace_changes_and_stop_remove_annotations(overlay):
     cursors.stop()
     assert not cursors.handlers and not cursors.markers
     assert space.draw_handler_remove.call_count == 2
+
+
+def test_observation_fades_without_erasing_pointer_or_other_window(
+    overlay, monkeypatch
+):
+    cursors, one, two, area, _ = overlay
+    # The fixture loads the module without registering it; use the methods' globals.
+    namespace = cursors.update.__globals__
+    observations = namespace["AgentObservations"]()
+    monkeypatch.setattr(namespace["time"], "time", lambda: 100.0)
+    cursors.update(one, area, "builder", [0.2, 0.3], "Move tool (done)")
+    observations.show(one, area, "builder")
+    observations.show(one, area, "reviewer")
+    assert len(observations.inspect(one)) == 2
+    assert observations.inspect(two) == []
+    assert observations.visible() == []  # Drawing context belongs to window two.
+    monkeypatch.setattr(namespace["time"], "time", lambda: 103.0)
+    assert observations.inspect(one) == []
+    assert len(cursors.inspect(one)) == 1
+    observations.stop()
+    assert not observations.handlers
+
+
+def test_capture_hides_both_annotations_and_restores_after_failure(overlay):
+    cursors, one, _, area, _ = overlay
+    namespace = cursors.update.__globals__
+    pointers, observations = namespace["cursors"], namespace["observations"]
+    pointers.update(one, area, "builder", [0.2, 0.3], "Selected")
+    observations.show(one, area, "reviewer")
+    with pytest.raises(RuntimeError):
+        with namespace["hide_annotations"]():
+            assert pointers.suspended and observations.suspended
+            with namespace["hide_annotations"]():
+                assert pointers.visible() == observations.visible() == []
+            assert pointers.suspended and observations.suspended
+            raise RuntimeError("capture failed")
+    assert not pointers.suspended and not observations.suspended
+    assert len(pointers.inspect(one)) == len(observations.inspect(one)) == 1
