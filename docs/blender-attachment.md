@@ -87,6 +87,7 @@ annotation appears in the largest viewport, or the explicitly selected viewport.
 | Action | Target / behavior |
 |---|---|
 | `inspect` | Editors, active object/tool, Properties tabs, workspace sharing and agent markers |
+| `observe` | Brief eye badge and border pulse in the chosen 3D View; use after viewing an external screenshot |
 | `open_menu` | `add`, `object`, `view`; Object Mode only; reports menu requested |
 | `set_tool` | `select_box`, `move`, `rotate`, `scale`; refuses shared workspaces and verifies active tool |
 | `isolate_workspace` | Explicitly duplicate the attached window's shared workspace; call `inspect` again for new editor IDs |
@@ -122,6 +123,33 @@ The implementation uses Blender's
 and Properties draw handlers. These annotations are independent of native menu
 placement: menus still open through Blender's UI API using Blender's event
 context, not at the virtual pointer as if it were a physical mouse.
+
+### Capture feedback
+
+In attached mode, a successful `capture_blender_viewport` or
+`capture_blender_viewport_sequence` briefly pulses the captured editor's border
+and shows an eye badge labeled **agent · Viewing scene**. The cue fades after
+2.4 seconds; it indicates a completed capture, not continuous observation.
+Failed captures show no new cue. A sequence produces one cue after completion.
+
+Both capture tools accept `agent_id`, defaulting to the MCP session identity.
+Multiple agents have separate labels and colors. Feedback is scoped to the
+attached window, scene, workspace and viewport; it does not replace agent
+pointers, move the mouse, or change scene data. Agent annotations are suppressed
+during Simul captures so they do not appear in the returned images. Embedded
+and headless operation does not display this UI feedback.
+
+Blender cannot detect screenshots taken by an external screen-capture tool.
+After viewing such a screenshot, the agent can explicitly call:
+
+```json
+{"agent_control": "observe", "agent_id": "reviewer"}
+```
+
+Supply `area_id` when several 3D Views exist. `inspect.agent_observations`
+reports the current cues. They disappear on expiry, file load, target changes,
+or bridge shutdown. External screenshots are not filtered by Simul and may
+include any annotations currently visible on screen.
 
 ### Workspace tool isolation
 

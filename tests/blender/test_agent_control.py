@@ -53,7 +53,7 @@ def ui(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, Any]:
     monkeypatch.setitem(
         sys.modules,
         "simul_mcp.blender_bridge.agent_cursor",
-        SimpleNamespace(cursors=cursors),
+        SimpleNamespace(cursors=cursors, observations=Mock()),
     )
     path = Path(__file__).parents[2] / "src/simul_mcp/blender_bridge/agent_control.py"
     spec = importlib.util.spec_from_file_location(
@@ -172,3 +172,17 @@ def test_headless_refused_and_schema_rejects_unknown_action(ui: tuple) -> None:
         module.control_ui("inspect")
     with pytest.raises(ValueError):
         BlenderUIRequest(agent_control="execute_script")
+
+
+def test_observe_uses_selected_editor_without_replacing_pointer(ui: tuple) -> None:
+    module, bpy, area = ui
+    module.control_ui("observe", agent_id="reviewer", area_id="7")
+    module.observations.show.assert_called_once_with(
+        bpy.context.window, area, "reviewer"
+    )
+    module.cursors.update.assert_not_called()
+    bpy.context.window.cursor_warp.assert_not_called()
+    with pytest.raises(ValueError, match="does not accept target"):
+        module.control_ui("observe", target="Cube")
+    with pytest.raises(ValueError, match="unique"):
+        module.control_ui("observe", area_id="stale")

@@ -552,6 +552,7 @@ class BlenderRuntimeSession:
         height: int = 512,
         jpeg_quality: int = 85,
         use_render_fallback: bool = False,
+        agent_id: str = "agent",
     ) -> Dict[str, Any]:
         """
         Capture the viewport as a base64-encoded JPEG image.
@@ -564,6 +565,7 @@ class BlenderRuntimeSession:
             height: Output image height in pixels.
             jpeg_quality: JPEG compression quality (1-100).
             use_render_fallback: Force the render fallback path.
+            agent_id: Visible capture feedback label in attached mode; ignored in embedded mode.
 
         Returns:
             Dictionary with image_base64, dimensions, engine, capture_method.
@@ -711,6 +713,7 @@ class BlenderRuntimeSession:
         width: int = 512,
         height: int = 512,
         jpeg_quality: int = 85,
+        agent_id: str = "agent",
     ) -> Dict[str, Any]:
         """
         Capture viewport at multiple frames as base64-encoded JPEGs.
@@ -722,6 +725,7 @@ class BlenderRuntimeSession:
             width: Output image width.
             height: Output image height.
             jpeg_quality: JPEG compression quality.
+            agent_id: Visible capture feedback label in attached mode; ignored in embedded mode.
 
         Returns:
             Dictionary with frames list, frame_count, capture_method.

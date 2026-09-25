@@ -194,9 +194,40 @@ def test_attach_existing_gui_and_refuse_changed_targets(
                 client.create_object("CUBE", name="MustNotModifyActiveMesh")
             client.execute_script("bpy.ops.object.mode_set(mode='OBJECT')")
             capture = client.capture_viewport(
-                width=64, height=64, use_render_fallback=True
+                width=64, height=64, use_render_fallback=True, agent_id="viewer"
             )
             assert base64.b64decode(capture["image_base64"]).startswith(b"\xff\xd8")
+            watching = ui("inspect")["agent_observations"]
+            assert [m["agent_id"] for m in watching] == ["viewer"]
+            assert watching[0]["area_id"] == view["area_id"]
+            assert ui("observe", agent_id="reviewer")["success"] is True
+            assert {m["agent_id"] for m in ui("inspect")["agent_observations"]} == {
+                "viewer",
+                "reviewer",
+            }
+            time.sleep(2.6)
+            assert ui("inspect")["agent_observations"] == []
+            # A failed capture must not announce that the agent saw an image.
+            client.execute_script("bpy.context.scene.camera = None")
+            try:
+                with pytest.raises(RuntimeError, match="camera"):
+                    client.capture_viewport(width=64, height=64, agent_id="failed")
+                assert ui("inspect")["agent_observations"] == []
+            finally:
+                client.execute_script(
+                    "bpy.context.scene.camera = bpy.data.objects['Camera']"
+                )
+            sequence = client.capture_viewport_sequence(
+                start_frame=1,
+                end_frame=2,
+                width=64,
+                height=64,
+                agent_id="sequence-viewer",
+            )
+            assert sequence["frame_count"] == 2
+            assert [m["agent_id"] for m in ui("inspect")["agent_observations"]] == [
+                "sequence-viewer"
+            ]
 
             # Virtual cursors belong to their agent and window, independently.
             ui("move_cursor", agent_id="planner", position=[0.25, 0.5])

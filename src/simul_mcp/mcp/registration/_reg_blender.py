@@ -27,6 +27,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             "Perform a named agent_control action in the explicitly attached Blender window. "
             "Use inspect for editor IDs, active tool, Properties tabs, shared workspace and agent cursors. "
             "Actions display labelled agent pointers; move_cursor moves this overlay, never the OS cursor. "
+            "Use observe after an external screenshot to show a brief eye badge and viewport pulse. "
             "Before set_tool on a shared workspace, use isolate_workspace then inspect for new editor IDs. "
             "Uses Blender UI APIs, not physical key/click events or arbitrary button lookup. "
             "Requires attached mode; does not launch Blender or execute arbitrary scripts."
@@ -47,7 +48,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         """Control the selected Blender UI without generating a Python script.
 
         Args:
-            agent_control: inspect, move_cursor, clear_cursor, open_menu, select_object,
+            agent_control: inspect, observe, move_cursor, clear_cursor, open_menu, select_object,
                 set_tool, show_properties, set_property or isolate_workspace.
             target: Menu add/object/view, tool select_box/move/rotate/scale, object name,
                 Properties tab such as OBJECT, or active-object property location/rotation_euler/scale.
@@ -417,7 +418,11 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="capture_blender_viewport",
-        description="Capture the Blender viewport as a base64-encoded JPEG image.",
+        description=(
+            "Capture the Blender viewport as a base64-encoded JPEG image. "
+            "In attached mode, briefly show an agent eye badge and border pulse after success. "
+            "Agent annotations are excluded from the captured image."
+        ),
         annotations=server._tool_annotations(
             read_only=True,
             idempotent=True,
@@ -432,6 +437,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         height: int = 512,
         jpeg_quality: int = 85,
         use_render_fallback: bool = False,
+        agent_id: Optional[str] = None,
     ) -> ToolResult:
         input_data = server._validate_input(
             BlenderCaptureViewportRequest,
@@ -439,6 +445,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             height=height,
             jpeg_quality=jpeg_quality,
             use_render_fallback=use_render_fallback,
+            agent_id=server._resolve_agent_id(agent_id),
         )
         if isinstance(input_data, dict):
             return server._as_text_result(input_data)
@@ -452,6 +459,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 input_data.height,
                 input_data.jpeg_quality,
                 input_data.use_render_fallback,
+                agent_id=input_data.agent_id,
             ),
         )
 
@@ -575,7 +583,9 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="capture_blender_viewport_sequence",
         description=(
-            "Capture a sequence of viewport frames " "as base64-encoded JPEGs."
+            "Capture a sequence of viewport frames as base64-encoded JPEGs. "
+            "In attached mode, briefly show an agent eye badge and border pulse after success. "
+            "Agent annotations are excluded from the captured images."
         ),
         annotations=server._tool_annotations(
             read_only=True,
@@ -593,6 +603,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         width: int = 512,
         height: int = 512,
         jpeg_quality: int = 85,
+        agent_id: Optional[str] = None,
     ) -> ToolResult:
         input_data = server._validate_input(
             BlenderCaptureSequenceRequest,
@@ -602,6 +613,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             width=width,
             height=height,
             jpeg_quality=jpeg_quality,
+            agent_id=server._resolve_agent_id(agent_id),
         )
         if isinstance(input_data, dict):
             return server._as_text_result(input_data)
@@ -617,6 +629,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
                 input_data.width,
                 input_data.height,
                 input_data.jpeg_quality,
+                agent_id=input_data.agent_id,
             ),
         )
 

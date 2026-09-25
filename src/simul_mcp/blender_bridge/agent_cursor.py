@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import bpy
@@ -18,6 +21,7 @@ class AgentCursors:
     def __init__(self) -> None:
         self.markers: dict[tuple[str, str], dict[str, Any]] = {}
         self.handlers: list[tuple[Any, Any]] = []
+        self.suspended = False
 
     def update(
         self, window: Any, area: Any, agent_id: str, position: list[float], label: str
@@ -110,12 +114,12 @@ class AgentCursors:
         self.handlers.clear()
         self.redraw()
 
-    def draw(self) -> None:
+    def visible(self) -> list[dict[str, Any]]:
         # Blender supplies the actual drawing window/area, not the last request's context.
         window, area, region = bpy.context.window, bpy.context.area, bpy.context.region
-        if window is None or area is None or region is None:
-            return
-        visible = [
+        if self.suspended or window is None or area is None or region is None:
+            return []
+        return [
             m
             for m in self.markers.values()
             if (
@@ -126,8 +130,12 @@ class AgentCursors:
                 and time.time() - m["updated_at"] < self.lifetime
             )
         ]
+
+    def draw(self) -> None:
+        visible = self.visible()
         if not visible:
             return
+        area, region = bpy.context.area, bpy.context.region
         import blf  # type: ignore[import-not-found]
         import gpu  # type: ignore[import-not-found]
         from gpu_extras.batch import batch_for_shader  # type: ignore[import-not-found]
@@ -203,4 +211,153 @@ class AgentCursors:
             gpu.state.blend_set(previous_blend)
 
 
+class AgentObservations(AgentCursors):
+    """A short eye badge and fading border after an agent views a capture."""
+
+    lifetime = 2.4
+
+    def show(self, window: Any, area: Any, agent_id: str) -> dict[str, Any]:
+        if (
+            not isinstance(agent_id, str)
+            or not 1 <= len(agent_id) <= 64
+            or not agent_id.isprintable()
+            or not agent_id.strip()
+        ):
+            raise ValueError("agent_id must be a printable label of 1 to 64 characters")
+        return self.update(window, area, agent_id, [0.5, 0.5], "Viewing scene")
+
+    def prune(self) -> None:
+        super().prune()
+        if self.markers:
+            # The bridge's existing timer drives the fade, including the last erase.
+            self.redraw()
+
+    def draw(self) -> None:
+        visible = self.visible()
+        if not visible:
+            return
+        import blf  # type: ignore[import-not-found]
+        import gpu  # type: ignore[import-not-found]
+        from gpu_extras.batch import batch_for_shader  # type: ignore[import-not-found]
+
+        region = bpy.context.region
+        scale = bpy.context.preferences.system.ui_scale
+        shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+        previous_blend = gpu.state.blend_get()
+        gpu.state.blend_set("ALPHA")
+
+        def rectangle(x: float, y: float, width: float, height: float) -> None:
+            batch_for_shader(
+                shader,
+                "TRIS",
+                {
+                    "pos": [
+                        (x, y),
+                        (x + width, y),
+                        (x + width, y + height),
+                        (x, y),
+                        (x + width, y + height),
+                        (x, y + height),
+                    ]
+                },
+            ).draw(shader)
+
+        try:
+            shader.bind()
+            for index, marker in enumerate(
+                sorted(visible, key=lambda m: m["agent_id"])
+            ):
+                age = max(0.0, time.time() - marker["updated_at"])
+                fade = min(1.0, (self.lifetime - age) / 0.8)
+                alpha = fade * (0.5 + 0.25 * math.cos(age * math.tau / self.lifetime))
+                color = (*marker["color"][:3], alpha)
+                shader.uniform_float("color", color)
+                inset = (3 + index * 4) * scale
+                thickness = 2 * scale
+                width, height = region.width - 2 * inset, region.height - 2 * inset
+                if width > 0 and height > 0:
+                    rectangle(inset, inset, width, thickness)
+                    rectangle(
+                        inset, region.height - inset - thickness, width, thickness
+                    )
+                    rectangle(inset, inset, thickness, height)
+                    rectangle(
+                        region.width - inset - thickness, inset, thickness, height
+                    )
+                # Bottom-left avoids the existing latest-action labels and the gizmo.
+                x, y = 32 * scale, (40 + index * 28) * scale
+                label = f"{marker['agent_id']} · Viewing scene"
+                blf.size(0, 13 * scale)
+                while (
+                    len(label) > 4
+                    and blf.dimensions(0, label)[0] > region.width - 100 * scale
+                ):
+                    label = label[:-4] + "..."
+                shader.uniform_float("color", (0.025, 0.035, 0.045, 0.85 * fade))
+                rectangle(
+                    x - 18 * scale,
+                    y - 7 * scale,
+                    blf.dimensions(0, label)[0] + 54 * scale,
+                    26 * scale,
+                )
+                shader.uniform_float("color", (*marker["color"][:3], fade))
+                # An eye outline and pupil, built from triangles for portable thickness.
+                eye = []
+                for step in range(40):
+                    a, b = step * math.tau / 40, (step + 1) * math.tau / 40
+                    outer_a = (
+                        x + 10 * scale * math.cos(a),
+                        y + 5 * scale + 6 * scale * math.sin(a),
+                    )
+                    outer_b = (
+                        x + 10 * scale * math.cos(b),
+                        y + 5 * scale + 6 * scale * math.sin(b),
+                    )
+                    inner_a = (
+                        x + 8 * scale * math.cos(a),
+                        y + 5 * scale + 4 * scale * math.sin(a),
+                    )
+                    inner_b = (
+                        x + 8 * scale * math.cos(b),
+                        y + 5 * scale + 4 * scale * math.sin(b),
+                    )
+                    eye.extend(
+                        [
+                            outer_a,
+                            outer_b,
+                            inner_b,
+                            outer_a,
+                            inner_b,
+                            inner_a,
+                            (x, y + 5 * scale),
+                            (
+                                x + 2.5 * scale * math.cos(a),
+                                y + 5 * scale + 2.5 * scale * math.sin(a),
+                            ),
+                            (
+                                x + 2.5 * scale * math.cos(b),
+                                y + 5 * scale + 2.5 * scale * math.sin(b),
+                            ),
+                        ]
+                    )
+                batch_for_shader(shader, "TRIS", {"pos": eye}).draw(shader)
+                blf.color(0, *marker["color"][:3], fade)
+                blf.position(0, x + 20 * scale, y, 0)
+                blf.draw(0, label)
+        finally:
+            gpu.state.blend_set(previous_blend)
+
+
 cursors = AgentCursors()
+observations = AgentObservations()
+
+
+@contextmanager
+def hide_annotations() -> Iterator[None]:
+    """Keep agent UI annotations out of captured images; restore even on failure."""
+    previous = cursors.suspended, observations.suspended
+    cursors.suspended = observations.suspended = True
+    try:
+        yield
+    finally:
+        cursors.suspended, observations.suspended = previous

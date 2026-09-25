@@ -7,12 +7,13 @@ from typing import Any
 
 import bpy
 
-from .agent_cursor import cursors
+from .agent_cursor import cursors, observations
 
 MENUS = {"add": "VIEW3D_MT_add", "object": "VIEW3D_MT_object", "view": "VIEW3D_MT_view"}
 TOOLS = {name: f"builtin.{name}" for name in ("select_box", "move", "rotate", "scale")}
 ACTIONS = (
     "inspect",
+    "observe",
     "move_cursor",
     "clear_cursor",
     "open_menu",
@@ -29,6 +30,7 @@ _pending_isolations: dict[str, tuple[str, str]] = {}
 def reset_ui() -> None:
     """Forget transient visual and workspace-request state on load or shutdown."""
     cursors.stop()
+    observations.stop()
     _pending_isolations.clear()
 
 
@@ -181,6 +183,7 @@ def control_ui(
             "tools": list(TOOLS),
             "properties": list(PROPERTIES),
             "agent_cursors": cursors.inspect(window),
+            "agent_observations": observations.inspect(window),
             "cursor_kind": "agent_overlay",
             "areas": [
                 {
@@ -227,6 +230,13 @@ def control_ui(
     if region is None or region.width < 2 or region.height < 2:
         raise ValueError("The selected editor has no usable window region")
     result["area_id"] = str(area.as_pointer())
+    if agent_control == "observe":
+        if target is not None:
+            raise ValueError("observe does not accept target")
+        return {
+            **result,
+            "agent_observation": observations.show(window, area, agent_id),
+        }
     point = [0.5, 0.5]
     if agent_control != "move_cursor":
         existing = next(
