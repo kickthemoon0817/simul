@@ -11,7 +11,6 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import (
     Any,
     Awaitable,
@@ -170,7 +169,6 @@ class SimulMCPServer(LoggerMixin):
         self._path_policy = PathPolicy.from_settings(
             self.settings, project_root=find_checkout_root()
         )
-        self._allowed_paths = self._resolve_allowed_paths()
 
         self.usage_tracker = ToolUsageTracker()
         self.session_manager = SessionManager()
@@ -191,7 +189,6 @@ class SimulMCPServer(LoggerMixin):
         self._global_rate_limit_burst = max(
             self._rate_limit_burst, global_per_minute // 6
         )
-        self._tool_timeout = self.settings.server.timeout
         # How long a call waits for an instance already in use. Generous enough
         # for ordinary contention, short enough that a caller is not left
         # guessing through a 1000-frame step.
@@ -717,9 +714,6 @@ class SimulMCPServer(LoggerMixin):
                 )
         finally:
             lock.release()
-
-    def _resolve_allowed_paths(self) -> List[Path]:
-        return self._path_policy.allowed_roots
 
     def _sandbox_denial(
         self, path_str: Optional[str], *, write: bool = False

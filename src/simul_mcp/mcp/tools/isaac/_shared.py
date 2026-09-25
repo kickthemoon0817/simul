@@ -11,15 +11,11 @@ the stock VS Code socket when bridge usage is disabled.
 
 import json
 import textwrap
-from typing import Annotated, Any, Callable, Dict, List, Optional
+from typing import Annotated, Any, List
 
 from pydantic import BeforeValidator
 
-from ....adapters import IsaacSocketClient, ScriptResult
-from ....config import Settings, get_settings
-from ....logging import LoggerMixin, get_logger
-from ....utils.paths import PathPolicy
-from ...schemas.common import ErrorResponse
+from ....logging import get_logger
 
 logger = get_logger(__name__)
 

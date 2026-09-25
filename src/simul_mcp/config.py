@@ -29,6 +29,14 @@ _ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{([^}]+)\}")
 _LOGGER = logging.getLogger(__name__)
 
 
+def _check_scan_port_range(start: int, end: int) -> None:
+    """Raise ``ValueError`` when a discovery scan range would be empty."""
+    if start >= end:
+        raise ValueError(
+            f"scan_port_start ({start}) must be less than scan_port_end ({end})"
+        )
+
+
 class ServerConfig(BaseModel):
     """MCP Server configuration."""
 
@@ -40,11 +48,7 @@ class ServerConfig(BaseModel):
     )
     host: str = Field(default="localhost", description="Server host")
     port: int = Field(default=8765, description="Server port", ge=1024, le=65535)
-    max_connections: int = Field(
-        default=10, description="Maximum concurrent connections", ge=1
-    )
     timeout: int = Field(default=30, description="Connection timeout in seconds", ge=1)
-    enable_cors: bool = Field(default=True, description="Enable CORS")
     cors_origins: List[str] = Field(
         default_factory=lambda: ["http://localhost:*", "https://localhost:*"]
     )
@@ -105,11 +109,6 @@ class IsaacSimConfig(BaseModel):
         description="Path to Isaac Sim installation (defaults to $ISAAC_SIM_PATH)",
     )
     headless: bool = Field(default=False, description="Run in headless mode")
-    enable_livestream: bool = Field(default=False, description="Enable livestream")
-    livestream_port: int = Field(
-        default=8211, description="Livestream port", ge=1024, le=65535
-    )
-    enable_webrtc: bool = Field(default=False, description="Enable WebRTC")
     width: int = Field(default=1920, description="Viewport width", ge=640)
     height: int = Field(default=1080, description="Viewport height", ge=480)
 
@@ -261,11 +260,7 @@ class IsaacSimConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_port_range(self) -> "IsaacSimConfig":
         """Ensure scan_port_start < scan_port_end to avoid empty scan ranges."""
-        if self.scan_port_start >= self.scan_port_end:
-            raise ValueError(
-                f"scan_port_start ({self.scan_port_start}) must be less than "
-                f"scan_port_end ({self.scan_port_end})"
-            )
+        _check_scan_port_range(self.scan_port_start, self.scan_port_end)
         return self
 
 
@@ -409,11 +404,7 @@ class UnrealConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_port_range(self) -> "UnrealConfig":
         """Ensure scan_port_start < scan_port_end to avoid empty scan ranges."""
-        if self.scan_port_start >= self.scan_port_end:
-            raise ValueError(
-                f"scan_port_start ({self.scan_port_start}) must be less than "
-                f"scan_port_end ({self.scan_port_end})"
-            )
+        _check_scan_port_range(self.scan_port_start, self.scan_port_end)
         return self
 
 
@@ -423,23 +414,6 @@ class USDConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     cache_enabled: bool = Field(default=True, description="Enable USD caching")
-    cache_size: int = Field(default=1000, description="USD cache size", ge=1)
-    stage_cache_limit: int = Field(default=10, description="Stage cache limit", ge=1)
-    load_rules: str = Field(default="LoadAll", description="USD load rules")
-    population_mask: str = Field(default="", description="USD population mask")
-    interpolation_type: str = Field(
-        default="Linear", description="USD interpolation type"
-    )
-    enable_instancing: bool = Field(default=True, description="Enable USD instancing")
-    enable_multithreading: bool = Field(
-        default=True, description="Enable USD multithreading"
-    )
-    max_concurrent_operations: int = Field(
-        default=10, description="Max concurrent USD operations", ge=1
-    )
-    operation_timeout: int = Field(
-        default=30, description="USD operation timeout", ge=1
-    )
     allowed_extensions: List[str] = Field(
         default_factory=lambda: [".usd", ".usda", ".usdc", ".usdz"],
         description="Allowed USD file extensions",
@@ -454,21 +428,10 @@ class ViewportConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    default_width: int = Field(
-        default=1920, description="Default viewport width", ge=640
-    )
-    default_height: int = Field(
-        default=1080, description="Default viewport height", ge=480
-    )
     max_size: int = Field(default=2048, description="Maximum viewport size", ge=640)
     format: str = Field(default="png", description="Image format")
     quality: int = Field(default=95, description="Image quality", ge=1, le=100)
-    samples_per_pixel: int = Field(default=1, description="Samples per pixel", ge=1)
-    max_bounces: int = Field(default=4, description="Maximum ray bounces", ge=1)
-    enable_denoising: bool = Field(default=True, description="Enable denoising")
     fov: float = Field(default=45.0, description="Field of view", ge=1.0, le=179.0)
-    near_plane: float = Field(default=0.1, description="Near clipping plane", gt=0.0)
-    far_plane: float = Field(default=1000.0, description="Far clipping plane", gt=0.0)
     capture_dir: Optional[str] = Field(
         default=None,
         description=(
@@ -487,8 +450,6 @@ class LoggingConfig(BaseModel):
     format: str = Field(default="detailed", description="Log format")
     file_enabled: bool = Field(default=True, description="Enable file logging")
     file_path: str = Field(default="~/.simul/logs/simul_mcp.log", description="Log file path")
-    file_max_size: str = Field(default="10MB", description="Maximum log file size")
-    file_backup_count: int = Field(default=5, description="Log file backup count", ge=1)
     console_enabled: bool = Field(default=True, description="Enable console logging")
     console_colored: bool = Field(
         default=True, description="Enable colored console output"
@@ -820,13 +781,10 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
     isaac_bridge = isaac.get("bridge") or {}
     isaac_resolution = isaac_kit.get("resolution") or {}
     usd = raw.get("usd") or {}
-    usd_stage = usd.get("stage") or {}
     usd_cache = usd.get("cache") or {}
     usd_files = usd.get("files") or {}
-    usd_performance = usd.get("performance") or {}
     viewport = raw.get("viewport") or {}
     viewport_capture = viewport.get("capture") or {}
-    viewport_rendering = viewport.get("rendering") or {}
     viewport_camera = viewport.get("camera") or {}
     logging_cfg = raw.get("logging") or {}
     logging_file = logging_cfg.get("file") or {}
@@ -844,9 +802,7 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     "name": server.get("name"),
                     "host": server.get("host"),
                     "port": server.get("port"),
-                    "max_connections": server.get("max_connections"),
                     "timeout": server.get("timeout"),
-                    "enable_cors": server.get("enable_cors"),
                     "cors_origins": server.get("cors_origins"),
                 }
             ),
@@ -854,18 +810,6 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                 {
                     "path": _normalise_optional_path(isaac.get("path")),
                     "headless": _coalesce(isaac.get("headless"), isaac_kit.get("headless")),
-                    "enable_livestream": _coalesce(
-                        isaac.get("enable_livestream"),
-                        isaac_kit.get("enable_livestream"),
-                    ),
-                    "livestream_port": _coalesce(
-                        isaac.get("livestream_port"),
-                        isaac_kit.get("livestream_port"),
-                    ),
-                    "enable_webrtc": _coalesce(
-                        isaac.get("enable_webrtc"),
-                        isaac_kit.get("enable_webrtc"),
-                    ),
                     "width": _coalesce(isaac.get("width"), isaac_resolution.get("width")),
                     "height": _coalesce(isaac.get("height"), isaac_resolution.get("height")),
                     "socket_host": isaac.get("socket_host"),
@@ -911,31 +855,6 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     "cache_enabled": _coalesce(
                         usd.get("cache_enabled"), usd_cache.get("enabled")
                     ),
-                    "cache_size": _coalesce(usd.get("cache_size"), usd_cache.get("size")),
-                    "stage_cache_limit": _coalesce(
-                        usd.get("stage_cache_limit"), usd_cache.get("stage_cache_limit")
-                    ),
-                    "load_rules": _coalesce(usd.get("load_rules"), usd_stage.get("load_rules")),
-                    "population_mask": _coalesce(
-                        usd.get("population_mask"), usd_stage.get("population_mask")
-                    ),
-                    "interpolation_type": _coalesce(
-                        usd.get("interpolation_type"), usd_stage.get("interpolation_type")
-                    ),
-                    "enable_instancing": _coalesce(
-                        usd.get("enable_instancing"), usd_stage.get("enable_instancing")
-                    ),
-                    "enable_multithreading": _coalesce(
-                        usd.get("enable_multithreading"),
-                        usd_performance.get("enable_multithreading"),
-                    ),
-                    "max_concurrent_operations": _coalesce(
-                        usd.get("max_concurrent_operations"),
-                        usd_performance.get("max_concurrent_operations"),
-                    ),
-                    "operation_timeout": _coalesce(
-                        usd.get("operation_timeout"), usd_performance.get("operation_timeout")
-                    ),
                     "allowed_extensions": _coalesce(
                         usd.get("allowed_extensions"), usd_files.get("allowed_extensions")
                     ),
@@ -946,36 +865,13 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
             ),
             "viewport": _compact_dict(
                 {
-                    "default_width": _coalesce(
-                        viewport.get("default_width"), viewport_capture.get("width")
-                    ),
-                    "default_height": _coalesce(
-                        viewport.get("default_height"), viewport_capture.get("height")
-                    ),
                     "max_size": _coalesce(viewport.get("max_size"), viewport_capture.get("max_size")),
                     "format": _coalesce(viewport.get("format"), viewport_capture.get("format")),
                     "quality": _coalesce(viewport.get("quality"), viewport_capture.get("quality")),
                     "capture_dir": _coalesce(
                         viewport.get("capture_dir"), viewport_capture.get("directory")
                     ),
-                    "samples_per_pixel": _coalesce(
-                        viewport.get("samples_per_pixel"),
-                        viewport_rendering.get("samples_per_pixel"),
-                    ),
-                    "max_bounces": _coalesce(
-                        viewport.get("max_bounces"), viewport_rendering.get("max_bounces")
-                    ),
-                    "enable_denoising": _coalesce(
-                        viewport.get("enable_denoising"),
-                        viewport_rendering.get("enable_denoising"),
-                    ),
                     "fov": _coalesce(viewport.get("fov"), viewport_camera.get("fov")),
-                    "near_plane": _coalesce(
-                        viewport.get("near_plane"), viewport_camera.get("near_plane")
-                    ),
-                    "far_plane": _coalesce(
-                        viewport.get("far_plane"), viewport_camera.get("far_plane")
-                    ),
                 }
             ),
             "logging": _compact_dict(
@@ -986,13 +882,6 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                         logging_cfg.get("file_enabled"), logging_file.get("enabled")
                     ),
                     "file_path": _coalesce(logging_cfg.get("file_path"), logging_file.get("path")),
-                    "file_max_size": _coalesce(
-                        logging_cfg.get("file_max_size"), logging_file.get("max_size")
-                    ),
-                    "file_backup_count": _coalesce(
-                        logging_cfg.get("file_backup_count"),
-                        logging_file.get("backup_count"),
-                    ),
                     "console_enabled": _coalesce(
                         logging_cfg.get("console_enabled"), logging_console.get("enabled")
                     ),

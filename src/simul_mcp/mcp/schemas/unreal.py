@@ -119,18 +119,6 @@ class UnrealLoadedMapResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class UnrealListActorsRequest(BaseModel):
-    """Request for listing actors in the current Unreal level."""
-
-    class_filter: Optional[str] = Field(
-        None, description="Filter actors by UClass name (e.g. 'StaticMeshActor')"
-    )
-    tag_filter: Optional[str] = Field(None, description="Filter actors by tag")
-    max_results: int = Field(
-        200, description="Maximum number of actors to return", ge=1, le=5000
-    )
-
-
 class UnrealActorEntry(BaseModel):
     """Single actor entry in a listing response."""
 
@@ -161,12 +149,6 @@ class UnrealListActorsResponse(BaseModel):
     truncated: bool = Field(
         False, description="Whether results were truncated by max_results"
     )
-
-
-class UnrealGetActorInfoRequest(BaseModel):
-    """Request for detailed actor information."""
-
-    actor_path: str = Field(..., description="Full object path of the actor")
 
 
 class UnrealActorComponentInfo(BaseModel):
@@ -202,21 +184,6 @@ class UnrealGetActorInfoResponse(BaseModel):
     is_hidden: bool = Field(False, description="Whether actor is hidden in game")
 
 
-class UnrealSearchAssetsRequest(BaseModel):
-    """Request to search the Unreal Asset Registry."""
-
-    query: str = Field("", description="Search query string")
-    class_names: Optional[List[str]] = Field(
-        None, description="Filter by UClass names (e.g. ['StaticMesh', 'Material'])"
-    )
-    package_paths: Optional[List[str]] = Field(
-        None, description="Package paths to search within (e.g. ['/Game/Meshes'])"
-    )
-    max_results: int = Field(
-        100, description="Maximum number of results", ge=1, le=1000
-    )
-
-
 class UnrealAssetEntry(BaseModel):
     """Single asset entry from the Asset Registry."""
 
@@ -238,15 +205,6 @@ class UnrealSearchAssetsResponse(BaseModel):
     )
     count: int = Field(..., description="Number of assets returned")
     truncated: bool = Field(False, description="Whether results were truncated")
-
-
-class UnrealDescribeObjectRequest(BaseModel):
-    """Request to describe a UObject's properties and functions."""
-
-    object_path: str = Field(
-        ...,
-        description="Full object path (e.g. '/Game/Maps/Test.Test:PersistentLevel.StaticMeshActor_0')",
-    )
 
 
 class UnrealPropertyInfo(BaseModel):
@@ -272,16 +230,6 @@ class UnrealDescribeObjectResponse(BaseModel):
     functions: List[str] = Field(
         default_factory=list, description="Callable function names"
     )
-
-
-class UnrealGetThumbnailRequest(BaseModel):
-    """Request for an asset thumbnail image."""
-
-    asset_path: str = Field(
-        ..., description="Full asset path (e.g. '/Game/Meshes/SM_Chair')"
-    )
-    width: int = Field(256, description="Thumbnail width in pixels", ge=32, le=1024)
-    height: int = Field(256, description="Thumbnail height in pixels", ge=32, le=1024)
 
 
 class UnrealGetThumbnailResponse(BaseModel):
@@ -323,16 +271,6 @@ class UnrealSceneSummaryResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class UnrealCaptureViewportRequest(BaseModel):
-    """Request to capture viewport screenshot."""
-
-    resolution_x: int = Field(1920, description="Capture width in pixels")
-    resolution_y: int = Field(1080, description="Capture height in pixels")
-    format: str = Field(
-        "png", description="Image format: png; CLI capture can convert to JPEG"
-    )
-
-
 class UnrealExecuteScriptResponse(BaseModel):
     """Whatever JSON object a script printed, with the envelope's status fields.
 
@@ -368,12 +306,6 @@ class UnrealCaptureViewportResponse(BaseModel):
     format: str = Field(..., description="Image format used")
 
 
-class UnrealViewportInfoRequest(BaseModel):
-    """Request to get viewport information."""
-
-    pass
-
-
 class UnrealViewportInfoResponse(BaseModel):
     """Viewport camera and render information."""
 
@@ -396,18 +328,6 @@ class UnrealViewportInfoResponse(BaseModel):
     )
 
 
-class UnrealSetCameraViewRequest(BaseModel):
-    """Request to set editor viewport camera."""
-
-    location: Optional[Tuple[float, float, float]] = Field(
-        None, description="Camera position (X, Y, Z) in cm"
-    )
-    rotation: Optional[Tuple[float, float, float]] = Field(
-        None, description="Camera rotation (Pitch, Yaw, Roll) in degrees"
-    )
-    fov: Optional[float] = Field(None, description="Field of view in degrees")
-
-
 class UnrealSetCameraViewResponse(BaseModel):
     """Response after setting camera view."""
 
@@ -422,15 +342,6 @@ class UnrealSetCameraViewResponse(BaseModel):
         ..., description="Applied camera rotation"
     )
     fov: float = Field(90.0, description="Applied field of view")
-
-
-class UnrealFocusActorRequest(BaseModel):
-    """Request to focus camera on an actor."""
-
-    actor_path: str = Field(..., description="Full actor path to focus on")
-    distance: float = Field(
-        0.0, description="Camera distance from actor (0 = auto-fit)"
-    )
 
 
 class UnrealFocusActorResponse(BaseModel):
@@ -454,19 +365,6 @@ class UnrealFocusActorResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class UnrealSpawnActorRequest(BaseModel):
-    """Request to spawn an actor from a class or asset path."""
-
-    asset_path: str = Field(..., description="Asset or class path to spawn from")
-    location: Tuple[float, float, float] = Field(
-        (0.0, 0.0, 0.0), description="Spawn location (X, Y, Z) in cm"
-    )
-    rotation: Tuple[float, float, float] = Field(
-        (0.0, 0.0, 0.0), description="Spawn rotation (Pitch, Yaw, Roll) in degrees"
-    )
-    label: Optional[str] = Field(None, description="Actor label in the outliner")
-
-
 class UnrealSpawnActorResponse(BaseModel):
     """Response after spawning an actor."""
 
@@ -481,12 +379,6 @@ class UnrealSpawnActorResponse(BaseModel):
     )
 
 
-class UnrealDeleteActorRequest(BaseModel):
-    """Request to delete an actor from the level."""
-
-    actor_path: str = Field(..., description="Full actor path to delete")
-
-
 class UnrealDeleteActorResponse(BaseModel):
     """Response after deleting an actor."""
 
@@ -496,21 +388,6 @@ class UnrealDeleteActorResponse(BaseModel):
     )
     actor_path: str = Field(..., description="Path of the deleted actor")
     deleted: bool = Field(..., description="Whether actor was actually deleted")
-
-
-class UnrealSetActorTransformRequest(BaseModel):
-    """Request to set an actor's transform."""
-
-    actor_path: str = Field(..., description="Full actor path")
-    location: Optional[Tuple[float, float, float]] = Field(
-        None, description="New location (X, Y, Z) in cm"
-    )
-    rotation: Optional[Tuple[float, float, float]] = Field(
-        None, description="New rotation (Pitch, Yaw, Roll) in degrees"
-    )
-    scale: Optional[Tuple[float, float, float]] = Field(
-        None, description="New scale (X, Y, Z)"
-    )
 
 
 class UnrealSetActorTransformResponse(BaseModel):
@@ -526,17 +403,6 @@ class UnrealSetActorTransformResponse(BaseModel):
     scale: Tuple[float, float, float] = Field(..., description="Applied scale")
 
 
-class UnrealSetActorPropertyRequest(BaseModel):
-    """Request to set a property on an actor."""
-
-    actor_path: str = Field(..., description="Full actor path")
-    property_name: str = Field(..., description="Property name to set")
-    property_value: str = Field(..., description="Property value as JSON string")
-    generate_transaction: bool = Field(
-        True, description="Whether to generate an undo transaction"
-    )
-
-
 class UnrealSetActorPropertyResponse(BaseModel):
     """Response after setting actor property."""
 
@@ -546,14 +412,6 @@ class UnrealSetActorPropertyResponse(BaseModel):
     )
     actor_path: str = Field(..., description="Actor whose property was set")
     property_name: str = Field(..., description="Property that was set")
-
-
-class UnrealCallActorFunctionRequest(BaseModel):
-    """Request to call a BlueprintCallable function on an actor."""
-
-    actor_path: str = Field(..., description="Full actor path")
-    function_name: str = Field(..., description="Function name to call")
-    parameters: Optional[str] = Field(None, description="Parameters as JSON string")
 
 
 class UnrealCallActorFunctionResponse(BaseModel):
@@ -566,15 +424,6 @@ class UnrealCallActorFunctionResponse(BaseModel):
     actor_path: str = Field(..., description="Actor on which function was called")
     function_name: str = Field(..., description="Function that was called")
     return_value: Optional[str] = Field(None, description="Return value as JSON string")
-
-
-class UnrealSetActorParentRequest(BaseModel):
-    """Request to attach an actor to a parent actor."""
-
-    actor_path: str = Field(..., description="Child actor path")
-    parent_path: Optional[str] = Field(
-        None, description="Parent actor path (None to detach)"
-    )
 
 
 class UnrealSetActorParentResponse(BaseModel):
@@ -590,18 +439,6 @@ class UnrealSetActorParentResponse(BaseModel):
     )
 
 
-class UnrealAddComponentRequest(BaseModel):
-    """Request to add a component to an actor."""
-
-    actor_path: str = Field(..., description="Full actor path")
-    component_class: str = Field(
-        ..., description="Component class name (e.g. StaticMeshComponent)"
-    )
-    component_name: Optional[str] = Field(
-        None, description="Name for the new component"
-    )
-
-
 class UnrealAddComponentResponse(BaseModel):
     """Response after adding a component."""
 
@@ -612,14 +449,6 @@ class UnrealAddComponentResponse(BaseModel):
     actor_path: str = Field(..., description="Actor that received the component")
     component_path: str = Field(..., description="Full path of the new component")
     component_class: str = Field(..., description="Class of the added component")
-
-
-class UnrealSetActorVisibilityRequest(BaseModel):
-    """Request to set actor visibility."""
-
-    actor_path: str = Field(..., description="Full actor path")
-    visible: bool = Field(..., description="Whether the actor should be visible")
-    propagate: bool = Field(True, description="Propagate to child components/actors")
 
 
 class UnrealSetActorVisibilityResponse(BaseModel):
@@ -636,12 +465,6 @@ class UnrealSetActorVisibilityResponse(BaseModel):
 # ---------------------------------------------------------------
 # Unreal Phase 4 -- Materials, Lighting & Rendering
 # ---------------------------------------------------------------
-
-
-class UnrealGetMaterialInfoRequest(BaseModel):
-    """Request to get material instance info."""
-
-    material_path: str = Field(..., description="Material or MIC asset path")
 
 
 class UnrealMaterialParameterInfo(BaseModel):
@@ -666,21 +489,6 @@ class UnrealGetMaterialInfoResponse(BaseModel):
     )
 
 
-class UnrealSetMaterialParamsRequest(BaseModel):
-    """Request to set material instance parameters."""
-
-    material_path: str = Field(..., description="Material Instance path")
-    scalar_params: Optional[Dict[str, float]] = Field(
-        None, description="Scalar parameter overrides"
-    )
-    vector_params: Optional[Dict[str, List[float]]] = Field(
-        None, description="Vector parameter overrides (RGBA lists)"
-    )
-    texture_params: Optional[Dict[str, str]] = Field(
-        None, description="Texture parameter overrides (asset paths)"
-    )
-
-
 class UnrealSetMaterialParamsResponse(BaseModel):
     """Response after setting material instance parameters."""
 
@@ -692,16 +500,6 @@ class UnrealSetMaterialParamsResponse(BaseModel):
     params_set: int = Field(0, description="Number of parameters set")
 
 
-class UnrealCreateMaterialInstanceRequest(BaseModel):
-    """Request to create a dynamic material instance."""
-
-    parent_path: str = Field(..., description="Parent material asset path")
-    instance_name: str = Field(..., description="New instance name")
-    save_path: str = Field(
-        "", description="Content-relative save path (auto-generated if empty)"
-    )
-
-
 class UnrealCreateMaterialInstanceResponse(BaseModel):
     """Response with newly created material instance path."""
 
@@ -711,14 +509,6 @@ class UnrealCreateMaterialInstanceResponse(BaseModel):
     )
     instance_path: str = Field(..., description="New MIC asset path")
     parent_path: str = Field(..., description="Parent material path")
-
-
-class UnrealAssignMaterialRequest(BaseModel):
-    """Request to assign a material to a mesh component."""
-
-    actor_path: str = Field(..., description="Target actor path")
-    material_path: str = Field(..., description="Material asset path to assign")
-    slot_index: int = Field(0, description="Material slot index")
 
 
 class UnrealAssignMaterialResponse(BaseModel):
@@ -733,26 +523,6 @@ class UnrealAssignMaterialResponse(BaseModel):
     slot_index: int = Field(0, description="Slot index")
 
 
-class UnrealSetLightParamsRequest(BaseModel):
-    """Request to set light component parameters."""
-
-    actor_path: str = Field(..., description="Light actor path")
-    intensity: Optional[float] = Field(None, description="Light intensity")
-    color_r: Optional[float] = Field(None, description="Color red (0-1)")
-    color_g: Optional[float] = Field(None, description="Color green (0-1)")
-    color_b: Optional[float] = Field(None, description="Color blue (0-1)")
-    temperature: Optional[float] = Field(
-        None, description="Color temperature in Kelvin"
-    )
-    use_temperature: Optional[bool] = Field(
-        None, description="Use color temperature instead of color"
-    )
-    attenuation_radius: Optional[float] = Field(
-        None, description="Attenuation radius in cm"
-    )
-    cast_shadows: Optional[bool] = Field(None, description="Enable shadow casting")
-
-
 class UnrealSetLightParamsResponse(BaseModel):
     """Response after setting light parameters."""
 
@@ -762,13 +532,6 @@ class UnrealSetLightParamsResponse(BaseModel):
     )
     actor_path: str = Field(..., description="Light actor path")
     params_set: int = Field(0, description="Number of params changed")
-
-
-class UnrealSetRenderSettingsRequest(BaseModel):
-    """Request to set rendering/post-process settings."""
-
-    setting_name: str = Field(..., description="Render setting name")
-    setting_value: str = Field(..., description="Value as JSON string")
 
 
 class UnrealSetRenderSettingsResponse(BaseModel):
@@ -787,15 +550,6 @@ class UnrealSetRenderSettingsResponse(BaseModel):
 # ------------------------------------------------------------------
 
 
-class UnrealControlSimulationRequest(BaseModel):
-    """Request to control a Play-In-Editor (PIE) session."""
-
-    action: str = Field(
-        ...,
-        description="PIE action: start, stop, pause, resume; step returns UnsupportedOperation",
-    )
-
-
 class UnrealControlSimulationResponse(BaseModel):
     """Response after controlling a PIE session."""
 
@@ -808,12 +562,6 @@ class UnrealControlSimulationResponse(BaseModel):
         ...,
         description="Resulting PIE state: playing, paused, or stopped",
     )
-
-
-class UnrealGetSimulationStatusRequest(BaseModel):
-    """Request to query current PIE simulation status."""
-
-    pass
 
 
 class UnrealGetSimulationStatusResponse(BaseModel):
@@ -831,16 +579,6 @@ class UnrealGetSimulationStatusResponse(BaseModel):
     sim_time: float = Field(0.0, description="Elapsed simulation time in seconds")
 
 
-class UnrealEnablePhysicsRequest(BaseModel):
-    """Request to enable or disable physics simulation on an actor."""
-
-    actor_path: str = Field(..., description="Full actor object path")
-    enable: bool = Field(True, description="Enable or disable physics")
-    simulate_physics: bool = Field(
-        True, description="Whether the body should actively simulate"
-    )
-
-
 class UnrealEnablePhysicsResponse(BaseModel):
     """Response after toggling physics on an actor."""
 
@@ -850,17 +588,6 @@ class UnrealEnablePhysicsResponse(BaseModel):
     )
     actor_path: str = Field(..., description="Actor that was modified")
     physics_enabled: bool = Field(..., description="Current physics state")
-
-
-class UnrealSetCollisionRequest(BaseModel):
-    """Request to configure collision settings on an actor."""
-
-    actor_path: str = Field(..., description="Full actor object path")
-    collision_preset: str = Field(
-        "",
-        description="Named collision preset (e.g. BlockAll, NoCollision, PhysicsActor)",
-    )
-    collision_enabled: bool = Field(True, description="Enable collision")
 
 
 class UnrealSetCollisionResponse(BaseModel):
@@ -875,24 +602,6 @@ class UnrealSetCollisionResponse(BaseModel):
     collision_enabled: bool = Field(..., description="Current collision state")
 
 
-class UnrealApplyForceRequest(BaseModel):
-    """Request to apply a force or impulse to a physics body."""
-
-    actor_path: str = Field(..., description="Full actor object path")
-    force_x: float = Field(0.0, description="Force X component (Newtons or cm/s)")
-    force_y: float = Field(0.0, description="Force Y component")
-    force_z: float = Field(0.0, description="Force Z component")
-    is_impulse: bool = Field(
-        False,
-        description="True for impulse (instant), False for continuous force",
-    )
-    location_x: Optional[float] = Field(
-        None, description="Application point X (actor-local); None for center of mass"
-    )
-    location_y: Optional[float] = Field(None, description="Application point Y")
-    location_z: Optional[float] = Field(None, description="Application point Z")
-
-
 class UnrealApplyForceResponse(BaseModel):
     """Response after applying a force or impulse."""
 
@@ -904,16 +613,6 @@ class UnrealApplyForceResponse(BaseModel):
     force_applied: bool = Field(True, description="Whether force was applied")
     force_vector: List[float] = Field(..., description="Applied force vector [x, y, z]")
     is_impulse: bool = Field(..., description="Whether an impulse was applied")
-
-
-class UnrealSetPhysicsParamsRequest(BaseModel):
-    """Request to set physics body parameters on an actor."""
-
-    actor_path: str = Field(..., description="Full actor object path")
-    mass: Optional[float] = Field(None, description="Mass in kg")
-    linear_damping: Optional[float] = Field(None, description="Linear damping")
-    angular_damping: Optional[float] = Field(None, description="Angular damping")
-    enable_gravity: Optional[bool] = Field(None, description="Enable gravity")
 
 
 class UnrealSetPhysicsParamsResponse(BaseModel):
@@ -932,19 +631,6 @@ class UnrealSetPhysicsParamsResponse(BaseModel):
 # ----------------------------------------------------------------------
 
 
-class UnrealImportUsdRequest(BaseModel):
-    """Request to import a USD file via Interchange Framework."""
-
-    usd_path: str = Field(..., description="Path to USD file to import")
-    destination_path: str = Field(
-        "/Game/Imports",
-        description="Content browser destination path",
-    )
-    import_options: Optional[Dict[str, Any]] = Field(
-        None, description="Interchange pipeline options"
-    )
-
-
 class UnrealImportUsdResponse(BaseModel):
     """Response after importing a USD file."""
 
@@ -959,16 +645,6 @@ class UnrealImportUsdResponse(BaseModel):
     warnings: List[str] = Field(default_factory=list, description="Import warnings")
 
 
-class UnrealExportUsdRequest(BaseModel):
-    """Request to export actors to USD."""
-
-    actor_paths: List[str] = Field(..., description="Actor paths to export")
-    output_path: str = Field(..., description="Output USD file path (.usd/.usda/.usdc)")
-    export_options: Optional[Dict[str, Any]] = Field(
-        None, description="Export pipeline options"
-    )
-
-
 class UnrealExportUsdResponse(BaseModel):
     """Response after exporting actors to USD."""
 
@@ -979,18 +655,6 @@ class UnrealExportUsdResponse(BaseModel):
     output_path: str = Field(..., description="Written USD file path")
     actors_exported: int = Field(..., description="Number of actors exported")
     file_size_bytes: int = Field(0, description="Output file size in bytes")
-
-
-class UnrealConvertToSimreadyRequest(BaseModel):
-    """Request to convert a USD asset to SimReady format."""
-
-    usd_path: str = Field(..., description="Source USD file path")
-    output_path: str = Field(..., description="Output SimReady USD path")
-    add_physics: bool = Field(True, description="Add physics schema")
-    add_collision: bool = Field(True, description="Generate collision geometry")
-    add_semantic_labels: bool = Field(True, description="Add semantic label metadata")
-    target_up_axis: str = Field("Z", description="Target up axis (Z)")
-    target_units: str = Field("meters", description="Target units")
 
 
 class UnrealConvertToSimreadyResponse(BaseModel):
@@ -1007,23 +671,6 @@ class UnrealConvertToSimreadyResponse(BaseModel):
     warnings: List[str] = Field(default_factory=list, description="Conversion warnings")
 
 
-class UnrealValidateSimreadyRequest(BaseModel):
-    """Request to validate asset against SimReady spec."""
-
-    usd_path: str = Field(..., description="USD file path to validate")
-    checks: List[str] = Field(
-        default_factory=lambda: [
-            "physics",
-            "collision",
-            "materials",
-            "scale",
-            "up_axis",
-            "semantics",
-        ],
-        description="Validation checks to run",
-    )
-
-
 class UnrealValidateSimreadyResponse(BaseModel):
     """Response after SimReady validation."""
 
@@ -1036,12 +683,6 @@ class UnrealValidateSimreadyResponse(BaseModel):
     checks: Dict[str, bool] = Field(..., description="Per-check pass/fail results")
     errors: List[str] = Field(default_factory=list, description="Validation errors")
     suggestions: List[str] = Field(default_factory=list, description="Fix suggestions")
-
-
-class UnrealGetInterchangeInfoRequest(BaseModel):
-    """Request to query available Interchange pipelines."""
-
-    pass
 
 
 class UnrealGetInterchangeInfoResponse(BaseModel):
@@ -1075,14 +716,6 @@ class UnrealGetInterchangeInfoResponse(BaseModel):
 # ----------------------------------------------------------------------
 
 
-class UnrealBatchOperationsRequest(BaseModel):
-    """Request to execute multiple operations atomically."""
-
-    operations: List[Dict[str, Any]] = Field(
-        ..., description="List of operation dicts with endpoint/body pairs"
-    )
-
-
 class UnrealBatchOperationsResponse(BaseModel):
     """Response after batch execution."""
 
@@ -1094,17 +727,6 @@ class UnrealBatchOperationsResponse(BaseModel):
     total: int = Field(..., description="Total operations submitted")
     succeeded: int = Field(..., description="Number that succeeded")
     failed: int = Field(0, description="Number that failed")
-
-
-class UnrealQuerySceneGraphRequest(BaseModel):
-    """Request to query the scene graph structure."""
-
-    root_path: Optional[str] = Field(
-        None, description="Root actor path to start from (None for level root)"
-    )
-    max_depth: int = Field(10, description="Maximum traversal depth")
-    include_components: bool = Field(False, description="Include component hierarchy")
-    class_filter: Optional[str] = Field(None, description="Filter by actor class")
 
 
 class UnrealQuerySceneGraphResponse(BaseModel):
@@ -1119,22 +741,6 @@ class UnrealQuerySceneGraphResponse(BaseModel):
     )
     total_actors: int = Field(..., description="Total actors in graph")
     total_depth: int = Field(..., description="Deepest nesting level")
-
-
-class UnrealAnalyzeSceneForRoboticsRequest(BaseModel):
-    """Request to analyze a scene for robotics use-cases."""
-
-    analysis_types: List[str] = Field(
-        default_factory=lambda: [
-            "traversability",
-            "graspability",
-            "collision_complexity",
-        ],
-        description="Analyses to run",
-    )
-    actor_filter: Optional[str] = Field(
-        None, description="Filter to specific actor subtree"
-    )
 
 
 class UnrealAnalyzeSceneForRoboticsResponse(BaseModel):
@@ -1156,26 +762,6 @@ class UnrealAnalyzeSceneForRoboticsResponse(BaseModel):
     total_actors_analyzed: int = Field(0, description="Number of actors analyzed")
 
 
-class UnrealGenerateProceduralSceneRequest(BaseModel):
-    """Request to generate a procedural scene via PCG."""
-
-    scene_type: str = Field(
-        ..., description="Scene type (warehouse, outdoor, room, corridor)"
-    )
-    parameters: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Generation parameters (size, density, seed, etc.)",
-    )
-    bounds_min: List[float] = Field(
-        default_factory=lambda: [0.0, 0.0, 0.0],
-        description="Minimum bounds [x, y, z] in cm",
-    )
-    bounds_max: List[float] = Field(
-        default_factory=lambda: [1000.0, 1000.0, 500.0],
-        description="Maximum bounds [x, y, z] in cm",
-    )
-
-
 class UnrealGenerateProceduralSceneResponse(BaseModel):
     """Response after procedural scene generation."""
 
@@ -1187,14 +773,6 @@ class UnrealGenerateProceduralSceneResponse(BaseModel):
     total_spawned: int = Field(..., description="Number of actors spawned")
     scene_type: str = Field(..., description="Generated scene type")
     seed: int = Field(..., description="Random seed used")
-
-
-class UnrealGetActorBySemanticLabelRequest(BaseModel):
-    """Request to find actors by semantic tag."""
-
-    label: str = Field(..., description="Semantic label to search for")
-    match_mode: str = Field("exact", description="Match mode: exact, contains, regex")
-    max_results: int = Field(100, description="Maximum results to return")
 
 
 class UnrealGetActorBySemanticLabelResponse(BaseModel):
@@ -1216,25 +794,6 @@ class UnrealGetActorBySemanticLabelResponse(BaseModel):
 # ----------------------------------------------------------------------
 
 
-class UnrealGenerateMeshPrimitiveRequest(BaseModel):
-    """Request to create a parametric mesh primitive."""
-
-    primitive_type: str = Field(
-        ...,
-        description="Primitive type: box, sphere, cylinder, cone, torus, capsule",
-    )
-    dimensions: Dict[str, float] = Field(
-        default_factory=dict,
-        description="Type-specific dimensions (e.g. radius, height, width)",
-    )
-    segments: int = Field(32, description="Tessellation segments")
-    location: List[float] = Field(
-        default_factory=lambda: [0.0, 0.0, 0.0],
-        description="Spawn location [x, y, z] in cm",
-    )
-    actor_label: Optional[str] = Field(None, description="Optional actor label")
-
-
 class UnrealGenerateMeshPrimitiveResponse(BaseModel):
     """Response after creating a mesh primitive."""
 
@@ -1246,20 +805,6 @@ class UnrealGenerateMeshPrimitiveResponse(BaseModel):
     primitive_type: str = Field(..., description="Primitive type created")
     triangle_count: int = Field(..., description="Number of triangles")
     vertex_count: int = Field(..., description="Number of vertices")
-
-
-class UnrealApplyMeshBooleanRequest(BaseModel):
-    """Request to apply boolean operation between two meshes."""
-
-    target_mesh_path: str = Field(
-        ..., description="Target mesh actor path (will be modified)"
-    )
-    tool_mesh_path: str = Field(
-        ..., description="Tool mesh actor path (used as operand)"
-    )
-    operation: str = Field(
-        ..., description="Boolean operation: union, subtract, intersect"
-    )
 
 
 class UnrealApplyMeshBooleanResponse(BaseModel):
@@ -1277,12 +822,6 @@ class UnrealApplyMeshBooleanResponse(BaseModel):
     result_vertex_count: int = Field(..., description="Vertex count after operation")
 
 
-class UnrealComputeConvexHullRequest(BaseModel):
-    """Request to compute a convex hull of a mesh."""
-
-    mesh_path: str = Field(..., description="Source mesh actor path")
-
-
 class UnrealComputeConvexHullResponse(BaseModel):
     """Response after convex hull computation."""
 
@@ -1295,16 +834,6 @@ class UnrealComputeConvexHullResponse(BaseModel):
     hull_vertex_count: int = Field(..., description="Hull vertex count")
     hull_triangle_count: int = Field(..., description="Hull triangle count")
     volume_ratio: float = Field(..., description="Hull volume / original volume ratio")
-
-
-class UnrealDecomposeConvexHullRequest(BaseModel):
-    """Request for V-HACD convex decomposition."""
-
-    mesh_path: str = Field(..., description="Source mesh actor path")
-    max_hulls: int = Field(16, description="Maximum number of convex pieces")
-    max_vertices_per_hull: int = Field(32, description="Max vertices per hull")
-    min_cluster_size: int = Field(256, description="Minimum cluster size")
-    resolution: int = Field(100000, description="V-HACD voxelization resolution")
 
 
 class UnrealDecomposeConvexHullResponse(BaseModel):
@@ -1322,28 +851,6 @@ class UnrealDecomposeConvexHullResponse(BaseModel):
     total_vertices: int = Field(..., description="Total vertices across all hulls")
 
 
-class UnrealEditMeshTopologyRequest(BaseModel):
-    """Request to edit mesh topology (extrude, bevel, inset, loop cut)."""
-
-    mesh_path: str = Field(..., description="Mesh actor path")
-    operation: str = Field(
-        ...,
-        description="Operation: extrude_faces, bevel_edges, inset_faces, loop_cut",
-    )
-    face_selection: Optional[str] = Field(
-        None, description="Face selection filter (e.g. top, front_hemisphere)"
-    )
-    edge_selection: Optional[str] = Field(
-        None, description="Edge selection filter (e.g. all_boundary)"
-    )
-    distance: Optional[float] = Field(None, description="Extrude distance")
-    offset: Optional[float] = Field(None, description="Bevel/inset offset")
-    scale: Optional[List[float]] = Field(
-        None, description="Scale factors [x, y, z] for scale_faces"
-    )
-    count: Optional[int] = Field(None, description="Loop cut count")
-
-
 class UnrealEditMeshTopologyResponse(BaseModel):
     """Response after topology edit."""
 
@@ -1356,17 +863,6 @@ class UnrealEditMeshTopologyResponse(BaseModel):
     faces_affected: int = Field(0, description="Faces affected")
     edges_affected: int = Field(0, description="Edges affected")
     result_triangle_count: int = Field(..., description="Triangle count after edit")
-
-
-class UnrealSubdivideMeshRequest(BaseModel):
-    """Request to subdivide a mesh (Catmull-Clark, Loop, or bilinear)."""
-
-    mesh_path: str = Field(..., description="Mesh actor path")
-    level: int = Field(2, description="Subdivision level (1-4)")
-    scheme: str = Field(
-        "catmull_clark",
-        description="Scheme: catmull_clark, loop, bilinear",
-    )
 
 
 class UnrealSubdivideMeshResponse(BaseModel):
@@ -1385,21 +881,6 @@ class UnrealSubdivideMeshResponse(BaseModel):
     result_vertex_count: int = Field(..., description="Vertex count after subdivision")
 
 
-class UnrealSimplifyMeshRequest(BaseModel):
-    """Request to simplify/decimate a mesh."""
-
-    mesh_path: str = Field(..., description="Mesh actor path")
-    target_triangle_count: Optional[int] = Field(
-        None, description="Target triangle count"
-    )
-    target_percentage: Optional[float] = Field(
-        None, description="Target percentage (0.0-1.0) of original triangles"
-    )
-    max_error: Optional[float] = Field(
-        None, description="Maximum geometric error tolerance"
-    )
-
-
 class UnrealSimplifyMeshResponse(BaseModel):
     """Response after mesh simplification."""
 
@@ -1415,18 +896,6 @@ class UnrealSimplifyMeshResponse(BaseModel):
     reduction_ratio: float = Field(..., description="Reduction ratio achieved")
 
 
-class UnrealCutMeshPlaneRequest(BaseModel):
-    """Request to cut/slice a mesh along a plane."""
-
-    mesh_path: str = Field(..., description="Mesh actor path")
-    plane_origin: List[float] = Field(..., description="Plane origin [x, y, z] in cm")
-    plane_normal: List[float] = Field(..., description="Plane normal [x, y, z]")
-    fill_holes: bool = Field(True, description="Fill cut holes with faces")
-    keep_both_sides: bool = Field(
-        False, description="Keep both sides as separate actors"
-    )
-
-
 class UnrealCutMeshPlaneResponse(BaseModel):
     """Response after plane cut."""
 
@@ -1437,21 +906,6 @@ class UnrealCutMeshPlaneResponse(BaseModel):
     mesh_path: str = Field(..., description="Cut mesh path")
     pieces: List[str] = Field(..., description="Resulting piece actor paths")
     cut_faces_added: int = Field(0, description="Number of fill faces added")
-
-
-class UnrealValidateMeshRequest(BaseModel):
-    """Request to validate mesh geometry."""
-
-    mesh_path: str = Field(..., description="Mesh actor path")
-    checks: List[str] = Field(
-        default_factory=lambda: [
-            "watertight",
-            "manifold",
-            "normals",
-            "self_intersection",
-        ],
-        description="Validation checks to run",
-    )
 
 
 class UnrealValidateMeshResponse(BaseModel):
@@ -1469,20 +923,6 @@ class UnrealValidateMeshResponse(BaseModel):
     vertex_count: int = Field(..., description="Current vertex count")
 
 
-class UnrealConvertMeshFormatRequest(BaseModel):
-    """Request to convert between StaticMesh and DynamicMesh."""
-
-    mesh_path: str = Field(..., description="Source mesh actor/asset path")
-    target_format: str = Field(
-        ...,
-        description="Target: static_mesh, dynamic_mesh, or cad_tessellation",
-    )
-    tessellation_options: Optional[Dict[str, Any]] = Field(
-        None,
-        description="CAD tessellation params (chord_tolerance, angle_tolerance)",
-    )
-
-
 class UnrealConvertMeshFormatResponse(BaseModel):
     """Response after mesh format conversion."""
 
@@ -1495,20 +935,6 @@ class UnrealConvertMeshFormatResponse(BaseModel):
     source_format: str = Field(..., description="Original format")
     target_format: str = Field(..., description="Converted format")
     triangle_count: int = Field(..., description="Result triangle count")
-
-
-class UnrealRemeshMeshRequest(BaseModel):
-    """Request to remesh for clean topology."""
-
-    mesh_path: str = Field(..., description="Mesh actor path")
-    mode: str = Field("uniform", description="Remesh mode: uniform, adaptive")
-    target_edge_length: Optional[float] = Field(
-        None, description="Target edge length in cm (uniform mode)"
-    )
-    target_triangle_count: Optional[int] = Field(
-        None, description="Target triangle count (adaptive mode)"
-    )
-    smoothing_iterations: int = Field(3, description="Number of smoothing iterations")
 
 
 class UnrealRemeshMeshResponse(BaseModel):
@@ -1525,18 +951,6 @@ class UnrealRemeshMeshResponse(BaseModel):
     average_edge_length: float = Field(
         ..., description="Average edge length after remesh"
     )
-
-
-class UnrealComputeMeshUvRequest(BaseModel):
-    """Request to generate UV coordinates."""
-
-    mesh_path: str = Field(..., description="Mesh actor path")
-    method: str = Field(
-        "auto_uv",
-        description="Method: auto_uv, box, planar, cylindrical, atlas_pack",
-    )
-    uv_channel: int = Field(0, description="UV channel index")
-    island_padding: float = Field(2.0, description="Padding between UV islands")
 
 
 class UnrealComputeMeshUvResponse(BaseModel):
@@ -1564,112 +978,61 @@ __all__ = [
     "UnrealHealthCheckResponse",
     "UnrealEngineInfoResponse",
     "UnrealLoadedMapResponse",
-    "UnrealListActorsRequest",
     "UnrealActorEntry",
     "UnrealListActorsResponse",
-    "UnrealGetActorInfoRequest",
     "UnrealActorComponentInfo",
     "UnrealGetActorInfoResponse",
-    "UnrealSearchAssetsRequest",
     "UnrealAssetEntry",
     "UnrealSearchAssetsResponse",
-    "UnrealDescribeObjectRequest",
     "UnrealPropertyInfo",
     "UnrealDescribeObjectResponse",
-    "UnrealGetThumbnailRequest",
     "UnrealGetThumbnailResponse",
     "UnrealSceneSummaryResponse",
-    "UnrealCaptureViewportRequest",
     "UnrealCaptureViewportResponse",
-    "UnrealViewportInfoRequest",
     "UnrealViewportInfoResponse",
-    "UnrealSetCameraViewRequest",
     "UnrealSetCameraViewResponse",
-    "UnrealFocusActorRequest",
     "UnrealFocusActorResponse",
-    "UnrealSpawnActorRequest",
     "UnrealSpawnActorResponse",
-    "UnrealDeleteActorRequest",
     "UnrealDeleteActorResponse",
-    "UnrealSetActorTransformRequest",
     "UnrealSetActorTransformResponse",
-    "UnrealSetActorPropertyRequest",
     "UnrealSetActorPropertyResponse",
-    "UnrealCallActorFunctionRequest",
     "UnrealCallActorFunctionResponse",
-    "UnrealSetActorParentRequest",
     "UnrealSetActorParentResponse",
-    "UnrealAddComponentRequest",
     "UnrealAddComponentResponse",
-    "UnrealSetActorVisibilityRequest",
     "UnrealSetActorVisibilityResponse",
-    "UnrealGetMaterialInfoRequest",
     "UnrealMaterialParameterInfo",
     "UnrealGetMaterialInfoResponse",
-    "UnrealSetMaterialParamsRequest",
     "UnrealSetMaterialParamsResponse",
-    "UnrealCreateMaterialInstanceRequest",
     "UnrealCreateMaterialInstanceResponse",
-    "UnrealAssignMaterialRequest",
     "UnrealAssignMaterialResponse",
-    "UnrealSetLightParamsRequest",
     "UnrealSetLightParamsResponse",
-    "UnrealSetRenderSettingsRequest",
     "UnrealSetRenderSettingsResponse",
-    "UnrealControlSimulationRequest",
     "UnrealControlSimulationResponse",
-    "UnrealGetSimulationStatusRequest",
     "UnrealGetSimulationStatusResponse",
-    "UnrealEnablePhysicsRequest",
     "UnrealEnablePhysicsResponse",
-    "UnrealSetCollisionRequest",
     "UnrealSetCollisionResponse",
-    "UnrealApplyForceRequest",
     "UnrealApplyForceResponse",
-    "UnrealSetPhysicsParamsRequest",
     "UnrealSetPhysicsParamsResponse",
-    "UnrealImportUsdRequest",
     "UnrealImportUsdResponse",
-    "UnrealExportUsdRequest",
     "UnrealExportUsdResponse",
-    "UnrealConvertToSimreadyRequest",
     "UnrealConvertToSimreadyResponse",
-    "UnrealValidateSimreadyRequest",
     "UnrealValidateSimreadyResponse",
-    "UnrealGetInterchangeInfoRequest",
     "UnrealGetInterchangeInfoResponse",
-    "UnrealBatchOperationsRequest",
     "UnrealBatchOperationsResponse",
-    "UnrealQuerySceneGraphRequest",
     "UnrealQuerySceneGraphResponse",
-    "UnrealAnalyzeSceneForRoboticsRequest",
     "UnrealAnalyzeSceneForRoboticsResponse",
-    "UnrealGenerateProceduralSceneRequest",
     "UnrealGenerateProceduralSceneResponse",
-    "UnrealGetActorBySemanticLabelRequest",
     "UnrealGetActorBySemanticLabelResponse",
-    "UnrealGenerateMeshPrimitiveRequest",
     "UnrealGenerateMeshPrimitiveResponse",
-    "UnrealApplyMeshBooleanRequest",
     "UnrealApplyMeshBooleanResponse",
-    "UnrealComputeConvexHullRequest",
     "UnrealComputeConvexHullResponse",
-    "UnrealDecomposeConvexHullRequest",
     "UnrealDecomposeConvexHullResponse",
-    "UnrealEditMeshTopologyRequest",
     "UnrealEditMeshTopologyResponse",
-    "UnrealSubdivideMeshRequest",
     "UnrealSubdivideMeshResponse",
-    "UnrealSimplifyMeshRequest",
     "UnrealSimplifyMeshResponse",
-    "UnrealCutMeshPlaneRequest",
     "UnrealCutMeshPlaneResponse",
-    "UnrealValidateMeshRequest",
     "UnrealValidateMeshResponse",
-    "UnrealConvertMeshFormatRequest",
     "UnrealConvertMeshFormatResponse",
-    "UnrealRemeshMeshRequest",
     "UnrealRemeshMeshResponse",
-    "UnrealComputeMeshUvRequest",
     "UnrealComputeMeshUvResponse",
 ]

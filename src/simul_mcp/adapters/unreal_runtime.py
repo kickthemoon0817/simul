@@ -8,6 +8,7 @@ Remote Control API (HTTP on port 30010) or the embedded ``unreal`` Python module
 import asyncio
 import base64
 import hashlib
+import importlib
 import json
 import math
 import re
@@ -59,11 +60,10 @@ except ImportError:
     AIOHTTP_AVAILABLE = False
 
 try:
-    import unreal as _unreal_module  # type: ignore[import-untyped]
+    importlib.import_module("unreal")
 
     UNREAL_EMBEDDED_AVAILABLE = True
 except ImportError:
-    _unreal_module = None
     UNREAL_EMBEDDED_AVAILABLE = False
 
 UNREAL_AVAILABLE = AIOHTTP_AVAILABLE or UNREAL_EMBEDDED_AVAILABLE
@@ -567,30 +567,6 @@ class UnrealRuntimeSession(LoggerMixin):
         """
         return await self._http_request(
             "PUT", path, body=body,
-            timeout_override=timeout_override, max_retries=max_retries,
-        )
-
-    async def _http_post(
-        self,
-        path: str,
-        body: Dict[str, Any],
-        timeout_override: Optional[float] = None,
-        max_retries: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """
-        Perform an HTTP POST against the Remote Control API.
-
-        Args:
-            path: URL path.
-            body: JSON-serializable request body.
-            timeout_override: Per-call timeout in seconds.
-            max_retries: Override for ``self.max_retries``.
-
-        Returns:
-            Parsed JSON response as a dictionary.
-        """
-        return await self._http_request(
-            "POST", path, body=body,
             timeout_override=timeout_override, max_retries=max_retries,
         )
 
@@ -3899,13 +3875,6 @@ if component.is_simulating_physics() != {target!r}:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    async def _describe_actor_brief(self, actor_path: str) -> Dict[str, Any]:
-        """Read actual actor state rather than property-description metadata."""
-        result = await self.get_actor_info(actor_path)
-        if result.get("error"):
-            raise RuntimeError(result["error"])
-        return result
 
     async def _get_actor_transform(self, actor_path: str) -> Dict[str, Any]:
         """Return the world transform, failing when the actor cannot be read."""

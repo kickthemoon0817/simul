@@ -434,8 +434,6 @@ logging:
   file:
     enabled: true
     path: "logs/simul_mcp.log"
-    max_size: "10MB"
-    backup_count: 5
   console:
     enabled: true
     colored: true
@@ -443,15 +441,12 @@ logging:
 usd:
   cache:
     enabled: true
-    stage_cache_limit: 10
   files:
     max_file_size_mb: 500
     allowed_extensions: [".usd", ".usda", ".usdc", ".usdz"]
 
 viewport:
   capture:
-    width: 1920
-    height: 1080
     max_size: 2048
     format: "png"
 

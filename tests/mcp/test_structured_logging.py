@@ -2,7 +2,7 @@
 
 Covers the high-impact regression surfaces flagged in PR #23 review:
 
-* ContextVar reset on success and exception (sync + async)
+* ContextVar reset on success and exception (request-context middleware)
 * JsonFormatter stable schema (load-bearing for downstream tooling)
 * AuditFormatter strict-mode (only the audit payload is emitted)
 * _setup_audit_handler idempotency
@@ -30,16 +30,26 @@ from simul_mcp.logging import (  # noqa: E402  (sys.path manipulation above)
     _setup_audit_handler,
     _stop_audit_listener,
     _TOOL_NAME_VAR,
-    wrap_tool_with_context,
+    build_request_context_middleware,
 )
 
 
 # ---------------------------------------------------------------------------
-# wrap_tool_with_context: ContextVar reset on success and on exception
+# RequestContextMiddleware: ContextVar reset on success and on exception
 # ---------------------------------------------------------------------------
 
 
-class TestWrapToolContextVarReset:
+class _FakeMessage:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeContext:
+    def __init__(self, name: str) -> None:
+        self.message = _FakeMessage(name)
+
+
+class TestRequestContextMiddlewareContextVarReset:
     """Stale request_id leaking into subsequent records is a silent corruption.
 
     The ``finally`` blocks must reset the ContextVars on every path including
@@ -47,47 +57,49 @@ class TestWrapToolContextVarReset:
     dead correlation id.
     """
 
-    def test_sync_resets_on_success(self) -> None:
-        wrapped = wrap_tool_with_context(lambda x: x + 1, "sync_tool")
-        assert wrapped(41) == 42
+    def test_sets_context_during_call_and_resets_on_success(self) -> None:
+        seen: dict = {}
+
+        async def call_next(context):  # type: ignore[no-untyped-def]
+            seen["request_id"] = _REQUEST_ID_VAR.get()
+            seen["tool_name"] = _TOOL_NAME_VAR.get()
+            return 42
+
+        middleware = build_request_context_middleware()
+        result = asyncio.run(middleware.on_call_tool(_FakeContext("my_tool"), call_next))
+        assert result == 42
+        assert seen["tool_name"] == "my_tool"
+        assert len(seen["request_id"]) == 12
         assert _REQUEST_ID_VAR.get() == "-"
         assert _TOOL_NAME_VAR.get() == "-"
 
-    def test_sync_resets_after_exception(self) -> None:
-        def boom() -> None:
-            raise RuntimeError("oops")
-
-        wrapped = wrap_tool_with_context(boom, "boom_tool")
-        with pytest.raises(RuntimeError):
-            wrapped()
-        assert _REQUEST_ID_VAR.get() == "-"
-        assert _TOOL_NAME_VAR.get() == "-"
-
-    def test_async_resets_on_success(self) -> None:
-        async def add(x: int) -> int:
-            return x + 1
-
-        wrapped = wrap_tool_with_context(add, "async_tool")
-        assert asyncio.run(wrapped(41)) == 42
-        assert _REQUEST_ID_VAR.get() == "-"
-        assert _TOOL_NAME_VAR.get() == "-"
-
-    def test_async_resets_after_exception(self) -> None:
-        async def async_boom() -> None:
+    def test_resets_after_exception(self) -> None:
+        async def call_next(context):  # type: ignore[no-untyped-def]
             raise ValueError("async oops")
 
-        wrapped = wrap_tool_with_context(async_boom, "async_boom")
+        middleware = build_request_context_middleware()
         with pytest.raises(ValueError):
-            asyncio.run(wrapped())
+            asyncio.run(middleware.on_call_tool(_FakeContext("boom_tool"), call_next))
         assert _REQUEST_ID_VAR.get() == "-"
         assert _TOOL_NAME_VAR.get() == "-"
 
-    def test_rejects_async_generator(self) -> None:
-        async def streaming():  # type: ignore[no-untyped-def]
-            yield 1
+    def test_emits_one_audit_record_per_call(self, caplog: pytest.LogCaptureFixture) -> None:
+        async def ok(context):  # type: ignore[no-untyped-def]
+            return None
 
-        with pytest.raises(TypeError):
-            wrap_tool_with_context(streaming, "streamer")
+        async def boom(context):  # type: ignore[no-untyped-def]
+            raise RuntimeError("x")
+
+        middleware = build_request_context_middleware()
+        with caplog.at_level(logging.INFO, logger="simul_mcp.audit"):
+            asyncio.run(middleware.on_call_tool(_FakeContext("ok_tool"), ok))
+            with pytest.raises(RuntimeError):
+                asyncio.run(middleware.on_call_tool(_FakeContext("bad_tool"), boom))
+        audits = [r.audit for r in caplog.records if hasattr(r, "audit")]
+        assert [a["tool"] for a in audits] == ["ok_tool", "bad_tool"]
+        assert audits[0]["status"] == "ok"
+        assert audits[1]["status"] == "error"
+        assert audits[1]["error_class"] == "RuntimeError"
 
 
 # ---------------------------------------------------------------------------

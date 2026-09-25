@@ -2,25 +2,14 @@
 
 import json
 import textwrap
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from ....adapters import IsaacSocketClient, ScriptResult
-from ...schemas.common import ErrorResponse
 from ._shared import (
     BIND_MATERIAL_CORE,
-    BULK_GEOMETRY_ATTRIBUTES,
-    DEFAULT_MAX_RESULTS,
     DEFINE_MATERIAL_CORE,
-    LOG_SCAN_WINDOW_BYTES,
-    MAX_CAPTURE_DIMENSION,
-    MAX_INLINE_CAPTURE_BYTES,
-    MAX_RETAINED_CAPTURES,
-    MAX_SCRIPT_BYTES,
-    PRIM_DETAIL_ASPECTS,
     FloatList,
     _compose_script,
     _pyval,
-    logger,
 )
 from .._meta import tool_meta
 
