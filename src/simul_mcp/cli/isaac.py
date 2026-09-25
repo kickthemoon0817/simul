@@ -16,7 +16,7 @@ import re
 import sys
 import textwrap
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
@@ -33,8 +33,12 @@ from simul_mcp.adapters.isaac_install import (
 )
 from simul_mcp.cli.output import emit, emit_error, is_json_mode
 from simul_mcp.config import get_settings
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
 from simul_mcp.utils.discovery import DiscoveryDir
+
+if TYPE_CHECKING:
+    # Imported in _tools(): the tools package pulls in fastmcp, which
+    # `simul --help` and the install/launch commands never need.
+    from simul_mcp.mcp.tools.isaac_tools import IsaacTools
 
 app = typer.Typer(
     name="isaac",
@@ -48,8 +52,10 @@ def _tools(
     host: Optional[str] = None,
     port: Optional[int] = None,
     timeout: Optional[float] = None,
-) -> IsaacTools:
+) -> "IsaacTools":
     """Build an IsaacTools instance from settings with optional overrides."""
+    from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+
     settings = get_settings()
     client = IsaacSocketClient(
         host=host if host is not None else settings.isaac_sim.socket_host,

@@ -18,7 +18,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from simul_mcp.adapters import is_headless_available
 from simul_mcp.cli.output import emit, emit_error, is_json_mode
 from simul_mcp.config import get_settings, load_settings
 
@@ -32,6 +31,9 @@ console = Console(stderr=True)
 
 def _require_usd() -> None:
     """Exit with an error if headless USD is unavailable."""
+    # Imported here: the probe loads pxr, which `simul --help` must not pay for.
+    from simul_mcp.adapters import is_headless_available
+
     if not is_headless_available():
         if is_json_mode():
             emit_error(

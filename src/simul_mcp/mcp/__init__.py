@@ -75,11 +75,24 @@ from .schemas.usd import (
     StageInfo,
     USDFileInfo,
 )
-from .server import (
-    SimulMCPServer,
-    create_server_instance,
-    start_mcp_server,
-)
+from typing import Any
+
+# The server pulls in fastmcp and every backend adapter. Resolve its exports on
+# first access (PEP 562) so importing a light submodule such as
+# ``simul_mcp.mcp.tools`` — which the ``simul isaac`` CLI does — does not pay
+# for the whole server.
+_SERVER_EXPORTS = ("SimulMCPServer", "create_server_instance", "start_mcp_server")
+
+
+def __getattr__(name: str) -> Any:
+    if name in _SERVER_EXPORTS:
+        from . import server
+
+        value = getattr(server, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     # Server

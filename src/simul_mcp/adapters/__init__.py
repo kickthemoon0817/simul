@@ -4,9 +4,19 @@ Adapter layer for Simul MCP Server.
 This package provides adapter classes that bridge between the MCP server
 and different runtime environments (headless USD operations, Isaac Sim via TCP,
 Blender, Unreal Engine).
+
+The exports are resolved lazily (PEP 562 module ``__getattr__``): importing
+the package costs nothing, and a name is imported from its submodule on first
+access. The optional runtimes pull in heavy dependencies (``pxr`` for headless
+USD, ``bpy`` for Blender, ``aiohttp`` for Unreal), and every ``simul`` CLI
+invocation imports this package, so eager imports made ``simul --help`` pay for
+all of them. An optional runtime whose import fails resolves to the same
+fallbacks as before: ``None`` for its classes, a raising ``create_*_session``
+and an ``is_*_available`` that returns False.
 """
 
-from typing import Any
+import importlib
+from typing import Any, Callable, Dict, Tuple
 
 
 def _raise_import_error(adapter_name: str) -> Any:
@@ -14,71 +24,89 @@ def _raise_import_error(adapter_name: str) -> Any:
     raise ImportError(f"{adapter_name} is not available in this environment")
 
 
-from .base import BackendAdapter
+# Always-importable exports: name -> submodule.
+_REQUIRED: Dict[str, str] = {
+    # Interface every backend adapter implements
+    "BackendAdapter": "base",
+    # Isaac Sim TCP socket client (no omni.* dependency)
+    "IsaacRuntimeAdapter": "isaac_runtime",
+    "IsaacSocketClient": "isaac_socket_client",
+    "ScriptResult": "isaac_socket_client",
+}
 
-# Isaac Sim TCP socket client (always available — no omni.* dependency)
-from .isaac_runtime import IsaacRuntimeAdapter
-from .isaac_socket_client import IsaacSocketClient, ScriptResult
 
+def _fallbacks(label: str, create_name: str, available_name: str) -> Dict[str, Any]:
+    """Build the stand-ins used when an optional runtime cannot be imported."""
 
-try:
-    from .headless_usd import (
-        HeadlessUSDAdapter,
-        HeadlessUSDSession,
-        create_headless_session,
-        is_headless_available,
-    )
-except Exception:
-    HeadlessUSDAdapter = None
-    HeadlessUSDSession = None
+    def create_session(*args: Any, **kwargs: Any) -> Any:
+        return _raise_import_error(label)
 
-    def create_headless_session(*args: Any, **kwargs: Any) -> Any:
-        """Fallback headless session creator when USD runtime is unavailable."""
-        return _raise_import_error("HeadlessUSDAdapter")
-
-    def is_headless_available() -> bool:
-        """Fallback headless availability check."""
+    def is_available() -> bool:
         return False
 
-
-try:
-    from .blender_runtime import (
-        BlenderRuntimeAdapter,
-        BlenderRuntimeSession,
-        create_blender_session,
-        is_blender_available,
-    )
-except Exception:
-    BlenderRuntimeAdapter = None
-    BlenderRuntimeSession = None
-
-    def create_blender_session(*args: Any, **kwargs: Any) -> Any:
-        """Fallback Blender session creator when Blender runtime is unavailable."""
-        return _raise_import_error("BlenderRuntimeAdapter")
-
-    def is_blender_available() -> bool:
-        """Fallback Blender availability check."""
-        return False
+    create_session.__name__ = create_session.__qualname__ = create_name
+    is_available.__name__ = is_available.__qualname__ = available_name
+    return {create_name: create_session, available_name: is_available}
 
 
-try:
-    from .unreal_runtime import (
-        UnrealRuntimeAdapter,
-        UnrealRuntimeSession,
-        create_unreal_session,
-        is_unreal_available,
-    )
-except Exception:
-    UnrealRuntimeAdapter = None
-    UnrealRuntimeSession = None
+# Optional runtimes: submodule -> (exported names, fallback factory).
+_OPTIONAL: Dict[str, Tuple[Tuple[str, ...], Callable[[], Dict[str, Any]]]] = {
+    "headless_usd": (
+        ("HeadlessUSDAdapter", "HeadlessUSDSession", "create_headless_session", "is_headless_available"),
+        lambda: {
+            "HeadlessUSDAdapter": None,
+            "HeadlessUSDSession": None,
+            **_fallbacks("HeadlessUSDAdapter", "create_headless_session", "is_headless_available"),
+        },
+    ),
+    "blender_runtime": (
+        ("BlenderRuntimeAdapter", "BlenderRuntimeSession", "create_blender_session", "is_blender_available"),
+        lambda: {
+            "BlenderRuntimeAdapter": None,
+            "BlenderRuntimeSession": None,
+            **_fallbacks("BlenderRuntimeAdapter", "create_blender_session", "is_blender_available"),
+        },
+    ),
+    "unreal_runtime": (
+        ("UnrealRuntimeAdapter", "UnrealRuntimeSession", "create_unreal_session", "is_unreal_available"),
+        lambda: {
+            "UnrealRuntimeAdapter": None,
+            "UnrealRuntimeSession": None,
+            **_fallbacks("UnrealRuntimeAdapter", "create_unreal_session", "is_unreal_available"),
+        },
+    ),
+}
 
-    def create_unreal_session(*args: Any, **kwargs: Any) -> Any:
-        """Fallback Unreal session creator when Unreal runtime is unavailable."""
-        return _raise_import_error("UnrealRuntimeAdapter")
+_OPTIONAL_BY_NAME: Dict[str, str] = {
+    name: module for module, (names, _) in _OPTIONAL.items() for name in names
+}
 
-    def is_unreal_available() -> bool:
-        """Fallback Unreal availability check."""
-        return False
+
+def __getattr__(name: str) -> Any:
+    """Import an export from its submodule on first access and cache it."""
+    module_name = _REQUIRED.get(name)
+    if module_name is not None:
+        value = getattr(importlib.import_module(f"{__name__}.{module_name}"), name)
+        globals()[name] = value
+        return value
+
+    module_name = _OPTIONAL_BY_NAME.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    names, fallback = _OPTIONAL[module_name]
+    try:
+        module = importlib.import_module(f"{__name__}.{module_name}")
+        resolved = {export: getattr(module, export) for export in names}
+    except Exception:
+        resolved = fallback()
+    # Resolve the whole group at once so the four names always agree.
+    for export, value in resolved.items():
+        globals().setdefault(export, value)
+    return globals()[name]
+
+
+def __dir__() -> list:
+    return sorted(set(globals()) | set(__all__))
 
 
 __all__ = [

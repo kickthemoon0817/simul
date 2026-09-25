@@ -15,7 +15,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
@@ -24,7 +24,6 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
-from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
 from simul_mcp.adapters.unreal_setup import (
     LauncherNotFound,
     ensure_remote_control_config,
@@ -33,6 +32,11 @@ from simul_mcp.adapters.unreal_setup import (
 )
 from simul_mcp.cli.output import emit, emit_error, is_json_mode
 from simul_mcp.config import get_settings
+
+if TYPE_CHECKING:
+    # Imported where a session is built: unreal_runtime pulls in aiohttp,
+    # which `simul --help` and `simul unreal setup` never need.
+    from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
 
 app = typer.Typer(
     name="unreal",
@@ -49,7 +53,7 @@ def _session(
     *,
     passphrase: Optional[str] = None,
     mode: Optional[str] = None,
-) -> UnrealRuntimeSession:
+) -> "UnrealRuntimeSession":
     """Build an UnrealRuntimeSession with optional overrides.
 
     ``passphrase`` accepts either plaintext or a pre-computed MD5 hex
@@ -78,10 +82,12 @@ def _session(
     if overrides:
         unreal_cfg = settings.unreal.model_copy(update=overrides)
         settings = settings.model_copy(update={"unreal": unreal_cfg})
+    from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
+
     return UnrealRuntimeSession(settings)
 
 
-async def _script_refusal(session: UnrealRuntimeSession) -> Dict[str, Any]:
+async def _script_refusal(session: "UnrealRuntimeSession") -> Dict[str, Any]:
     return session._script_execution_denied()
 
 
@@ -125,6 +131,8 @@ async def _attached_call(method: str, **kwargs: Any) -> Dict[str, Any]:
     settings = settings.model_copy(
         update={"unreal": settings.unreal.model_copy(update={"mode": "attached"})}
     )
+    from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
+
     session = UnrealRuntimeSession(settings)
     try:
         return await getattr(session, method)(**kwargs)
@@ -795,7 +803,7 @@ def set_visibility(
 # setup -- auto-configure Remote Control, optionally launch the editor,
 #          then poll until Remote Control accepts connections.
 # ---------------------------------------------------------------------------
-async def _poll_health(session: UnrealRuntimeSession, timeout: float, interval: float) -> Dict[str, Any]:
+async def _poll_health(session: "UnrealRuntimeSession", timeout: float, interval: float) -> Dict[str, Any]:
     """Call health_check repeatedly until connected or timeout elapses."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
