@@ -14,12 +14,11 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from simul_mcp.adapters import is_headless_available
-from simul_mcp.cli.output import emit, emit_error, is_json_mode
+from simul_mcp.cli.output import console, emit, emit_error, fail, is_json_mode
 from simul_mcp.config import get_settings, load_settings
 
 app = typer.Typer(
@@ -27,19 +26,12 @@ app = typer.Typer(
     help="USD file commands -- analyse and manipulate USD files locally (no Isaac Sim needed).",
     add_completion=False,
 )
-console = Console(stderr=True)
 
 
 def _require_usd() -> None:
     """Exit with an error if headless USD is unavailable."""
     if not is_headless_available():
-        if is_json_mode():
-            emit_error(
-                "pxr library not available -- cannot perform USD operations.",
-                "DependencyError",
-            )
-        console.print("[red]Error: pxr library not available -- cannot perform USD operations.[/red]")
-        raise typer.Exit(1)
+        fail("pxr library not available -- cannot perform USD operations.", "DependencyError")
 
 
 # ---------------------------------------------------------------------------
@@ -74,17 +66,11 @@ def info(
             console.print(f"[cyan]Loading[/cyan] {file_path}")
         stage_id = session.load_stage(file_path)
         if not stage_id:
-            if is_json_mode():
-                emit_error("Failed to load USD file", "LoadError", {"file_path": str(file_path)})
-            console.print("[red]Failed to load USD file[/red]")
-            raise typer.Exit(1)
+            fail("Failed to load USD file", "LoadError", {"file_path": str(file_path)})
 
         stage_info = session.get_stage_info(stage_id)
         if not stage_info:
-            if is_json_mode():
-                emit_error("Failed to read stage info", "ReadError")
-            console.print("[red]Failed to read stage info[/red]")
-            raise typer.Exit(1)
+            fail("Failed to read stage info", "ReadError")
 
         summary = session.summarize_stage(stage_id, include_meshes=True)
 
