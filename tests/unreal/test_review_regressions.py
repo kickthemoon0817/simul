@@ -17,6 +17,7 @@ import pytest
 from aiohttp import web
 from PIL import Image
 
+from simul_mcp.adapters import unreal_runtime
 from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
 from simul_mcp.config import Settings
 
@@ -529,6 +530,8 @@ async def test_capture_download_above_inline_cap_and_remote_path(
         return json.loads(output.getvalue())
 
     monkeypatch.setattr(session, "_execute_json_script", transfer)
+    # Shrink the chunk so this ~440 KiB capture still spans several reads.
+    monkeypatch.setattr(unreal_runtime, "_CAPTURE_CHUNK_BYTES", 128 * 1024)
     target = tmp_path / f"capture.{fmt}"
     result = await session.capture_to_file(target, 384, 384, fmt)
     assert result["file_path"] == str(target.resolve())
@@ -537,6 +540,7 @@ async def test_capture_download_above_inline_cap_and_remote_path(
         assert saved.size == (384, 384)
     assert len(offsets) > 1
     assert all(size <= 128 * 1024 for _, size in offsets)
+    assert [offset for offset, _ in offsets] == list(range(0, len(blob), 128 * 1024))
 
 
 @pytest.mark.asyncio
@@ -554,3 +558,27 @@ async def test_capture_failed_transfer_preserves_existing_output(monkeypatch, tm
         await session.capture_to_file(target)
     assert target.read_bytes() == b"original"
     assert list(tmp_path.iterdir()) == [target]
+
+
+@pytest.mark.asyncio
+async def test_mesh_ops_resolve_actors_with_actor_at():
+    """Mesh ops load their actors by path (ACTOR_HELPERS.actor_at) instead of
+    scanning every level actor, and a missing actor is a ScriptError."""
+    session = UnrealRuntimeSession()
+    session._execute_python = AsyncMock(
+        return_value={
+            "ReturnValue": False,
+            "CommandResult": "ValueError: Actor not found: /Game/M.M:PersistentLevel.Missing",
+        }
+    )
+    result = await session.apply_mesh_boolean(
+        "/Game/M.M:PersistentLevel.Body", "/Game/M.M:PersistentLevel.Missing", "union"
+    )
+    script = session._execute_python.call_args.args[0]
+    assert "get_all_level_actors" not in script
+    assert "target_actor = actor_at('/Game/M.M:PersistentLevel.Body')" in script
+    assert "tool_actor = actor_at('/Game/M.M:PersistentLevel.Missing')" in script
+    compile(script, "apply_mesh_boolean", "exec")
+    assert result["success"] is False
+    assert result["error_type"] == "ScriptError"
+    assert "Actor not found" in result["error"]
