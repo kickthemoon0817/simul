@@ -175,21 +175,27 @@ class SimulationMixin:
 
     @tool_meta(
         name="step_isaac_simulation",
-        description="Step the simulation forward by N physics steps.",
+        description=(
+            "Step the simulation forward by exactly N frames and leave the timeline "
+            "paused. Works from a playing, paused or stopped timeline; reports the "
+            "frames advanced and the time delta."
+        ),
         read_only=False,
     )
     async def step_isaac_simulation(
         self, num_steps: int = 1
     ) -> Dict[str, Any]:
         """
-        Step the simulation forward by N physics steps.
+        Step the simulation forward by exactly N frames, then pause.
 
         Args:
-            num_steps: Number of app update frames to advance (one physics
-                step each at the default physics rate).
+            num_steps: Number of timeline frames to advance (one physics
+                step each at the default physics rate). Clamped to [1, 1000].
 
         Returns:
-            Dict with current time after stepping.
+            Dict with ``steps`` advanced, ``steps_requested``,
+            ``start_time``, ``current_time``, ``time_delta`` and ``state``
+            ("paused"); ``error`` when fewer frames advanced than requested.
         """
         num_steps = max(1, min(num_steps, 1000))
         bridge_result = await self._execute_bridge_action(
@@ -206,21 +212,55 @@ class SimulationMixin:
                 import omni.kit.app
 
                 timeline = omni.timeline.get_timeline_interface()
-                if timeline.is_stopped():
-                    timeline.play()
-                    import asyncio
-                    for _ in range(3):
-                        await omni.kit.app.get_app().next_update_async()
+                app = omni.kit.app.get_app()
+                num_steps = {num_steps}
 
-                for _ in range({num_steps}):
-                    await omni.kit.app.get_app().next_update_async()
+                def _commit():
+                    commit = getattr(timeline, "commit", None)
+                    if callable(commit):
+                        commit()
+
+                # A paused timeline does not move on app updates and a
+                # stopped one spends its first updates after play() on
+                # physics warm-up, so play and count only the updates that
+                # moved the time; then pause. The budget bounds the loop when
+                # time cannot advance (end of a non-looping range).
+                start_time = timeline.get_current_time()
+                if not timeline.is_playing():
+                    timeline.play()
+                    _commit()
+                advanced = 0
+                updates = 0
+                last = start_time
+                try:
+                    while advanced < num_steps and updates < num_steps + 60:
+                        await app.next_update_async()
+                        updates += 1
+                        now = timeline.get_current_time()
+                        if now != last:
+                            advanced += 1
+                            last = now
+                finally:
+                    timeline.pause()
+                    _commit()
 
                 current_time = timeline.get_current_time()
-                print(json.dumps({{
-                    "steps": {num_steps},
+                result = {{
+                    "steps": advanced,
+                    "steps_requested": num_steps,
+                    "start_time": start_time,
                     "current_time": current_time,
-                    "state": "playing" if timeline.is_playing() else "paused",
-                }}))
+                    "time_delta": current_time - start_time,
+                    "app_updates": updates,
+                    "state": "paused",
+                }}
+                if advanced < num_steps:
+                    result["error"] = (
+                        f"Timeline advanced {{advanced}} of {{num_steps}} steps in "
+                        f"{{updates}} app updates; it may be at the end of a "
+                        "non-looping time range."
+                    )
+                print(json.dumps(result))
             except Exception as e:
                 print(json.dumps({{"error": f"Failed to step simulation: {{e}}"}}))
         """)
