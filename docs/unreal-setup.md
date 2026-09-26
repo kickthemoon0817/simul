@@ -28,11 +28,34 @@ and comments in the file are preserved verbatim.
 | `RemoteControlHttpServerPort` | `--port` (default `30010`) | HTTP listen port |
 | `bRestrictServerAccess` | `True` | Hardcoded by simul; safe default |
 | `bEnableRemotePythonExecution` | `True` | Allows the Python script endpoint |
+| `bAllowConsoleCommandRemoteExecution` | `True` | Allows editor console commands over Remote Control |
 | `RemoteControlWebsocketServerBindAddress` | `--bind` (only when set) | WebSocket bind address. UE's C++ default is `0.0.0.0`. |
-| `[HTTPServer.Listeners] DefaultBindAddress` (in `Config/DefaultEngine.ini`, **separate file**) | `--bind` (only when set) | HTTP bind address. **Not** a `URemoteControlSettings` field — UE's RemoteControl HTTP server delegates to `FHttpServerModule`, which reads its bind from `GEngineIni`'s `[HTTPServer.Listeners]` `DefaultBindAddress` (per UE 5.x source `HttpServerConfig.cpp:11-17` / `HttpListener.cpp:62-92`). Earlier patches wrote `RemoteControlHttpServerHostname` here in this same RC ini, which UE silently ignored — that key has been removed. |
+| `[HTTPServer.Listeners] DefaultBindAddress` (in `Config/DefaultEngine.ini`, **separate file**) | `--bind` (only when set) | HTTP bind address. **Not** a `URemoteControlSettings` field — UE's RemoteControl HTTP server delegates to `FHttpServerModule`, which reads its bind from `GEngineIni`'s `[HTTPServer.Listeners]` `DefaultBindAddress` (UE 5.x `HttpServerConfig.cpp` / `HttpListener.cpp`). |
 | `RemoteControlWebSocketServerPort` | `--websocket-port` (only when set) | Multi-instance disambiguation; default 30020 |
 | `bEnforcePassphraseForRemoteClients` | `--passphrase` (only when set) | Pins to `True`. UE's C++ default is `True` but writing it explicitly makes the operator's intent visible. |
 | `+Passphrases=(Identifier="simul",Passphrase="<md5>")` | `--passphrase <plaintext>` | Appends a UE config-array entry. simul hashes the plaintext with MD5 (UE 5.x's `FMD5::HashAnsiString`); the line is appended idempotently — re-running with the same passphrase does not duplicate it. The CLI refuses `--passphrase` without a non-loopback `--bind`. **To let simul-mcp itself talk to a passphrase-enabled editor, set the matching plaintext (or pre-computed MD5 hex) on the client side via the `UNREAL__PASSPHRASE` env var (or `.env`) — `UnrealRuntimeSession` then attaches `Passphrase: <md5>` to every Remote Control request automatically.** Other Remote Control clients (curl scripts, custom tooling) need to send the same header on each request. |
+
+## Re-running setup
+
+Setup is idempotent, and a plain re-run (no `--bind`) returns the project to
+the loopback default:
+
+- a non-loopback `RemoteControlWebsocketServerBindAddress` is reset to `127.0.0.1`;
+- a non-loopback `DefaultBindAddress` is removed from `DefaultEngine.ini`
+  (the file is never created just for this);
+- every simul-identified `+Passphrases` entry is dropped.
+
+Pass `--allow-public` on the re-run to keep an existing public bind. Running
+with a different `--passphrase` (plus the non-loopback `--bind` it requires)
+rotates it: earlier simul entries are replaced by the new hash.
+
+## How the editor is launched
+
+| OS | Resolution order |
+|---|---|
+| macOS | `--engine-path` → with `--no-headless`, LaunchServices `open -a "Unreal Editor"` → the highest `UE_*` install under `/Users/Shared/Epic Games`, `/Applications/Epic Games`, `~/Applications/Epic Games` (version-sorted, so `UE_5.10` beats `UE_5.9`). Headless launches always run the binary directly, never `open -a`. |
+| Linux | `--engine-path` → `UE_ENGINE_PATH` (or `UNREAL_ENGINE_PATH`) → `UnrealEditor` on `PATH`. |
+| Windows / other | Automated launch is unsupported. Start the editor yourself and run setup with `--no-launch`. |
 
 ## What is NOT installed and is NOT required
 

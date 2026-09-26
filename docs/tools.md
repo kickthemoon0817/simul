@@ -1,11 +1,11 @@
 # MCP tool catalog
 
 The tools a server registers depend on which backends are available and
-selected (`--backends`), on `--unreal-tools`, and on
+selected (`--backends`), on `--unreal-tools` / `--blender-tools`, and on
 `security.allow_script_execution`. To see exactly what your server exposes:
 
 ```bash
-simul-mcp --json info
+simul-mcp tools            # add --json for descriptions and input schemas
 ```
 
 Every tool returns a JSON object. Failures carry `success: false` and an
@@ -120,7 +120,8 @@ Behaviour worth knowing:
 
 Registered when Blender is available: either `bpy` is importable by the
 server (embedded mode) or a window is attached through the bridge add-on
-(attached mode, [blender-attachment.md](blender-attachment.md)).
+(attached mode, [blender-attachment.md](blender-attachment.md)). `--blender-tools thin`
+registers only `THIN_BLENDER_TOOLS` from `src/simul_mcp/tool_surfaces.py`.
 
 | Group | Tools |
 |---|---|
@@ -131,7 +132,7 @@ server (embedded mode) or a window is attached through the bridge add-on
 | Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake` |
 | Animation | `get_blender_frame`, `set_blender_frame`, `set_blender_frame_range`, `play_blender_animation`, `insert_blender_keyframe`, `delete_blender_keyframe`, `get_blender_keyframes`, `get_blender_object_trajectory` |
 | Camera and viewport | `get_blender_camera_info`, `set_blender_camera_view`, `get_blender_viewport_info`, `focus_blender_on_object`, `capture_blender_viewport`, `capture_blender_viewport_sequence` |
-| UI | `control_blender_ui` |
+| UI and attachment | `control_blender_ui`, `attach_blender_window` |
 | SimReady | `get_simready_metadata`, `apply_simready_metadata`, `setup_simready_hierarchy`, `validate_simready_compliance`, `export_simready_usd` |
 | Scripting | `execute_blender_script` |
 

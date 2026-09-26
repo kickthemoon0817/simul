@@ -201,14 +201,12 @@ class USDReader(LoggerMixin):
             USDStageInfo with stage details
         """
         try:
-            # Get root layer info
             root_layer = stage.GetRootLayer()
             
-            # Get session layer info
             session_layer = stage.GetSessionLayer()
             session_layer_path = session_layer.identifier if session_layer else None
             
-            # Get all layers
+            # Layer stack, strongest first
             layers = []
             for layer in stage.GetLayerStack():
                 layer_info = USDLayerInfo(
@@ -225,11 +223,10 @@ class USDReader(LoggerMixin):
                 )
                 layers.append(layer_info)
             
-            # Get stage metadata
             default_prim = stage.GetDefaultPrim()
             default_prim_path = str(default_prim.GetPath()) if default_prim else None
             
-            # Get stage variables
+            # Stage-level metadata (not every pxr build exposes GetMetadata)
             stage_variables = {}
             if hasattr(stage, 'GetMetadata'):
                 try:
@@ -241,7 +238,6 @@ class USDReader(LoggerMixin):
             if prim_count is None:
                 prim_count = sum(1 for _ in stage.Traverse())
             
-            # Get root prims
             root_prims = [str(prim.GetPath()) for prim in stage.GetPseudoRoot().GetChildren()]
             
             stage_info = USDStageInfo(

@@ -31,6 +31,29 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_CONTEXT_MEMBER_ERROR = "AttributeError: 'Context' object has no attribute"
+CONTEXT_OVERRIDE_HINT = (
+    "Hint: bpy.context lost its window/view-layer members, usually because the "
+    "script loaded a file (read_homefile/open_mainfile), which replaces the window "
+    "the call was bound to. After the load, wrap context-dependent operators such "
+    "as exporters and render in an override built from the new window: "
+    "win = bpy.context.window_manager.windows[0]; "
+    "area = next(a for a in win.screen.areas if a.type == 'VIEW_3D'); "
+    "region = next(r for r in area.regions if r.type == 'WINDOW'); "
+    "with bpy.context.temp_override(window=win, screen=win.screen, scene=win.scene, "
+    "view_layer=win.view_layer, area=area, region=region): bpy.ops.export_scene.gltf(...)"
+)
+
+
+def add_context_hint(error: Optional[str]) -> Optional[str]:
+    """Append the context-override recipe to a missing ``bpy.context`` member error.
+
+    Idempotent, so both the add-on and the attached client may apply it.
+    """
+    if not error or _CONTEXT_MEMBER_ERROR not in error or CONTEXT_OVERRIDE_HINT in error:
+        return error
+    return f"{error}. {CONTEXT_OVERRIDE_HINT}"
+
 
 @dataclass
 class BlenderObjectEntry:
@@ -1987,7 +2010,7 @@ class BlenderRuntimeSession:
         no safe way to kill that thread, so the script keeps running in the
         background until it finishes on its own; it just no longer blocks
         the MCP server. Its output is discarded. Without a timeout the
-        script runs inline, exactly as before.
+        script runs inline.
 
         Args:
             script: Python source code to execute.
@@ -2022,7 +2045,7 @@ class BlenderRuntimeSession:
                     "output": stdout_capture.getvalue() or None,
                     "return_value": None,
                     "duration_seconds": round(time.monotonic() - start, 4),
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": add_context_hint(f"{type(exc).__name__}: {exc}"),
                 }
             elapsed = time.monotonic() - start
             raw_output = stdout_capture.getvalue()

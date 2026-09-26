@@ -1,6 +1,6 @@
 ---
 name: simulation-control
-description: This skill should be used when the user asks to "start the simulation", "stop the simulation", "pause simulation", "step the simulation", "reset simulation", "play simulation", "check simulation state", "run the simulation", or needs to control simulation playback in Isaac Sim.
+description: Use when the user asks to "start the simulation", "stop the simulation", "pause simulation", "step the simulation", "reset simulation", "play simulation", "check simulation state", "run the simulation", or needs to control simulation playback in Isaac Sim.
 version: 0.1.0
 ---
 
@@ -27,7 +27,8 @@ Always check state before issuing a command to avoid sending `start` to an alrea
 mcp__simul__get_isaac_simulation_state
 ```
 
-Returns: `{ "playing": bool, "paused": bool, "stopped": bool }`.
+Returns `state` (`"playing"`, `"paused"` or `"stopped"`), `current_time`,
+`time_codes_per_second`, `is_playing` and `is_stopped`.
 
 Also useful for monitoring elapsed time during a run:
 
@@ -63,7 +64,7 @@ Each step advances physics by one timestep (default 1/60 s). This is useful when
 
 For a burst of steps without reading between them, pass a larger `num_steps` (e.g. 60 for 1 second at 60 Hz). The tool blocks until all steps complete.
 
-**Note:** Stepping only works when the simulation is already running (started). Call `start_isaac_simulation` first, then `step_isaac_simulation`.
+**Note:** Stepping works from a playing, paused or stopped timeline and always leaves it **paused**. Call `start_isaac_simulation` afterwards to resume free-running playback. `num_steps` is clamped to [1, 1000].
 
 ## Step 4: Pause the Simulation
 

@@ -120,13 +120,10 @@ class SceneSummarizer(LoggerMixin):
             total_prims = scan["total_prims"]
             prim_type_counts = scan["prim_type_counts"]
 
-            # Get basic stage information
             stage_info = self.usd_reader.get_stage_info(stage, prim_count=total_prims)
             
-            # Initialize bbox cache
             bbox_cache = BBoxCache(stage)
             
-            # Compute scene bounding box
             scene_bbox = bbox_cache.get_stage_bbox()
             scene_bbox_dict = None
             scene_center = None
@@ -140,7 +137,6 @@ class SceneSummarizer(LoggerMixin):
                 scene_size = bbox_size(scene_bbox)
                 scene_volume = bbox_volume(scene_bbox)
             
-            # Summarize root prims
             root_prims = []
             for prim in stage.GetPseudoRoot().GetChildren():
                 prim_summary = self.summarize_prim(
@@ -155,7 +151,6 @@ class SceneSummarizer(LoggerMixin):
             mesh_statistics = scan["mesh_statistics"]
             hierarchy_depth = scan["hierarchy_depth"]
             
-            # Get animation info
             animation_info = self._get_animation_info(stage_info)
             
             summary = SceneSummary(
@@ -212,14 +207,11 @@ class SceneSummarizer(LoggerMixin):
             PrimSummary object
         """
         try:
-            # Get basic prim info
             prim_info = self.usd_reader.get_prim_info(prim)
             
-            # Initialize bbox cache if not provided
             if bbox_cache is None:
                 bbox_cache = BBoxCache(prim.GetStage())
             
-            # Compute bounding box
             bbox = bbox_cache.compute_world_bbox(prim)
             bbox_dict = None
             bbox_center_val = None
@@ -233,12 +225,10 @@ class SceneSummarizer(LoggerMixin):
                 bbox_size_val = bbox_size(bbox)
                 bbox_volume_val = bbox_volume(bbox)
             
-            # Get transform information
             transform_info = None
             if prim.IsA(UsdGeom.Xformable):
                 transform_info = self._get_transform_info(prim)
             
-            # Get mesh information
             mesh_info_dict = None
             if include_mesh_info and prim.IsA(UsdGeom.Mesh):
                 try:
@@ -257,7 +247,6 @@ class SceneSummarizer(LoggerMixin):
                 except Exception as e:
                     self.logger.debug(f"Could not get mesh info for {prim.GetPath()}: {e}")
             
-            # Count children by type
             children_types = {}
             children_count = len(prim_info.children)
             
@@ -266,7 +255,6 @@ class SceneSummarizer(LoggerMixin):
                     child_type = child.GetTypeName()
                     children_types[child_type] = children_types.get(child_type, 0) + 1
             
-            # Filter attributes for summary (keep only important ones)
             important_attributes = self._filter_important_attributes(prim_info.attributes)
             
             summary = PrimSummary(

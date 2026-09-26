@@ -131,7 +131,8 @@ simul-mcp usd summary scene.usda --format json
 
 ```bash
 simul-mcp info              # reachable backends and registered tools
-simul-mcp --json info       # the same, as JSON
+simul-mcp tools             # every MCP tool, grouped by backend
+simul-mcp --json tools      # the same with descriptions and input schemas
 ```
 
 ## Connect your agent
@@ -195,8 +196,10 @@ Keep agent context small by registering only what you use:
 | SimReady | Metadata, hierarchy, compliance checks, USD export | `validate_simready_compliance`, `export_simready_usd` |
 | Server | Usage statistics | `get_tool_usage_stats` |
 
-`simul-mcp --json info` lists every tool registered in your environment. The
-full catalog is in [docs/tools.md](docs/tools.md).
+`simul-mcp tools` lists every tool for the backends you select (no engine
+needed); add `--json` for descriptions and input schemas. `--unreal-tools` and
+`--blender-tools` pick a thin or full surface. The full catalog is in
+[docs/tools.md](docs/tools.md).
 
 ## Documentation
 

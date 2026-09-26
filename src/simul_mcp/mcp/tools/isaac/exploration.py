@@ -270,9 +270,7 @@ class ExplorationMixin:
             "Create a light prim in the scene. Supports DomeLight (environment/HDRI), "
             "DistantLight (sun), SphereLight (point), RectLight (area), DiskLight, and "
             "CylinderLight. Configure intensity, color, color temperature, and texture. "
-            "texture_file must be inside the configured sandbox (security.allowed_paths); "
-            "omniverse:// URLs are allowed when their scheme is in "
-            "security.allowed_url_schemes."
+            "texture_file: sandbox (security.allowed_paths); URLs need an allowed scheme."
         ),
         read_only=False,
         sandboxed_paths=(SandboxedPath("texture_file"),),
@@ -428,11 +426,9 @@ class ExplorationMixin:
     @tool_meta(
         name="get_isaac_subtree",
         description=(
-            "Get a subtree as a flat, traversal-ordered list with depth, type, and child "
-            "count for each prim; paged via max_results/offset. Use get_isaac_subtree to "
-            "see the structure under one prim (a robot, an imported asset); use "
-            "list_isaac_prims to browse with a type filter, and search_isaac_prims to find "
-            "a prim by name."
+            "Get the structure under one prim (a robot, an imported asset) as a flat, "
+            "traversal-ordered list with depth, type, and child count for each prim. "
+            "Paged (max_results/offset)."
         ),
         read_only=True,
         idempotent=True,

@@ -34,8 +34,8 @@ class CoreToolsMixin:
 
         Args:
             prim_path: USD path of the prim to inspect.
-            aspects: Which aspects to read. Defaults to ``["info"]``. Valid
-                     names are the keys of PRIM_DETAIL_ASPECTS.
+            aspects: Aspect names to read (listed in the tool description).
+                     Defaults to ``["info"]``.
 
         Returns:
             Dict with one entry per requested aspect, keyed by aspect name.

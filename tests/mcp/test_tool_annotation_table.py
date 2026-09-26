@@ -76,6 +76,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "compute_unreal_convex_hull": (RW, False, True),
     # Blender
     "get_blender_info": (RO, True, True),
+    "attach_blender_window": (RW, True, True),  # selects the target; Blender untouched
     "capture_blender_viewport": (RO, True, True),  # base64 only, no file
     "create_blender_object": (RW, False, True),
     "delete_blender_object": (DESTRUCTIVE, False, True),

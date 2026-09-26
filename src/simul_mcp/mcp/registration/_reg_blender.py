@@ -11,17 +11,29 @@ from fastmcp.tools.tool import ToolResult
 from ..schemas.blender import *
 from ..schemas.blender_ui import AgentControl, BlenderUIRequest, BlenderUIResponse
 from ..schemas.simready import *
-from ._helpers import with_param_descriptions
+from ...tool_surfaces import THIN_BLENDER_TOOLS
+from ._helpers import surface_tool, with_param_descriptions
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
 
 
-def register_blender_tools(server: "SimulMCPServer") -> None:
-    """Register Blender runtime specific tools."""
+def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None:
+    """Register Blender runtime specific tools.
+
+    Args:
+        server: The MCP server instance.
+        thin: When True, register only ``THIN_BLENDER_TOOLS`` from
+            ``simul_mcp.tool_surfaces``. Selected by ``blender.tool_surface`` /
+            ``simul-mcp server --blender-tools``.
+    """
     from ...adapters.blender_runtime import BlenderRuntimeSession
 
-    @server.mcp.tool(
+    surface = THIN_BLENDER_TOOLS if thin else None
+    tool = surface_tool(server.mcp.tool, surface)
+    script_tool = surface_tool(server._script_tool, surface)
+
+    @tool(
         name="control_blender_ui",
         description=(
             "Perform a named agent_control action in the explicitly attached Blender window. "
@@ -72,7 +84,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             lambda session: session.control_ui(**input_data.model_dump()),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_info",
         description="Get information about the active Blender runtime.",
         annotations=server._tool_annotations(
@@ -98,7 +110,63 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             lambda session: session.get_runtime_info(),
         )
 
-    @server.mcp.tool(
+    @tool(
+        name="attach_blender_window",
+        description=(
+            "Attached mode: select the Blender process and window that Blender tools act on, "
+            "the same as `simul blender attach`. Use it to recover after another file was loaded "
+            "(read_homefile, open_mainfile) or Blender restarted. Succeeds only when the choice is "
+            "unambiguous; pass instance_id/window_id from the error details or get_blender_info otherwise."
+        ),
+        annotations=server._tool_annotations(read_only=False, idempotent=True, open_world=True),
+        output_schema=None,
+        task=server._task_optional(),
+    )
+    @with_param_descriptions()
+    async def attach_blender_window(
+        instance_id: Optional[str] = None,
+        window_id: Optional[str] = None,
+    ) -> ToolResult:
+        """Verify and persist the attached Blender target.
+
+        Args:
+            instance_id: Bridge instance ID; required when several Blender processes run.
+            window_id: Window ID; required when the selected process has several windows.
+        """
+        input_data = server._validate_input(
+            BlenderAttachWindowRequest, instance_id=instance_id, window_id=window_id
+        )
+        if isinstance(input_data, dict):
+            return server._as_text_result(input_data)
+        assert isinstance(input_data, BlenderAttachWindowRequest)
+
+        def _attach(_session: Any) -> Dict[str, Any]:
+            if server.settings.blender.mode != "attached":
+                return {
+                    "success": False,
+                    "error": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
+                    "error_type": "ValueError",
+                }
+            from ...adapters.blender_connection import BlenderAttachments
+
+            attachments = BlenderAttachments(server.settings)
+            try:
+                return attachments.attach(input_data.instance_id, input_data.window_id)
+            except (ValueError, RuntimeError) as exc:
+                # List the candidates so the agent can choose without a shell.
+                return {
+                    "success": False,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "details": {"instances": attachments.instances()},
+                }
+
+        return await server._exec_backend(
+            "attach_blender_window", server.blender_adapter, "Blender",
+            BlenderAttachWindowResponse, _attach,
+        )
+
+    @tool(
         name="list_blender_scene_objects",
         description="List objects from the active Blender scene.",
         annotations=server._tool_annotations(
@@ -149,7 +217,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
 
     # -- Phase 1: Core Observation tools ----------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_object_info",
         description="Get detailed information about a single Blender object.",
         annotations=server._tool_annotations(
@@ -178,7 +246,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             lambda session: session.get_object_info(input_data.object_name),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_mesh_info",
         description="Get mesh geometry counts for a Blender mesh object.",
         annotations=server._tool_annotations(
@@ -207,7 +275,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             lambda session: session.get_mesh_info(input_data.object_name),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_bounding_box",
         description="Get the bounding box of a Blender object.",
         annotations=server._tool_annotations(
@@ -241,7 +309,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="search_blender_objects",
         description=(
             "Search for objects in the Blender scene " "by name pattern or type."
@@ -280,7 +348,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="summarize_blender_scene",
         description="Get a high-level summary of the Blender scene.",
         annotations=server._tool_annotations(
@@ -300,7 +368,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             lambda session: session.summarize_scene(),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_material_info",
         description="Get material information with bounded node tree traversal.",
         annotations=server._tool_annotations(
@@ -331,7 +399,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_distance_between",
         description="Measure the Euclidean distance between two Blender objects.",
         annotations=server._tool_annotations(
@@ -365,7 +433,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="check_blender_object_bounds",
         description="Check if a Blender object is within spatial bounds.",
         annotations=server._tool_annotations(
@@ -416,10 +484,12 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
 
     # -- Phase 2: Visual Observation tools --------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="capture_blender_viewport",
         description=(
-            "Capture the Blender viewport as a base64-encoded JPEG image. "
+            "Capture the Blender viewport as a JPEG. The image arrives as an MCP "
+            "image content block, followed by a JSON block with success, width, "
+            "height, engine, capture_method, format and image_attached=true. "
             "In attached mode, briefly show an agent eye badge and border pulse after success. "
             "Agent annotations are excluded from the captured image."
         ),
@@ -463,7 +533,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_blender_camera_view",
         description="Set the active camera's location and rotation.",
         annotations=server._tool_annotations(
@@ -500,7 +570,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_camera_info",
         description="Get information about the active Blender camera.",
         annotations=server._tool_annotations(
@@ -523,7 +593,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             lambda session: session.get_camera_info(camera_name),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="focus_blender_on_object",
         description="Focus the camera on a specific Blender object.",
         annotations=server._tool_annotations(
@@ -560,7 +630,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_viewport_info",
         description="Get active viewport and render settings.",
         annotations=server._tool_annotations(
@@ -580,7 +650,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             lambda session: session.get_viewport_info(),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="capture_blender_viewport_sequence",
         description=(
             "Capture a sequence of viewport frames as base64-encoded JPEGs. "
@@ -635,7 +705,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
 
     # -- Phase 3: Scene Manipulation tools --------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="create_blender_object",
         description="Create a new object in the Blender scene.",
         annotations=server._tool_annotations(
@@ -678,7 +748,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="delete_blender_object",
         description="Delete an object from the Blender scene.",
         annotations=server._tool_annotations(
@@ -708,7 +778,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             lambda session: session.delete_object(input_data.object_name),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_blender_object_transform",
         description="Set location, rotation, and/or scale on a Blender object.",
         annotations=server._tool_annotations(
@@ -750,7 +820,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_blender_object_parent",
         description="Parent one Blender object to another.",
         annotations=server._tool_annotations(
@@ -785,7 +855,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="clear_blender_object_parent",
         description="Remove parent from a Blender object.",
         annotations=server._tool_annotations(
@@ -820,7 +890,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="assign_blender_material",
         description="Assign a Principled BSDF material to a Blender object.",
         annotations=server._tool_annotations(
@@ -864,7 +934,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="add_blender_modifier",
         description="Add a modifier to a Blender object.",
         annotations=server._tool_annotations(
@@ -904,7 +974,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_blender_light_params",
         description="Set light parameters on a Blender light object.",
         annotations=server._tool_annotations(
@@ -956,7 +1026,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
 
     # -- Phase 4: File I/O tools ------------------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="open_blender_file",
         description="Open a .blend file, replacing the current scene.",
         annotations=server._tool_annotations(
@@ -986,7 +1056,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             lambda session: session.open_blend_file(input_data.file_path),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="save_blender_file",
         description="Save the current .blend file.",
         annotations=server._tool_annotations(
@@ -1016,7 +1086,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             lambda session: session.save_blend_file(input_data.file_path),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="import_blender_file",
         description="Import a file into the Blender scene.",
         annotations=server._tool_annotations(
@@ -1052,7 +1122,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
 
     # -- File I/O tools (export + info) ----------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="export_blender_file",
         description="Export scene objects to a file.",
         annotations=server._tool_annotations(
@@ -1090,7 +1160,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_file_info",
         description="Get information about the current .blend file.",
         annotations=server._tool_annotations(
@@ -1112,7 +1182,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
 
     # -- Animation & Timeline tools ---------------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="set_blender_frame",
         description="Set the current animation frame.",
         annotations=server._tool_annotations(
@@ -1139,7 +1209,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             lambda session: session.set_frame(input_data.frame),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_frame",
         description="Get the current frame and animation range.",
         annotations=server._tool_annotations(
@@ -1159,7 +1229,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             lambda session: session.get_frame(),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_blender_frame_range",
         description="Set the animation frame range.",
         annotations=server._tool_annotations(
@@ -1194,7 +1264,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="play_blender_animation",
         description="Control animation playback (play, stop, reverse).",
         annotations=server._tool_annotations(
@@ -1223,7 +1293,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             lambda session: session.play_animation(input_data.action),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="insert_blender_keyframe",
         description="Insert a keyframe on an object property.",
         annotations=server._tool_annotations(
@@ -1263,7 +1333,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="delete_blender_keyframe",
         description="Delete a keyframe from an object property.",
         annotations=server._tool_annotations(
@@ -1304,7 +1374,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_keyframes",
         description="Get keyframe summary for an object.",
         annotations=server._tool_annotations(
@@ -1337,7 +1407,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
 
     # -- Physics & Simulation tools ---------------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="setup_blender_rigid_body",
         description="Set up rigid body physics on a Blender object.",
         annotations=server._tool_annotations(
@@ -1390,7 +1460,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="add_blender_force_field",
         description="Add a force field to the scene.",
         annotations=server._tool_annotations(
@@ -1430,7 +1500,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_force_field_info",
         description="Get force field parameters for an object.",
         annotations=server._tool_annotations(
@@ -1461,7 +1531,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="add_blender_rigid_body_constraint",
         description="Add a rigid body constraint between two objects.",
         annotations=server._tool_annotations(
@@ -1504,7 +1574,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_constraint_info",
         description="Get rigid body constraint info for an object.",
         annotations=server._tool_annotations(
@@ -1535,7 +1605,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_physics_state",
         description="Get current physics state of an object.",
         annotations=server._tool_annotations(
@@ -1566,7 +1636,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_blender_object_trajectory",
         description="Sample object position over a frame range.",
         annotations=server._tool_annotations(
@@ -1606,7 +1676,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="bake_blender_simulation",
         description="Bake physics simulation for a frame range.",
         annotations=server._tool_annotations(
@@ -1640,7 +1710,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="free_blender_bake",
         description="Free (delete) baked physics simulation data.",
         annotations=server._tool_annotations(
@@ -1669,7 +1739,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
 
     # -- Scripting & mesh-from-data tools --------------------------------
 
-    @server._script_tool(
+    @script_tool(
         name="execute_blender_script",
         description=(
             "Execute arbitrary Python code inside Blender with access "
@@ -1707,7 +1777,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="create_blender_mesh_from_data",
         description=(
             "Create a mesh object from raw vertex, edge, and face "
@@ -1758,7 +1828,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
 
     # -- SimReady Asset Format tools ---------------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="apply_simready_metadata",
         description=(
             "Apply NVIDIA SimReady metadata (semantic labels, physics "
@@ -1797,7 +1867,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_simready_metadata",
         description=(
             "Read NVIDIA SimReady metadata from a Blender object. "
@@ -1832,7 +1902,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="validate_simready_compliance",
         description=(
             "Validate Blender objects against NVIDIA SimReady "
@@ -1882,7 +1952,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="export_simready_usd",
         description=(
             "Export a SimReady-compliant USD file from Blender. Validates "
@@ -1927,7 +1997,7 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="setup_simready_hierarchy",
         description=(
             "Create a SimReady-compliant object hierarchy in Blender with "

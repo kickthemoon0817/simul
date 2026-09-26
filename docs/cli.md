@@ -37,6 +37,7 @@ simul-mcp server                                   # stdio, every available back
 simul-mcp server --backends unreal                 # only Unreal tools (plus usage stats)
 simul-mcp server --backends isaac,usd
 simul-mcp server --backends unreal --unreal-tools full
+simul-mcp server --backends blender --blender-tools thin
 simul-mcp server --backends unreal --unreal-mode attached
 simul-mcp server --backends blender --blender-mode attached
 simul-mcp server --transport http                  # streamable HTTP on server.host:server.port
@@ -49,10 +50,25 @@ simul-mcp server --config /abs/path/config.yaml --log-level DEBUG
 | `-t, --transport` | `stdio` (default; the client spawns the server), `http` (streamable HTTP) or `sse` (legacy) |
 | `-b, --backends` | Comma-separated subset of `isaac,unreal,usd,blender`. Default: every available backend |
 | `--unreal-tools` | `thin` (default, six tools) or `full` (every granular Unreal tool). Overrides `unreal.tool_surface` |
+| `--blender-tools` | `full` (default) or `thin` (the essentials in `THIN_BLENDER_TOOLS`). Overrides `blender.tool_surface` |
 | `--unreal-mode` | `endpoint` (default) or `attached` (the editor chosen with `simul unreal attach`) |
 | `--blender-mode` | `embedded` (default, local `bpy`) or `attached` (the window chosen with `simul blender attach`) |
 | `-l, --log-level` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
 | `-v, --verbose` | Verbose logging |
+
+`--backends` also limits the startup probes: backends you did not select are
+neither probed nor built.
+
+### `simul-mcp tools`
+
+Lists the MCP tools the server would register, grouped by backend, without
+connecting to any engine. It takes the same `--backends`, `--unreal-tools`,
+`--blender-tools`, `--unreal-mode` and `--blender-mode` options as `server`.
+
+```bash
+simul-mcp tools                                    # names, grouped by backend
+simul-mcp --json tools --backends blender --blender-tools thin   # with descriptions and schemas
+```
 
 ## `simul-mcp isaac`
 

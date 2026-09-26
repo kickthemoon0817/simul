@@ -321,7 +321,7 @@ print(json.dumps({
     "skills_head": resource("skills.md").read_text(encoding="utf-8")[:400],
     "api_core_is_file": resource("docs", "api", "core.md").is_file(),
     "socket_protocol": settings.isaac_sim.socket_protocol,
-    "cors_origins": settings.server.cors_origins,
+    "log_components": settings.logging.components,
     "allowed_roots": [str(root) for root in PathPolicy.from_settings(settings).allowed_roots],
     "bare_settings_ok": isinstance(Settings(), Settings),
 }))
@@ -356,6 +356,6 @@ def test_wheel_install_serves_settings_and_resources(tmp_path: Path) -> None:
     assert "execute_isaac_script" in payload["skills_head"]
     assert payload["api_core_is_file"] is True
     assert payload["socket_protocol"] == "vscode"
-    assert payload["cors_origins"][-1] == "http://localhost:8229", "packaged default.yaml was not loaded"
+    assert payload["log_components"].get("isaac") == "INFO", "packaged default.yaml was not loaded"
     assert payload["allowed_roots"] == [str(Path("/tmp/simul_mcp").resolve())]
     assert payload["bare_settings_ok"] is True

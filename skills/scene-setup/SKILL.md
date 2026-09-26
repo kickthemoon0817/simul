@@ -1,6 +1,6 @@
 ---
 name: scene-setup
-description: This skill should be used when the user asks to "set up a scene", "create a new scene", "add a ground plane", "add lighting", "create a basic scene", "scene from scratch", "empty scene", "new stage", or needs to build a complete 3D scene in Isaac Sim from the ground up.
+description: Use when the user asks to "set up a scene", "create a new scene", "add a ground plane", "add lighting", "create a basic scene", "scene from scratch", "empty scene", "new stage", or needs to build a complete 3D scene in Isaac Sim from the ground up.
 version: 0.1.0
 ---
 

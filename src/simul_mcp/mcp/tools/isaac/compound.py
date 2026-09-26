@@ -44,9 +44,7 @@ class CompoundMixin:
             "add_isaac_rigid_body, add_isaac_collision, set_isaac_mass_properties, "
             "create_isaac_material and assign_isaac_material: it runs the same steps in a "
             "single round trip and reports each step's result under 'steps'. Stops at the "
-            "first failing step and names it in 'failed_step'. collision accepts none, "
-            "convexHull, convexDecomposition, meshSimplification, boundingSphere, "
-            "boundingCube."
+            "first failing step and names it in 'failed_step'."
         ),
         read_only=False,
     )

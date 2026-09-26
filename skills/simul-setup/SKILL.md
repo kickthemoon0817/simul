@@ -1,6 +1,6 @@
 ---
 name: simul-setup
-description: This skill should be used when the user asks to "set up simul", "install simul", "configure simul", "get started", "which backend", "how to install", or needs help choosing and installing the right backends for their simulation workflow.
+description: Use when the user asks to "set up simul", "install simul", "configure simul", "get started", "which backend", "how to install", or needs help choosing and installing the right backends for their simulation workflow.
 version: 0.1.0
 ---
 
@@ -22,21 +22,9 @@ Multiple backends can be used simultaneously. Isaac Sim and Unreal are the most 
 
 ## Step 2: Check Python Version
 
-Simul requires Python 3.11, 3.12, or 3.13. Check the user's version:
-
-```bash
-python3 --version
-```
-
-**Blender users must use Python 3.11 or 3.13** — the `bpy` package has no 3.12 wheels.
-
-| Python | USD | Isaac Sim | Unreal | Blender |
-|--------|-----|-----------|--------|---------|
-| 3.11   | Yes | Yes       | Yes    | Yes (bpy 4.x/5.0) |
-| 3.12   | Yes | Yes       | Yes    | No      |
-| 3.13   | Yes | TBD       | Yes    | Yes (bpy 5.1) |
-
-**Recommended:** Python 3.11 for maximum compatibility across all backends.
+Simul requires Python 3.11, 3.12, or 3.13 (`python3 --version`). Embedded
+Blender (`bpy`) additionally needs 3.11 or 3.13; see the README's
+requirements section for the per-backend matrix.
 
 ## Step 3: Install
 
@@ -77,58 +65,49 @@ Isaac Sim provides its own `pxr` and `omni` Python modules — no extra pip pack
      install or repo checkout). Add `--symlink` for editable workflows.
    - Or use Docker Compose: `docker compose -f compose.isaac-sim.yml up`
 
-2. Enable the extension in Isaac Sim:
-   - Window > Extensions > search "simul" > Enable
+2. Start Isaac Sim with the bridge enabled:
+   - `simul-mcp isaac launch` (any version; enables the Python socket and
+     the bridge, then waits for both ports), or
+   - `simul-mcp isaac bridge-up` when a 5.x editor is already running.
 
 3. Verify connectivity:
    ```bash
    simul-mcp isaac ping
    ```
 
-The bridge extension auto-allocates ports for multi-instance support. No manual port configuration needed.
+Ports are fixed, not auto-allocated: bridge 8229, stock Python socket 8226.
+For a second instance pass `--socket-port` / `--bridge-port` to `launch`.
 
 ### Unreal Engine
 
 Simul communicates with Unreal via the built-in Remote Control HTTP API. No extra Python packages needed.
 
-1. Enable plugins in your `.uproject`:
-   ```json
-   {
-     "Plugins": [
-       {"Name": "RemoteControl", "Enabled": true},
-       {"Name": "PythonScriptPlugin", "Enabled": true}
-     ]
-   }
+1. Run setup against the project (ask for the `.uproject` path first):
+   ```bash
+   simul unreal setup /path/to/Project.uproject --yes
    ```
+   It enables `RemoteControl` + `PythonScriptPlugin`, writes
+   `Config/DefaultRemoteControl.ini`, launches the editor headless, and
+   waits until Remote Control answers. Add `--no-launch` when the editor
+   is already running. Don't hand-edit the `.uproject` or ini; see
+   `docs/unreal-setup.md` for exactly what gets written.
 
-2. Create `Config/DefaultRemoteControl.ini`:
-   ```ini
-   [/Script/RemoteControlCommon.RemoteControlSettings]
-   bAutoStartWebServer=True
-   bAutoStartWebSocketServer=True
-   RemoteControlHttpServerPort=30010
-   RemoteControlWebSocketServerPort=30020
-   bRestrictServerAccess=True
-   bEnableRemotePythonExecution=True
-   bAllowConsoleCommandRemoteExecution=True
-   ```
-
-   > **Important:** `bRestrictServerAccess=True` is required. Without it, Python execution silently remains disabled.
-
-3. Restart the Unreal Editor.
-
-4. Verify connectivity:
+2. Verify connectivity:
    ```bash
    simul-mcp unreal health
    ```
 
 ### Blender
 
-Blender integration uses the `bpy` pip package.
+Two modes:
 
-1. Ensure you installed with `--extra blender`
-2. Blender runs in-process — no external editor needed for headless operations
-3. For live editor integration, start Blender with the MCP addon (future release)
+- **Embedded** (default): `bpy` runs inside the MCP server. Install with
+  `--extra blender`; no Blender editor needed.
+- **Attached**: drive an already-open Blender window. Run
+  `simul blender install-bridge`, enable the add-on ZIP in Blender, then
+  `simul blender attach` and start the server with
+  `--backends blender --blender-mode attached`. See
+  `docs/blender-attachment.md`.
 
 ### USD Only (Headless)
 
@@ -188,6 +167,6 @@ simul-mcp info
 ```
 
 If any backend fails, re-check the setup steps above. Common issues:
-- **Isaac Sim**: Bridge extension not enabled, or Isaac Sim not running
-- **Unreal**: Remote Control plugin not enabled, or `bRestrictServerAccess` not set to `True`
-- **Blender**: Wrong Python version (need 3.11 or 3.13)
+- **Isaac Sim**: Isaac Sim not running, or started without `simul-mcp isaac launch` (bridge not enabled)
+- **Unreal**: setup not run against this project; re-run `simul unreal setup <.uproject> --no-launch --yes`
+- **Blender**: embedded mode on the wrong Python version (need 3.11 or 3.13)

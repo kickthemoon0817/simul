@@ -78,7 +78,6 @@ def setup_logging(
 
     config_file = _resolve_logging_config_path(config_file or _DEFAULT_LOGGING_CONFIG)
 
-    # Load logging configuration
     if config_file.exists():
         try:
             with open(config_file, "r", encoding="utf-8") as f:
@@ -86,21 +85,16 @@ def setup_logging(
 
             _apply_settings_to_dictconfig(config, settings)
 
-            # Apply profile if specified
             if profile and "profiles" in config and profile in config["profiles"]:
                 profile_config = config["profiles"][profile]
-                # Merge profile configuration
                 if "loggers" in profile_config:
                     config.setdefault("loggers", {}).update(profile_config["loggers"])
                 if "handlers" in profile_config:
                     config.setdefault("handlers", {}).update(profile_config["handlers"])
 
-            # Override log level if specified
             if log_level:
-                # Update all loggers with the new level
                 for logger_config in config.get("loggers", {}).values():
                     logger_config["level"] = log_level.upper()
-                # Update root logger
                 if "root" in config:
                     config["root"]["level"] = log_level.upper()
 

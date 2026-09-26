@@ -805,7 +805,7 @@ async def _poll_health(
     return last
 
 
-# Kept under the old private name: the safety gate and its tests use it.
+# Private alias used by the safety gate and its tests.
 _is_loopback_bind = is_loopback_bind
 
 _WILDCARD_BINDS = {"0.0.0.0", "::", "[::]", "any", "*"}
@@ -898,10 +898,9 @@ def setup(
             "itself talk to the resulting editor, set the matching "
             "plaintext (or MD5 hex) on the client side via the "
             "UNREAL__PASSPHRASE env var or .env — simul-mcp will "
-            "then attach 'Passphrase: <md5>' to every request. Most "
-            "useful with --bind <non-loopback> as a layer-2 hardening on "
-            "top of the IP allowlist; --bind alone is enough for trusted-"
-            "LAN setups."
+            "then attach 'Passphrase: <md5>' to every request. Requires "
+            "--bind <non-loopback> --allow-public; it hardens a public bind "
+            "on top of the IP allowlist."
         ),
     ),
     agent_overlay: bool = typer.Option(
@@ -1051,7 +1050,8 @@ def setup(
             title="Plan",
         ))
         console.print(
-            "This will edit the .uproject and DefaultRemoteControl.ini in place. "
+            "This will edit the .uproject, DefaultRemoteControl.ini and (to set or "
+            "clear a bind address) DefaultEngine.ini in place. "
             "Re-run with [bold]--yes[/bold] to skip this prompt."
         )
         if not typer.confirm("Proceed?", default=True):

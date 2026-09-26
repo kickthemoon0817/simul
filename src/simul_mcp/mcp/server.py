@@ -12,6 +12,7 @@ import hashlib
 import inspect
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import (
@@ -57,6 +58,10 @@ from .usage_tracker import ToolUsageTracker
 
 logger = get_logger(__name__)
 
+# sizeof(sockaddr_un.sun_path), terminating NUL included: 104 on macOS and the
+# BSDs, 108 on Linux.
+_UNIX_SOCKET_PATH_MAX = 108 if sys.platform.startswith("linux") else 104
+
 try:
     from importlib.metadata import version as _pkg_version
 
@@ -81,7 +86,12 @@ _MCP_INSTRUCTIONS: str = (
     "execute_isaac_script when none does (custom extensions, replicator "
     "workflows, robotics APIs, warp kernels). Read the "
     "'simul://isaac-sim/skills' resource for scripting patterns and API "
-    "reference when writing scripts.\n\n"
+    "reference when writing scripts.\n"
+    "  Finding Isaac prims: get_isaac_scene_summary for counts first; "
+    "list_isaac_prims to browse a level; get_isaac_subtree for the structure "
+    "under one prim; search_isaac_prims by name or exact type anywhere below a "
+    "root; query_isaac_typed_prims by schema (subclasses too) with attribute "
+    "values; find_isaac_prims_in_area by position.\n\n"
     "CONVENTIONS — Isaac Sim stages are Z-up with metersPerUnit=1, so "
     "positions and distances are metres, gravity points along -Z, and "
     "rotations are XYZ Euler degrees; get_isaac_stage_info reports the "
@@ -95,13 +105,9 @@ _MCP_INSTRUCTIONS: str = (
     "Blender and Unreal; each one's description names the runtime it targets.\n"
     + "".join(f"  {spec.routing_rule}\n" for spec in BACKENDS if spec.name == "usd")
     + "  The two *_tool_usage_stats tools are server metadata, not a backend.\n\n"
-    "MULTI-INSTANCE — when multiple Isaac Sim applications are running:\n"
-    "  1. Call list_isaac_instances to discover all running instances "
-    "and see which stage each has loaded.\n"
-    "  2. Call set_active_isaac_instance to switch within the current MCP session.\n"
-    "  3. All subsequent Isaac tool calls in that same session route to that instance.\n"
-    "  4. For containerized Isaac Sim, use the host-published bridge / VS Code ports, "
-    "not the container-internal ports."
+    "MULTI-INSTANCE — list_isaac_instances, then set_active_isaac_instance; "
+    "later Isaac calls in this session go there. For containerized Isaac Sim use "
+    "the host-published ports, not the container-internal ones."
 )
 
 _FASTMCP_SUPPORTS_INSTRUCTIONS: bool = (
@@ -188,6 +194,7 @@ class SimulMCPServer(LoggerMixin):
         self,
         settings: Optional[Settings] = None,
         backends: Optional[Set[str]] = None,
+        require_available: bool = True,
     ):
         """
         Initialize Simul 3D MCP Server.
@@ -197,9 +204,14 @@ class SimulMCPServer(LoggerMixin):
             backends: Set of backend names to register MCP tools for.
                       ``None`` (default) registers all available backends.
                       Valid names: ``isaac``, ``unreal``, ``usd``, ``blender``.
+            require_available: When False, register an enabled backend's
+                tools even if its runtime is missing here. Only for listing
+                the tool surface (``simul-mcp tools``); such tools fail on
+                every call.
         """
         self.settings = settings or get_settings()
         self._backends = backends  # None means "all available"
+        self._require_available = require_available
         self._path_policy = PathPolicy.from_settings(
             self.settings, project_root=find_checkout_root()
         )
@@ -229,9 +241,17 @@ class SimulMCPServer(LoggerMixin):
         self._instance_lock_timeout = float(self.settings.server.timeout)
 
         # One adapter per registered backend; None when its runtime is not
-        # importable in this process.
+        # importable in this process or the backend was not selected, so a
+        # disabled backend's runtime (bpy, pxr, aiohttp) is never probed.
+        # Isaac's adapter is always built: it owns the default client the
+        # instance registry and IsaacTools hold, and building it dials nothing.
         self._adapters: Dict[str, Optional[BackendAdapter]] = {
-            spec.name: spec.adapter_factory(self.settings) for spec in BACKENDS
+            spec.name: (
+                spec.adapter_factory(self.settings)
+                if spec.name == "isaac" or self._backend_enabled(spec.name)
+                else None
+            )
+            for spec in BACKENDS
         }
         # Which backend registered each tool, for the CLI's grouping.
         self._tool_backends: Dict[str, str] = {}
@@ -262,7 +282,6 @@ class SimulMCPServer(LoggerMixin):
             client_resolver=self._get_request_isaac_client,
         )
 
-        # Initialize FastMCP server
         mcp_kwargs: Dict[str, Any] = {
             "name": "Simul – 3D Simulation & DCC Tools",
             "version": _PACKAGE_VERSION,
@@ -872,7 +891,10 @@ class SimulMCPServer(LoggerMixin):
             response_model: Schema a successful payload is validated against.
             call: Receives an open session and returns the payload, or an
                 error envelope (``success`` False with ``error``) that is
-                passed through as is. May be sync or async.
+                passed through as is. May be sync or async. Parse tool
+                input inside ``call``, not before it, so malformed input
+                comes back as an error payload instead of escaping as an
+                unhandled exception.
             params: Call parameters worth keeping in the usage log.
 
         Returns:
@@ -962,8 +984,15 @@ class SimulMCPServer(LoggerMixin):
             return self._validate_output(sandbox_error(exc.details), models, tool_name)
         except Exception as exc:
             self.logger.error("Error in %s: %s", tool_name, exc)
+            # Structured errors (e.g. Blender's AttachmentStale) name their own
+            # type and details so clients can branch on them.
+            details = getattr(exc, "details", None)
             return self._validate_output(
-                ErrorResponse(error=str(exc), error_type="Exception").model_dump(),
+                ErrorResponse(
+                    error=str(exc),
+                    error_type=str(getattr(exc, "error_type", "Exception")),
+                    details=details if isinstance(details, dict) and details else None,
+                ).model_dump(),
                 models,
                 tool_name,
             )
@@ -992,12 +1021,16 @@ class SimulMCPServer(LoggerMixin):
         """
         content: List[Any] = []
         image = payload.get("image_base64")
-        if isinstance(image, str) and image:
+        if "image_base64" in payload:
+            # The transport keys never reach the client: a present image moves
+            # to its own block, an absent one (a null a response model filled
+            # in) would only be noise in the record.
             payload = {
                 key: value
                 for key, value in payload.items()
                 if key not in ("image_base64", "encoding")
             }
+        if isinstance(image, str) and image:
             payload["image_attached"] = True
             image_format = _sniff_image_format(image) or str(
                 payload.get("format", "png")
@@ -1291,6 +1324,14 @@ class SimulMCPServer(LoggerMixin):
                     )
                 if not resolved.startswith(boundary) or not os.path.exists(resolved):
                     socket_path = None
+                elif len(os.fsencode(resolved)) >= _UNIX_SOCKET_PATH_MAX:
+                    # The host's discovery dir can be deeper than the
+                    # container's, and connect(2) rejects a path sun_path
+                    # cannot hold; TCP still reaches the bridge.
+                    logger.warning(
+                        "Bridge socket %s is too long for AF_UNIX; using TCP instead", resolved
+                    )
+                    socket_path = None
                 else:
                     socket_path = resolved
 
@@ -1356,9 +1397,8 @@ class SimulMCPServer(LoggerMixin):
         per-instance override, and any bridge advertised by a discovery file
         or already registered — are excluded from the scan. Probing one with
         the stock-socket protocol never finds an instance: the bridge waits
-        for a length prefix that never comes, and the probe only returns
-        when its read deadline expires, which used to add the full cap to
-        every listing.
+        for a length prefix that never comes, and the probe would only return
+        once its read deadline expired.
         """
         # Phase 1: fast discovery via files
         file_discovered = await self._discover_from_files()
@@ -1509,7 +1549,9 @@ class SimulMCPServer(LoggerMixin):
         """
         for spec in BACKENDS:
             adapter = self._adapters[spec.name]
-            if not self._backend_enabled(spec.name) or adapter is None or not adapter.is_available():
+            if not self._backend_enabled(spec.name):
+                continue
+            if self._require_available and (adapter is None or not adapter.is_available()):
                 continue
             before = self._registered_tool_names()
             spec.register_tools(self)
@@ -1577,7 +1619,9 @@ class SimulMCPServer(LoggerMixin):
         Returns:
             Mapping of every registered backend name to ``{"enabled": bool,
             "available": bool, "capabilities": list[str]}``. ``enabled`` is
-            whether the backend was selected for tool registration.
+            whether the backend was selected for tool registration; a
+            backend that is not enabled has no adapter and reports
+            ``available`` false (Isaac excepted, whose adapter always exists).
         """
         return {
             spec.name: self._adapter_capabilities(spec.name, self._adapters[spec.name])

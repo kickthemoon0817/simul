@@ -49,8 +49,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="load_usd_file",
         description=(
-            "Load a USD file and return stage information. Paths must be inside "
-            "the configured sandbox (security.allowed_paths)."
+            "Load a USD file and return stage information. "
+            "Paths: sandbox (security.allowed_paths)."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -112,8 +112,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="validate_usd_file",
         description=(
-            "Validate a USD file without loading it. Paths must be inside the "
-            "configured sandbox (security.allowed_paths)."
+            "Validate a USD file without loading it. "
+            "Paths: sandbox (security.allowed_paths)."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False

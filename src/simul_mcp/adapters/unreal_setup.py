@@ -87,15 +87,10 @@ def _required_ini_values(
         "bEnableRemotePythonExecution": "True",
         "bAllowConsoleCommandRemoteExecution": "True",
     }
-    # NOTE: HTTP bind hostname does NOT live on URemoteControlSettings —
-    # iter6 traced it to FHttpListenerConfig.BindAddress, populated from
-    # GEngineIni's [HTTPServer.Listeners] DefaultBindAddress. The
-    # `RemoteControlHttpServerHostname` key earlier patches wrote here was
-    # a silent no-op (the field doesn't exist on the URemoteControlSettings
-    # CDO). HTTP bind is now patched via `patch_default_engine_ini` below.
-    # WebSocket bind, however, IS a real RemoteControlSettings field, so
-    # we route the same `bind` value through it here for symmetry — users
-    # who pass --bind 127.0.0.1 get loopback on both HTTP and WS.
+    # The HTTP bind address is not a URemoteControlSettings field; it comes
+    # from DefaultEngine.ini's [HTTPServer.Listeners] DefaultBindAddress (see
+    # `patch_default_engine_ini`). The WebSocket bind is a settings field, so
+    # the same `bind` value goes here to keep HTTP and WS on one interface.
     if bind is not None:
         values["RemoteControlWebsocketServerBindAddress"] = bind
     if websocket_port is not None:
@@ -206,9 +201,8 @@ def patch_default_engine_ini(
     UE's RemoteControl HTTP server delegates to ``FHttpServerModule``,
     whose listener reads ``[HTTPServer.Listeners] DefaultBindAddress``
     from the engine ini (``GEngineIni`` → ``DefaultEngine.ini``). The
-    bind is *not* configurable via ``URemoteControlSettings``; iter6
-    traced this directly to UE 5.3 source at
-    ``HttpServerConfig.cpp:11-17`` and ``HttpListener.cpp:62-92``.
+    bind is *not* configurable via ``URemoteControlSettings`` (UE 5.3
+    ``HttpServerConfig.cpp`` / ``HttpListener.cpp``).
 
     Idempotent: only rewrites when the value differs. Touches only the
     ``[HTTPServer.Listeners]`` section; other sections preserved verbatim.

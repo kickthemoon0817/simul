@@ -474,11 +474,7 @@ class DiagnosticsMixin:
     @tool_meta(
         name="disable_isaac_extension",
         description=(
-            "Disable an extension immediately in the running Isaac Sim instance. Accepts "
-            "EITHER the bare canonical Kit extension name (e.g. 'omni.physx', "
-            "'isaacsim.replicator.behavior') OR the version-suffixed ID returned by "
-            "list_isaac_extensions (e.g. 'omni.physx-107.3.7'). The bare name is preferred "
-            "— it keeps callers decoupled from the installed version. Refuses the transport "
+            "Disable an extension immediately in the running Isaac Sim instance. Refuses the transport "
             "extensions simul-mcp speaks through (khemoo.simul.mcp, "
             "isaacsim.code_editor.python_server, isaacsim.code_editor.vscode)."
         ),
@@ -490,14 +486,10 @@ class DiagnosticsMixin:
         """
         Disable an extension by its ID in the running Isaac Sim instance.
 
-        Accepts either the bare canonical extension name (e.g. "worv.env.sun")
-        — which is what ``omni.kit.app.IExtensionManager.set_extension_enabled_immediate``
-        natively takes — or the fully version-suffixed ID returned by
-        ``list_isaac_extensions`` (e.g. "worv.env.sun-0.3.0").
-
         Args:
-            extension_id: The extension name or fully qualified ID
-                (e.g. "isaacsim.core.utils", "omni.physx", "worv.env.sun-0.3.0").
+            extension_id: Bare Kit extension name (preferred, e.g. "omni.physx")
+                or the version-suffixed ID from list_isaac_extensions
+                (e.g. "omni.physx-107.3.7").
 
         Returns:
             Dict with success status and extension info after disabling, or a

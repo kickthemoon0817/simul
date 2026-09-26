@@ -285,16 +285,10 @@ class RenderMixin:
     @tool_meta(
         name="query_isaac_typed_prims",
         description=(
-            "Query prims by USD schema type and optionally read their attributes. Traverses "
-            "the stage from root_path, finds all prims matching the schema type, and reads "
-            "the requested attributes. Supported types: UsdLux.DistantLight, "
-            "UsdLux.SphereLight, UsdLux.DomeLight, UsdGeom.Mesh, UsdGeom.PointInstancer, "
-            "UsdGeom.Xform, UsdShade.Material, or any USD type name. Attributes are read "
-            "via schema API first (e.g. 'intensity' -> GetIntensityAttr), then fallback to "
-            "generic and inputs: prefix. Paged via max_results/offset. Use "
-            "query_isaac_typed_prims when you need attribute values or schema-based "
-            "matching (subclasses included); use search_isaac_prims for a plain name or "
-            "exact type lookup."
+            "Find prims below root_path by USD schema type (subclasses included) and read "
+            "the requested attributes from each. Attributes resolve via the schema API "
+            "first (e.g. 'intensity' -> GetIntensityAttr), then the plain and inputs: "
+            "names. Paged (max_results/offset)."
         ),
         read_only=True,
         idempotent=True,

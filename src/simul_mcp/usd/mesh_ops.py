@@ -87,23 +87,20 @@ class MeshOperations(LoggerMixin):
         time_code = self._default_time_code() if time_code is None else time_code
         
         try:
-            # Get basic mesh data
             points = mesh.GetPointsAttr().Get(time_code)
             face_vertex_counts = mesh.GetFaceVertexCountsAttr().Get(time_code)
             face_vertex_indices = mesh.GetFaceVertexIndicesAttr().Get(time_code)
             
-            # Convert to numpy arrays for easier manipulation
             points_array = np.array(points) if points else np.array([])
             face_counts_array = np.array(face_vertex_counts) if face_vertex_counts else np.array([])
             face_indices_array = np.array(face_vertex_indices) if face_vertex_indices else np.array([])
             
-            # Get normals
             normals = None
             normals_attr = mesh.GetNormalsAttr()
             if normals_attr and normals_attr.Get(time_code):
                 normals = np.array(normals_attr.Get(time_code))
             
-            # Get UVs (texture coordinates)
+            # First UV primvar under a common name wins
             uvs = None
             primvars = UsdGeom.PrimvarsAPI(mesh.GetPrim()).GetPrimvars()
             for primvar in primvars:
@@ -113,7 +110,6 @@ class MeshOperations(LoggerMixin):
                         uvs = np.array(uv_data)
                         break
             
-            # Get vertex colors
             colors = None
             for primvar in primvars:
                 if primvar.GetPrimvarName() in ['displayColor', 'color']:
@@ -122,12 +118,10 @@ class MeshOperations(LoggerMixin):
                         colors = np.array(color_data)
                         break
             
-            # Get subdivision scheme
             subdivision_scheme = mesh.GetSubdivisionSchemeAttr().Get()
             if not subdivision_scheme:
                 subdivision_scheme = "none"
             
-            # Get interpolation settings
             face_varying_linear_interpolation = mesh.GetFaceVaryingLinearInterpolationAttr().Get()
             interpolate_boundary = mesh.GetInterpolateBoundaryAttr().Get()
             
