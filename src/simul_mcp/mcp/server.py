@@ -967,8 +967,15 @@ class SimulMCPServer(LoggerMixin):
             return self._validate_output(sandbox_error(exc.details), models, tool_name)
         except Exception as exc:
             self.logger.error("Error in %s: %s", tool_name, exc)
+            # Structured errors (e.g. Blender's AttachmentStale) name their own
+            # type and details so clients can branch on them.
+            details = getattr(exc, "details", None)
             return self._validate_output(
-                ErrorResponse(error=str(exc), error_type="Exception").model_dump(),
+                ErrorResponse(
+                    error=str(exc),
+                    error_type=str(getattr(exc, "error_type", "Exception")),
+                    details=details if isinstance(details, dict) and details else None,
+                ).model_dump(),
                 models,
                 tool_name,
             )

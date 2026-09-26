@@ -44,6 +44,8 @@ without the bridge is not discoverable by these commands.
 When exactly one live GUI process and one window exist, `simul blender attach`
 can omit both selectors. Ambiguous selections fail and require explicit IDs.
 Window IDs are session identities, not OS window titles or coordinates.
+From an MCP client, the `attach_blender_window` tool makes the same selection
+(`instance_id` / `window_id` arguments) and writes the same attachment file.
 
 The existing Blender and SimReady MCP tools use this connection. For example,
 `get_blender_info` reports the selected process/window and `create_blender_object`
@@ -199,14 +201,57 @@ or bypass of operating-system permissions in this implementation.
 
 Every request verifies the bridge instance, file-load generation, window and
 scene identity before executing. Closing the window, switching its scene,
-loading another `.blend`, restarting Blender, or restarting the bridge makes
-the old target invalid. Run `instances` and `attach` again. Simul never silently
-selects a replacement window. An explicit `open_blender_file` affects the whole
-Blender process and invalidates its old attachment after completing.
+loading another `.blend` (including `bpy.ops.wm.read_homefile` or
+`open_mainfile` inside `execute_blender_script`), restarting Blender, or
+restarting the bridge makes the old target invalid. Loading a file replaces the
+window and scene as well as the document; only the process stays the same.
+Simul never silently selects a replacement window: the next call fails with
+`error_type: "AttachmentTargetChanged"`, and its `details` carry the new
+`document_id` and the process's current `windows`.
+
+Recover without leaving the MCP session by calling `attach_blender_window`. It
+performs the same verified selection as `simul blender attach`: with no
+arguments it succeeds only when exactly one GUI process with one window exists;
+otherwise pass `instance_id` and/or `window_id` (an ambiguous call fails and
+lists the candidates in `details.instances`).
+
+`open_blender_file` is the one exception to the manual step: it re-attaches to
+the document it opened itself, keeping the previous window when it survived or
+the only window otherwise. Its response reports `reattached`, the new
+`document_id`, `window_id` and `scene_name`. When the opened file has several
+windows it reports `reattached: false` with a `reattach_error` rather than
+guessing, and the old pin keeps refusing until you call `attach_blender_window`.
+
+When the attached process has exited, calls fail with
+`error_type: "AttachmentStale"` naming the recorded PID (checked before any
+connection is attempted), instead of a raw `Connection refused`. A live process
+whose bridge refuses connections (add-on disabled or restarted) is reported the
+same way with `details.process_alive: true`. `simul blender status` prints the
+same envelope. The stale attachment file is left in place; attach again or run
+`simul blender detach`.
 
 Object-creation and other mode-sensitive granular operations refuse to run
 in Edit/Pose Mode rather than unexpectedly editing the active mesh. Scripts
 remain responsible for their own operator context and mode changes.
+
+Operations and scripts run inside a `temp_override` of the attached window and
+its 3D View, so exporters (`bpy.ops.export_scene.gltf`) and
+`bpy.ops.render.render` work from `execute_blender_script`. A script that loads
+a file frees that window mid-script; later operators in the same script then fail
+with `AttributeError: 'Context' object has no attribute 'active_object'`, and
+the error carries this recipe. Build the override from the new window after the load:
+
+```python
+bpy.ops.wm.read_homefile(use_empty=True)
+win = bpy.context.window_manager.windows[0]
+area = next(a for a in win.screen.areas if a.type == "VIEW_3D")
+region = next(r for r in area.regions if r.type == "WINDOW")
+with bpy.context.temp_override(window=win, screen=win.screen, scene=win.scene,
+                               view_layer=win.view_layer, area=area, region=region):
+    bpy.ops.export_scene.gltf(filepath="/path/out.glb", export_format="GLB")
+```
+
+After such a script, call `attach_blender_window` before the next tool call.
 
 Blender's application timer polls a nonblocking loopback socket and runs all
 `bpy` work on the main thread. Requests execute sequentially. A long render or
@@ -246,7 +291,10 @@ For a custom discovery directory, set the matching directory in both environment
 The GUI integration test runs in a new disposable process and never uses an
 existing user's editor. It checks preservation of unsaved work, main-thread
 execution, named UI actions with scripting disabled, object editing, JPEG capture, multiple windows, scene/file changes,
-and detachment. It always closes the process it started.
+and detachment. A second disposable process checks glTF export and render from a script, the
+context-loss recipe after `read_homefile`, recovery through `attach_blender_window`,
+`open_blender_file` re-attachment, and `AttachmentStale` after the process exits.
+It always closes the process it started.
 
 ```sh
 pytest tests/blender --no-cov

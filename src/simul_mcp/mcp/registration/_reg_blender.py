@@ -99,6 +99,62 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
         )
 
     @server.mcp.tool(
+        name="attach_blender_window",
+        description=(
+            "Attached mode: select the Blender process and window that Blender tools act on, "
+            "the same as `simul blender attach`. Use it to recover after another file was loaded "
+            "(read_homefile, open_mainfile) or Blender restarted. Succeeds only when the choice is "
+            "unambiguous; pass instance_id/window_id from the error details or get_blender_info otherwise."
+        ),
+        annotations=server._tool_annotations(read_only=False, idempotent=True, open_world=True),
+        output_schema=None,
+        task=server._task_optional(),
+    )
+    @with_param_descriptions()
+    async def attach_blender_window(
+        instance_id: Optional[str] = None,
+        window_id: Optional[str] = None,
+    ) -> ToolResult:
+        """Verify and persist the attached Blender target.
+
+        Args:
+            instance_id: Bridge instance ID; required when several Blender processes run.
+            window_id: Window ID; required when the selected process has several windows.
+        """
+        input_data = server._validate_input(
+            BlenderAttachWindowRequest, instance_id=instance_id, window_id=window_id
+        )
+        if isinstance(input_data, dict):
+            return server._as_text_result(input_data)
+        assert isinstance(input_data, BlenderAttachWindowRequest)
+
+        def _attach(_session: Any) -> Dict[str, Any]:
+            if server.settings.blender.mode != "attached":
+                return {
+                    "success": False,
+                    "error": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
+                    "error_type": "ValueError",
+                }
+            from ...adapters.blender_connection import BlenderAttachments
+
+            attachments = BlenderAttachments(server.settings)
+            try:
+                return attachments.attach(input_data.instance_id, input_data.window_id)
+            except (ValueError, RuntimeError) as exc:
+                # List the candidates so the agent can choose without a shell.
+                return {
+                    "success": False,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "details": {"instances": attachments.instances()},
+                }
+
+        return await server._exec_backend(
+            "attach_blender_window", server.blender_adapter, "Blender",
+            BlenderAttachWindowResponse, _attach,
+        )
+
+    @server.mcp.tool(
         name="list_blender_scene_objects",
         description="List objects from the active Blender scene.",
         annotations=server._tool_annotations(

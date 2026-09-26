@@ -37,6 +37,14 @@ from .protocol import (
 logger = logging.getLogger(__name__)
 
 
+class AttachmentTargetChanged(ValueError):
+    """The pinned document, window or scene is gone; the reply carries the new identity."""
+
+    def __init__(self, message: str, details: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.details = details
+
+
 @dataclass
 class PendingConnection:
     """One bounded, short-lived connection polled on Blender's main thread."""
@@ -244,8 +252,10 @@ class BlenderBridge:
     def _execute(self, request: dict[str, Any]) -> dict[str, Any]:
         target = request["target"]
         if target["document_id"] != self.document_id:
-            raise ValueError(
-                "Blender loaded another file; run simul blender attach again"
+            raise AttachmentTargetChanged(
+                f"Blender loaded another file (attached document {target['document_id']}, "
+                f"now {self.document_id}); call attach_blender_window or run simul blender attach again",
+                {"document_id": self.document_id, "attached_document_id": target["document_id"]},
             )
         window = next(
             (
@@ -256,8 +266,10 @@ class BlenderBridge:
             None,
         )
         if window is None or str(window.scene.as_pointer()) != target["scene_id"]:
-            raise ValueError(
-                "Attached window closed or changed scene; run simul blender attach again"
+            raise AttachmentTargetChanged(
+                "Attached window closed or changed scene; call attach_blender_window "
+                "or run simul blender attach again",
+                {"document_id": self.document_id},
             )
         method = request["method"]
         operation = getattr(BlenderRuntimeSession, method, None)
@@ -280,6 +292,13 @@ class BlenderBridge:
             # waiting; it cannot safely interrupt an operation that already began.
             arguments.arguments["timeout"] = None
         area = next((a for a in window.screen.areas if a.type == "VIEW_3D"), None)
+        # Blender derives screen, scene and view layer from the window. Do not
+        # pin scene/view_layer here: a script that loads a file (read_homefile,
+        # open_mainfile) frees them, and a later operator in the same script
+        # dereferences the stale pointer and crashes Blender (verified on
+        # 5.0.1). With only window/area/region pinned, such a script gets a
+        # missing-context-member AttributeError instead, which execute_script
+        # annotates with the re-override recipe (issue #215).
         context = {"window": window}
         if area is not None:
             context["area"] = area

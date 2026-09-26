@@ -837,6 +837,49 @@ class BlenderOpenFileResponse(BaseModel):
     )
     file_path: str = Field(..., description="Path that was opened")
     object_count: int = Field(..., description="Number of objects in the opened scene")
+    reattached: Optional[bool] = Field(
+        None,
+        description="Attached mode: whether the attachment now follows the opened document",
+    )
+    document_id: Optional[str] = Field(None, description="Attached mode: new document identity")
+    window_id: Optional[str] = Field(None, description="Attached mode: re-attached window identity")
+    scene_name: Optional[str] = Field(None, description="Attached mode: scene in the re-attached window")
+    reattach_error: Optional[str] = Field(
+        None, description="Attached mode: why the attachment could not follow the new document"
+    )
+
+
+class BlenderAttachWindowRequest(BaseModel):
+    """Select the Blender process and window that attached-mode tools act on."""
+
+    instance_id: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=128,
+        description="Bridge instance ID; required when several Blender processes run",
+    )
+    window_id: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=128,
+        description="Window ID; required when the process has several windows",
+    )
+
+
+class BlenderAttachWindowResponse(BaseModel):
+    """The verified attachment that subsequent Blender tools use."""
+
+    success: bool = Field(..., description="Whether the window was attached")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    instance_id: str = Field(..., description="Attached Blender process identity")
+    document_id: str = Field(..., description="Attached document identity")
+    pid: Optional[int] = Field(None, description="Blender process ID")
+    version_string: Optional[str] = Field(None, description="Blender version")
+    blend_file_path: Optional[str] = Field(None, description="Open .blend file; null when unsaved")
+    is_dirty: Optional[bool] = Field(None, description="Whether the open file has unsaved changes")
+    window: Dict[str, Any] = Field(..., description="Selected window: window_id, scene_id, scene_name, workspace")
+    windows: List[Dict[str, Any]] = Field(default_factory=list, description="Every window of the process")
+    attachment_path: str = Field(..., description="Attachment file the server and CLI share")
 
 
 class BlenderSaveFileRequest(BaseModel):
@@ -1504,6 +1547,8 @@ __all__ = [
     "BlenderSetLightParamsResponse",
     "BlenderOpenFileRequest",
     "BlenderOpenFileResponse",
+    "BlenderAttachWindowRequest",
+    "BlenderAttachWindowResponse",
     "BlenderSaveFileRequest",
     "BlenderSaveFileResponse",
     "BlenderImportFileRequest",
