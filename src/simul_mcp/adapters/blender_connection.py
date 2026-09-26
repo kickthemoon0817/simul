@@ -13,10 +13,45 @@ from typing import Any, Callable
 from ..blender_bridge.protocol import BridgeFiles, BridgeRemoteError, BridgeWire
 from ..config import Settings
 from ..resources import find_checkout_root
+from ..utils.discovery import DiscoveryDir
 from ..utils.paths import PathPolicy, SandboxDenied
-from .blender_runtime import BlenderRuntimeSession
+from .blender_runtime import BlenderRuntimeSession, add_context_hint
 
 logger = logging.getLogger(__name__)
+
+REATTACH_HINT = (
+    "call the attach_blender_window MCP tool (or run 'simul blender instances' "
+    "and 'simul blender attach')"
+)
+
+# Bridge messages from add-ons built before the typed AttachmentTargetChanged
+# error; matched so an older add-on still gets the structured recovery path.
+_LEGACY_TARGET_CHANGED = (
+    "Blender loaded another file",
+    "Attached window closed or changed scene",
+)
+
+
+class AttachmentError(RuntimeError):
+    """An attached-mode failure with a stable ``error_type`` clients can branch on."""
+
+    error_type = "AttachmentError"
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.details = details or {}
+
+
+class AttachmentStale(AttachmentError):
+    """The attached Blender process exited or its bridge stopped listening."""
+
+    error_type = "AttachmentStale"
+
+
+class AttachmentTargetChanged(AttachmentError):
+    """The attached process is alive but loaded another file or lost the window/scene."""
+
+    error_type = "AttachmentTargetChanged"
 
 
 class BlenderConnection:
@@ -66,21 +101,125 @@ class BlenderConnection:
                     "allowed_write_url_schemes": policy.allowed_write_url_schemes,
                 },
             }
+            self._refuse_dead_process(attachment)
             try:
-                return BridgeWire.request(attachment, payload, timeout)
+                result = BridgeWire.request(attachment, payload, timeout)
+            except ConnectionRefusedError as exc:
+                # Refused while connecting: nothing was sent, so the operation
+                # certainly did not run and naming the stale target is safe.
+                raise self._stale(attachment, "its bridge refused the connection") from exc
             except BridgeRemoteError as exc:
                 if exc.remote_type == "SandboxDenied":
                     raise SandboxDenied(
                         exc.details.get("file_path", ""), exc.details
                     ) from exc
+                if exc.remote_type == "AttachmentTargetChanged" or any(
+                    text in str(exc) for text in _LEGACY_TARGET_CHANGED
+                ):
+                    raise self._target_changed(attachment, exc) from exc
                 raise
             except TimeoutError as exc:
                 raise TimeoutError(
                     "Blender did not reply before the timeout. An operation that already started may still be "
                     "running; its outcome is unknown. No retry was sent. Inspect Blender before retrying."
                 ) from exc
+            if method == "execute_script" and result.get("error"):
+                # Also covers add-ons built before the session added the hint itself.
+                result = {**result, "error": add_context_hint(result["error"])}
+            if method == "open_blend_file":
+                result = {**result, **self._follow_document(attachment)}
+            return result
 
         return invoke
+
+    def _refuse_dead_process(self, attachment: dict[str, Any]) -> None:
+        """Fail before connecting when the recorded process no longer exists.
+
+        A dead process's port may since have been reused by another program,
+        so probing the pid first also avoids talking to the wrong listener.
+        """
+        pid = attachment.get("pid")
+        if type(pid) is int and pid > 0 and not DiscoveryDir.pid_alive(pid):
+            raise self._stale(attachment, "the process is not running", alive=False)
+
+    def _stale(
+        self, attachment: dict[str, Any], reason: str, alive: bool | None = None
+    ) -> AttachmentStale:
+        """Explain a dead target with its pid and the recovery commands."""
+        pid = attachment.get("pid")
+        if alive is None and type(pid) is int and pid > 0:
+            alive = DiscoveryDir.pid_alive(pid)
+        who = f"Attached Blender (pid {pid})" if pid is not None else "Attached Blender"
+        if alive is False:
+            message = f"{who} is not running; {REATTACH_HINT} to select a live window."
+        else:
+            message = (
+                f"{who} is not accepting bridge connections ({reason}); the Simul Blender "
+                f"Bridge add-on was disabled or restarted. Re-enable it, then {REATTACH_HINT}."
+            )
+        return AttachmentStale(
+            message,
+            {
+                "pid": pid,
+                "process_alive": alive,
+                "instance_id": attachment.get("instance_id"),
+                "attachment_path": str(Path(self.settings.blender.attachment_path).expanduser()),
+            },
+        )
+
+    def _target_changed(
+        self, attachment: dict[str, Any], exc: BridgeRemoteError
+    ) -> AttachmentTargetChanged:
+        """Name what the pinned target became so the agent can re-attach deliberately."""
+        previous = attachment.get("target", {})
+        details: dict[str, Any] = {
+            "attached_document_id": previous.get("document_id"),
+            "attached_window_id": previous.get("window_id"),
+            "instance_id": attachment.get("instance_id"),
+        }
+        if exc.details.get("document_id"):
+            details["document_id"] = exc.details["document_id"]
+        try:
+            current = BlenderAttachments(self.settings)._hello(attachment)
+            details["document_id"] = current["document_id"]
+            details["blend_file_path"] = current.get("blend_file_path")
+            details["windows"] = current.get("windows", [])
+        except (OSError, ValueError, KeyError, RuntimeError):
+            logger.debug("Could not describe the changed Blender target", exc_info=True)
+        if details.get("document_id") not in (None, previous.get("document_id")):
+            change = (
+                f"Blender loaded another file (attached document {previous.get('document_id')}, "
+                f"now {details['document_id']})"
+            )
+        else:
+            change = "The attached Blender window closed or changed scene"
+        return AttachmentTargetChanged(
+            f"{change}. The attachment stays pinned to the old target so no call acts on an "
+            f"unexpected scene; {REATTACH_HINT} to select the new one.",
+            details,
+        )
+
+    def _follow_document(self, attachment: dict[str, Any]) -> dict[str, Any]:
+        """Re-pin after this connection's own open_blend_file replaced the document.
+
+        The open was requested through this attachment, so following it is not
+        a silent retarget. Ambiguity (several windows, none of them the old one)
+        is reported instead of guessed.
+        """
+        try:
+            info = BlenderAttachments(self.settings).reattach(attachment)
+        except (OSError, ValueError, KeyError, RuntimeError) as exc:
+            logger.warning("Could not re-attach after opening a file: %s", exc)
+            return {
+                "reattached": False,
+                "reattach_error": f"{exc}; {REATTACH_HINT} to select a window.",
+            }
+        return {
+            "reattached": True,
+            "document_id": info["document_id"],
+            "window_id": info["window"]["window_id"],
+            "scene_name": info["window"]["scene_name"],
+        }
 
 
 class BlenderAttachments:
@@ -136,10 +275,34 @@ class BlenderAttachments:
             raise ValueError(
                 "Select one --window from simul blender instances; no unique matching window"
             )
-        selected = windows[0]
         endpoint = BridgeFiles.read(
             self.directory / f"instance-{info['instance_id']}.json"
         )
+        return self._publish(endpoint, info, windows[0])
+
+    def reattach(self, previous: dict[str, Any]) -> dict[str, Any]:
+        """Re-pin the same process after its document changed.
+
+        Keeps the previous window when it survived; otherwise requires the
+        process to have exactly one window. Never switches processes.
+        """
+        instance_id = previous["instance_id"]
+        endpoint = BridgeFiles.read(self.directory / f"instance-{instance_id}.json")
+        info = self._hello(endpoint)
+        old_window = previous.get("target", {}).get("window_id")
+        windows = [
+            window for window in info["windows"] if window["window_id"] == old_window
+        ] or info["windows"]
+        if len(windows) != 1:
+            raise ValueError(
+                f"Blender has {len(windows)} windows after the file changed; select one window_id"
+            )
+        return self._publish(endpoint, info, windows[0])
+
+    def _publish(
+        self, endpoint: dict[str, Any], info: dict[str, Any], selected: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Recheck the target, then atomically persist it as the attachment."""
         # Recheck immediately before publishing, including the document and scene.
         latest = self._hello(endpoint)
         if (

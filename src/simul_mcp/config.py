@@ -50,9 +50,6 @@ class ServerConfig(BaseModel):
     host: str = Field(default="localhost", description="Server host")
     port: int = Field(default=8765, description="Server port", ge=1024, le=65535)
     timeout: int = Field(default=30, description="Connection timeout in seconds", ge=1)
-    cors_origins: List[str] = Field(
-        default_factory=lambda: ["http://localhost:*", "https://localhost:*"]
-    )
 
 
 class IsaacInstanceConfig(BaseModel):
@@ -109,9 +106,6 @@ class IsaacSimConfig(BaseModel):
         default_factory=lambda: os.environ.get("ISAAC_SIM_PATH") or None,
         description="Path to Isaac Sim installation (defaults to $ISAAC_SIM_PATH)",
     )
-    headless: bool = Field(default=False, description="Run in headless mode")
-    width: int = Field(default=1920, description="Viewport width", ge=640)
-    height: int = Field(default=1080, description="Viewport height", ge=480)
 
     # TCP socket connection to the stock Isaac Sim Python socket server:
     # isaacsim.code_editor.python_server on 6.0+, isaacsim.code_editor.vscode on 5.x
@@ -437,9 +431,6 @@ class ViewportConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     max_size: int = Field(default=2048, description="Maximum viewport size", ge=640)
-    format: str = Field(default="png", description="Image format")
-    quality: int = Field(default=95, description="Image quality", ge=1, le=100)
-    fov: float = Field(default=45.0, description="Field of view", ge=1.0, le=179.0)
     capture_dir: Optional[str] = Field(
         default=None,
         description=(
@@ -785,15 +776,12 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
 
     server = raw.get("server") or {}
     isaac = raw.get("isaac_sim") or {}
-    isaac_kit = isaac.get("kit") or {}
     isaac_bridge = isaac.get("bridge") or {}
-    isaac_resolution = isaac_kit.get("resolution") or {}
     usd = raw.get("usd") or {}
     usd_cache = usd.get("cache") or {}
     usd_files = usd.get("files") or {}
     viewport = raw.get("viewport") or {}
     viewport_capture = viewport.get("capture") or {}
-    viewport_camera = viewport.get("camera") or {}
     logging_cfg = raw.get("logging") or {}
     logging_file = logging_cfg.get("file") or {}
     logging_console = logging_cfg.get("console") or {}
@@ -811,15 +799,11 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     "host": server.get("host"),
                     "port": server.get("port"),
                     "timeout": server.get("timeout"),
-                    "cors_origins": server.get("cors_origins"),
                 }
             ),
             "isaac_sim": _compact_dict(
                 {
                     "path": _normalise_optional_path(isaac.get("path")),
-                    "headless": _coalesce(isaac.get("headless"), isaac_kit.get("headless")),
-                    "width": _coalesce(isaac.get("width"), isaac_resolution.get("width")),
-                    "height": _coalesce(isaac.get("height"), isaac_resolution.get("height")),
                     "socket_host": isaac.get("socket_host"),
                     "socket_port": isaac.get("socket_port"),
                     "socket_timeout": isaac.get("socket_timeout"),
@@ -874,12 +858,9 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
             "viewport": _compact_dict(
                 {
                     "max_size": _coalesce(viewport.get("max_size"), viewport_capture.get("max_size")),
-                    "format": _coalesce(viewport.get("format"), viewport_capture.get("format")),
-                    "quality": _coalesce(viewport.get("quality"), viewport_capture.get("quality")),
                     "capture_dir": _coalesce(
                         viewport.get("capture_dir"), viewport_capture.get("directory")
                     ),
-                    "fov": _coalesce(viewport.get("fov"), viewport_camera.get("fov")),
                 }
             ),
             "logging": _compact_dict(

@@ -12,6 +12,7 @@ import hashlib
 import inspect
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import (
@@ -56,6 +57,10 @@ from .tools.isaac_tools import IsaacTools
 from .usage_tracker import ToolUsageTracker
 
 logger = get_logger(__name__)
+
+# sizeof(sockaddr_un.sun_path), terminating NUL included: 104 on macOS and the
+# BSDs, 108 on Linux.
+_UNIX_SOCKET_PATH_MAX = 108 if sys.platform.startswith("linux") else 104
 
 try:
     from importlib.metadata import version as _pkg_version
@@ -976,8 +981,15 @@ class SimulMCPServer(LoggerMixin):
             return self._validate_output(sandbox_error(exc.details), models, tool_name)
         except Exception as exc:
             self.logger.error("Error in %s: %s", tool_name, exc)
+            # Structured errors (e.g. Blender's AttachmentStale) name their own
+            # type and details so clients can branch on them.
+            details = getattr(exc, "details", None)
             return self._validate_output(
-                ErrorResponse(error=str(exc), error_type="Exception").model_dump(),
+                ErrorResponse(
+                    error=str(exc),
+                    error_type=str(getattr(exc, "error_type", "Exception")),
+                    details=details if isinstance(details, dict) and details else None,
+                ).model_dump(),
                 models,
                 tool_name,
             )
@@ -1006,12 +1018,16 @@ class SimulMCPServer(LoggerMixin):
         """
         content: List[Any] = []
         image = payload.get("image_base64")
-        if isinstance(image, str) and image:
+        if "image_base64" in payload:
+            # The transport keys never reach the client: a present image moves
+            # to its own block, an absent one (a null a response model filled
+            # in) would only be noise in the record.
             payload = {
                 key: value
                 for key, value in payload.items()
                 if key not in ("image_base64", "encoding")
             }
+        if isinstance(image, str) and image:
             payload["image_attached"] = True
             image_format = _sniff_image_format(image) or str(
                 payload.get("format", "png")
@@ -1304,6 +1320,14 @@ class SimulMCPServer(LoggerMixin):
                         os.path.join(discovery_dir, os.path.basename(str(socket_path)))
                     )
                 if not resolved.startswith(boundary) or not os.path.exists(resolved):
+                    socket_path = None
+                elif len(os.fsencode(resolved)) >= _UNIX_SOCKET_PATH_MAX:
+                    # The host's discovery dir can be deeper than the
+                    # container's, and connect(2) rejects a path sun_path
+                    # cannot hold; TCP still reaches the bridge.
+                    logger.warning(
+                        "Bridge socket %s is too long for AF_UNIX; using TCP instead", resolved
+                    )
                     socket_path = None
                 else:
                     socket_path = resolved

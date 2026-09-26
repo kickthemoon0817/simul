@@ -366,17 +366,23 @@ def _apply_backend_options(
         settings = _with_section(settings, section, **{field_name: value})
 
     backend_set: Optional[Set[str]] = None
-    if backends:
+    if backends is not None:
         from simul_mcp.mcp.backends import ALL_BACKEND_NAMES
 
         backend_set = {b.strip().lower() for b in backends.split(",") if b.strip()}
+        if not backend_set:
+            # An empty selection must not silently mean "every backend".
+            _option_error(
+                f"--backends names no backend: {backends!r}. "
+                f"Valid: {', '.join(sorted(ALL_BACKEND_NAMES))}"
+            )
         unknown = backend_set - ALL_BACKEND_NAMES
         if unknown:
             _option_error(
                 f"Unknown backends: {', '.join(sorted(unknown))}. "
                 f"Valid: {', '.join(sorted(ALL_BACKEND_NAMES))}"
             )
-    return settings, backend_set or None
+    return settings, backend_set
 
 
 def _is_enabled(backend_set: Optional[Set[str]], name: str) -> bool:

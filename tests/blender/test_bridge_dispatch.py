@@ -27,11 +27,13 @@ def bridge_module(monkeypatch: pytest.MonkeyPatch) -> Any:
         as_pointer=lambda: 4,
         scene=SimpleNamespace(as_pointer=lambda: 5, name="Scene"),
         screen=SimpleNamespace(areas=[area]),
+        view_layer=SimpleNamespace(name="ViewLayer"),
     )
+    overrides: list = []
     bpy = ModuleType("bpy")
     bpy.context = SimpleNamespace(  # type: ignore[attr-defined]
         mode="OBJECT",
-        temp_override=lambda **kw: nullcontext(),
+        temp_override=lambda **kw: overrides.append(kw) or nullcontext(),
         window_manager=SimpleNamespace(windows=[window]),
     )
     handlers = ModuleType("bpy.app.handlers")
@@ -65,6 +67,8 @@ def bridge_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     module.test_observations = observations
+    module.test_overrides = overrides
+    module.test_window = window
     return module
 
 
@@ -166,3 +170,61 @@ def test_capture_is_not_lost_to_an_undrawable_label(
     assert reply["success"] is True, reply
     assert reply["result"]["image_base64"] == "abc"
     assert captured == [label]
+
+
+def _session_returning(result: Dict[str, Any]) -> Any:
+    class Session:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def get_frame(self) -> Dict[str, Any]:
+            return dict(result)
+
+    return Session
+
+
+def test_operations_pin_the_window_but_never_its_scene_or_view_layer(
+    bridge_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #215: scene/view_layer are derived from the window, never pinned.
+
+    A script that loads a file frees them; a pinned stale view layer made the
+    next operator in that script crash Blender 5.0.1 (live-verified).
+    """
+    monkeypatch.setattr(bridge_module, "BlenderRuntimeSession", _session_returning({"frame": 1}))
+    bridge = _bridge(bridge_module, tmp_path)
+    reply = bridge.dispatch(
+        _request(
+            bridge,
+            method="get_frame",
+            target={"document_id": bridge.document_id, "window_id": "4", "scene_id": "5"},
+            path_policy={"enabled": False, "allowed_paths": [], "project_root": str(tmp_path)},
+        )
+    )
+    assert reply["success"] is True, reply
+    override = bridge_module.test_overrides[-1]
+    window = bridge_module.test_window
+    assert override["window"] is window
+    assert override["area"].type == "VIEW_3D"
+    assert override["region"].type == "WINDOW"
+    assert not {"scene", "view_layer", "screen"} & set(override)
+
+
+def test_document_change_reply_names_the_new_document(
+    bridge_module: Any, tmp_path: Path
+) -> None:
+    """Issue #216: the pin mismatch carries the new identity and the MCP recovery tool."""
+    bridge = _bridge(bridge_module, tmp_path)
+    reply = bridge.dispatch(
+        _request(
+            bridge,
+            method="get_frame",
+            target={"document_id": "old", "window_id": "4", "scene_id": "5"},
+            path_policy={"enabled": False, "allowed_paths": [], "project_root": str(tmp_path)},
+        )
+    )
+    assert reply["success"] is False
+    assert reply["error_type"] == "AttachmentTargetChanged"
+    assert reply["details"] == {"document_id": bridge.document_id, "attached_document_id": "old"}
+    assert bridge.document_id in reply["error"]
+    assert "attach_blender_window" in reply["error"]

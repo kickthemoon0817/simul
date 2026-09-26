@@ -16,7 +16,12 @@ from typing import Any
 
 import pytest
 
-from simul_mcp.adapters.blender_connection import BlenderAttachments, BlenderConnection
+from simul_mcp.adapters.blender_connection import (
+    AttachmentStale,
+    AttachmentTargetChanged,
+    BlenderAttachments,
+    BlenderConnection,
+)
 from simul_mcp.blender_bridge.protocol import BridgeFiles, BridgeWire
 from simul_mcp.config import Settings
 from simul_mcp.mcp.server import SimulMCPServer
@@ -304,8 +309,12 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             # File loading invalidates every old attachment even in the same PID.
             saved = tmp_path / "scratch.blend"
             client.save_blend_file(str(saved))
-            client.open_blend_file(str(saved))
-            with pytest.raises(RuntimeError, match="loaded another file"):
+            # Several windows: open_blend_file cannot pick one, so it reports
+            # that instead of guessing and the old pin keeps refusing.
+            opened = client.open_blend_file(str(saved))
+            assert opened["reattached"] is False
+            assert "attach_blender_window" in opened["reattach_error"]
+            with pytest.raises(AttachmentTargetChanged, match="loaded another file"):
                 client.get_runtime_info()
             live = manager.instances()[0]
             manager.attach(window_id=live["windows"][0]["window_id"])
@@ -346,3 +355,145 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+
+
+def test_recover_from_file_loads_context_loss_and_exit(
+    tmp_path: Path, fake_fastmcp: Any
+) -> None:
+    """Issues #215, #216 and #217 through the MCP tools, one disposable window."""
+    if os.environ.get("SIMUL_BLENDER_LIVE") != "1":
+        pytest.skip("Set SIMUL_BLENDER_LIVE=1 to launch a disposable GUI Blender")
+    binary = shutil.which("blender")
+    if (
+        sys.platform == "darwin"
+        and Path("/Applications/Blender.app/Contents/MacOS/Blender").is_file()
+    ):
+        binary = "/Applications/Blender.app/Contents/MacOS/Blender"
+    if binary is None:
+        pytest.skip("Blender executable unavailable")
+    addon = BlenderAttachments.build_addon(tmp_path / "addon.zip")
+    with zipfile.ZipFile(addon) as archive:
+        archive.extractall(tmp_path / "addons")
+    startup = tmp_path / "startup.py"
+    startup.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(tmp_path / 'addons')!r})\n"
+        "import simul_blender_bridge\n"
+        "simul_blender_bridge.register()\n"
+    )
+    settings = Settings(
+        blender={
+            "mode": "attached",
+            "discovery_dir": str(tmp_path),
+            "attachment_path": str(tmp_path / "attachment.json"),
+        },
+        security={"allowed_paths": [str(tmp_path)], "rate_limiting_enabled": False},
+    )
+    environment = {**os.environ, "SIMUL_BLENDER_DISCOVERY_DIR": str(tmp_path)}
+    with (tmp_path / "blender.log").open("w") as log:
+        process = subprocess.Popen(
+            [binary, "--factory-startup", "--no-window-focus", "--python", str(startup)],
+            env=environment,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            manager = BlenderAttachments(settings)
+            deadline = time.monotonic() + 45
+            while not any(item["reachable"] for item in manager.instances()):
+                if process.poll() is not None or time.monotonic() > deadline:
+                    pytest.fail((tmp_path / "blender.log").read_text())
+                time.sleep(0.2)
+            server = SimulMCPServer(settings, backends={"blender"})
+            tools = {t.name: t for t in server.mcp.tools}
+
+            def call(name: str, **kwargs: Any) -> dict[str, Any]:
+                return json.loads(asyncio.run(tools[name].func(**kwargs)).content[0].text)
+
+            # Recovery never needs a shell: the MCP tool selects the only window.
+            attached = call("attach_blender_window")
+            assert attached["success"] is True and attached["pid"] == process.pid
+
+            # #215: exporter and render from a script in the attached GUI.
+            glb, still = tmp_path / "cube.glb", tmp_path / "render.png"
+            exported = call(
+                "execute_blender_script",
+                script=(
+                    "bpy.ops.mesh.primitive_cube_add()\n"
+                    f"bpy.ops.export_scene.gltf(filepath={str(glb)!r}, export_format='GLB')\n"
+                    "scene = bpy.context.scene\n"
+                    "scene.render.resolution_x = scene.render.resolution_y = 32\n"
+                    f"scene.render.filepath = {str(still)!r}\n"
+                    "bpy.ops.render.render(write_still=True)\n"
+                ),
+            )
+            assert exported["success"] is True, exported
+            assert glb.stat().st_size > 0 and still.stat().st_size > 0
+
+            # #215: loading a file inside a script replaces the window the call
+            # was bound to; the error now carries the recipe, and the recipe works.
+            lost = call(
+                "execute_blender_script",
+                script=(
+                    "bpy.ops.wm.read_homefile(use_empty=True)\n"
+                    f"bpy.ops.export_scene.gltf(filepath={str(glb)!r}, export_format='GLB')\n"
+                ),
+            )
+            assert lost["success"] is False
+            assert "'Context' object has no attribute 'active_object'" in lost["error"]
+            assert "temp_override(window=win" in lost["error"]
+
+            # #216: the strict pin refuses, names the new document and recovers in-session.
+            refused = call("get_blender_info")
+            assert refused["error_type"] == "AttachmentTargetChanged"
+            new_document = refused["details"]["document_id"]
+            assert new_document in refused["error"]
+            assert "attach_blender_window" in refused["error"]
+            recovered = call("attach_blender_window")
+            assert recovered["success"] is True
+            assert recovered["document_id"] == new_document
+            glb.unlink()
+            recipe = call(
+                "execute_blender_script",
+                script=(
+                    "bpy.ops.wm.read_homefile(use_empty=True)\n"
+                    "win = bpy.context.window_manager.windows[0]\n"
+                    "area = next(a for a in win.screen.areas if a.type == 'VIEW_3D')\n"
+                    "region = next(r for r in area.regions if r.type == 'WINDOW')\n"
+                    "with bpy.context.temp_override(window=win, screen=win.screen, scene=win.scene,\n"
+                    "        view_layer=win.view_layer, area=area, region=region):\n"
+                    "    bpy.ops.mesh.primitive_cube_add()\n"
+                    f"    bpy.ops.export_scene.gltf(filepath={str(glb)!r}, export_format='GLB')\n"
+                ),
+            )
+            assert recipe["success"] is True, recipe
+            assert glb.stat().st_size > 0
+            assert call("attach_blender_window")["success"] is True
+
+            # #216: open_blender_file follows the document it opened itself.
+            saved = tmp_path / "saved.blend"
+            assert call("save_blender_file", file_path=str(saved))["success"] is True
+            opened = call("open_blender_file", file_path=str(saved))
+            assert opened["success"] is True and opened["reattached"] is True, opened
+            info = call("get_blender_info")
+            assert info["success"] is True
+            assert info["document_id"] == opened["document_id"]
+            assert info["blend_file_path"] == str(saved)
+
+            # #217: an exited process is named, typed and never a raw Errno 61.
+            process.kill()
+            process.wait(timeout=10)
+            stale = call("get_blender_info")
+            assert stale["error_type"] == "AttachmentStale"
+            assert f"pid {process.pid}" in stale["error"]
+            assert "not running" in stale["error"]
+            with pytest.raises(AttachmentStale):
+                BlenderConnection(settings).get_runtime_info()
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)

@@ -282,3 +282,11 @@ class TestToolsCommand:
         payload = json.loads(result.stdout)
         assert "simul-mcp tools" in payload["mcp_tools"]
         assert "tools" in {entry["command"] for entry in payload["commands"]}
+
+
+@pytest.mark.parametrize("value", [",", " , ", ""])
+def test_empty_backends_selection_is_rejected(value: str) -> None:
+    """A --backends value that names nothing must not enable every backend."""
+    result = runner.invoke(app, ["--json", "tools", "--backends", value])
+    assert result.exit_code != 0
+    assert "names no backend" in result.stdout

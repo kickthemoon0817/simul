@@ -40,6 +40,7 @@ THIN_BLENDER_TOOLS: Tuple[str, ...] = (
     "control_blender_ui",
     "open_blender_file",
     "save_blender_file",
+    "attach_blender_window",
 )
 
 
