@@ -2010,7 +2010,7 @@ class BlenderRuntimeSession:
         no safe way to kill that thread, so the script keeps running in the
         background until it finishes on its own; it just no longer blocks
         the MCP server. Its output is discarded. Without a timeout the
-        script runs inline, exactly as before.
+        script runs inline.
 
         Args:
             script: Python source code to execute.

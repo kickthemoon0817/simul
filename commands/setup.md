@@ -12,18 +12,12 @@ selection.
 
 ## Why this command exists
 
-The simul plugin ships a Claude Code skills + commands surface, but the
-heavy lifting (HTTP adapters for Isaac Sim / Unreal / Blender, USD
-operations, viewport capture) lives in the `simul-mcp` Python package.
-The plugin does not auto-register that MCP server — this command does
-the full bootstrap: clone the source, install `simul-mcp` globally,
-write the MCP server entry into `~/.claude.json`, and verify.
-
-Doing it from `/simul:setup` (rather than auto-registering via a
-plugin-shipped `.mcp.json`) keeps Claude Code from logging "failed to
-spawn simul" warnings before `simul-mcp` is on `PATH`, and gives the
-user a single source of truth for which `simul-mcp` binary their
-Claude Code is talking to.
+The simul plugin ships skills and commands only; the backend adapters
+(Isaac Sim sockets, Unreal Remote Control, Blender, headless USD) live in
+the `simul-mcp` Python package. The plugin ships no `.mcp.json`, so
+nothing registers the MCP server until this command writes the entry into
+`~/.claude.json`. That avoids "failed to spawn simul" warnings before
+`simul-mcp` is on `PATH`, and pins the exact binary Claude Code talks to.
 
 This is the only manual bootstrap step. Everything else (per-backend
 config, project-specific `.uproject` patching for Unreal, etc.) is
@@ -157,7 +151,7 @@ supported choices in the menu:
 | Backend | Linux | macOS | Windows | Hard requirement |
 |---|---|---|---|---|
 | **Isaac Sim** | ✅ | ❌ | ✅ | NVIDIA RTX GPU (Turing 20xx or newer) |
-| **Unreal Engine** | ✅ | ✅ | ✅ | none beyond the engine install |
+| **Unreal Engine** | ✅ | ✅ | ⚠️ | none beyond the engine install (Windows: no automated launch — start the editor yourself and use `simul unreal setup --no-launch`) |
 | **Blender** | ✅ | ✅ | ✅ | none |
 | **USD-only** | ✅ | ✅ | ✅ | none (pure CPU pxr) |
 
@@ -184,7 +178,7 @@ then proceed.
 For each picked backend, walk the env-var setup **now** rather than
 letting the user discover the requirement at runtime. simul's
 templates expand env vars at server start, and a missing
-`ISAAC_SIM_PATH` or `UE_ENGINE_PATH` produces a "warn-and-continue
+`ISAAC_SIM_PATH` (or, on Linux, `UE_ENGINE_PATH`) produces a "warn-and-continue
 with degraded behavior" path that's hard to debug after the fact.
 
 Detailed flow per backend:
@@ -235,16 +229,26 @@ with NVIDIA RTX GPU).
 
 5. Verify: `ls "$ISAAC_SIM_PATH/python.sh"` (or `.bat`) succeeds.
 
-6. Tell the user the bridge socket is `localhost:8226`; if they
-   need to change ports, set `ISAAC_SIM__SOCKET_PORT` / `ISAAC_SIM__BRIDGE_PORT`
-   in the environment (the environment overrides the packaged default config
-   at `src/simul_mcp/resources/config/default.yaml`).
+6. Publish the bridge extension once per Isaac install, then start
+   Isaac through simul so both transports are enabled:
+   ```bash
+   simul-mcp isaac install-bridge          # add --symlink for a repo checkout
+   simul-mcp isaac launch                  # every launch; enables socket + bridge
+   ```
+   The bridge listens on `localhost:8229`; the stock Python socket on
+   `localhost:8226` is the fallback. To change ports, set
+   `ISAAC_SIM__BRIDGE_PORT` / `ISAAC_SIM__SOCKET_PORT` (the environment
+   overrides the packaged `src/simul_mcp/resources/config/default.yaml`).
 
 #### Unreal Engine (selected)
 
-1. Probe: `echo $UE_ENGINE_PATH` (and `$UNREAL_ENGINE_PATH` as a
-   fallback name). If set and `Engine/Binaries/{Mac,Linux,Win64}/`
-   exists under it, confirm and skip to step 4.
+`UE_ENGINE_PATH` (or `UNREAL_ENGINE_PATH`) is only read on **Linux**.
+On macOS `simul unreal setup` scans the Epic install folders itself (or
+takes `--engine-path`); on Windows it cannot launch the editor at all.
+
+1. Probe (Linux): `echo $UE_ENGINE_PATH` (and `$UNREAL_ENGINE_PATH` as a
+   fallback name). If set and `Engine/Binaries/Linux/UnrealEditor`
+   exists under it, confirm and skip to step 5.
 
 2. **Auto-detect** at the official install locations per OS.
    Prefer the highest version when multiple are installed.
@@ -255,10 +259,10 @@ with NVIDIA RTX GPU).
          "/Applications/Epic Games/UE_"*/            \
          "$HOME/Applications/Epic Games/UE_"*/ 2>/dev/null
    ```
-   Also probe LaunchServices: `open -Ra UnrealEditor`. If it
-   succeeds, `simul unreal setup` will route through `open -a` at
-   runtime — env var is optional. Skip the persist step in that
-   case.
+   `simul unreal setup` picks the highest `UE_*` found here on its
+   own, so no env var is needed on macOS; pass `--engine-path` for an
+   install elsewhere. Headless launches (the default) run the binary
+   directly; `open -a` is only used with `--no-headless`.
 
    **Linux** (Epic's binary release defaults + common manual
    install paths):
@@ -271,26 +275,20 @@ with NVIDIA RTX GPU).
    which UnrealEditor   # Epic ships a launcher script in some installs
    ```
 
-   **Windows** (Epic Games Launcher + manual installs):
-   ```bash
-   ls -d "/c/Program Files/Epic Games/UE_"*/    \
-         "/c/Epic Games/UE_"*/                  \
-         "/d/Epic Games/UE_"*/                  \
-         "$HOME/Epic Games/UE_"*/ 2>/dev/null
-   ```
+   **Windows**: automated launch is unsupported. Have the user open
+   the editor themselves, then run `simul unreal setup <.uproject>
+   --no-launch --yes`.
 
    Validate each candidate by checking
    `Engine/Binaries/Mac/UnrealEditor.app` (mac) /
-   `Engine/Binaries/Linux/UnrealEditor` (linux) /
-   `Engine/Binaries/Win64/UnrealEditor.exe` (win) actually exists.
+   `Engine/Binaries/Linux/UnrealEditor` (linux) actually exists.
 
 3. If neither the env var nor any default location resolves, ask:
    "Where is your Unreal Engine install root (the directory that
    contains `Engine/`)?". Validate the binary file under that root.
 
-4. Persist `UE_ENGINE_PATH` to the shell rc as in the Isaac flow.
-   Skip if LaunchServices on macOS already resolves UnrealEditor —
-   the env var is optional in that case.
+4. Linux only: persist `UE_ENGINE_PATH` to the shell rc as in the
+   Isaac flow, unless `UnrealEditor` is already on `PATH`.
 
 5. Tell the user: project-level setup is `simul unreal setup
    <.uproject> --yes` (headless by default; cf. CLAUDE.md). They
@@ -299,8 +297,8 @@ with NVIDIA RTX GPU).
 
 #### Blender (selected)
 
-1. Probe: `echo $BLENDER_PATH`. If set and the binary exists,
-   confirm and skip to step 3.
+1. Probe: `echo $BLENDER__BINARY_PATH`. If set and the binary exists,
+   confirm and skip to step 4.
 
 2. **Auto-detect** at default install locations. Prefer the
    highest-versioned match.
@@ -330,11 +328,12 @@ with NVIDIA RTX GPU).
 3. If auto-detection finds nothing, ask for the Blender binary
    path and validate it's executable.
 
-4. Persist `BLENDER_PATH` to the shell rc as in the Isaac flow.
+4. Persist `BLENDER__BINARY_PATH` to the shell rc as in the Isaac flow.
 
-5. Reference `src/simul_mcp/adapters/blender_runtime.py` for the
-   runtime adapter; the user does not need to manually register
-   anything beyond the env var.
+5. The default `embedded` mode imports `bpy` into the server (install
+   with the `blender` extra). To drive an already-open Blender window
+   instead, use attached mode (`simul blender install-bridge`, then
+   `simul blender attach`); see `docs/blender-attachment.md`.
 
 #### USD-only (selected)
 

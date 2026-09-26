@@ -1,6 +1,6 @@
 ---
 name: physics-configuration
-description: This skill should be used when the user asks to "add physics", "make it a rigid body", "add a collider", "add collision", "set physics material", "configure physics", "add gravity", "set mass", "create a joint", "add articulation", or needs to configure physics properties on scene objects in Isaac Sim.
+description: Use when the user asks to "add physics", "make it a rigid body", "add a collider", "add collision", "set physics material", "configure physics", "add gravity", "set mass", "create a joint", "add articulation", or needs to configure physics properties on scene objects in Isaac Sim.
 version: 0.1.0
 ---
 

@@ -113,12 +113,8 @@ class SceneInspectionMixin:
     @tool_meta(
         name="list_isaac_prims",
         description=(
-            "List prims in the current Isaac Sim stage under a given root path, with depth "
-            "control, prim type filtering, and paging (max_results/offset; applied_limit "
-            "reports the effective cap). Use list_isaac_prims to walk a level of the "
-            "hierarchy; use search_isaac_prims to find prims by name or type anywhere below "
-            "a root, get_isaac_subtree for a depth-annotated tree, and "
-            "get_isaac_scene_summary for counts without listing."
+            "Browse prims under root_path with a depth limit and an optional prim type "
+            "filter. Paged (max_results/offset)."
         ),
         read_only=True,
         idempotent=True,
@@ -447,11 +443,8 @@ class SceneInspectionMixin:
         name="search_isaac_prims",
         description=(
             "Search the whole hierarchy below root_path for prims whose type name equals "
-            "query (search_type='type') or whose name contains query (search_type='name'); "
-            "paged via max_results/offset. Use search_isaac_prims when you know a name or "
-            "type; use query_isaac_typed_prims to match by USD schema and read attributes "
-            "in the same call, list_isaac_prims to browse one level, and "
-            "find_isaac_prims_in_area to search by position."
+            "query (search_type='type') or whose name contains query (search_type='name'). "
+            "Paged (max_results/offset)."
         ),
         read_only=True,
         idempotent=True,

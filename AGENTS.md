@@ -1,7 +1,8 @@
 # AGENTS.md — Simul MCP Server
 
-Coding standards and conventions are defined in CLAUDE.md. This file contains
-repo-specific build commands, project layout, and runtime notes only.
+This file is canonical for repo layout, build/test commands, coding
+conventions and runtime notes. `CLAUDE.md` holds Claude Code behavioral rules
+(engine setup flows, release protocol, issue filing).
 
 ## Repository Layout
 
@@ -32,8 +33,8 @@ repo-specific build commands, project layout, and runtime notes only.
 ## Build / Run
 
 ```sh
+uv venv .venv && uv pip install -e ".[dev]"   # dev venv (or: uv sync --extra dev)
 pip install -e .                              # install package (editable)
-pip install -e ".[dev]"                       # + dev deps
 python -m build                               # build sdist + wheel
 simul-mcp server                              # MCP server (dev, stdio)
 simul-mcp server --transport http             # streamable HTTP on server.host:server.port
@@ -53,8 +54,8 @@ warns at startup if it's expected but not set).
 ```sh
 black src/ tests/ examples/ && isort src/ tests/ examples/   # format
 flake8 src/ tests/ && mypy src/                              # lint (119 cols, see .flake8) + types
-pytest tests/ -v                                              # unit + live (live skips if engine down)
-pytest tests/ -v --cov=simul_mcp                              # with coverage
+pytest tests/ -v                                              # unit + live (live skips if engine down); coverage is on via addopts
+pytest tests/ -q --no-cov                                     # fast loop without coverage
 pytest tests/isaac/live -v -m isaac                           # Isaac live (skips unless the socket answers)
 pytest tests/ -v -m unreal_live                               # Unreal live (requires running editor)
 pytest tests/packaging -m packaging                           # wheel build + install smoke (slow)
@@ -67,7 +68,7 @@ files next to it whatever `simul-mcp` is installed in the interpreter.
 ## MCP Error Handling
 
 - Tools return JSON-serializable dicts.
-- On error, return `ErrorResponse(...).dict()`.
+- On error, return `ErrorResponse(...).model_dump()`.
 - Log errors with context before returning.
 
 ## Runtime Notes

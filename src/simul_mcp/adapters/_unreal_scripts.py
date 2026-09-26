@@ -153,8 +153,8 @@ else:
     }))
 """
 
-# Engine/project metadata in one Remote Control round trip (health_check and
-# get_engine_info used to issue one call per field).
+# Engine/project metadata in one Remote Control round trip, shared by
+# health_check and get_engine_info.
 ENGINE_METADATA = """
 import json, unreal
 world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()

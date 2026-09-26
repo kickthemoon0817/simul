@@ -544,9 +544,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         """
 
         def _call(session):
-            # Parsing stays inside the envelope: malformed input must
-            # return the error payload it always has, not escape as an
-            # unhandled exception.
             parsed_classes = (
                 [c.strip() for c in class_names.split(",") if c.strip()]
                 if class_names
@@ -1140,9 +1137,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         import json as json_lib
 
         def _call(session):
-            # Parsing stays inside the envelope: malformed input must
-            # return the error payload it always has, not escape as an
-            # unhandled exception.
             scalar_params = (
                 json_lib.loads(scalar_params_json) if scalar_params_json else None
             )
@@ -1552,9 +1546,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         """
 
         def _call(session):
-            # Parsing stays inside the envelope: malformed input must
-            # return the error payload it always has, not escape as an
-            # unhandled exception.
             paths = [p.strip() for p in actor_paths.split(",")]
             return session.export_usd(
                 actor_paths=paths,
@@ -1647,9 +1638,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         """
 
         def _call(session):
-            # Parsing stays inside the envelope: malformed input must
-            # return the error payload it always has, not escape as an
-            # unhandled exception.
             check_list = (
                 [c.strip() for c in checks.split(",") if c.strip()] if checks else None
             )
@@ -1710,9 +1698,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         """Batch multiple operations."""
 
         def _call(session):
-            # Parsing stays inside the envelope: malformed input must
-            # return the error payload it always has, not escape as an
-            # unhandled exception.
             import json as _json
 
             ops = _json.loads(operations)
@@ -1777,9 +1762,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         """Analyze scene for robotics."""
 
         def _call(session):
-            # Parsing stays inside the envelope: malformed input must
-            # return the error payload it always has, not escape as an
-            # unhandled exception.
             types_list = (
                 [t.strip() for t in analysis_types.split(",") if t.strip()]
                 if analysis_types
@@ -1819,9 +1801,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         """Generate procedural scene."""
 
         def _call(session):
-            # Parsing stays inside the envelope: malformed input must
-            # return the error payload it always has, not escape as an
-            # unhandled exception.
             import json as _json
 
             params = _json.loads(parameters) if parameters else None
@@ -1898,9 +1877,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         """Create mesh primitive."""
 
         def _call(session):
-            # Parsing stays inside the envelope: malformed input must
-            # return the error payload it always has, not escape as an
-            # unhandled exception.
             import json as _json
 
             dims = _json.loads(dimensions) if dimensions else None
@@ -2039,9 +2015,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         """Edit mesh topology."""
 
         def _call(session):
-            # Parsing stays inside the envelope: malformed input must
-            # return the error payload it always has, not escape as an
-            # unhandled exception.
             scale_list = [float(v) for v in scale.split(",")] if scale else None
             return session.edit_mesh_topology(
                 mesh_path=mesh_path,
@@ -2149,9 +2122,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         """Cut mesh with plane."""
 
         def _call(session):
-            # Parsing stays inside the envelope: malformed input must
-            # return the error payload it always has, not escape as an
-            # unhandled exception.
             origin = [float(v) for v in plane_origin.split(",")]
             normal = [float(v) for v in plane_normal.split(",")]
             return session.cut_mesh_plane(
@@ -2189,9 +2159,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         """Validate mesh integrity."""
 
         def _call(session):
-            # Parsing stays inside the envelope: malformed input must
-            # return the error payload it always has, not escape as an
-            # unhandled exception.
             check_list = (
                 [c.strip() for c in checks.split(",") if c.strip()] if checks else None
             )
@@ -2229,9 +2196,6 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         """Convert mesh format."""
 
         def _call(session):
-            # Parsing stays inside the envelope: malformed input must
-            # return the error payload it always has, not escape as an
-            # unhandled exception.
             import json as _json
 
             tess_opts = (

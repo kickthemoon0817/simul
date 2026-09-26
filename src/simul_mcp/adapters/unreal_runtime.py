@@ -1222,7 +1222,7 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
             Dictionary with map_path, total_actors, actor_class_counts,
             and summary_text.
         """
-        # One script counts classes inside the editor; this used to take a
+        # Count classes inside the editor in one script rather than one
         # ``/remote/object/describe`` round trip per actor.
         scene = await self._execute_json_script(SCENE_SUMMARY)
         if scene.get("error"):

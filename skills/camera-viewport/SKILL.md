@@ -1,6 +1,6 @@
 ---
 name: camera-viewport
-description: This skill should be used when the user asks to "set the camera", "change camera position", "capture the viewport", "take a screenshot", "render the scene", "focus on a prim", "look at", "create a camera", "camera view", or needs to control cameras and capture images in Isaac Sim.
+description: Use when the user asks to "set the camera", "change camera position", "capture the viewport", "take a screenshot", "render the scene", "focus on a prim", "look at", "create a camera", "camera view", or needs to control cameras and capture images in Isaac Sim.
 version: 0.1.0
 ---
 

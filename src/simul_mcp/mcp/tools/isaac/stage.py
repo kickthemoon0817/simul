@@ -19,10 +19,9 @@ class StageAssetMixin:
     @tool_meta(
         name="open_isaac_stage",
         description=(
-            "Open a USD stage file in Isaac Sim. Paths must be inside the configured "
-            "sandbox (security.allowed_paths); omniverse:// URLs are allowed when their "
-            "scheme is in security.allowed_url_schemes. Refused while the current stage has "
-            "unsaved edits unless discard_unsaved=true."
+            "Open a USD stage file in Isaac Sim. Refused while the current stage has "
+            "unsaved edits unless discard_unsaved=true. "
+            "Paths: sandbox (security.allowed_paths); URLs need an allowed scheme."
         ),
         read_only=False,
         destructive=True,
@@ -83,9 +82,8 @@ class StageAssetMixin:
         description=(
             "Save the current stage, overwriting the file on disk. Optionally provide a "
             "file path to save-as to a new location; an existing file there is refused "
-            "unless overwrite=true. Paths must be inside the configured sandbox "
-            "(security.allowed_paths); writes to URLs are refused unless the scheme is in "
-            "security.allowed_write_url_schemes."
+            "unless overwrite=true. "
+            "Paths: sandbox (security.allowed_paths); URLs need an allowed write scheme."
         ),
         read_only=False,
         destructive=True,
@@ -212,9 +210,8 @@ class StageAssetMixin:
         name="import_isaac_asset",
         description=(
             "Import an external asset (USD, USDZ, OBJ, FBX) into the current stage at a "
-            "target path. Paths must be inside the configured sandbox "
-            "(security.allowed_paths); omniverse:// URLs are allowed when their scheme is "
-            "in security.allowed_url_schemes."
+            "target path. "
+            "Paths: sandbox (security.allowed_paths); URLs need an allowed scheme."
         ),
         read_only=False,
         sandboxed_paths=(SandboxedPath("asset_path"),),
@@ -272,9 +269,7 @@ class StageAssetMixin:
         name="add_isaac_reference",
         description=(
             "Add a USD reference to a prim so it composes in content from another USD file. "
-            "Paths must be inside the configured sandbox (security.allowed_paths); "
-            "omniverse:// URLs are allowed when their scheme is in "
-            "security.allowed_url_schemes."
+            "Paths: sandbox (security.allowed_paths); URLs need an allowed scheme."
         ),
         read_only=False,
         sandboxed_paths=(SandboxedPath("reference_path"),),

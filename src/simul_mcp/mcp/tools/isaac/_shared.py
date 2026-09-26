@@ -1,14 +1,5 @@
 """Shared constants and helpers for the Isaac tool mixins."""
 
-"""
-Isaac Sim MCP tools for Simul MCP Server.
-
-This module provides granular Isaac Sim tools over the repo-owned typed bridge
-when available, falling back to raw script execution only when required by the
-current coverage. For legacy compatibility, raw script execution can still use
-the stock VS Code socket when bridge usage is disabled.
-"""
-
 import json
 import textwrap
 from typing import Annotated, Any, List
@@ -43,9 +34,8 @@ DEFAULT_WORLD_PATH = "/World"
 def _coerce_str_to_float_list(value: Any) -> Any:
     """Pydantic ``BeforeValidator``: accept ``'[1, 2, 3]'`` as a list of floats.
 
-    Some MCP clients serialise list arguments as JSON-encoded strings. Pydantic
-    2.12 dropped the implicit ``str`` -> ``list`` coercion that earlier versions
-    accepted, so we normalise here before validation runs.
+    Some MCP clients serialise list arguments as JSON-encoded strings, and
+    Pydantic (>= 2.12) doesn't coerce ``str`` to ``list``, so normalise here.
     """
     if isinstance(value, str):
         try:
@@ -89,9 +79,8 @@ PRIM_DETAIL_ASPECTS = {
 # Largest raw script accepted for execution.
 MAX_SCRIPT_BYTES = 100_000
 
-# 4K on the long edge. The old ceiling of 7680 allowed a 59-megapixel capture —
-# tens of megabytes pushed through several buffers before anything checked
-# whether the result could be delivered.
+# 4K on the long edge, so a capture can't grow to tens of megabytes before
+# anything checks whether the result can be delivered.
 MAX_CAPTURE_DIMENSION = 3840
 
 # Largest capture returned as inline base64. Encoding grows a file by ~33%, and

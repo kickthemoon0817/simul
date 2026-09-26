@@ -1,6 +1,6 @@
 ---
 name: isaac-scripting
-description: This skill should be used when the user asks to "execute a script in Isaac Sim", "run Python in Isaac", "write a custom Isaac Sim script", "use the omni API", "use the pxr API", "use the isaacsim API", "execute_isaac_script", or needs to perform operations not covered by the granular MCP tools.
+description: Use when the user asks to "execute a script in Isaac Sim", "run Python in Isaac", "write a custom Isaac Sim script", "use the omni API", "use the pxr API", "use the isaacsim API", "execute_isaac_script", or needs to perform operations not covered by the granular MCP tools.
 version: 0.1.0
 ---
 
@@ -23,14 +23,14 @@ version: 0.1.0
 | Query scene | `get_isaac_scene_summary`, `get_isaac_prim_detail` with `aspects=["info"]` |
 
 **Use `execute_isaac_script` when:**
-- The required API is not exposed by any granular tool (e.g. creating lights, querying rigid body velocities, custom material shaders, bounding box computations, raycasting)
+- The required API is not exposed by any granular tool (e.g. querying rigid body velocities, custom material shaders, raycasting)
 - You need to batch multiple low-level USD operations in a single round-trip to reduce latency
 - You need full `pxr.*`, `omni.*`, or `isaacsim.*` API access
 - You are iterating over many prims (stage traversal, bulk attribute reads)
 
 ## Execution Model
 
-Scripts are sent over TCP to port **8226** (the stock `isaacsim.code_editor.vscode` extension). The executor runs your code with `compile()` inside Kit's Python process, giving full access to the global namespace including `omni.*`, `pxr.*`, and `isaacsim.*`.
+Scripts go to the `khemoo.simul.mcp` bridge on port **8229** when it is up, and otherwise to the stock Python socket on port **8226** (`isaacsim.code_editor.vscode` on 5.x, `isaacsim.code_editor.python_server` on 6.0). The executor runs your code with `compile()` inside Kit's Python process, giving full access to the global namespace including `omni.*`, `pxr.*`, and `isaacsim.*`.
 
 Key rules:
 - `stdout` is captured and returned — use `print()` for all output
@@ -63,105 +63,20 @@ Always wrap in try/except. Always end with `print(json.dumps(result))`. This ens
 
 ## Namespace: Isaac Sim 5.1 and 6.0
 
-Isaac Sim 5.1.0 migrated the core package namespace. Use the new names — the old `omni.isaac.*` imports will fail (5.1 keeps shims, 6.0 removes them):
-
-| Old (pre-5.1) | New (5.1.0+) |
-|---------------|--------------|
-| `omni.isaac.core` | `isaacsim.core.api` |
-| `omni.isaac.core.utils` | `isaacsim.core.utils` |
-| `omni.isaac.core.utils.prims` | `isaacsim.core.utils.prims` |
-| `omni.isaac.core.utils.stage` | `isaacsim.core.utils.stage` |
-| `omni.isaac.core.utils.xforms` | `isaacsim.core.utils.xforms` |
-| `omni.isaac.core.utils.bounds` | `isaacsim.core.utils.bounds` |
-| `omni.isaac.core.utils.rotations` | `isaacsim.core.utils.rotations` |
-| `omni.isaac.core.utils.collisions` | `isaacsim.core.utils.collisions` |
-| `omni.isaac.core.utils.viewports` | `isaacsim.core.utils.viewports` |
-
-Kit-level APIs are **unchanged**: `omni.usd`, `omni.timeline`, `pxr.*` (Usd, UsdGeom, UsdPhysics, UsdShade, UsdLux, Gf, Sdf, etc.) all import normally.
-
-On **Isaac Sim 6.0** (`get_isaac_runtime_info` → `app.isaac_version` starts with `6.`), `isaacsim.core.api`, `isaacsim.core.prims`, and `isaacsim.core.utils` are deprecated; prefer `isaacsim.core.experimental.*` and `isaacsim.core.simulation_manager`, or plain `pxr` + `omni.usd`, which work identically on both versions. Never use `asyncio.wait_for` in a script — the 6.0 socket server runs top-level `await` outside a Task and it raises. See `references/namespace-migration.md` for the full table.
+Use `isaacsim.*` names, never `omni.isaac.*` (5.1 keeps shims, 6.0 removes
+them). Kit-level APIs (`omni.usd`, `omni.timeline`, `pxr.*`) are unchanged.
+On **Isaac Sim 6.0** (`get_isaac_runtime_info` → `app.isaac_version` starts
+with `6.`), `isaacsim.core.{api,prims,utils}` are deprecated; prefer
+`isaacsim.core.experimental.*`, or plain `pxr` + `omni.usd`, which work on
+both. Never use `asyncio.wait_for` in a script — the 6.0 socket server runs
+top-level `await` outside a Task and it raises. The full mapping is in
+`references/namespace-migration.md`.
 
 ## Common Script Patterns
 
-### Check simulation state
-
-```python
-import json, omni.timeline
-tl = omni.timeline.get_timeline_interface()
-print(json.dumps({
-    "playing": tl.is_playing(),
-    "stopped": tl.is_stopped(),
-    "current_time": tl.get_current_time(),
-}))
-```
-
-### Traverse and list all prims by type
-
-```python
-import json, omni.usd
-stage = omni.usd.get_context().get_stage()
-prims = [
-    {"path": str(p.GetPath()), "type": p.GetTypeName()}
-    for p in stage.Traverse()
-    if p.GetTypeName()  # skip pseudoroot and untyped
-]
-print(json.dumps({"prims": prims, "count": len(prims)}))
-```
-
-### List all Mesh prims
-
-```python
-import json, omni.usd
-stage = omni.usd.get_context().get_stage()
-meshes = [str(p.GetPath()) for p in stage.Traverse() if p.GetTypeName() == "Mesh"]
-print(json.dumps({"meshes": meshes, "count": len(meshes)}))
-```
-
-### Set prim transform via USD attribute
-
-```python
-import json, traceback
-try:
-    from isaacsim.core.utils.prims import set_prim_attribute_value
-    from pxr import Gf
-    set_prim_attribute_value("/World/Box", "xformOp:translate", Gf.Vec3d(1.0, 2.0, 0.5))
-    set_prim_attribute_value("/World/Box", "xformOp:scale", Gf.Vec3d(2.0, 2.0, 2.0))
-    result = {"success": True}
-except Exception as e:
-    import traceback
-    result = {"success": False, "error": str(e), "traceback": traceback.format_exc()}
-print(json.dumps(result))
-```
-
-### Get world pose
-
-```python
-import json, traceback
-try:
-    from isaacsim.core.utils.xforms import get_world_pose
-    pos, quat = get_world_pose("/World/Robot")
-    result = {"success": True, "position": pos.tolist(), "orientation_wxyz": quat.tolist()}
-except Exception as e:
-    result = {"success": False, "error": str(e), "traceback": traceback.format_exc()}
-print(json.dumps(result))
-```
-
-### Compute bounding box
-
-```python
-import json, traceback
-try:
-    from isaacsim.core.utils.bounds import create_bbox_cache, compute_aabb
-    import numpy as np
-    cache = create_bbox_cache()
-    aabb = compute_aabb(cache, "/World/Robot")
-    center = ((aabb[:3] + aabb[3:]) / 2).tolist()
-    size = (aabb[3:] - aabb[:3]).tolist()
-    result = {"success": True, "center": center, "size": size, "aabb": aabb.tolist()}
-except Exception as e:
-    result = {"success": False, "error": str(e), "traceback": traceback.format_exc()}
-print(json.dumps(result))
-```
+Copy-paste templates (stage info, traversal by type, transforms, world pose,
+simulation state, stepping, bounding boxes, raycast, materials, rigid body
+velocities) live in `references/script-templates.md`.
 
 ## Common Pitfalls
 

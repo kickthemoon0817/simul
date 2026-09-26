@@ -39,7 +39,6 @@ from simul_mcp.config import Settings, get_settings, load_settings, validate_set
 from simul_mcp.tool_surfaces import THIN_BLENDER_TOOLS, THIN_UNREAL_TOOLS, TOOL_SURFACES
 from simul_mcp.logging import setup_logging, get_logger
 
-# Import sub-apps
 from simul_mcp.cli.isaac import app as isaac_app
 from simul_mcp.cli.usd_cli import app as usd_app
 from simul_mcp.cli.unreal_cli import app as unreal_app

@@ -272,11 +272,9 @@ class CameraMixin:
         name="capture_isaac_viewport",
         description=(
             "Capture the current viewport to a PNG on the Isaac Sim host and return its "
-            "path. Writes the PNG under the capture directory (viewport.capture_dir, "
-            "default <allowed root>/captures) and reclaims the oldest captures there; the "
-            "directory must be inside the configured sandbox (security.allowed_paths). Pass "
-            "inline=true to also receive the image itself as an image content block; "
-            "captures above the inline size cap return the path alone."
+            "path. Writes under viewport.capture_dir (default <allowed root>/captures, "
+            "must be in the sandbox, security.allowed_paths) and reclaims the oldest "
+            "captures there. inline=true also returns the image as a content block."
         ),
         read_only=False,
         destructive=True,
@@ -298,12 +296,11 @@ class CameraMixin:
         resolution is restored afterwards.
 
         Args:
-            width: Output image width in pixels (1–MAX_CAPTURE_DIMENSION).
-            height: Output image height in pixels (1–MAX_CAPTURE_DIMENSION).
+            width: Output image width in pixels (1–3840).
+            height: Output image height in pixels (1–3840).
             inline: Also return the image as an image content block. Only
-                    honoured for files up to MAX_INLINE_CAPTURE_BYTES; above
-                    that the path is returned alone, since a larger payload
-                    overruns a client's per-result budget.
+                    honoured for files up to 256 KiB; larger captures return
+                    the path alone.
 
         Returns:
             Dict with the capture path, dimensions, and byte size. With

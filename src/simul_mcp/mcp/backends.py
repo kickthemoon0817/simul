@@ -143,8 +143,7 @@ BACKENDS: Tuple[BackendSpec, ...] = (
         routing_rule=(
             "Tools containing 'unreal' → require a connected Unreal Engine instance. In attached mode use the "
             "editor/map/viewport selected with 'simul unreal attach'; never switch targets automatically. "
-            "For visible activity use control_unreal_ui with a unique agent_id per agent and move_cursor "
-            "to annotate other work; these are virtual overlays, not OS mouse input."
+            "control_unreal_ui cursors are virtual overlays, not OS mouse input."
         ),
     ),
 )
