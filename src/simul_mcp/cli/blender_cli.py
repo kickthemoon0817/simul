@@ -74,7 +74,11 @@ def status() -> None:
     try:
         emit(BlenderConnection(get_settings()).get_runtime_info())
     except (OSError, ValueError, KeyError, RuntimeError) as exc:
-        emit_error(str(exc), type(exc).__name__)
+        emit_error(
+            str(exc),
+            getattr(exc, "error_type", type(exc).__name__),
+            getattr(exc, "details", None),
+        )
 
 
 @app.command("detach")
