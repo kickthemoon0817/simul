@@ -93,6 +93,7 @@ class IsaacRuntimeAdapter(LoggerMixin):
         bridge_socket_path: Optional[str] = None,
         socket_protocol: Optional[str] = None,
         socket_auth_token: Optional[str] = None,
+        bridge_circuit_breaker: bool = True,
     ) -> IsaacSocketClient:
         """
         Create one bridge-aware client from per-instance values and settings defaults.
@@ -110,6 +111,8 @@ class IsaacRuntimeAdapter(LoggerMixin):
             bridge_socket_path: Unix socket path advertised by a discovery file.
             socket_protocol: Stock socket flavour; the settings default when omitted.
             socket_auth_token: python_server token; the settings default when omitted.
+            bridge_circuit_breaker: Gate bridge dials behind the failure breaker;
+                readiness probes pass False so every poll dials the bridge.
 
         Returns:
             The configured client.
@@ -137,6 +140,7 @@ class IsaacRuntimeAdapter(LoggerMixin):
             auth_token=socket_auth_token if socket_auth_token is not None else isaac.socket_auth_token,
             bridge_failure_threshold=isaac.bridge_failure_threshold,
             bridge_cooldown_seconds=isaac.bridge_cooldown_seconds,
+            bridge_circuit_breaker=bridge_circuit_breaker,
         )
 
     def bridge_port_for_socket(self, socket_port: int) -> int:

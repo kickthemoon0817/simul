@@ -747,13 +747,17 @@ def test_exec_long_inline_script_is_not_treated_as_path(monkeypatch) -> None:
     assert captured["code"] == script
 
 
-def test_is_script_file(tmp_path: Path) -> None:
+def test_read_script_arg_file_vs_inline(tmp_path: Path) -> None:
+    from simul_mcp.cli.output import read_script_arg
+
     script = tmp_path / "s.py"
     script.write_text("print(1)\n")
-    assert unreal_cli._is_script_file(str(script)) is True
-    assert unreal_cli._is_script_file(str(tmp_path / "missing.py")) is False
-    assert unreal_cli._is_script_file("print('a')") is False
-    assert unreal_cli._is_script_file("a" * 5000 + ".py") is False
+    assert read_script_arg(str(script)) == "print(1)\n"
+    missing = str(tmp_path / "missing.py")
+    assert read_script_arg(missing) == missing
+    assert read_script_arg("print('a')") == "print('a')"
+    long_inline = "a" * 5000 + ".py"
+    assert read_script_arg(long_inline) == long_inline
 
 
 # ---------------------------------------------------------------------------

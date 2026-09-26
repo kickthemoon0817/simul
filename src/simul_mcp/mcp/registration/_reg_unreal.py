@@ -31,7 +31,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     """
     # Imported here rather than at module level: the adapter needs aiohttp,
     # and this module must import even where the Unreal backend is absent.
-    from ...adapters.unreal_runtime import UnrealRuntimeSession
+    from ...adapters.unreal_runtime import UNREAL_EXEC_MODES, UnrealRuntimeSession
 
     @server.mcp.tool(
         name="unreal_health_check",
@@ -306,11 +306,10 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ``output`` when it printed no JSON. A ScriptError envelope when
             the Python raised.
         """
-        _VALID_EXEC_MODES = {"ExecuteFile", "EvaluateStatement", "ExecuteStatement"}
-        if mode not in _VALID_EXEC_MODES:
+        if mode not in UNREAL_EXEC_MODES:
             return server._as_text_result(
                 ErrorResponse(
-                    error=f"Invalid mode '{mode}'. Must be one of {sorted(_VALID_EXEC_MODES)}",
+                    error=f"Invalid mode '{mode}'. Must be one of {sorted(UNREAL_EXEC_MODES)}",
                     error_type="ValidationError",
                 ).model_dump()
             )

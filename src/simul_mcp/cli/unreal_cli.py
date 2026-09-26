@@ -14,18 +14,16 @@ import asyncio
 import hashlib
 import json
 import subprocess
-import sys
 from pathlib import Path
-from typing import Any, Dict, List, NoReturn, Optional
+from typing import Any, Coroutine, Dict, List, NoReturn, Optional
 
 import typer
-from rich.console import Console
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
-from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
+from simul_mcp.adapters.unreal_runtime import UNREAL_EXEC_MODES, UnrealRuntimeSession
 from simul_mcp.adapters.unreal_setup import (
     LauncherNotFound,
     ensure_remote_control_config,
@@ -33,7 +31,16 @@ from simul_mcp.adapters.unreal_setup import (
     launch_editor,
     resolve_launch_argv,
 )
-from simul_mcp.cli.output import emit, emit_error, is_json_mode
+from simul_mcp.cli.output import (
+    console,
+    emit,
+    emit_error,
+    exit_if_failed,
+    fail,
+    is_json_mode,
+    read_script_arg,
+    run_or_exit,
+)
 from simul_mcp.config import get_settings
 
 app = typer.Typer(
@@ -41,7 +48,6 @@ app = typer.Typer(
     help="Unreal Engine commands -- interact with a running UE5 instance via Remote Control API.",
     add_completion=False,
 )
-console = Console(stderr=True)
 
 
 def _session(
@@ -87,33 +93,9 @@ async def _script_refusal(session: UnrealRuntimeSession) -> Dict[str, Any]:
     return session._script_execution_denied()
 
 
-def _run(coro: Any) -> Dict[str, Any]:
-    """
-    Run an async session method and handle errors uniformly.
-
-    In JSON mode: emits the full result dict to stdout.
-    In Rich mode: prints errors with Rich formatting.
-    """
-    try:
-        result = asyncio.run(coro)
-    except Exception as e:
-        if is_json_mode():
-            emit_error(str(e), type(e).__name__)
-            return {}  # unreachable (emit_error raises), but documents intent
-        console.print(f"[red]{type(e).__name__}: {e}[/red]")
-        raise typer.Exit(1)
-
-    if isinstance(result, dict) and result.get("error"):
-        if is_json_mode():
-            emit_error(
-                result["error"],
-                result.get("error_type", "Error"),
-                result.get("details"),
-            )
-            return result  # unreachable (emit_error raises), but documents intent
-        console.print(f"[red]{result.get('error_type', 'Error')}: {result['error']}[/red]")
-        raise typer.Exit(1)
-    return result
+def _run(coro: Coroutine[Any, Any, Dict[str, Any]]) -> Dict[str, Any]:
+    """Run an async session method; exit non-zero on an exception or failed payload."""
+    return run_or_exit(coro, catch_exceptions=True)
 
 
 # Common options
@@ -226,8 +208,15 @@ def control(
         )
     except ValueError as exc:
         emit_error(str(exc), "ValueError")
-        return
-    emit(_run(_attached_call("control_ui", **request.model_dump())))
+    # overlay_error means the editor action completed but its cursor annotation
+    # did not: keep the result on stdout, then exit non-zero like the MCP envelope.
+    result = run_or_exit(
+        _attached_call("control_ui", **request.model_dump()),
+        catch_exceptions=True,
+        allow_partial=True,
+    )
+    emit(result)
+    exit_if_failed(result)
 
 
 # ---------------------------------------------------------------------------
@@ -382,10 +371,7 @@ def spawn(
         loc = tuple(float(v) for v in location.split(",")) if location else (0.0, 0.0, 0.0)
         rot = tuple(float(v) for v in rotation.split(",")) if rotation else (0.0, 0.0, 0.0)
     except (ValueError, IndexError) as e:
-        if is_json_mode():
-            emit_error(f"Invalid transform value: {e}", "ValueError")
-        console.print(f"[red]Invalid transform value: {e}[/red]")
-        raise typer.Exit(1)
+        fail(f"Invalid transform value: {e}", "ValueError")
 
     session = _session(host, port)
     result = _run(session.spawn_actor(
@@ -436,10 +422,7 @@ def set_transform(
         rot = tuple(float(v) for v in rotation.split(",")) if rotation else None
         sc = tuple(float(v) for v in scale.split(",")) if scale else None
     except ValueError as e:
-        if is_json_mode():
-            emit_error(f"Invalid numeric value: {e}", "ValueError")
-        console.print(f"[red]Invalid numeric value: {e}[/red]")
-        raise typer.Exit(1)
+        fail(f"Invalid numeric value: {e}", "ValueError")
 
     session = _session(host, port)
     result = _run(session.set_actor_transform(
@@ -531,10 +514,7 @@ def sim(
     valid = {"start", "stop", "pause", "resume", "step"}
     if action not in valid:
         msg = f"Invalid action '{action}'. Must be one of: {', '.join(sorted(valid))}"
-        if is_json_mode():
-            emit_error(msg, "ValueError")
-        console.print(f"[red]{msg}[/red]")
-        raise typer.Exit(1)
+        fail(msg, "ValueError")
 
     session = _session(host, port)
     result = _run(session.control_simulation(action))
@@ -613,31 +593,11 @@ def exec_script(
     port: Optional[int] = _port_opt,
 ) -> None:
     """Execute Python code inside Unreal Engine."""
-    valid_modes = {"ExecuteFile", "EvaluateStatement", "ExecuteStatement"}
-    if mode not in valid_modes:
-        msg = f"Invalid mode '{mode}'. Must be one of: {', '.join(sorted(valid_modes))}"
-        if is_json_mode():
-            emit_error(msg, "ValueError")
-        console.print(f"[red]{msg}[/red]")
-        raise typer.Exit(1)
+    if mode not in UNREAL_EXEC_MODES:
+        msg = f"Invalid mode '{mode}'. Must be one of: {', '.join(sorted(UNREAL_EXEC_MODES))}"
+        fail(msg, "ValueError")
 
-    if script is None:
-        if not sys.stdin.isatty():
-            code = sys.stdin.read()
-        else:
-            if is_json_mode():
-                emit_error(
-                    "Provide a script string, .py file path, or pipe code via stdin.",
-                    "InputError",
-                )
-            console.print(
-                "[red]Provide a script string, .py file path, or pipe code via stdin.[/red]"
-            )
-            raise typer.Exit(1)
-    elif _is_script_file(script):
-        code = Path(script).read_text(encoding="utf-8")
-    else:
-        code = script
+    code = read_script_arg(script)
 
     session = _session(host, port)
     if not session.settings.security.allow_script_execution:
@@ -645,10 +605,7 @@ def exec_script(
     try:
         raw_result = asyncio.run(session._execute_python(code, mode=mode))
     except Exception as e:
-        if is_json_mode():
-            emit_error(str(e), type(e).__name__)
-        console.print(f"[red]{e}[/red]")
-        raise typer.Exit(1)
+        fail(str(e), type(e).__name__)
 
     # UE's PythonScriptLibrary.ExecutePythonCommandEx returns:
     #   ReturnValue: bool  — true iff the Python script ran without raising
@@ -861,21 +818,6 @@ def _poll_host(bind: Optional[str]) -> Optional[str]:
     return host
 
 
-def _is_script_file(script: str) -> bool:
-    """True when ``script`` names an existing ``.py`` file.
-
-    The suffix check runs first so a long inline script never reaches
-    ``Path.is_file``, which raises ``OSError`` (ENAMETOOLONG) on
-    Python 3.11-3.13 instead of returning False.
-    """
-    if not script.endswith(".py"):
-        return False
-    try:
-        return Path(script).is_file()
-    except OSError:
-        return False
-
-
 def _fail_launch(error: str) -> NoReturn:
     """Report a launcher failure and exit non-zero (never returns)."""
     msg = (
@@ -1013,11 +955,7 @@ def setup(
     uproject = uproject.expanduser().resolve()
     if not uproject.is_file() or uproject.suffix != ".uproject":
         msg = f"Not a .uproject file: {uproject}"
-        if is_json_mode():
-            emit_error(msg, "InvalidArgument")
-            return
-        console.print(f"[red]{msg}[/red]")
-        raise typer.Exit(2)
+        fail(msg, "InvalidArgument", exit_code=2)
 
     # Safety gate: a non-loopback bind exposes UE Remote Control to the
     # network. Since we also enable bEnableRemotePythonExecution=True, that
@@ -1030,11 +968,7 @@ def setup(
             f"--allow-public to acknowledge the trust-radius implication, or "
             f"pick a loopback bind (omit --bind, or pass 127.0.0.1)."
         )
-        if is_json_mode():
-            emit_error(msg, "InvalidArgument")
-            raise typer.Exit(2)
-        console.print(f"[red]{msg}[/red]")
-        raise typer.Exit(2)
+        fail(msg, "InvalidArgument", exit_code=2)
 
     # Compute the MD5 hash UE expects (FMD5::HashAnsiString) and refuse the
     # combination of --passphrase with a loopback-only bind: passphrase
@@ -1054,11 +988,7 @@ def setup(
                 "Passphrase header. Either drop --passphrase, or also pass "
                 "--bind <non-loopback> --allow-public."
             )
-            if is_json_mode():
-                emit_error(msg, "InvalidArgument")
-                raise typer.Exit(2)
-            console.print(f"[red]{msg}[/red]")
-            raise typer.Exit(2)
+            fail(msg, "InvalidArgument", exit_code=2)
         # UE's FMD5::HashAnsiString operates on the narrowed ANSI byte
         # representation. A non-ASCII passphrase would silently produce a
         # different hash on UE's side from what we compute here. Reject
@@ -1072,11 +1002,7 @@ def setup(
                 "FMD5::HashAnsiString narrows wide characters before "
                 f"hashing, so non-ASCII bytes silently mismatch. ({exc})"
             )
-            if is_json_mode():
-                emit_error(msg, "InvalidArgument")
-                raise typer.Exit(2)
-            console.print(f"[red]{msg}[/red]")
-            raise typer.Exit(2)
+            fail(msg, "InvalidArgument", exit_code=2)
         passphrase_md5 = hashlib.md5(ascii_bytes).hexdigest()
 
     # Preview-only launch resolution so we can tell the user what WOULD happen.
@@ -1141,7 +1067,6 @@ def setup(
     except Exception as exc:
         if is_json_mode():
             emit_error(str(exc), type(exc).__name__)
-            return
         console.print(f"[red]config patch failed: {exc}[/red]")
         raise typer.Exit(1)
 

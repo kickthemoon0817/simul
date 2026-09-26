@@ -1086,7 +1086,8 @@ def test_bridge_up_reprobe_loop_is_not_cut_short_by_the_circuit_breaker(monkeypa
     """
     client_cls = _flaky_bridge_client_class(refusals=4)
     enable = AsyncMock(return_value={"success": True, "enabled": True})
-    monkeypatch.setattr(isaac_cli, "IsaacSocketClient", client_cls)
+    # bridge-up's clients come from IsaacRuntimeAdapter.build_client.
+    monkeypatch.setattr("simul_mcp.adapters.isaac_runtime.IsaacSocketClient", client_cls)
     monkeypatch.setattr(
         isaac_cli,
         "IsaacTools",

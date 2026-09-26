@@ -31,6 +31,10 @@ from ._unreal_scripts import (
     USD_IMPORT,
 )
 
+#: ``ExecutionMode`` values UE's ``PythonScriptLibrary.ExecutePythonCommandEx``
+#: accepts. Shared by the ``execute_unreal_script`` tool and ``simul unreal exec``.
+UNREAL_EXEC_MODES = frozenset({"ExecuteFile", "EvaluateStatement", "ExecuteStatement"})
+
 # UE's FMD5 hex output is lowercase. Accept either case from configured
 # input and normalize. Anything that isn't a clean 32-char hex digest is
 # treated as plaintext and MD5-hashed (UE's FMD5::HashAnsiString).
