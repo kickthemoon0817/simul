@@ -1,8 +1,26 @@
 """Blender MCP schemas."""
 
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
+
+
+def _printable_agent_label(value: str) -> str:
+    """Reject labels the attached add-on's feedback overlay cannot draw.
+
+    Checked here so embedded and attached captures accept the same labels.
+    """
+    if not value.isprintable() or not value.strip():
+        raise ValueError("agent_id must be a printable, non-blank label")
+    return value
+
+
+AgentLabel = Annotated[
+    str,
+    Field(min_length=1, max_length=64, description="Agent label shown in capture feedback"),
+    AfterValidator(_printable_agent_label),
+]
+
 
 class BlenderInfoResponse(BaseModel):
     """Response with Blender runtime information."""
@@ -349,7 +367,7 @@ class BlenderBoundsCheckResponse(BaseModel):
 class BlenderCaptureViewportRequest(BaseModel):
     """Request to capture the current viewport as a JPEG image."""
 
-    agent_id: str = Field("agent", min_length=1, max_length=64)
+    agent_id: AgentLabel = "agent"
 
     width: int = Field(512, description="Output image width in pixels", ge=64, le=4096)
     height: int = Field(
@@ -382,6 +400,7 @@ class BlenderCaptureViewportResponse(BaseModel):
     capture_method: str = Field(
         ..., description="Method used: gpu_offscreen or render_fallback"
     )
+    format: str = Field("jpeg", description="Encoded image format of image_base64")
 
 
 class BlenderSetCameraViewRequest(BaseModel):
@@ -508,7 +527,7 @@ class BlenderViewportInfoResponse(BaseModel):
 class BlenderCaptureSequenceRequest(BaseModel):
     """Request for multi-frame viewport capture."""
 
-    agent_id: str = Field("agent", min_length=1, max_length=64)
+    agent_id: AgentLabel = "agent"
 
     start_frame: int = Field(..., description="First frame to capture")
     end_frame: int = Field(..., description="Last frame to capture")

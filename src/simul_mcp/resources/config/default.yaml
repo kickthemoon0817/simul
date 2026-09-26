@@ -9,9 +9,7 @@ server:
   name: "Simul – 3D Simulation & DCC Tools"
   host: "localhost"
   port: 8765
-  max_connections: 10
   timeout: 30
-  enable_cors: true
   cors_origins:
     - "http://localhost:8765"
     - "https://localhost:8765"
@@ -61,9 +59,6 @@ isaac_sim:
   # Kit configuration
   kit:
     headless: false
-    enable_livestream: false
-    livestream_port: 8211
-    enable_webrtc: false
     resolution:
       width: 1920
       height: 1080
@@ -79,18 +74,9 @@ blender:
 
 # USD Configuration
 usd:
-  # Stage settings
-  stage:
-    load_rules: "LoadAll"  # LoadAll, LoadNone, OnlyLoadedPrims
-    population_mask: ""
-    interpolation_type: "Linear"  # Linear, Held
-    enable_instancing: true
-
   # Cache settings
   cache:
     enabled: true
-    size: 1000
-    stage_cache_limit: 10
 
   # File handling
   files:
@@ -101,18 +87,10 @@ usd:
       - ".usdz"
     max_file_size_mb: 500
 
-  # Performance settings
-  performance:
-    enable_multithreading: true
-    max_concurrent_operations: 10
-    operation_timeout: 30
-
 # Viewport Configuration
 viewport:
   # Default capture settings
   capture:
-    width: 1920
-    height: 1080
     max_size: 2048
     format: "png"  # png, jpg, exr
     quality: 95
@@ -120,17 +98,9 @@ viewport:
     # when it is enabled; unset picks <writable allowed root>/captures.
     # directory: "/tmp/simul_mcp/captures"
 
-  # Rendering settings
-  rendering:
-    samples_per_pixel: 1
-    max_bounces: 4
-    enable_denoising: true
-
   # Camera settings
   camera:
     fov: 45.0
-    near_plane: 0.1
-    far_plane: 1000.0
 
 # Logging Configuration
 logging:
@@ -141,8 +111,6 @@ logging:
   file:
     enabled: true
     path: "~/.simul/logs/simul_mcp.log"
-    max_size: "10MB"
-    backup_count: 5
     # Suffix filenames with the process PID so concurrent servers do not interleave
     per_instance: false
     # Daily rotations kept by the timed handler

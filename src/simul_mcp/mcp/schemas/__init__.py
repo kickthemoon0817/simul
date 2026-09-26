@@ -1,6 +1,5 @@
 """MCP schema package grouped by backend/domain."""
 
-from . import _all as _cross
 from . import blender as _blender
 from . import common as _common
 from . import instance as _instance
@@ -8,7 +7,6 @@ from . import simready as _simready
 from . import unreal as _unreal
 from . import usd as _usd
 
-from ._all import *
 from .blender import *
 from .common import *
 from .instance import *
@@ -17,7 +15,6 @@ from .unreal import *
 from .usd import *
 
 __all__ = [
-    *_cross.__all__,
     *_common.__all__,
     *_usd.__all__,
     *_instance.__all__,

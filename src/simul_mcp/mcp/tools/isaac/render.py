@@ -1,23 +1,11 @@
 """AOV / Replicator tools for Isaac Sim."""
 
-import json
 import textwrap
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from ....adapters import IsaacSocketClient, ScriptResult
-from ...schemas.common import ErrorResponse
 from ._shared import (
-    BULK_GEOMETRY_ATTRIBUTES,
     DEFAULT_MAX_RESULTS,
-    LOG_SCAN_WINDOW_BYTES,
-    MAX_CAPTURE_DIMENSION,
-    MAX_INLINE_CAPTURE_BYTES,
-    MAX_RETAINED_CAPTURES,
-    MAX_SCRIPT_BYTES,
-    PRIM_DETAIL_ASPECTS,
-    FloatList,
     _pyval,
-    logger,
 )
 from .._meta import DeprecatedAlias, tool_meta
 
@@ -233,6 +221,22 @@ class RenderMixin:
             }}
             if attach_errors:
                 output["attach_errors"] = attach_errors
+            # Per-AOV failures live under keys the envelope does not read
+            # (attach_errors, aovs.<name>.error), so a call where nothing
+            # produced data needs a top-level error to report failure. A
+            # partial read stays a success and names what failed.
+            failed = sorted(
+                set(attach_errors)
+                | {{n for n, s in results.items() if "error" in s}}
+            )
+            if failed:
+                output["failed_aovs"] = failed
+            if not any("error" not in s for s in results.values()):
+                reasons = [
+                    n + ": " + attach_errors.get(n, results.get(n, {{}}).get("error", "no data"))
+                    for n in aov_names
+                ]
+                output["error"] = "No AOV produced data (" + "; ".join(reasons) + ")"
             print(json.dumps(output))
         """)
         return await self._execute_json_script(script)
@@ -362,7 +366,10 @@ class RenderMixin:
                 truncated = False
                 matched = 0
 
-                for prim in Usd.PrimRange(root_prim):
+                # Usd.PrimRange over an invalid prim is empty; without this a
+                # mistyped root reads as "no prims of that type".
+                prim_range = Usd.PrimRange(root_prim) if root_prim.IsValid() else ()
+                for prim in prim_range:
                     if schema_cls is not None:
                         if not prim.IsA(schema_cls):
                             continue
@@ -413,16 +420,19 @@ class RenderMixin:
                         prim_info["attributes"] = attrs
                     prims_data.append(prim_info)
 
-                print(json.dumps({{
-                    "type_filter": type_str,
-                    "root_path": root_path,
-                    "count": len(prims_data),
-                    "offset": offset,
-                    "applied_limit": max_results,
-                    "truncated": truncated,
-                    "next_offset": offset + len(prims_data) if truncated else None,
-                    "prims": prims_data,
-                }}))
+                if not root_prim.IsValid():
+                    print(json.dumps({{"error": "Root path not found: " + root_path}}))
+                else:
+                    print(json.dumps({{
+                        "type_filter": type_str,
+                        "root_path": root_path,
+                        "count": len(prims_data),
+                        "offset": offset,
+                        "applied_limit": max_results,
+                        "truncated": truncated,
+                        "next_offset": offset + len(prims_data) if truncated else None,
+                        "prims": prims_data,
+                    }}))
         """)
         return await self._execute_json_script(script)
 

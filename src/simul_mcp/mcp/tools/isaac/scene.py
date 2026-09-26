@@ -1,22 +1,12 @@
 """Scene Inspection (Read-only) tools for Isaac Sim."""
 
-import json
 import textwrap
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
 from ._shared import (
     BULK_GEOMETRY_ATTRIBUTES,
-    LOG_SCAN_WINDOW_BYTES,
-    MAX_CAPTURE_DIMENSION,
-    MAX_INLINE_CAPTURE_BYTES,
-    MAX_RETAINED_CAPTURES,
-    MAX_SCRIPT_BYTES,
-    PRIM_DETAIL_ASPECTS,
-    FloatList,
     _pyval,
-    logger,
 )
 from .._meta import DeprecatedAlias, tool_meta
 
@@ -265,7 +255,7 @@ class SceneInspectionMixin:
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
-            from pxr import Usd, UsdGeom, Gf
+            from pxr import Gf, Sdf, Usd, UsdGeom
 
             stage = omni.usd.get_context().get_stage()
             if stage is None:
@@ -303,10 +293,11 @@ class SceneInspectionMixin:
                                 return [_serialize(x) for x in v]
                         except Exception:
                             pass
-                        try:
-                            return float(v) if isinstance(v, (type(Gf.Vec3f()[0]),)) else v
-                        except Exception:
-                            pass
+                        # Anything else (Sdf.AssetPath, Sdf.Path, TfToken
+                        # wrappers, enums) must still become JSON, or one such
+                        # attribute fails the whole json.dumps below.
+                        if isinstance(v, Sdf.AssetPath):
+                            return v.path
                         return str(v)
 
                     BULK_GEOMETRY_ATTRS = {_bulk_attrs}

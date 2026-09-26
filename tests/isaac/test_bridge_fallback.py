@@ -78,3 +78,30 @@ def test_bridge_action_still_reports_errors_when_fallback_disabled() -> None:
 
     assert outcome is not None
     assert outcome["error_type"] == "ConnectionRefusedError"
+
+
+# ---------------------------------------------------------------------------
+# A typed action the bridge already received must not be replayed as a script
+# ---------------------------------------------------------------------------
+
+
+def test_delivered_bridge_action_is_not_replayed_on_the_script_path() -> None:
+    """A reply timeout after delivery must surface, not fall through to execute().
+
+    The bridge may already have applied the action (e.g. ``simulation_control``
+    start, a prim create); the script fallback would apply it twice.
+    """
+    from simul_mcp.adapters.isaac_socket_client import BridgeResponseTimeoutError
+
+    client = _client_with_unreachable_bridge({"state": "playing", "started": True})
+    client.bridge_request = AsyncMock(
+        side_effect=BridgeResponseTimeoutError("no reply; request delivered")
+    )
+    tools = IsaacTools(client)
+
+    result = asyncio.run(tools.start_isaac_simulation())
+
+    assert result["error_type"] == "BridgeResponseTimeoutError"
+    assert client.execute.await_count == 0
+    assert client.execute_vscode_only.await_count == 0
+    assert client.execute_bridge_script_only.await_count == 0

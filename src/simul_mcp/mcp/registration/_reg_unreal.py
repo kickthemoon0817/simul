@@ -301,7 +301,10 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                   or ExecuteStatement (single statement).
 
         Returns:
-            The JSON object the script printed, or a ScriptError envelope.
+            EvaluateStatement: the expression's value as ``result``. Other
+            modes: the first JSON object the script printed, or its printed
+            ``output`` when it printed no JSON. A ScriptError envelope when
+            the Python raised.
         """
         _VALID_EXEC_MODES = {"ExecuteFile", "EvaluateStatement", "ExecuteStatement"}
         if mode not in _VALID_EXEC_MODES:
@@ -312,22 +315,12 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
                 ).model_dump()
             )
 
-        async def _run_script(session: Any) -> Dict[str, Any]:
-            raw = await session._execute_python(code, mode=mode)
-            parsed = session._parse_python_json(raw)
-            if parsed.get("error"):
-                return ErrorResponse(
-                    error=parsed["error"],
-                    error_type="ScriptError",
-                ).model_dump()
-            return parsed
-
         return await server._exec_backend(
             "execute_unreal_script",
             server.unreal_adapter,
             "Unreal",
             UnrealExecuteScriptResponse,
-            _run_script,
+            lambda session: session.execute_script(code, mode=mode),
             params={"code_bytes": len(code), "mode": mode},
         )
 
@@ -717,16 +710,17 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     )
     @with_param_descriptions()
     async def set_unreal_camera_view(
-        location_x: float = 0.0,
-        location_y: float = 0.0,
-        location_z: float = 0.0,
-        rotation_pitch: float = 0.0,
-        rotation_yaw: float = 0.0,
-        rotation_roll: float = 0.0,
-        fov: float = 90.0,
+        location_x: Optional[float] = None,
+        location_y: Optional[float] = None,
+        location_z: Optional[float] = None,
+        rotation_pitch: Optional[float] = None,
+        rotation_yaw: Optional[float] = None,
+        rotation_roll: Optional[float] = None,
     ) -> ToolResult:
         """
-        Set the editor viewport camera.
+        Set the editor viewport camera. Give all three location components,
+        all three rotation components, or both; an omitted group is left
+        unchanged. The viewport field of view cannot be set remotely.
 
         Args:
             location_x: Camera X position in cm.
@@ -735,20 +729,33 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             rotation_pitch: Camera pitch in degrees.
             rotation_yaw: Camera yaw in degrees.
             rotation_roll: Camera roll in degrees.
-            fov: Field of view in degrees.
 
         Returns:
-            Applied camera state or error response.
+            Applied camera state (None for a group left unchanged) or error response.
         """
+        groups = {
+            "location": (location_x, location_y, location_z),
+            "rotation": (rotation_pitch, rotation_yaw, rotation_roll),
+        }
+        chosen: Dict[str, Any] = {}
+        for group, values in groups.items():
+            given = [v is not None for v in values]
+            if any(given) and not all(given):
+                return server._as_text_result(
+                    ErrorResponse(
+                        error=f"Give all three {group} components or none",
+                        error_type="ValidationError",
+                    ).model_dump()
+                )
+            chosen[group] = values if all(given) else None
         return await server._exec_backend(
             "set_unreal_camera_view",
             server.unreal_adapter,
             "Unreal",
             UnrealSetCameraViewResponse,
             lambda session: session.set_camera_view(
-                location=(location_x, location_y, location_z),
-                rotation=(rotation_pitch, rotation_yaw, rotation_roll),
-                fov=fov,
+                location=chosen["location"],
+                rotation=chosen["rotation"],
             ),
         )
 

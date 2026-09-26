@@ -1,25 +1,16 @@
 """Transport and policy machinery every Isaac tool mixin builds on."""
 
 import json
-import textwrap
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 from ....adapters import IsaacSocketClient, ScriptResult
+from ....adapters.isaac_socket_client import BridgeRequestDeliveredError
 from ....config import Settings, get_settings
 from ....logging import LoggerMixin
 from ....utils.paths import PathPolicy
 from ...registration._helpers import apply_success_from_error
 from ...schemas.common import ErrorResponse
 from ._shared import (
-    BULK_GEOMETRY_ATTRIBUTES,
-    LOG_SCAN_WINDOW_BYTES,
-    MAX_CAPTURE_DIMENSION,
-    MAX_INLINE_CAPTURE_BYTES,
-    MAX_RETAINED_CAPTURES,
-    MAX_SCRIPT_BYTES,
-    PRIM_DETAIL_ASPECTS,
-    FloatList,
-    _pyval,
     logger,
 )
 
@@ -229,6 +220,14 @@ class IsaacScriptBase(LoggerMixin):
 
         try:
             response = await self._client.bridge_request(action, payload or {})
+        except BridgeRequestDeliveredError as exc:
+            # The bridge already holds the request and may have acted on it
+            # (a typed create/delete/simulation_control is not idempotent).
+            # Running the script fallback now would apply it a second time.
+            return ErrorResponse(
+                error=str(exc),
+                error_type=type(exc).__name__,
+            ).model_dump()
         except (ConnectionRefusedError, TimeoutError, OSError) as exc:
             # The bridge is unreachable, not the action unsupported. When a
             # script transport sits below us, defer to it exactly as an

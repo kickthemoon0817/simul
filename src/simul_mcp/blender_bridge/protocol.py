@@ -10,8 +10,23 @@ from typing import Any
 # Re-exported: the Blender add-on and the CLI import BridgeFiles from here.
 from ..utils.private_files import BridgeFiles  # noqa: F401
 
-PROTOCOL_VERSION = 1
+# Bump whenever the add-on and the server stop agreeing on a call shape. The
+# add-on is a separately installed ZIP that bundles its own copy of
+# BlenderRuntimeSession, so an upgraded server can otherwise send arguments
+# (e.g. capture ``agent_id``) that the stale add-on rejects with a bare
+# TypeError. Version 2: capture tools take ``agent_id``.
+PROTOCOL_VERSION = 2
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
+
+
+def protocol_mismatch_message(addon: Any, server: Any) -> str:
+    """Explain a server/add-on version skew with the fix, not just the symptom."""
+    return (
+        f"Blender bridge protocol mismatch: the Blender add-on speaks protocol {addon!r}, "
+        f"simul-mcp speaks protocol {server!r}. Rebuild the add-on with "
+        "`simul blender install-bridge`, reinstall and enable it in Blender, restart "
+        "Blender, then run `simul blender attach` again."
+    )
 
 
 class BridgeRemoteError(RuntimeError):
@@ -39,10 +54,11 @@ class BridgeWire:
         endpoint: dict[str, Any], payload: dict[str, Any], timeout: float
     ) -> dict[str, Any]:
         """Send exactly once; never retry an operation whose outcome is unknown."""
-        if (
-            endpoint.get("protocol") != PROTOCOL_VERSION
-            or endpoint.get("host") != "127.0.0.1"
-        ):
+        if endpoint.get("protocol") != PROTOCOL_VERSION:
+            raise ValueError(
+                protocol_mismatch_message(endpoint.get("protocol"), PROTOCOL_VERSION)
+            )
+        if endpoint.get("host") != "127.0.0.1":
             raise ValueError("Unsupported Blender bridge endpoint")
         if not isinstance(endpoint.get("token"), str) or not endpoint["token"]:
             raise ValueError("Missing Blender bridge authentication token")

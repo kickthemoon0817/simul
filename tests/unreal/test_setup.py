@@ -297,22 +297,51 @@ def test_patch_ini_passphrase_omitted_does_not_touch_passphrase_keys(
     assert "bEnforcePassphraseForRemoteClients" not in text
 
 
-def test_patch_ini_appends_second_passphrase_when_hash_differs(
+def test_patch_ini_rotating_passphrase_replaces_old_simul_entry(
     tmp_path: Path,
 ) -> None:
-    """Documented behavior: a different passphrase hash on a subsequent
-    run appends an additional +Passphrases entry rather than overwriting.
-    UE accepts any matching entry per WebRemoteControlInternalUtils.cpp's
-    CheckPassphrase, so this is non-destructive multi-tenancy. Pin the
-    invariant so a future refactor can't silently break it."""
+    """A different hash on a later run replaces the earlier simul entry.
+    UE accepts any matching +Passphrases entry (CheckPassphrase), so leaving
+    the old one would keep the rotated-out secret valid."""
     first = "5f4dcc3b5aa765d61d8327deb882cf99"   # md5("password")
     second = "21232f297a57a5a743894a0e4a801fc3"  # md5("admin")
     patch_remote_control_ini(tmp_path, port=30010, passphrase_md5=first)
-    patch_remote_control_ini(tmp_path, port=30010, passphrase_md5=second)
+    result = patch_remote_control_ini(tmp_path, port=30010, passphrase_md5=second)
     text = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
-    assert text.count("+Passphrases=") == 2
-    assert f'Passphrase="{first}"' in text
+    assert text.count("+Passphrases=") == 1
+    assert f'Passphrase="{first}"' not in text
     assert f'Passphrase="{second}"' in text
+    assert result.changed is True
+    assert "Passphrases" in result.removed
+
+
+def test_patch_ini_passphrase_rotation_keeps_foreign_entries(tmp_path: Path) -> None:
+    """Entries with another Identifier (added by hand or another tool) and
+    entries in other sections survive rotation; duplicate simul lines collapse."""
+    config_dir = tmp_path / "Config"
+    config_dir.mkdir()
+    ini = config_dir / "DefaultRemoteControl.ini"
+    old = "5f4dcc3b5aa765d61d8327deb882cf99"
+    new = "21232f297a57a5a743894a0e4a801fc3"
+    foreign = '+Passphrases=(Identifier="ops",Passphrase="0123456789abcdef0123456789abcdef")'
+    ini.write_text(
+        f"[{REMOTE_CONTROL_SECTION}]\n"
+        f'+Passphrases=(Identifier="simul",Passphrase="{old}")\n'
+        f"{foreign}\n"
+        f'+Passphrases=(Identifier="simul",Passphrase="{new}")\n'
+        f'+Passphrases=(Identifier="simul",Passphrase="{new}")\n'
+        "[Other]\n"
+        f'+Passphrases=(Identifier="simul",Passphrase="{old}")\n',
+        encoding="utf-8",
+    )
+
+    patch_remote_control_ini(tmp_path, port=30010, passphrase_md5=new)
+
+    rc_section, other = ini.read_text().split("[Other]")
+    assert foreign in rc_section
+    assert old not in rc_section
+    assert rc_section.count(f'Passphrase="{new}"') == 1
+    assert old in other
 
 
 def test_patch_ini_updates_bind_when_value_differs(tmp_path: Path) -> None:
@@ -592,3 +621,120 @@ def test_no_passphrase_never_consults_git(tmp_path: Path, monkeypatch: pytest.Mo
     result = patch_remote_control_ini(tmp_path, port=30010)
 
     assert result.warnings == []
+
+
+# ---------------------------------------------------------------------------
+# Re-running setup without --bind clears a public bind an earlier run wrote
+# ---------------------------------------------------------------------------
+
+
+def test_rerun_without_bind_clears_public_bind(tmp_path: Path) -> None:
+    """`--bind 0.0.0.0` followed by a plain re-run must not leave the editor
+    publicly bound: HTTP DefaultBindAddress is removed (UE default is
+    localhost) and the WS bind is reset to loopback (UE default is 0.0.0.0,
+    so deleting it would not help)."""
+    uproject = _write_uproject(tmp_path, {"FileVersion": 3})
+    ensure_remote_control_config(uproject, port=30010, bind="0.0.0.0")
+
+    result = ensure_remote_control_config(uproject, port=30010)
+
+    engine_text = (tmp_path / "Config" / "DefaultEngine.ini").read_text()
+    rc_text = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
+    assert "DefaultBindAddress" not in engine_text
+    assert f"[{HTTP_LISTENERS_SECTION}]" in engine_text
+    assert "RemoteControlWebsocketServerBindAddress=127.0.0.1" in rc_text
+    assert "0.0.0.0" not in rc_text
+    assert result.engine_ini is not None and result.engine_ini.changed is True
+    assert result.engine_ini.removed == ["DefaultBindAddress"]
+    assert "RemoteControlWebsocketServerBindAddress" in result.ini.updated
+    assert any("0.0.0.0" in w for w in result.engine_ini.warnings)
+
+    # A third run is a no-op.
+    again = ensure_remote_control_config(uproject, port=30010)
+    assert again.changed is False
+
+
+def test_rerun_without_bind_drops_simul_passphrase(tmp_path: Path) -> None:
+    """UE 5.7's PassphrasePreprocessor checks every request, loopback
+    included, so a leftover simul passphrase would 401 the plain client
+    (seen live). Foreign entries stay; keep_public_bind keeps simul's too."""
+    uproject = _write_uproject(tmp_path, {"FileVersion": 3})
+    md5 = "5f4dcc3b5aa765d61d8327deb882cf99"
+    ensure_remote_control_config(uproject, port=30010, bind="0.0.0.0", passphrase_md5=md5)
+    ini = tmp_path / "Config" / "DefaultRemoteControl.ini"
+    foreign = '+Passphrases=(Identifier="ops",Passphrase="0123456789abcdef0123456789abcdef")'
+    ini.write_text(ini.read_text() + foreign + "\n", encoding="utf-8")
+
+    kept = ensure_remote_control_config(uproject, port=30010, keep_public_bind=True)
+    assert kept.changed is False
+    assert md5 in ini.read_text()
+
+    result = ensure_remote_control_config(uproject, port=30010)
+
+    text = ini.read_text()
+    assert md5 not in text
+    assert foreign in text
+    assert "Passphrases" in result.ini.removed
+
+
+def test_rerun_without_bind_keeps_loopback_bind(tmp_path: Path) -> None:
+    uproject = _write_uproject(tmp_path, {"FileVersion": 3})
+    ensure_remote_control_config(uproject, port=30010, bind="127.0.0.1")
+
+    result = ensure_remote_control_config(uproject, port=30010)
+
+    assert result.changed is False
+    assert "DefaultBindAddress=127.0.0.1" in (tmp_path / "Config" / "DefaultEngine.ini").read_text()
+
+
+def test_rerun_without_bind_keeps_public_bind_when_asked(tmp_path: Path) -> None:
+    """keep_public_bind (the CLI's --allow-public) leaves the earlier bind."""
+    uproject = _write_uproject(tmp_path, {"FileVersion": 3})
+    ensure_remote_control_config(uproject, port=30010, bind="192.168.1.10")
+
+    result = ensure_remote_control_config(uproject, port=30010, keep_public_bind=True)
+
+    assert result.changed is False
+    assert result.engine_ini is None
+    assert "DefaultBindAddress=192.168.1.10" in (tmp_path / "Config" / "DefaultEngine.ini").read_text()
+    rc_text = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
+    assert "RemoteControlWebsocketServerBindAddress=192.168.1.10" in rc_text
+
+
+def test_reset_leaves_bind_keys_in_other_sections(tmp_path: Path) -> None:
+    uproject = _write_uproject(tmp_path, {"FileVersion": 3})
+    config_dir = tmp_path / "Config"
+    config_dir.mkdir()
+    (config_dir / "DefaultEngine.ini").write_text(
+        "[Other]\nDefaultBindAddress=0.0.0.0\n", encoding="utf-8"
+    )
+
+    result = ensure_remote_control_config(uproject, port=30010)
+
+    assert result.engine_ini is not None and result.engine_ini.changed is False
+    assert "DefaultBindAddress=0.0.0.0" in (config_dir / "DefaultEngine.ini").read_text()
+
+
+# ---------------------------------------------------------------------------
+# Engine auto-detection picks the highest version numerically
+# ---------------------------------------------------------------------------
+
+
+def test_engine_version_key_sorts_numerically() -> None:
+    names = ["UE_5.9", "UE_5.10", "UE_5.7", "UE_Custom"]
+    ordered = sorted((Path(n) for n in names), key=unreal_setup._engine_version_key, reverse=True)
+    assert [p.name for p in ordered] == ["UE_5.10", "UE_5.9", "UE_5.7", "UE_Custom"]
+
+
+def test_macos_binary_prefers_ue_5_10_over_5_9(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "Epic Games"
+    for version in ("UE_5.9", "UE_5.10"):
+        binary = root / version / "Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("")
+    monkeypatch.setattr(unreal_setup, "_macos_engine_roots", lambda: (root,))
+
+    binary = unreal_setup._macos_macos_binary(None)
+
+    assert binary is not None
+    assert "UE_5.10" in str(binary)
