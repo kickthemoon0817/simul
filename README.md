@@ -1,38 +1,63 @@
-# Simul MCP Server
+<div align="center">
 
-MCP (Model Context Protocol) server for simulation and DCC tools with USD operations and simulation control.
+# Simul
 
-## Overview
+**An MCP server that gives AI agents live control of Isaac Sim, Unreal Engine 5, Blender and OpenUSD.**
 
-This project provides a comprehensive MCP server implementation for Simul-MCP, enabling AI models to interact with USD scenes, perform simulation control, and capture viewport data. The server supports both headless USD operations and full Isaac Sim runtime integration.
+[![CI](https://github.com/kickthemoon0817/simul/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kickthemoon0817/simul/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Python 3.11 | 3.12 | 3.13](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](pyproject.toml)
+[![MCP](https://img.shields.io/badge/MCP-server-8A2BE2.svg)](https://modelcontextprotocol.io)
 
-Simul-MCP is designed for multi-engine workflows. Isaac Sim is the primary runtime, with planned adapters for Blender, Unreal, Maya, and 3ds Max. The goal is to expose consistent tools across engines for scale correction, SimReady asset formats, and engine-specific simulation features.
+[Quickstart](#quickstart) ·
+[Connect your agent](#connect-your-agent) ·
+[Tools](docs/tools.md) ·
+[CLI](docs/cli.md) ·
+[Configuration](docs/configuration.md) ·
+[Contributing](CONTRIBUTING.md)
 
-## Features
+</div>
 
-- **USD Operations**: Load, analyze, and manipulate USD files
-- **Scene Analysis**: Extract scene information, prim details, and mesh statistics
-- **Bounding Box Computation**: Calculate world and local space bounding boxes
-- **Mesh Operations**: Analyze mesh topology, materials, and geometry
-- **Isaac Sim Integration**: Viewport capture, simulation control, camera management
-- **Unreal Engine Integration**: Scene control, actor manipulation, viewport capture, Python execution via Remote Control HTTP API
-- **Blender Integration**: Scene and object manipulation via bpy, or [attach to an existing Blender window](docs/blender-attachment.md)
-- **Backend Selection**: `--backends` flag to register only the engines you need, minimizing AI agent context overhead
-- **Flexible Architecture**: Works in both headless and runtime environments
-- **Comprehensive Logging**: Structured logging with multiple output formats
-- **Configuration Management**: YAML-based configuration with environment variable support
+---
 
-## Requirements
+Simul speaks the [Model Context Protocol](https://modelcontextprotocol.io), so
+Claude Code, Codex, OpenCode or any other MCP client can inspect and edit a
+running simulator or DCC tool: read the scene, change it, run physics, and
+look at the result. The same operations are available from the `simul-mcp`
+command line, which prints JSON when piped.
 
-- Python 3.11, 3.12, or 3.13
-- USD Python bindings (`usd-core`) — installed automatically
-- NVIDIA Isaac Sim 5.1.0, 6.0.0, or 6.0.1 (optional — for live simulation control)
-- Unreal Engine 5.x with Remote Control plugin (optional)
-- Blender via `bpy` package (optional — Python 3.11 or 3.13 only)
+## What you can do
 
-## Install via Claude Code Marketplace
+- **Build a scene from a prompt.** "Put a table with three cubes on it in
+  Isaac Sim, give them rigid bodies, run 120 physics steps and show me the
+  viewport."
+- **Inspect a stage you did not write.** "Summarize this USD file: prim
+  types, mesh statistics, lights, and anything with a missing material."
+- **Drive an editor you already have open.** "In my open Unreal level, select
+  the forklift, move it 2 m forward, and capture the level viewport."
+- **Prepare assets.** "Check this Blender object's bounds and SimReady
+  compliance, then export it as USD."
+- **Fall back to scripts.** When no granular tool fits, the agent runs Python
+  inside the editor (`execute_isaac_script`, `execute_unreal_script`,
+  `execute_blender_script`). Operators can switch that off.
 
-simul ships through the `khemoo` Claude Code marketplace at <https://github.com/kickthemoon0817/khemoo-claude-plugins>, which also hosts other khemoo plugins (e.g. `khemoo-skills` for the `khemoo-vc` version-control workflow):
+## Supported backends
+
+| Backend | Versions | Transport | Needs running app? | Setup command |
+|---|---|---|---|---|
+| **NVIDIA Isaac Sim** | 5.1.0, 6.0.0, 6.0.1 | TCP: `khemoo.simul.mcp` bridge (8229), stock Python socket fallback (8226) | Yes | `simul-mcp isaac install-bridge` once, then `simul-mcp isaac launch` |
+| **Unreal Engine 5** | 5.x | Remote Control HTTP API (30010) + `PythonScriptPlugin` | Yes (headless launch by default) | `simul unreal setup <project>.uproject --yes` |
+| **Blender** | 4.2+ and 5.x | Attached: local add-on bridge in the open window. Embedded: `bpy` in the server process | Attached: yes. Embedded: no | `simul blender install-bridge`, then `simul blender attach` |
+| **OpenUSD (headless)** | `usd-core` 26.3+ | In-process `pxr` | No | None |
+
+`simul` and `simul-mcp` are the same entry point.
+
+## Quickstart
+
+### 1. Install
+
+**Claude Code plugin** (installs the skills, the `/simul:setup` command, and
+registers the MCP server):
 
 ```text
 /plugin marketplace add kickthemoon0817/khemoo-claude-plugins
@@ -40,916 +65,192 @@ simul ships through the `khemoo` Claude Code marketplace at <https://github.com/
 /simul:setup
 ```
 
-That's the whole install. `/simul:setup` clones this repo to `~/.simul/source/`, installs the `simul-mcp` Python package globally (via `uv tool install`, with `pipx` / `pip --user` fallbacks), walks you through backend selection (Isaac Sim / Unreal / Blender / USD-only), and tells you when to restart Claude Code so the plugin's bundled MCP server can spawn cleanly.
+`/simul:setup` clones this repository to `~/.simul/source/`, installs
+`simul-mcp` with `uv tool install` (falling back to `pipx` or `pip --user`),
+adds the server to `~/.claude.json`, and walks you through backend selection.
 
-No `pip install` needed — `simul-mcp` is not on PyPI yet, and `/simul:setup` handles the from-source install for you.
-
-For a hacking-on-simul setup (you're working on the plugin itself, not just using it), use the source install below.
-
-## Installation
-
-**Requirements:** Python 3.11, 3.12, or 3.13
+**From git** (simul-mcp is not published on PyPI):
 
 ```bash
-git clone https://github.com/kickthemoon0817/simul.git
-cd simul
+uv tool install "git+https://github.com/kickthemoon0817/simul"
+# or
+pip install "git+https://github.com/kickthemoon0817/simul"
 ```
 
-### Choose Your Backends
+Requires Python 3.11, 3.12 or 3.13. For embedded Blender add the `blender`
+extra (`"simul-mcp[blender] @ git+https://github.com/kickthemoon0817/simul"`);
+the `bpy` wheels exist only for Python 3.11 and 3.13.
 
-Install only what you need. USD support is included by default — pick the simulation engines you use:
+### 2. Bring up a backend
 
-| I want to use... | Install command |
-|-------------------|----------------|
-| **USD only** (headless scene analysis) | `uv sync` |
-| **Isaac Sim** (NVIDIA Omniverse) | `uv sync` — then launch Isaac Sim with the bridge extension |
-| **Unreal Engine** (5.x) | `uv sync` — then enable Remote Control in your UE project |
-| **Blender** (Python 3.11 or 3.13) | `uv sync --extra blender` |
-| **All backends + dev tools** | `uv sync --extra dev --extra blender` |
-
-Or with pip:
+**Isaac Sim**
 
 ```bash
-# Core (USD + Isaac Sim + Unreal support)
-pip install -e .
-
-# With Blender
-pip install -e ".[blender]"
-
-# With dev tools
-pip install -e ".[dev]"
-```
-
-### Backend-Specific Setup
-
-**Isaac Sim** — No extra Python packages needed. Isaac Sim provides its own `pxr` and `omni` modules. Install the `khemoo.simul.mcp` bridge extension into Isaac Sim (see [Isaac Sim Extension](#isaac-sim-extension) below), or use the Docker Compose setup.
-
-**Unreal Engine** — No extra Python packages needed. Simul communicates via UE5's built-in Remote Control HTTP API. Enable the `RemoteControl` and `PythonScriptPlugin` plugins in your `.uproject` and configure `DefaultRemoteControl.ini` (see [Unreal Engine Setup](#unreal-engine-setup) below).
-
-**Blender** — Requires the `bpy` pip package which has strict Python version locks:
-- Python 3.11 → `bpy 4.2–5.0.x` (Blender 4.x)
-- Python 3.12 → Not supported by `bpy`
-- Python 3.13 → `bpy 5.1.0` (Blender 5.1)
-
-**Unity** — Planned for a future release. The architecture supports adding new backends via the adapter pattern.
-
-### Python Version Guide
-
-| Python | USD | Isaac Sim | Unreal | Blender |
-|--------|-----|-----------|--------|---------|
-| 3.11 | Yes | Yes (5.1, 6.0) | Yes | Yes (bpy 4.x/5.0) |
-| 3.12 | Yes | Yes (5.1, 6.0) | Yes | **No** (no bpy wheels) |
-| 3.13 | Yes | Yes (5.1, 6.0) | Yes | Yes (bpy 5.1) |
-
-The MCP server talks to Isaac Sim over TCP, so its Python version is independent of the one Isaac Sim ships (3.11 for 5.1, 3.12 for 6.0).
-
-**Recommended:** Python 3.11 for maximum compatibility across all backends.
-
-## Agent Integration
-
-Simul MCP works with any MCP-compatible AI coding agent. The most reliable
-enrollment path from a local checkout is to point the agent at `uv run
-simul-mcp server` inside this repository, so it uses the project-managed
-virtual environment instead of assuming a global install.
-
-Recommended repo-local command:
-
-```bash
-uv --directory /abs/path/to/simul run simul-mcp server
-```
-
-If you prefer a globally installed entrypoint, `simul-mcp server` also works
-after installing the package into your environment.
-
-The `src/simul_mcp/resources/skills.md` file ships inside the package and is exposed
-automatically by the MCP server as the `simul://isaac-sim/skills` resource. You do not need to install a separate
-agent-side skill package to use it.
-
-### Claude Code
-
-Add to `~/.claude/settings.json` under `mcpServers`:
-
-```json
-{
-  "mcpServers": {
-    "simul": {
-      "command": "uv",
-      "args": ["--directory", "/abs/path/to/simul", "run", "simul-mcp", "server"]
-    }
-  }
-}
-```
-
-Or use the CLI:
-
-```bash
-claude mcp add simul -- uv --directory /abs/path/to/simul run simul-mcp server
-```
-
-### Codex (OpenAI)
-
-Add to `~/.codex/config.json`:
-
-```json
-{
-  "mcpServers": {
-    "simul": {
-      "command": "uv",
-      "args": ["--directory", "/abs/path/to/simul", "run", "simul-mcp", "server"]
-    }
-  }
-}
-```
-
-### OpenCode
-
-Add to `~/.config/opencode/config.json` under `mcpServers`:
-
-```json
-{
-  "mcpServers": {
-    "simul": {
-      "command": "uv",
-      "args": ["--directory", "/abs/path/to/simul", "run", "simul-mcp", "server"]
-    }
-  }
-}
-```
-
-If you need a custom config file, append the extra server args after `server`,
-for example:
-
-```json
-{
-  "command": "uv",
-  "args": [
-    "--directory", "/abs/path/to/simul",
-    "run", "simul-mcp", "server",
-    "--config", "/abs/path/to/your-config.yaml"
-  ]
-}
-```
-
-### Prerequisites for Isaac Sim Tools
-
-Isaac Sim tools prefer a running Isaac Sim instance with the repo-owned `khemoo.simul.mcp` bridge extension enabled on TCP port 8229. When that bridge is unavailable, the client falls back to the stock Python socket on TCP port 8226: `isaacsim.code_editor.python_server` on Isaac Sim 6.0+, `isaacsim.code_editor.vscode` on 5.x. The client detects which one it is talking to; set `ISAAC_SIM__SOCKET_PROTOCOL` to pin it. Use `ping_isaac` to verify connectivity.
-
-Every script carries a server-side execution timeout (one second under `ISAAC_SIM__SOCKET_TIMEOUT`, minimum 1 s): the bridge interrupts a script that overruns it inside Kit, and the 6.0 `python_server` reports the overrun through its request envelope. A script that is still running can be stopped early with `interrupt_isaac_script` / `simul-mcp isaac interrupt` when it is a coroutine or suspended at an `await`; a synchronous loop that never yields also blocks the bridge's event loop, so only the timeout reaches it, and a blocking C call is interrupted only when it returns to Python. `get_isaac_runtime_info` reports `bridge.busy`, `bridge.busy_since` and `bridge.current_action` so a busy instance can be told from a hung one. A bridge port that is filtered or half-open would cost the full bridge timeout on every call; after `ISAAC_SIM__BRIDGE_FAILURE_THRESHOLD` consecutive failures (default 3) the client skips the bridge for `ISAAC_SIM__BRIDGE_COOLDOWN_SECONDS` (default 30) and uses the stock socket directly, reported as `bridge_circuit_open` by `ping_isaac`, `list_isaac_instances` and `get_isaac_runtime_info`.
-
-Isaac Sim 6.0 enables neither extension at startup. `simul-mcp isaac launch` starts the editor with the right ones enabled for the install it finds under `$ISAAC_SIM_PATH`; see [Isaac Sim 6.0](#isaac-sim-60) below.
-
-When Isaac Sim runs in Docker, Simul MCP connects to the host-published ports, not the container-internal ports. With the included Compose file, the host-facing ports are controlled by `ISAAC_BRIDGE_PORT` and `ISAAC_VSCODE_PORT`, so the MCP server and agents should target those host values.
-
-## Quick Start
-
-### 1. Start the MCP Server
-
-```bash
-# Basic startup
-uv run simul-mcp server
-
-# With custom configuration
-uv run simul-mcp server --config config/custom.yaml --verbose
-```
-
-### 2. Test USD Operations
-
-```bash
-# Analyze a USD file
-simul-mcp usd info /path/to/scene.usd
-
-# Check server capabilities
-simul-mcp info
-
-# View tool usage statistics
-simul-mcp stats
-```
-
-### 3. Use with Isaac Sim
-
-1. Publish the bridge once per install: `ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac install-bridge --symlink`
-2. Launch Isaac Sim with the transports enabled: `ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac launch`
-   (or start `isaac-sim.sh` yourself and run `simul-mcp isaac bridge-up` on 5.x, where the VS Code socket is on by default)
-3. Start your AI agent (Claude Code, Codex, or OpenCode) with simul MCP configured
-4. The agent can now use 75+ Isaac Sim tools for scene control, rendering, physics, and more
-
-### Isaac Sim 6.0
-
-Isaac Sim 6.0.0 and 6.0.1 (Kit 110, Python 3.12) are supported alongside 5.1.0. What changed on the Isaac side:
-
-- The Python socket on port 8226 moved from `isaacsim.code_editor.vscode` into `isaacsim.code_editor.python_server`, and it now executes only after the client half-closes the connection. simul's client detects the flavour with one introspection request, so no configuration is needed.
-- Neither the socket server nor the `khemoo.simul.mcp` bridge is enabled by default, so `bridge-up` has nothing to talk to after a plain `isaac-sim.sh` start. Use `simul-mcp isaac launch`, which reads `<isaac-root>/VERSION` and passes the right `--enable` flags.
-- The python_server can require a token. Start it with `simul-mcp isaac launch --auth-token <secret>` and set `ISAAC_SIM__SOCKET_AUTH_TOKEN=<secret>` for the MCP server.
-- `isaacsim.core.api`, `isaacsim.core.prims`, and `isaacsim.core.utils` are deprecated in favour of `isaacsim.core.experimental.*`, and the `omni.isaac.*` shims are gone. See `skills/isaac-scripting/references/namespace-migration.md` before writing `execute_isaac_script` code.
-
-```bash
-ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac launch            # headless, waits for both ports
-ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac launch --no-headless
-simul-mcp isaac launch --isaac-root ~/isaac-sim-5.1.0 --dry-run    # print the command only
-```
-
-Equivalent manual launch: `isaac-sim.sh --enable isaacsim.code_editor.python_server --enable khemoo.simul.mcp --no-window`.
-
-### Containerized Isaac Sim
-
-For Linux hosts, the repo includes a Docker Compose file that runs the official
-`nvcr.io/nvidia/isaac-sim:5.1.0` image with the bridge extension mounted from
-this checkout:
-
-```bash
-docker compose -f compose.isaac-sim.yml up -d
-```
-
-This Compose file:
-- publishes the bridge and VS Code sockets from the container to the host
-- mounts `./src/simul_mcp/bridge_ext/khemoo.simul.mcp` into `/tmp/extsUser/khemoo.simul.mcp`
-- starts `/isaac-sim/isaac-sim.sh --allow-root --no-window`
-- enables both `khemoo.simul.mcp` and `isaacsim.code_editor.vscode`
-- binds the bridge inside the container on `0.0.0.0:${ISAAC_BRIDGE_PORT:-8229}` —
-  a container-loopback bind cannot receive a published port, so the host would
-  connect and then be closed on with no data
-- enables the bridge transport's raw `execute_script` action by default; this
-  flag only gates the bridge, not the stock Kit socket, and is not a security
-  boundary (see `security.allow_script_execution` under Configuration)
-- binds the VS Code fallback inside the container on `0.0.0.0:${ISAAC_VSCODE_PORT:-8226}`
-- publishes those ports back to the host on the same numbers
-- keeps the container stateless by default so validation runs start cleanly
-
-Port-forwarding note:
-- Simul MCP always talks to the host-visible ports.
-- Cross-host Isaac Sim is not a supported deployment shape. The MCP server
-  only trusts loopback addresses in discovery files, the `simul-mcp isaac
-  launch` command binds the transports on the local machine, and neither the
-  bridge nor the stock Python socket authenticates beyond the optional
-  python_server token: anything that can reach the ports can run Python
-  inside Isaac Sim. Run `simul-mcp` on the same host (or, for a container,
-  publish the ports to the host's loopback as the Compose file does). Unreal's
-  `--bind/--allow-public/--passphrase` flow has no Isaac counterpart.
-- If the container publishes `127.0.0.1:9229` and `127.0.0.1:9226`, the MCP server must use `9229` / `9226`.
-- Discovery files now include both the bridge port and the forwarded VS Code fallback port so multi-instance routing can distinguish local and containerized Isaac apps correctly.
-
-To stop it:
-
-```bash
-docker compose -f compose.isaac-sim.yml down
-```
-
-Override ports or the image tag with standard Compose environment variables, for example:
-
-```bash
-ISAAC_BRIDGE_PORT=8829 ISAAC_VSCODE_PORT=8826 docker compose -f compose.isaac-sim.yml up -d
-```
-
-For an Isaac Sim 6.x image also name the extension that serves the Python socket:
-
-```bash
-ISAAC_SIM_IMAGE=nvcr.io/nvidia/isaac-sim:6.0.1 \
-ISAAC_PYTHON_SERVER_EXT=isaacsim.code_editor.python_server \
-docker compose -f compose.isaac-sim.yml up -d
-```
-
-## Usage
-
-### Command Line Interface
-
-```bash
-# Start the MCP server (all backends)
-simul-mcp server
-
-# Start with only specific backends (reduces agent context)
-simul-mcp server --backends unreal
-simul-mcp server --backends isaac,usd
-
-# Register every granular Unreal tool instead of the default thin set
-simul-mcp server --backends unreal --unreal-tools full
-
-# Start with custom configuration (copy src/simul_mcp/resources/config/default.yaml to start)
-simul-mcp server --config /path/to/your-config.yaml
-
-# Start with verbose logging
-simul-mcp server --verbose
-
-# Show server information and capabilities
-simul-mcp info
-
-# Test USD file loading and analysis
-simul-mcp usd info /path/to/scene.usd
-
-# Validate configuration file
-simul-mcp validate-config /path/to/your-config.yaml
-
-# Show version information
-simul-mcp version
-
-# Isaac Sim commands
+export ISAAC_SIM_PATH=~/isaac-sim-6.0.1
+simul-mcp isaac install-bridge          # once per Isaac install (add --symlink for a repo checkout)
+simul-mcp isaac launch                  # starts Isaac headless with the transports enabled
 simul-mcp isaac ping
-simul-mcp isaac status
-simul-mcp isaac scene
-simul-mcp isaac exec "print('hello')"
-simul-mcp isaac interrupt   # stop the script the bridge is running
-
-# Unreal Engine commands
-simul-mcp unreal health
-simul-mcp unreal list-actors --class StaticMeshActor
-simul-mcp unreal spawn StaticMeshActor --location 0,0,100
-simul-mcp unreal exec "print(unreal.EditorLevelLibrary.get_all_level_actors())"
-simul-mcp unreal capture viewport.png --width 1920
-
-# USD commands
-simul-mcp usd info scene.usd
-simul-mcp usd validate scene.usd
-simul-mcp usd summary scene.usd
 ```
 
-### Isaac Sim Extension
+See [docs/isaac-sim.md](docs/isaac-sim.md) for 5.x `bridge-up`, 6.0 notes and
+the Docker Compose setup.
 
-1. Open Isaac Sim
-2. Go to Window → Extensions
-3. Search for "Isaac Sim MCP Server"
-4. Enable the extension
-5. Use the MCP Server panel to start/stop the server
-
-The extension provides:
-- Server start/stop controls
-- Configuration options (transport, log level)
-- Real-time status monitoring
-- Tool availability display
-- Log viewer
-
-### Python API
-
-```python
-from simul_mcp.mcp.server import SimulMCPServer
-from simul_mcp.config import get_settings
-
-# Create and run server
-settings = get_settings()
-server = SimulMCPServer(settings)
-await server.run("stdio")
-```
-
-### Headless USD Operations
-
-```python
-from simul_mcp.adapters import HeadlessUSDAdapter
-
-adapter = HeadlessUSDAdapter()
-with adapter.create_session() as session:
-    # Load USD file
-    stage_id = session.load_stage("/path/to/scene.usd")
-
-    # Get stage information
-    stage_info = session.get_stage_info(stage_id)
-    print(f"Stage has {stage_info.prim_count} prims")
-
-    # Generate scene summary
-    summary = session.summarize_stage(stage_id)
-    print(f"Scene summary: {summary.total_prims} prims, {summary.hierarchy_depth} levels deep")
-
-    # Find mesh prims
-    meshes = session.find_prims_by_type(stage_id, "Mesh")
-    print(f"Found {len(meshes)} mesh prims")
-
-    # Analyze specific mesh
-    if meshes:
-        mesh_info = session.get_mesh_info(stage_id, meshes[0])
-        print(f"Mesh has {mesh_info['vertex_count']} vertices, {mesh_info['face_count']} faces")
-```
-
-## Configuration
-
-The server loads the `default.yaml` shipped inside the package
-(`src/simul_mcp/resources/config/default.yaml`) unless `CONFIG_FILE` or `--config`
-names another file. Every key can be overridden per leaf by a `SECTION__KEY`
-environment variable, and the environment always wins over the file. See the
-packaged file for all available options:
-
-```yaml
-server:
-  name: "Simul - 3D Simulation & DCC Tools"
-
-logging:
-  level: "INFO"
-  format: "detailed"
-  file:
-    enabled: true
-    path: "logs/simul_mcp.log"
-  console:
-    enabled: true
-    colored: true
-
-usd:
-  cache:
-    enabled: true
-  files:
-    max_file_size_mb: 500
-    allowed_extensions: [".usd", ".usda", ".usdc", ".usdz"]
-
-viewport:
-  capture:
-    max_size: 2048
-    format: "png"
-
-isaac_sim:
-  path: "${ISAAC_SIM_PATH}"
-  socket_host: "127.0.0.1"
-  socket_port: 8226
-  socket_timeout: 30.0
-  bridge:
-    enabled: true
-    host: "127.0.0.1"
-    port: 8229
-    timeout: 30.0
-    fallback_to_vscode: true
-```
-
-### Operator controls
-
-- `security.allow_script_execution` (env `SECURITY__ALLOW_SCRIPT_EXECUTION`,
-  default `true`): when `false`, the server does not register
-  `execute_isaac_script`, `execute_unreal_script`, or `execute_blender_script`,
-  or Unreal's `call_unreal_actor_function` and `batch_unreal_operations` dispatchers.
-  `simul-mcp isaac exec` and `simul-mcp unreal exec` return a
-  `ScriptExecutionDisabled` error. Fixed granular tools keep working.
-  This is the only switch that removes the agent-authored
-  code surface; the bridge extension's `allow_unsafe_execution` setting (and
-  `simul-mcp isaac bridge-set-unsafe`) only gates raw scripts sent over the
-  bridge transport on 8229. Raw scripts and every generated tool script still
-  run over the stock Kit Python socket on 8226, so that flag is not a security
-  boundary.
-- Self-sabotage and data-loss refusals: `delete_isaac_prim` refuses `/` and
-  refuses `/World` unless `allow_root_delete=true`; `disable_isaac_extension`
-  refuses the transport extensions (`khemoo.simul.mcp`,
-  `isaacsim.code_editor.python_server`, `isaacsim.code_editor.vscode`);
-  `set_isaac_carb_settings` refuses keys under `/exts/khemoo.simul.mcp/` and
-  `/exts/isaacsim.code_editor.python_server/`; `save_isaac_stage` needs
-  `overwrite=true` to replace an existing file; `new_isaac_stage` and
-  `open_isaac_stage` need `discard_unsaved=true` when the current stage has
-  unsaved edits. Each refusal is a structured `RefusedOperation` error.
-- Tool usage statistics are read via `get_tool_usage_stats`; clearing the log is
-  operator-only via `simul-mcp stats --reset`.
-
-### Environment Variables
-
-You can override configuration using environment variables:
+**Unreal Engine 5**
 
 ```bash
-export LOGGING__LEVEL=DEBUG
-export USD__CACHE_ENABLED=false
-export VIEWPORT__MAX_SIZE=4096
-export ISAAC_SIM__SOCKET_PROTOCOL=python_server   # auto | python_server (6.0+) | vscode (5.x)
-export ISAAC_SIM__SOCKET_AUTH_TOKEN=secret        # only for a python_server started with require_auth
+simul unreal setup /abs/path/MyProject.uproject --yes   # patches plugins + ini, launches, waits
+simul unreal health
+simul unreal capture viewport.png
 ```
 
-## MCP Tools
+See [docs/unreal-setup.md](docs/unreal-setup.md) for what setup changes, and
+[docs/unreal-attachment.md](docs/unreal-attachment.md) to attach to a
+specific open editor and viewport.
 
-The server provides 75+ tools across multiple backends. Key tool categories:
+**Blender (attach to an open window)**
 
-### Headless USD (no runtime required)
+```bash
+simul blender install-bridge            # builds ~/.simul/blender/simul_blender_bridge.zip
+# In Blender: Preferences > Add-ons > Install from Disk, enable "Simul Blender Bridge"
+simul blender attach
+simul blender status
+```
 
-`load_usd_file`, `validate_usd_file`, `get_prim_info`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box`, `create_prim`, `delete_prim`, `update_prim_attributes`
+Then start the server with `--blender-mode attached` (or set
+`BLENDER__MODE=attached`). The bridge uses protocol version 2: rebuild and
+reinstall the add-on after upgrading simul. See [docs/blender-attachment.md](docs/blender-attachment.md).
 
-### Isaac Sim — Scene Inspection
+**Headless USD**
 
-`get_isaac_stage_info`, `list_isaac_prims`, `get_isaac_prim_detail` (aspect-based single-prim reads: info, transform, ancestors, relationships, variants, bounding_box, mesh, light, material, rigid_body, collision, joint, mass, animation), `search_isaac_prims`, `get_isaac_scene_summary`, `get_isaac_subtree`, `get_isaac_scene_stats`
+```bash
+simul-mcp usd info scene.usda
+simul-mcp usd summary scene.usda --format json
+```
 
-### Isaac Sim — Prim Manipulation
+### 3. Check what the server exposes
 
-`create_isaac_object` (prim + transform + rigid body + collider + mass + material in one call), `create_isaac_prim`, `delete_isaac_prim`, `set_isaac_prim_transform`, `set_isaac_prim_visibility`, `set_isaac_prim_attribute`, `duplicate_isaac_prim`, `reparent_isaac_prim`
+```bash
+simul-mcp info              # reachable backends and registered tools
+simul-mcp --json info       # the same, as JSON
+```
 
-### Isaac Sim — Viewport & Camera
+## Connect your agent
 
-`list_isaac_cameras`, `get_isaac_camera_info`, `set_isaac_camera`, `capture_isaac_viewport`, `focus_isaac_viewport`, `get_isaac_viewport_info`
+Every client launches the server over stdio with `simul-mcp server`. Use the
+absolute path from `which simul-mcp` when the client's environment may not
+include your shell `PATH`. To run from a checkout instead, replace the
+command with `uv --directory /abs/path/to/simul run simul-mcp server`.
 
-### Isaac Sim — Physics
+**Claude Code**
 
-`get_isaac_physics_scene`, `create_isaac_physics_scene`, `add_isaac_rigid_body`, `add_isaac_collision`, `set_isaac_mass_properties`, `set_isaac_physics_material`, `list_isaac_physics_objects`
+```bash
+claude mcp add --scope user simul -- simul-mcp server
+```
 
-### Isaac Sim — Simulation Control
-
-`get_isaac_simulation_state`, `start_isaac_simulation`, `pause_isaac_simulation`, `stop_isaac_simulation`, `step_isaac_simulation`, `reset_isaac_simulation`, `get_isaac_simulation_time`
-
-### Isaac Sim — Materials
-
-`list_isaac_materials`, `assign_isaac_material`, `set_isaac_material_property`, `create_isaac_material`
-
-### Isaac Sim — Rendering & AOVs
-
-`read_isaac_aovs`, `list_isaac_aovs`, `list_isaac_render_vars`, `get_isaac_carb_settings`, `set_isaac_carb_settings`
-
-### Isaac Sim — GUI & App State
-
-`get_isaac_ui_state` (consolidated snapshot: windows, focus, viewport, selection, timeline, stage), `get_isaac_ui_window` (widget-tree inspection of one window)
-
-### Isaac Sim — USD Schema Queries
-
-`query_isaac_typed_prims` — find prims by schema type (UsdLux, UsdGeom, UsdShade) and read attributes in one call
-
-### Isaac Sim — Extensions & Assets
-
-`list_isaac_extensions`, `enable_isaac_extension`, `disable_isaac_extension`, `open_isaac_stage`, `save_isaac_stage`, `new_isaac_stage`, `import_isaac_asset`, `add_isaac_reference`
-
-### Isaac Sim — Advanced
-
-`execute_isaac_script` (custom Python), `interrupt_isaac_script`, `ping_isaac`, `raycast_isaac_scene`, `find_isaac_prims_in_area`, `get_isaac_texture_dependencies`, `list_isaac_instances`, `set_active_isaac_instance`
-
-### Observability
-
-`get_tool_usage_stats` — per-tool call counts, success rates, and durations via persistent JSONL log; clear it with `simul-mcp stats --reset`
-
-### Blender (when runtime connected)
-
-53 tools for scene objects, materials, rigid bodies, constraints, modifiers, mesh operations, animation, physics baking, viewport capture, named UI controls, and SimReady compliance.
-
-### Unreal Engine Operations
-
-Unreal Engine integration uses the built-in Remote Control HTTP API. By default the MCP server registers a thin tool set (6 tools: `unreal_health_check`, `ping_unreal`, `list_unreal_instances`, `control_unreal_ui`, `capture_unreal_viewport`, `execute_unreal_script`) to minimize context overhead for AI agents. Pass `--unreal-tools full` (or set `unreal.tool_surface: full` / `UNREAL__TOOL_SURFACE=full`) to register every granular Unreal tool; the full operation set is also available via CLI.
-
-**MCP Tools (always available):**
-- `unreal_health_check`: Check connectivity to Unreal Engine
-- `control_unreal_ui`: Named controls and per-agent viewport pointers in attached mode
-- `capture_unreal_viewport`: Capture viewport screenshot (returns image data)
-- `execute_unreal_script`: Execute arbitrary Python inside the UE5 editor
-
-**CLI Commands (`simul-mcp unreal ...`):**
-- `health`, `info`, `scene`, `map` — inspection
-- `list-actors`, `actor-info`, `search`, `scene-graph` — scene queries
-- `spawn`, `delete`, `set-transform`, `set-property`, `set-visibility` — manipulation
-- `sim`, `sim-status` — Play-In-Editor control
-- `capture`, `exec`, `materials` — viewport, scripting, materials
-
-For explicit editor/map/viewport selection and named controls, see
-[Attach to an existing Unreal editor](docs/unreal-attachment.md). Start with
-`simul unreal instances`, `simul unreal attach`, and `simul unreal control inspect`;
-run the MCP server with `--unreal-mode attached`.
-For colored agent pointers and activity labels, install the optional editor overlay
-using `simul unreal setup <project.uproject> --agent-overlay --no-headless --yes`
-(requires Unreal's C++ toolchain). Pass a distinct `agent_id` for each agent; the
-overlay never moves the system mouse or adds scene objects.
-
-#### Unreal Engine Setup
-
-The full Unreal surface uses editor Python APIs for actor inspection, physics,
-materials, and PIE start/stop/pause/resume. Unsupported single-frame stepping
-returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
-engine cannot provide a simulation-specific count.
-
-USD import/export requires the optional **USDImporter** plugin enabled when the
-editor starts. These operations use `AssetImportTask` and `LevelExporterUSD`;
-`get_unreal_interchange_info` reports plugin availability. Import options accept
-boolean `import_actors`, `import_geometry`, `import_materials`, `import_lights`,
-and `import_cameras`; export options accept boolean `export_actor_folders` and
-`export_sublayers`. SimReady conversion and validation are not implemented;
-their compatibility tools return `UnsupportedOperation` without changing files.
-
-MCP viewport captures produce PNG; `simul unreal capture --format jpeg` converts
-the downloaded screenshot locally. The CLI transfers captures from the editor
-in bounded chunks, including files above the MCP inline size limit. Re-run
-`simul unreal setup` and restart the editor to apply the console-execution
-setting required by screenshots when upgrading an older project configuration.
-
-**Prerequisites:** Unreal Engine 5.x with a project open in the editor.
-
-**Step 1 — Enable plugins** in your `.uproject` file:
+Or commit a project-level `.mcp.json`:
 
 ```json
 {
-  "Plugins": [
-    {"Name": "RemoteControl", "Enabled": true},
-    {"Name": "PythonScriptPlugin", "Enabled": true}
-  ]
+  "mcpServers": {
+    "simul": { "command": "simul-mcp", "args": ["server"] }
+  }
 }
 ```
 
-**Step 2 — Configure Remote Control** in `Config/DefaultRemoteControl.ini`:
+**Codex** (`~/.codex/config.toml`, or `codex mcp add simul -- simul-mcp server`)
 
-```ini
-[/Script/RemoteControlCommon.RemoteControlSettings]
-bAutoStartWebServer=True
-bAutoStartWebSocketServer=True
-RemoteControlHttpServerPort=30010
-RemoteControlWebSocketServerPort=30020
-bRestrictServerAccess=True
-bEnableRemotePythonExecution=True
-bAllowConsoleCommandRemoteExecution=True
+```toml
+[mcp_servers.simul]
+command = "simul-mcp"
+args = ["server"]
 ```
 
-> **Important:** `bRestrictServerAccess=True` is required — the Python execution and
-> console command settings are gated behind it. Without it, those features silently
-> remain disabled even if set to `True`.
+**OpenCode** (`~/.config/opencode/opencode.json`, or `opencode.json` in a project)
 
-**Step 3 — Restart the Unreal Editor** to load the plugins and apply the config.
-
-**Step 4 — Verify** the connection:
-
-```bash
-# Quick check
-curl http://localhost:30010/remote/info
-
-# Or via simul CLI
-simul-mcp unreal health
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "simul": {
+      "type": "local",
+      "command": ["simul-mcp", "server"],
+      "enabled": true
+    }
+  }
+}
 ```
 
-#### Claude Code MCP Configuration
+Keep agent context small by registering only what you use:
+`simul-mcp server --backends unreal` or `--backends isaac,usd`. Append
+`--config /abs/path/config.yaml` to point at your own configuration.
 
-To use simul with Unreal Engine in Claude Code, add to your project's MCP config:
+## Tools
 
-```bash
-claude mcp add simul -- /path/to/.venv/bin/simul-mcp server --backends unreal
-```
+| Backend | Categories | Examples |
+|---|---|---|
+| Headless USD | Load and validate, prim queries, meshes and bounds, edits | `load_usd_file`, `summarize_scene`, `get_bounding_box` |
+| Isaac Sim | Scene inspection, prim editing, physics, simulation control, materials, cameras and viewport, rendering and AOVs, OmniGraph, extensions, stage I/O, UI state, logs, multi-instance | `create_isaac_object`, `step_isaac_simulation`, `capture_isaac_viewport` |
+| Unreal Engine | Thin set by default: health, instances, named editor controls, capture, scripting. `--unreal-tools full` adds actors, physics, materials, meshes, PIE, USD import/export | `control_unreal_ui`, `capture_unreal_viewport`, `execute_unreal_script` |
+| Blender | Objects, materials, rigid bodies and constraints, modifiers, animation, baking, viewport capture, UI controls | `create_blender_object`, `bake_blender_simulation`, `capture_blender_viewport` |
+| SimReady | Metadata, hierarchy, compliance checks, USD export | `validate_simready_compliance`, `export_simready_usd` |
+| Server | Usage statistics | `get_tool_usage_stats` |
 
-The `--backends unreal` flag registers only the Unreal tools (the thin 6-tool set unless you add
-`--unreal-tools full`) plus the usage-stats tools, keeping agent context minimal. All other
-operations are available via `simul-mcp unreal <command>`.
+`simul-mcp --json info` lists every tool registered in your environment. The
+full catalog is in [docs/tools.md](docs/tools.md).
 
-## Examples
+## Documentation
 
-### Basic USD Analysis
+| Guide | Contents |
+|---|---|
+| [docs/cli.md](docs/cli.md) | Every `simul-mcp` command and its main flags |
+| [docs/configuration.md](docs/configuration.md) | YAML config, `SECTION__KEY` environment overrides, security switches, logging |
+| [docs/tools.md](docs/tools.md) | MCP tool catalog by backend |
+| [docs/isaac-sim.md](docs/isaac-sim.md) | Bridge install, launch, 6.0 differences, containers, transport behaviour |
+| [docs/unreal-setup.md](docs/unreal-setup.md) | What `simul unreal setup` configures, cross-host flags |
+| [docs/unreal-attachment.md](docs/unreal-attachment.md) | Attach to an existing Unreal editor, named controls, agent overlay |
+| [docs/unreal-e2e-checklist.md](docs/unreal-e2e-checklist.md) | Live verification probes for Unreal |
+| [docs/blender-attachment.md](docs/blender-attachment.md) | Attach to an existing Blender window |
+| [docs/development.md](docs/development.md) | Repository layout, architecture, tests, formatting |
 
-```python
-# examples/isaac/sample_usd_reader.py
-python examples/isaac/sample_usd_reader.py /path/to/scene.usd --verbose
-```
+Example galleries with prompts and results:
+[Blender](examples/blender/EXAMPLES.md) and [Unreal](examples/unreal/EXAMPLES.md).
 
-This example demonstrates:
+The Isaac Sim scripting reference ships inside the package and is served to
+agents as the MCP resource `simul://isaac-sim/skills`. The Claude Code plugin
+also installs task skills from [`skills/`](skills).
 
-- Loading USD files
-- Extracting stage information
-- Finding prims by type
-- Computing bounding boxes
-- Generating scene summaries
-- Analyzing mesh statistics
+## Security
 
-### HTTP Client Example
+Every backend can run agent-written Python inside the target application, and
+none of the transports authenticate by default:
 
-```python
-# examples/isaac/http_client_mcp.py
-python examples/isaac/http_client_mcp.py --server http://localhost:8000 --usd-file /path/to/scene.usd
-```
+- Unreal Remote Control with remote Python execution has no authentication.
+  `simul unreal setup` keeps UE's default loopback binding. Binding to another
+  interface requires `--bind <host> --allow-public`, optionally with
+  `--passphrase`; read [docs/unreal-setup.md](docs/unreal-setup.md) first.
+- The Isaac Sim bridge and Python socket bind to the local machine. Run
+  `simul-mcp` on the same host; cross-host Isaac is not supported.
+- `SECURITY__ALLOW_SCRIPT_EXECUTION=false` removes the arbitrary-code tools
+  from the MCP server. See [docs/configuration.md](docs/configuration.md#security).
 
-This example shows how to:
-
-- Connect to MCP server via HTTP
-- Call MCP tools programmatically
-- Handle responses and errors
-- Demonstrate both USD and Isaac Sim operations
-
-### MCP Tool Usage
-
-```python
-import asyncio
-from simul_mcp.mcp.server import SimulMCPServer
-
-async def example():
-    server = SimulMCPServer()
-
-    # Load USD file
-    result = await server.mcp.tools["load_usd_file"]("/path/to/scene.usd")
-    if result.get("success", True):
-        stage_id = result["stage_id"]
-
-        # Get scene summary
-        summary_result = await server.mcp.tools["summarize_scene"](
-            stage_id=stage_id,
-            include_meshes=True,
-            format="text"
-        )
-
-        if summary_result.get("success", True):
-            print(summary_result["digest"])
-
-asyncio.run(example())
-```
-
-## Development
-
-### Project Structure
-
-```
-simul-mcp/
-├── pyproject.toml          # Project configuration
-├── README.md              # This file
-├── .env.example           # Environment variables template
-├── .gitignore            # Git ignore rules
-├── Makefile              # Development tasks
-├── config/               # Repo-only configuration
-│   └── isaac/kits/       # Isaac Sim Kit configurations
-├── scripts/              # Shell scripts
-│   └── isaac/            # Isaac Sim helpers
-│       ├── run_kit_mcp.sh   # Linux/macOS launcher
-│       ├── run_kit_mcp.ps1  # Windows launcher
-│       └── dev_isort_black.sh # Code formatting
-├── src/simul_mcp/        # Main source code
-│   ├── __init__.py       # Package initialization
-│   ├── config.py         # Configuration management
-│   ├── logging.py        # Logging setup
-│   ├── resources/        # Data shipped in the wheel
-│   │   ├── skills.md     # Isaac Sim scripting reference (MCP resource)
-│   │   ├── docs/api/     # Isaac Sim API references (MCP resources)
-│   │   └── config/       # default.yaml + logging.yaml
-│   ├── usd/             # USD operations
-│   ├── adapters/        # Runtime adapters
-│   ├── mcp/             # MCP server implementation
-│   └── utils/           # Utility modules
-├── src/simul_mcp/cli/    # Command-line interface
-│   └── main.py          # CLI implementation
-├── src/simul_mcp/bridge_ext/khemoo.simul.mcp/  # Isaac Sim extension
-│                          # bundled in the wheel since v0.0.36;
-│                          # publish via `simul-mcp isaac install-bridge`
-├── tests/               # Test suite
-│   ├── conftest.py      # sys.path setup + shared FakeFastMCP fixture
-│   ├── fakes.py         # FakeFastMCP / AvailableAdapter doubles
-│   ├── isaac/           # Isaac Sim tests (live tier under isaac/live/)
-│   ├── mcp/             # Server, registry, tool surface tests
-│   ├── unreal/, blender/, cli/, packaging/
-├── examples/            # Example scripts
-│   └── isaac/           # Isaac Sim examples
-```
-
-### Isaac Sim bridge extension setup
-
-The `khemoo.simul.mcp` Kit extension that backs port 8229 is bundled
-inside the `simul-mcp` Python wheel as of v0.0.36. After installing
-the package (or pulling new repo commits) once per Isaac install:
-
-```bash
-# Publish the bundled bridge ext into Isaac's extsUser dir
-ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac install-bridge --symlink
-
-# Then per Isaac launch, either start it through simul (any supported version) ...
-ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac launch
-
-# ... or, on 5.x with isaac-sim.sh already running, auto-enable the ext + wait for the port
-simul-mcp isaac bridge-up
-```
-
-`--symlink` is recommended for editable / repo-checkout workflows so
-future `git pull`s propagate without re-running `install-bridge`. See
-`CLAUDE.md` for the full lifecycle and the `bridge-up` retry semantics.
-
-### Running Tests
-
-```bash
-# Run all tests
-pytest
-
-# Run specific test file
-pytest tests/isaac/test_reader.py
-
-# Run with coverage
-pytest --cov=simul_mcp tests/
-
-# Run tests with verbose output
-pytest -v tests/
-
-# Isaac Sim live tier (skips unless a running instance answers on the configured socket)
-pytest tests/isaac/live -m isaac
-
-# Wheel build + fresh-venv install smoke (slow; the packaging marker is off by default)
-pytest tests/packaging -m packaging
-```
-
-### SimulationApp Smoke Test
-
-This is the one script that runs inside Isaac Sim's own interpreter; the MCP
-server itself never does.
-
-```bash
-# Run a minimal Isaac Sim smoke check
-$ISAAC_SIM_PATH/python.sh scripts/isaac/smoke_simulationapp.py
-```
-
-### Code Formatting
-
-```bash
-# Format code using the provided script
-./scripts/isaac/dev_isort_black.sh
-
-# Or directly
-isort src/ tests/ examples/
-black src/ tests/ examples/
-```
-
-### Development Tasks
-
-```bash
-# Install development dependencies
-pip install -e ".[dev]"
-
-# Run linting + type checking
-flake8 src/ tests/ && mypy src/
-
-# Run tests
-pytest tests/ -v
-
-# Clean build artifacts
-rm -rf build/ dist/ *.egg-info/ .pytest_cache/ .coverage htmlcov/ .mypy_cache/
-find . -type d -name __pycache__ -exec rm -rf {} +
-```
-
-## Architecture
-
-The project follows a modular architecture with clear separation of concerns:
-
-### Core Components
-
-- **Configuration System**: Pydantic-based configuration with YAML support
-- **Logging System**: Structured logging with multiple handlers and formatters
-- **USD Operations**: Pure pxr-based USD file operations and analysis
-- **Adapter Layer**: Abstraction between USD operations and runtime environments
-- **MCP Server**: FastMCP-based server with tool registry and connection management
-
-### Runtime Environments
-
-1. **Headless Mode**: Uses pure pxr library for USD operations without GUI
-2. **Isaac Sim Mode**: Full integration with Isaac Sim runtime for simulation and viewport operations
-
-### Key Design Principles
-
-- **Modularity**: Each component has a single responsibility
-- **Extensibility**: Easy to add new tools and capabilities
-- **Error Handling**: Comprehensive error handling with proper logging
-- **Performance**: Caching and optimization for large USD files
-- **Type Safety**: Full type hints and Pydantic validation
+To report a vulnerability, open an issue asking for a private contact and
+leave the exploit details out of the public thread.
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Make your changes
-4. Add tests for new functionality
-5. Run the test suite (`pytest`)
-6. Run code formatting (`black src/ tests/ examples/ && isort src/ tests/ examples/`)
-7. Commit your changes (`git commit -m 'Add amazing feature'`)
-8. Push to the branch (`git push origin feature/amazing-feature`)
-9. Open a Pull Request
-
-### Development Guidelines
-
-- Follow PEP 8 style guidelines
-- Add type hints to all functions
-- Write docstrings for all public functions and classes
-- Add tests for new functionality
-- Update documentation as needed
-- Use meaningful commit messages
-
-## Troubleshooting
-
-### Common Issues
-
-1. **USD Library Not Found**
-   ```
-   ImportError: pxr library not available
-   ```
-   Solution: Install USD Python bindings or run within Isaac Sim environment
-
-2. **Isaac Sim Not Available**
-   ```
-   Isaac Sim runtime not available
-   ```
-   Solution: Run the server within Isaac Sim or use headless mode only
-
-3. **Configuration Errors**
-   ```
-   ValidationError: Invalid configuration
-   ```
-Solution: Check configuration file syntax and validate with `simul-mcp validate-config`
-
-4. **Port Already in Use**
-   ```
-   Address already in use
-   ```
-   Solution: Change the server port or stop the existing server
-
-### Debug Mode
-
-Enable debug logging for detailed troubleshooting:
-
-```bash
-simul-mcp server --log-level DEBUG
-```
-
-Or set environment variable:
-
-```bash
-export LOGGING__LEVEL=DEBUG
-```
+Bug reports and pull requests are welcome. Start with
+[CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, test tiers and PR
+conventions, and file issues at
+<https://github.com/kickthemoon0817/simul/issues>.
 
 ## License
 
-This project is licensed under the MIT License. See LICENSE for details.
+Apache License 2.0. See [LICENSE](LICENSE).
 
-## Support
+## Acknowledgements
 
-For issues and questions:
-
-- GitHub Issues: https://github.com/kickthemoon0817/simul/issues
-- Documentation: https://github.com/kickthemoon0817/simul/wiki
-- Discussions: https://github.com/kickthemoon0817/simul/discussions
-
-## Acknowledgments
-
-- NVIDIA Isaac Sim team for the simulation platform
-- Pixar for the USD format and libraries
-- The MCP community for the protocol specification
-- Contributors and users of this project
+- The NVIDIA Isaac Sim team for the simulation platform
+- Pixar and the OpenUSD community for USD
+- Epic Games for Unreal Engine's Remote Control and Python APIs
+- The Blender Foundation
+- The Model Context Protocol community for the specification and FastMCP

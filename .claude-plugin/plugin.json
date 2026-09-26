@@ -8,7 +8,7 @@
   },
   "homepage": "https://github.com/kickthemoon0817/simul",
   "repository": "https://github.com/kickthemoon0817/simul",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": [
     "simulation",
     "isaac-sim",

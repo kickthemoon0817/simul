@@ -11,7 +11,7 @@ on a dotted-name subdirectory:
 
 Setuptools' handling of dotted-name dirs in package-data globs has
 had regressions in the past (for example, setuptools #3341, fixed
-in 62.3 — the lower-bound this project pins). A future setuptools
+in 62.3; the project now pins >=77 for PEP 639 license metadata). A future setuptools
 release that quietly changes this behavior would silently produce
 wheels with an empty ``bridge_ext/khemoo.simul.mcp/`` directory,
 and ``install-bridge`` would fail at runtime for every pip user
