@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Coroutine, Dict, List, Optional
 
 import typer
+from rich.markup import escape as rich_escape
 from rich.syntax import Syntax
 from rich.table import Table
 
@@ -33,6 +34,7 @@ from simul_mcp.adapters.isaac_runtime import IsaacRuntimeAdapter
 from simul_mcp.cli.output import (
     console,
     emit,
+    exit_if_failed,
     fail,
     is_json_mode,
     read_script_arg,
@@ -70,9 +72,15 @@ def _tools(
     return IsaacTools(client, settings)
 
 
-def _run(coro: Coroutine[Any, Any, Dict[str, Any]]) -> Dict[str, Any]:
-    """Run an async IsaacTools method; exit non-zero when its payload failed."""
-    return run_or_exit(coro, show_traceback=True)
+def _run(
+    coro: Coroutine[Any, Any, Dict[str, Any]], *, allow_partial: bool = False
+) -> Dict[str, Any]:
+    """Run an async IsaacTools method; exit non-zero when its payload failed.
+
+    ``allow_partial`` returns a payload that failed only through ``*_error``
+    keys so the command can render what worked; it must ``exit_if_failed``.
+    """
+    return run_or_exit(coro, show_traceback=True, allow_partial=allow_partial)
 
 
 def _parse_script_result(result: Any) -> Dict[str, Any]:
@@ -1865,13 +1873,14 @@ def list_render_vars(
     port: Optional[int] = _port_opt,
 ) -> None:
     """List available render variable names from SyntheticData."""
-    result = _run(_tools(host, port).list_render_vars())
+    result = _run(_tools(host, port).list_render_vars(), allow_partial=True)
     if is_json_mode():
         emit(result)
+        exit_if_failed(result)
         return
     if result.get("syntheticdata_error"):
-        console.print(f"[red]Error:[/red] {result['syntheticdata_error']}")
-        return
+        console.print(f"[red]Error:[/red] {rich_escape(str(result['syntheticdata_error']))}")
+        raise typer.Exit(1)
     templates = result.get("render_var_templates", [])
     if templates:
         console.print(f"[bold]Render Var Templates ({result.get('render_var_count', len(templates))}):[/bold]")
@@ -1893,9 +1902,12 @@ def runtime_info(
     port: Optional[int] = _port_opt,
 ) -> None:
     """Get consolidated runtime diagnostics from Isaac Sim."""
-    result = _run(_tools(host, port).get_runtime_info())
+    # Sections fail independently (physics_error, viewport_error, ...); render
+    # the ones that worked, then exit non-zero if any failed.
+    result = _run(_tools(host, port).get_runtime_info(), allow_partial=True)
     if is_json_mode():
         emit(result)
+        exit_if_failed(result)
         return
 
     sections = [
@@ -1946,6 +1958,13 @@ def runtime_info(
             if val is not None:
                 table.add_row(k, str(val))
         console.print(table)
+
+    # Section errors the tables above don't show (physics_error, viewport_error).
+    shown = {f"{key}_error" for _, key, _ in sections}
+    for key, value in result.items():
+        if key.endswith("_error") and key not in shown and value is not None:
+            console.print(f"[red]{key}:[/red] {rich_escape(str(value))}")
+    exit_if_failed(result)
 
 
 # ---------------------------------------------------------------------------

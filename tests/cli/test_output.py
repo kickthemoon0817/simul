@@ -241,6 +241,54 @@ def test_isaac_runtime_info_partial_failure_exits_non_zero(monkeypatch: pytest.M
     assert payload["physics_error"] == "no PhysicsScene"
 
 
+def test_isaac_runtime_info_human_mode_still_renders_working_sections(
+    monkeypatch: pytest.MonkeyPatch, human_mode: list[str]
+) -> None:
+    """One failed section must not hide the others; the command still exits 1."""
+    monkeypatch.setattr(isaac_cli, "is_json_mode", lambda: False)
+    tools = SimpleNamespace(
+        get_runtime_info=AsyncMock(
+            return_value={
+                "app": {"version": "107.3"},
+                "renderer_error": "no renderer",
+                "physics_error": "no PhysicsScene",
+            }
+        )
+    )
+    monkeypatch.setattr(isaac_cli, "_tools", lambda *args, **kwargs: tools)
+    rendered: list[Any] = []
+    monkeypatch.setattr(isaac_cli.console, "print", lambda *a, **k: rendered.append(a[0] if a else ""))
+
+    result = _invoke(lambda: isaac_cli.runtime_info(host=None, port=None))
+
+    assert result.exit_code == 1
+    titles = [getattr(r, "title", None) for r in rendered]
+    assert "App" in titles
+    text = " ".join(str(r) for r in rendered)
+    assert "no renderer" in text and "no PhysicsScene" in text
+
+
+def test_run_or_exit_allow_partial_returns_suffixed_error_payload() -> None:
+    seen: list[Any] = []
+
+    def body() -> None:
+        payload = output.run_or_exit(_returns({"a": 1, "overlay_error": "x"}), allow_partial=True)
+        seen.append(payload)
+        output.exit_if_failed(payload)
+
+    result = _invoke(body)
+
+    assert result.exit_code == 1
+    assert seen == [{"a": 1, "overlay_error": "x", "success": False}]
+
+
+def test_run_or_exit_allow_partial_still_fails_on_top_level_error() -> None:
+    result = _invoke(lambda: output.run_or_exit(_returns({"error": "boom"}), allow_partial=True))
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"] == "boom"
+
+
 def test_isaac_tools_builds_client_through_the_adapter_with_cli_overrides() -> None:
     """--host/--port/--timeout address the stock socket; the bridge stays on its configured endpoint."""
     isaac = isaac_cli.get_settings().isaac_sim

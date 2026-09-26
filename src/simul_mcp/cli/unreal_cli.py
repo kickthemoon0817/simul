@@ -33,6 +33,7 @@ from simul_mcp.cli.output import (
     console,
     emit,
     emit_error,
+    exit_if_failed,
     fail,
     is_json_mode,
     read_script_arg,
@@ -205,7 +206,15 @@ def control(
         )
     except ValueError as exc:
         emit_error(str(exc), "ValueError")
-    emit(_run(_attached_call("control_ui", **request.model_dump())))
+    # overlay_error means the editor action completed but its cursor annotation
+    # did not: keep the result on stdout, then exit non-zero like the MCP envelope.
+    result = run_or_exit(
+        _attached_call("control_ui", **request.model_dump()),
+        catch_exceptions=True,
+        allow_partial=True,
+    )
+    emit(result)
+    exit_if_failed(result)
 
 
 # ---------------------------------------------------------------------------

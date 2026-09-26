@@ -118,6 +118,7 @@ def run_or_exit(
     *,
     catch_exceptions: bool = False,
     show_traceback: bool = False,
+    allow_partial: bool = False,
 ) -> T:
     """Run a backend coroutine and exit non-zero when its payload failed.
 
@@ -137,9 +138,15 @@ def run_or_exit(
             CLI failure instead of letting it propagate.
         show_traceback: In human mode, print ``details.traceback`` from a
             failed payload in a panel.
+        allow_partial: Hand a payload that failed without a top-level
+            ``error`` back to the caller instead of exiting, so a command
+            that renders per-section errors (``isaac runtime-info``) still
+            shows the sections that worked. The caller must then call
+            ``exit_if_failed`` after rendering.
 
     Returns:
-        The payload, when it did not fail.
+        The payload, when it did not fail (or failed only partially and
+        ``allow_partial`` is set).
     """
     # Deferred: simul_mcp.mcp pulls in every schema and FastMCP, which the
     # lightweight commands (usd, --help) should not pay for.
@@ -159,7 +166,7 @@ def run_or_exit(
         return result
     apply_success_from_error(result)
     error = result.get("error")
-    if not error and result.get("success") is not False:
+    if not error and (allow_partial or result.get("success") is not False):
         return result
 
     if error:
@@ -177,6 +184,12 @@ def run_or_exit(
         raise typer.Exit(1)
     console.print(f"[red]Error: {rich_escape(_failure_message(result))}[/red]")
     raise typer.Exit(1)
+
+
+def exit_if_failed(result: Any) -> None:
+    """Exit 1 after rendering a payload ``run_or_exit(allow_partial=True)`` returned failed."""
+    if isinstance(result, dict) and result.get("success") is False:
+        raise typer.Exit(1)
 
 
 def read_script_arg(script: Optional[str]) -> str:
