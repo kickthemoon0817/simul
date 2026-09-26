@@ -40,7 +40,6 @@ def test_load_settings_supports_nested_repo_config_without_isaac_env(
     settings = load_settings(resource_filesystem_path("config", "default.yaml"))
 
     assert settings.isaac_sim.path is None
-    assert settings.isaac_sim.headless is False
     assert settings.logging.file_enabled is True
     assert settings.logging.file_path == "~/.simul/logs/simul_mcp.log"
     assert settings.logging.retention_days == 14
@@ -50,7 +49,6 @@ def test_load_settings_supports_nested_repo_config_without_isaac_env(
     assert settings.isaac_sim.bridge_port == 8229
     assert settings.isaac_sim.bridge_fallback_to_vscode is True
     assert settings.usd.max_file_size_mb == 500
-    assert settings.viewport.fov == 45.0
     assert settings.viewport.max_size == 2048
     assert settings.security.rate_limiting_enabled is True
     assert settings.security.requests_per_minute == 60

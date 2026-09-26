@@ -51,6 +51,18 @@ class ScriptInterrupted(KeyboardInterrupt):
         self.reason = reason
 
 
+def _async_exc_checkpoint() -> None:
+    """Run a few bytecodes so a pending async exception fires here.
+
+    The interpreter delivers an exception planted by
+    ``PyThreadState_SetAsyncExc`` at the next function entry or backward
+    jump, so both this call and the loop are delivery points. The caller
+    wraps the call in ``try`` so the exception lands inside it.
+    """
+    for _ in range(8):
+        pass
+
+
 class _CoroutineDriver:
     """Step a coroutine to completion without wrapping it in a Task.
 
@@ -343,18 +355,31 @@ class ScriptExecutor:
             self._interrupt_reason = None
 
     def _end_sync(self) -> None:
-        """Leave the synchronous phase and defuse an undelivered async exception.
+        """Leave the synchronous phase and absorb an undelivered async exception.
 
         An interrupt planted just as ``eval`` returned would otherwise fire
-        later, inside the event loop rather than the script. Clearing it here
-        under the lock closes that window; a request that did land is still
+        later, inside the event loop rather than the script. Once the phase is
+        idle no new one can be planted, so a pending one is made to fire at
+        :func:`_async_exc_checkpoint` and swallowed there. It may also fire a
+        few bytecodes earlier, in this method, and then reaches ``execute`` as
+        an ordinary interrupt. Either way a request that did land is still
         recorded in ``_interrupt_reason`` for the coroutine check.
+
+        The exception is never withdrawn with ``PyThreadState_SetAsyncExc(tid,
+        NULL)``: on CPython 3.11 that raises the interpreter-wide async
+        exception flag with nothing attached, nothing ever lowers it again,
+        and under ``sys.settrace`` (a debugger, profiler or coverage) every
+        thread then spins forever at its next function entry, holding the GIL.
         """
         with self._state_lock:
-            if self._async_exc_sent and self._executing_thread_ident is not None:
-                self._clear_in_thread(self._executing_thread_ident)
-                self._async_exc_sent = False
+            pending = self._async_exc_sent
+            self._async_exc_sent = False
             self._phase = self._PHASE_IDLE
+        if pending:
+            try:
+                _async_exc_checkpoint()
+            except ScriptInterrupted:
+                pass
 
     def _pending_interrupt_reason(self) -> str | None:
         """Return the reason of an interrupt requested during the sync phase."""
@@ -397,14 +422,6 @@ class ScriptExecutor:
         set_async_exc.argtypes = (ctypes.c_ulong, ctypes.py_object)
         set_async_exc.restype = ctypes.c_int
         return set_async_exc(ctypes.c_ulong(thread_ident), exc_type) == 1
-
-    @staticmethod
-    def _clear_in_thread(thread_ident: int) -> None:
-        """Withdraw a pending async exception; a NULL exception clears it."""
-        clear_async_exc = ctypes.PyDLL(None).PyThreadState_SetAsyncExc
-        clear_async_exc.argtypes = (ctypes.c_ulong, ctypes.c_void_p)
-        clear_async_exc.restype = ctypes.c_int
-        clear_async_exc(ctypes.c_ulong(thread_ident), None)
 
     @staticmethod
     def _get_compiler_flags() -> int:

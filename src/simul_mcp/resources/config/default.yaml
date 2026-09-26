@@ -10,11 +10,6 @@ server:
   host: "localhost"
   port: 8765
   timeout: 30
-  cors_origins:
-    - "http://localhost:8765"
-    - "https://localhost:8765"
-    - "http://localhost:8226"
-    - "http://localhost:8229"
 
 # Isaac Sim Configuration
 isaac_sim:
@@ -56,13 +51,6 @@ isaac_sim:
   # released or expires (120 s without activity). False keeps claims advisory.
   enforce_claims: false
 
-  # Kit configuration
-  kit:
-    headless: false
-    resolution:
-      width: 1920
-      height: 1080
-
 # Blender Configuration
 blender:
   enabled: true
@@ -92,15 +80,9 @@ viewport:
   # Default capture settings
   capture:
     max_size: 2048
-    format: "png"  # png, jpg, exr
-    quality: 95
     # Where captures land on the Isaac Sim host. Must sit inside the sandbox
     # when it is enabled; unset picks <writable allowed root>/captures.
     # directory: "/tmp/simul_mcp/captures"
-
-  # Camera settings
-  camera:
-    fov: 45.0
 
 # Logging Configuration
 logging:
