@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -32,9 +33,32 @@ REQUIRED_PLUGINS: Tuple[str, ...] = ("RemoteControl", "PythonScriptPlugin")
 
 # Identifier we stamp on simul-managed passphrase entries. UE doesn't use
 # this for matching (only the hashed Passphrase field is compared) — it's
-# purely for human bookkeeping in the project settings UI and lets us
-# write the same +Passphrases line on re-runs without duplicating.
+# purely for human bookkeeping in the project settings UI. simul also uses
+# it to find its own entries: rotating --passphrase drops every entry with
+# this identifier before writing the new one, so the old secret stops working.
 PASSPHRASE_IDENTIFIER = "simul"
+
+# Where a bind cleared by a no-``--bind`` re-run lands. The HTTP key is
+# deleted outright (UE's FHttpServerConfig default is ``localhost``); the
+# WebSocket key is rewritten to this value because deleting it would fall back
+# to URemoteControlSettings' default of ``0.0.0.0``.
+LOOPBACK_BIND = "127.0.0.1"
+WEBSOCKET_BIND_KEY = "RemoteControlWebsocketServerBindAddress"
+HTTP_BIND_KEY = "DefaultBindAddress"
+
+
+def is_loopback_bind(host: str) -> bool:
+    """Return True when ``host`` is a loopback bind address.
+
+    Anything else (including ``0.0.0.0``, ``::`` and UE's ``any`` keyword) is
+    treated as network-exposed. Conservative on purpose — better to make the
+    user pass --allow-public once than to silently expose remote Python
+    execution.
+    """
+    if not host:
+        return True
+    h = host.strip().lower()
+    return h in {"localhost", "::1"} or h.startswith("127.")
 
 
 def _required_ini_values(
@@ -114,6 +138,63 @@ def _section_has_entry(lines: List[str], section: str, entry: str) -> bool:
     return False
 
 
+def _reset_public_bind(
+    lines: List[str],
+    section: str,
+    key: str,
+    replacement: Optional[str],
+    result: "PatchResult",
+) -> List[str]:
+    """Drop or rewrite a non-loopback ``key`` inside ``section``.
+
+    A loopback value is kept as is. A non-loopback value is replaced with
+    ``replacement`` (recorded in ``result.updated``), or deleted when
+    ``replacement`` is None (recorded in ``result.removed``), and a warning
+    names the value that was cleared.
+    """
+    out: List[str] = []
+    inside = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            inside = stripped == f"[{section}]"
+        elif inside and "=" in stripped and not stripped.startswith(";"):
+            name, _, value = stripped.partition("=")
+            if name.strip() == key and not is_loopback_bind(value.strip()):
+                if replacement is None:
+                    result.removed.append(key)
+                else:
+                    out.append(f"{key}={replacement}")
+                    result.updated.append(key)
+                result.warnings.append(
+                    f"{result.path}: cleared {key}={value.strip()} left by an earlier "
+                    "--bind; pass --bind again (with --allow-public) to keep it public."
+                )
+                continue
+        out.append(line)
+    return out
+
+
+def reset_default_engine_ini_bind(project_dir: Path) -> Optional["PatchResult"]:
+    """Remove a non-loopback ``DefaultBindAddress`` from ``DefaultEngine.ini``.
+
+    Used when setup runs without ``--bind``: UE's HTTP listener then falls
+    back to its ``localhost`` default instead of a public bind an earlier run
+    wrote. Returns None when ``Config/DefaultEngine.ini`` does not exist (the
+    file is never created here).
+    """
+    ini_path = Path(project_dir) / "Config" / "DefaultEngine.ini"
+    if not ini_path.is_file():
+        return None
+    result = PatchResult(path=ini_path)
+    lines = ini_path.read_text(encoding="utf-8").splitlines()
+    out_lines = _reset_public_bind(lines, HTTP_LISTENERS_SECTION, HTTP_BIND_KEY, None, result)
+    if result.removed:
+        result.changed = True
+        ini_path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    return result
+
+
 def patch_default_engine_ini(
     project_dir: Path,
     *,
@@ -182,6 +263,7 @@ class PatchResult:
     changed: bool = False
     added: List[str] = field(default_factory=list)
     updated: List[str] = field(default_factory=list)
+    removed: List[str] = field(default_factory=list)
     already_ok: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
@@ -193,6 +275,8 @@ class PatchResult:
             parts.append(f"added {', '.join(self.added)}")
         if self.updated:
             parts.append(f"updated {', '.join(self.updated)}")
+        if self.removed:
+            parts.append(f"removed {', '.join(self.removed)}")
         return f"{self.path}: {'; '.join(parts) if parts else 'changed'}"
 
 
@@ -246,9 +330,10 @@ class SetupResult:
 
     uproject: PatchResult
     ini: PatchResult
-    # ``engine_ini`` is None when --bind was not supplied (we don't touch
-    # DefaultEngine.ini in that case). When --bind is set, this is the
-    # PatchResult for [HTTPServer.Listeners]'s DefaultBindAddress.
+    # ``engine_ini`` is the PatchResult for [HTTPServer.Listeners]'s
+    # DefaultBindAddress: written when --bind is set, checked for a stale
+    # public bind otherwise. None when --bind was not supplied and
+    # DefaultEngine.ini does not exist (it is never created then).
     engine_ini: Optional[PatchResult] = None
 
     @property
@@ -313,6 +398,7 @@ def patch_remote_control_ini(
     bind: Optional[str] = None,
     websocket_port: Optional[int] = None,
     passphrase_md5: Optional[str] = None,
+    reset_public_bind: bool = False,
 ) -> PatchResult:
     """Ensure ``Config/DefaultRemoteControl.ini`` has the required settings.
 
@@ -328,10 +414,18 @@ def patch_remote_control_ini(
     ``RemoteControlWebSocketServerPort``. Either left as ``None`` means
     the setting is not touched, preserving UE's default.
 
-    ``passphrase_md5`` (when set) appends a single ``+Passphrases=(...)``
-    array entry under the same section AND pins
+    ``reset_public_bind`` (only acts with ``bind=None``) rewrites a
+    non-loopback ``RemoteControlWebsocketServerBindAddress`` left by an
+    earlier ``--bind`` run to ``127.0.0.1`` and, without ``passphrase_md5``,
+    drops simul-identified ``+Passphrases`` entries (UE checks them on
+    loopback requests too, so they would lock out the default client).
+
+    ``passphrase_md5`` (when set) writes a single simul-identified
+    ``+Passphrases=(...)`` array entry under the same section AND pins
     ``bEnforcePassphraseForRemoteClients=True``. Idempotent — re-running
-    with the same hash does not duplicate the line. ENABLING THIS BLOCKS
+    with the same hash does not duplicate the line; a different hash
+    replaces every earlier simul entry, so a rotated secret stops working.
+    Entries with other identifiers are left alone. ENABLING THIS BLOCKS
     EVERY CLIENT (including simul-mcp itself) UNTIL THEY SEND THE
     ``Passphrase: <md5>`` HTTP HEADER on every Remote Control request.
     """
@@ -363,23 +457,62 @@ def patch_remote_control_ini(
     )
     result.added.extend(missing)
 
+    if bind is None and reset_public_bind:
+        out_lines = _reset_public_bind(
+            out_lines, REMOTE_CONTROL_SECTION, WEBSOCKET_BIND_KEY, LOOPBACK_BIND, result
+        )
+        if passphrase_md5 is None:
+            # UE's PassphrasePreprocessor checks every request, loopback
+            # included, so a simul passphrase left from an earlier public run
+            # would 401 the default client. The CLI never writes a passphrase
+            # without a public bind, so it goes with the bind.
+            out_lines = _drop_stale_simul_passphrases(out_lines, None, result)
+
     # +Passphrases is a UE config-array entry, not a key=value setting, so
-    # the standard rewriter doesn't touch it. Append idempotently — same hash
-    # on re-run is a no-op; a different hash adds an additional entry (UE
-    # accepts any matching passphrase, so this is non-destructive).
+    # the standard rewriter doesn't touch it. Same hash on re-run is a no-op;
+    # a different hash drops the earlier simul entries first — UE accepts any
+    # matching entry, so leaving the old one would keep the old secret valid.
     if passphrase_md5 is not None:
         git_warning = git_visibility_warning(ini_path)
         if git_warning is not None:
             result.warnings.append(git_warning)
         passphrase_line = _passphrase_array_line(passphrase_md5)
+        out_lines = _drop_stale_simul_passphrases(out_lines, passphrase_line, result)
         if not _section_has_entry(out_lines, REMOTE_CONTROL_SECTION, passphrase_line):
             _insert_ini_entries(out_lines, REMOTE_CONTROL_SECTION, [passphrase_line])
             result.added.append("Passphrases")
 
-    if result.added or result.updated:
+    if result.added or result.updated or result.removed:
         result.changed = True
         ini_path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
     return result
+
+
+def _drop_stale_simul_passphrases(
+    lines: List[str], keep: Optional[str], result: PatchResult
+) -> List[str]:
+    """Remove simul-identified ``+Passphrases`` entries other than ``keep``.
+
+    Only entries inside the Remote Control section whose Identifier is
+    ``PASSPHRASE_IDENTIFIER`` are touched; a duplicate of ``keep`` beyond the
+    first is dropped too. ``keep=None`` drops every simul entry.
+    """
+    prefix = f'+Passphrases=(Identifier="{PASSPHRASE_IDENTIFIER}",'
+    out: List[str] = []
+    inside = False
+    kept = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            inside = stripped == f"[{REMOTE_CONTROL_SECTION}]"
+        elif inside and stripped.replace(" ", "").startswith(prefix):
+            if stripped == keep and not kept:
+                kept = True
+            else:
+                result.removed.append("Passphrases")
+                continue
+        out.append(line)
+    return out
 
 
 def _rewrite_ini_section(
@@ -428,12 +561,18 @@ def ensure_remote_control_config(
     websocket_port: Optional[int] = None,
     passphrase_md5: Optional[str] = None,
     agent_overlay: bool = False,
+    keep_public_bind: bool = False,
 ) -> SetupResult:
     """Run both patches; caller decides what to do with the result.
 
     See :func:`patch_remote_control_ini` for the meaning of ``bind``,
-    ``websocket_port``, and ``passphrase_md5`` — all default to ``None``
-    (untouched).
+    ``websocket_port``, and ``passphrase_md5`` — all default to ``None``.
+
+    With ``bind=None`` a non-loopback bind left on disk by an earlier
+    ``--bind`` run is cleared (HTTP ``DefaultBindAddress`` removed, WebSocket
+    bind reset to ``127.0.0.1``, simul passphrase entries dropped) so the
+    editor really gets the loopback default, unless ``keep_public_bind`` is set (the CLI passes
+    ``--allow-public`` here).
     """
     uproject_path = Path(uproject_path)
     u = patch_uproject(uproject_path, agent_overlay=agent_overlay)
@@ -443,15 +582,17 @@ def ensure_remote_control_config(
         bind=bind,
         websocket_port=websocket_port,
         passphrase_md5=passphrase_md5,
+        reset_public_bind=not keep_public_bind,
     )
     # HTTP bind address lives in DefaultEngine.ini, not RemoteControl —
     # see patch_default_engine_ini's docstring for the UE 5.x source
-    # trace. We only touch this file when --bind is supplied; otherwise
-    # UE's default (loopback) stays in effect and Engine.ini is left
-    # alone.
+    # trace. Without --bind the file is only edited to remove a public
+    # bind an earlier run wrote; it is never created.
     e: Optional[PatchResult] = None
     if bind is not None:
         e = patch_default_engine_ini(uproject_path.parent, bind=bind)
+    elif not keep_public_bind:
+        e = reset_default_engine_ini_bind(uproject_path.parent)
     return SetupResult(uproject=u, ini=i, engine_ini=e)
 
 
@@ -480,6 +621,27 @@ HEADLESS_FLAGS: Tuple[str, ...] = (
 )
 
 
+def _engine_version_key(entry: Path) -> Tuple[int, ...]:
+    """Sort key for ``UE_<major>.<minor>`` install dirs by numeric version.
+
+    A lexical sort puts ``UE_5.9`` above ``UE_5.10``. Names without a
+    parseable version sort below every versioned install.
+    """
+    match = re.match(r"UE_(\d+(?:\.\d+)*)", entry.name)
+    if match is None:
+        return (-1,)
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _macos_engine_roots() -> Tuple[Path, ...]:
+    """Directories the macOS auto-detection scans for ``UE_*`` installs."""
+    return (
+        Path("/Users/Shared/Epic Games"),  # Epic Launcher default on macOS
+        Path("/Applications/Epic Games"),
+        Path.home() / "Applications/Epic Games",
+    )
+
+
 def _macos_macos_binary(engine_path: Optional[Path]) -> Optional[Path]:
     """Return the UnrealEditor binary path on macOS, or None if not found."""
     if engine_path is not None:
@@ -488,14 +650,10 @@ def _macos_macos_binary(engine_path: Optional[Path]) -> Optional[Path]:
             / "Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor"
         )
         return binary if binary.is_file() else None
-    for root in (
-        Path("/Users/Shared/Epic Games"),  # Epic Launcher default on macOS
-        Path("/Applications/Epic Games"),
-        Path.home() / "Applications/Epic Games",
-    ):
+    for root in _macos_engine_roots():
         if not root.is_dir():
             continue
-        for entry in sorted(root.glob("UE_*"), reverse=True):
+        for entry in sorted(root.glob("UE_*"), key=_engine_version_key, reverse=True):
             binary = (
                 entry
                 / "Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor"
