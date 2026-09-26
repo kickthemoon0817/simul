@@ -255,7 +255,7 @@ class SceneInspectionMixin:
         script = textwrap.dedent(f"""\
             import json
             import omni.usd
-            from pxr import Usd, UsdGeom, Gf
+            from pxr import Gf, Sdf, Usd, UsdGeom
 
             stage = omni.usd.get_context().get_stage()
             if stage is None:
@@ -293,10 +293,11 @@ class SceneInspectionMixin:
                                 return [_serialize(x) for x in v]
                         except Exception:
                             pass
-                        try:
-                            return float(v) if isinstance(v, (type(Gf.Vec3f()[0]),)) else v
-                        except Exception:
-                            pass
+                        # Anything else (Sdf.AssetPath, Sdf.Path, TfToken
+                        # wrappers, enums) must still become JSON, or one such
+                        # attribute fails the whole json.dumps below.
+                        if isinstance(v, Sdf.AssetPath):
+                            return v.path
                         return str(v)
 
                     BULK_GEOMETRY_ATTRS = {_bulk_attrs}

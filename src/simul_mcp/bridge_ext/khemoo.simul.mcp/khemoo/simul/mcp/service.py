@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from .executor import ScriptExecutor
 from .prim_detail import BULK_GEOMETRY_ATTRIBUTES, PRIM_DETAIL_ASPECTS, PrimDetailReader
-from .protocol import BridgeRequest, BridgeResponse
+from .protocol import DEFAULT_REQUEST_TIMEOUT_SECONDS, BridgeRequest, BridgeResponse
 
 
 # Actions that only read state. They are safe to dispatch without the request
@@ -49,9 +49,18 @@ class BridgeCommandService:
         self,
         executor: ScriptExecutor,
         allow_unsafe_execution: bool,
+        request_timeout: float | None = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     ) -> None:
         self._executor = executor
         self._allow_unsafe_execution = allow_unsafe_execution
+        # The lifecycle abandons a request after ``request_timeout``; a script
+        # budget at or above it would never fire. Keep the ceiling a margin
+        # below so the executor interrupts first and reports why.
+        self._script_timeout_ceiling: float | None = (
+            request_timeout - min(5.0, request_timeout * 0.1)
+            if request_timeout and request_timeout > 0
+            else None
+        )
         # The mutating action in flight, if any. Reads run concurrently and
         # are not tracked: they cannot be what a client is waiting behind.
         self._current_action: str | None = None
@@ -193,6 +202,9 @@ class BridgeCommandService:
                 )
             if timeout_seconds <= 0:
                 timeout_seconds = None
+        ceiling = self._script_timeout_ceiling
+        if ceiling is not None and (timeout_seconds is None or timeout_seconds > ceiling):
+            timeout_seconds = ceiling
         output, exception, trace = await self._executor.execute(
             code, timeout_seconds=timeout_seconds
         )
@@ -748,26 +760,77 @@ class BridgeCommandService:
             )
         if command == "step":
             num_steps = max(1, min(int(request.payload.get("num_steps", 1)), 1000))
-            if timeline.is_stopped():
-                timeline.play()
-                for _ in range(3):
-                    await omni.kit.app.get_app().next_update_async()
-            for _ in range(num_steps):
-                await omni.kit.app.get_app().next_update_async()
-            return BridgeResponse.success(
-                request.request_id,
-                {
-                    "transport": "simul_bridge",
-                    "steps": num_steps,
-                    "current_time": timeline.get_current_time(),
-                    "state": "playing" if timeline.is_playing() else "paused",
-                },
-            )
+            result = await self._step_timeline(timeline, omni.kit.app.get_app(), num_steps)
+            result["transport"] = "simul_bridge"
+            # An incomplete step keeps its counts beside ``error``; the client
+            # envelope turns that key into success=False.
+            return BridgeResponse.success(request.request_id, result)
         return BridgeResponse.failure(
             request.request_id,
             "InvalidSimulationCommand",
             f"Unsupported simulation command: {command}",
         )
+
+    @staticmethod
+    async def _step_timeline(timeline: Any, app: Any, num_steps: int) -> dict[str, Any]:
+        """Advance the timeline by exactly ``num_steps`` frames and leave it paused.
+
+        A paused timeline does not move on app updates, and a stopped one
+        spends its first updates after ``play`` initialising physics without
+        advancing time. So the timeline is played and only updates that
+        actually moved the current time are counted; once ``num_steps`` of
+        them have run it is paused again. The update budget bounds the loop
+        when time cannot advance (end of a non-looping range).
+
+        Args:
+            timeline: The ``omni.timeline`` interface.
+            app: The Kit application, for ``next_update_async``.
+            num_steps: Frames to advance, already clamped by the caller.
+
+        Returns:
+            ``steps`` (frames advanced), ``steps_requested``, ``start_time``,
+            ``current_time``, ``time_delta``, ``app_updates`` and ``state``;
+            plus ``error`` when fewer frames advanced than requested.
+        """
+        start_time = timeline.get_current_time()
+        if not timeline.is_playing():
+            timeline.play()
+            commit = getattr(timeline, "commit", None)
+            if callable(commit):
+                commit()
+        advanced = 0
+        updates = 0
+        last = start_time
+        max_updates = num_steps + 60
+        try:
+            while advanced < num_steps and updates < max_updates:
+                await app.next_update_async()
+                updates += 1
+                now = timeline.get_current_time()
+                if now != last:
+                    advanced += 1
+                    last = now
+        finally:
+            timeline.pause()
+            commit = getattr(timeline, "commit", None)
+            if callable(commit):
+                commit()
+        current_time = timeline.get_current_time()
+        result: dict[str, Any] = {
+            "steps": advanced,
+            "steps_requested": num_steps,
+            "start_time": start_time,
+            "current_time": current_time,
+            "time_delta": current_time - start_time,
+            "app_updates": updates,
+            "state": "paused",
+        }
+        if advanced < num_steps:
+            result["error"] = (
+                f"Timeline advanced {advanced} of {num_steps} steps in {updates} "
+                "app updates; it may be at the end of a non-looping time range."
+            )
+        return result
 
     @staticmethod
     def _page_bounds(payload: dict[str, Any], default_limit: int) -> tuple[int, int]:

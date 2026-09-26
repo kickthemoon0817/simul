@@ -563,9 +563,10 @@ class TestUnrealRuntimeSessionPhase2:
 
         assert result["camera_location"] == (100.0, 200.0, 300.0)
         assert result["camera_rotation"] == (-15.0, 45.0, 0.0)
-        assert result["viewport_size"] == (1920, 1080)
-        assert result["fov"] == 90.0
-        assert result["projection_type"] == "Perspective"
+        # Remote Control exposes none of these; they are not guessed.
+        assert result["viewport_size"] is None
+        assert result["fov"] is None
+        assert result["projection_type"] is None
 
     # -- set_camera_view --
 
@@ -586,16 +587,15 @@ class TestUnrealRuntimeSessionPhase2:
         result = asyncio.run(session.set_camera_view(
             location=(500.0, 600.0, 700.0),
             rotation=(-30.0, 90.0, 0.0),
-            fov=75.0,
         ))
 
         assert result["location"] == (500.0, 600.0, 700.0)
         assert result["rotation"] == (-30.0, 90.0, 0.0)
-        assert result["fov"] == 75.0
+        assert "fov" not in result
         assert "SetLevelViewportCameraInfo" in calls_made
 
     def test_set_camera_view_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_camera_view with no params returns default values and skips HTTP call."""
+        """set_camera_view with no params reports nothing applied and skips HTTP call."""
         session = self._make_session(monkeypatch)
         calls_made: list = []
 
@@ -607,9 +607,8 @@ class TestUnrealRuntimeSessionPhase2:
 
         result = asyncio.run(session.set_camera_view())
 
-        assert result["location"] == (0.0, 0.0, 0.0)
-        assert result["rotation"] == (0.0, 0.0, 0.0)
-        assert result["fov"] == 90.0
+        assert result["location"] is None
+        assert result["rotation"] is None
         # No SetLevelViewportCameraInfo call since no params provided
         assert "SetLevelViewportCameraInfo" not in calls_made
 
@@ -1114,13 +1113,23 @@ class TestUnrealRuntimeSessionPhase4:
     def test_create_material_instance_success(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """create_material_instance returns new instance path."""
+        """create_material_instance builds a MaterialInstanceConstant, never a duplicate."""
         session = self._make_session(monkeypatch)
+        scripts: list = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
             fn = (json or {}).get("functionName", "")
-            if fn == "DuplicateAsset":
-                return FakeResponse({"ReturnValue": True})
+            assert fn != "DuplicateAsset"
+            if fn == "ExecutePythonCommandEx":
+                scripts.append(json["parameters"]["PythonCommand"])
+                return FakeResponse({
+                    "ReturnValue": True,
+                    "LogOutput": [{"Type": "Info", "Output": (
+                        '{"instance_path": "/Game/Materials/MI_Whale.MI_Whale",'
+                        ' "parent_path": "/Game/Materials/M_Base.M_Base",'
+                        ' "class_name": "MaterialInstanceConstant"}'
+                    )}],
+                })
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
@@ -1130,8 +1139,32 @@ class TestUnrealRuntimeSessionPhase4:
             instance_name="MI_Whale",
         ))
 
-        assert result["parent_path"] == "/Game/Materials/M_Base"
-        assert "MI_Whale" in result["instance_path"]
+        assert result["parent_path"] == "/Game/Materials/M_Base.M_Base"
+        assert result["instance_path"] == "/Game/Materials/MI_Whale.MI_Whale"
+        assert "MaterialInstanceConstantFactoryNew" in scripts[0]
+        assert "'folder': '/Game/Materials'" in scripts[0]
+
+    def test_create_material_instance_missing_parent_is_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = self._make_session(monkeypatch)
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            return FakeResponse({
+                "ReturnValue": True,
+                "LogOutput": [{"Type": "Info", "Output": (
+                    '{"success": false, "error": "Parent material not found: /Game/Nope"}'
+                )}],
+            })
+
+        session._session = SmartFakeClientSession(put_fn=put_fn)
+
+        result = asyncio.run(session.create_material_instance(
+            parent_path="/Game/Nope", instance_name="MI_X",
+        ))
+
+        assert result["success"] is False
+        assert "Parent material not found" in result["error"]
 
     # -- assign_material --
 
@@ -1140,14 +1173,24 @@ class TestUnrealRuntimeSessionPhase4:
     def test_set_light_params_success(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """set_light_params sets multiple light properties."""
+        """set_light_params writes the light component, not the actor, and reports read-back values."""
         session = self._make_session(monkeypatch)
-        call_count = {"n": 0}
+        component = "/Game/Maps/Test.Test:PersistentLevel.PointLight_0.LightComponent0"
+        scripts: list = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
-            if "/remote/object/property" in path:
-                call_count["n"] += 1
-                return FakeResponse({})
+            # No bare Remote Control property writes to the actor path.
+            assert "/remote/object/property" not in path
+            if (json or {}).get("functionName") == "ExecutePythonCommandEx":
+                scripts.append(json["parameters"]["PythonCommand"])
+                return FakeResponse({
+                    "ReturnValue": True,
+                    "LogOutput": [{"Type": "Info", "Output": (
+                        '{"component_path": "%s", "params_set": 3, "applied": '
+                        '{"intensity": 5000.0, "light_color": [255, 230, 204, 255], "cast_shadows": true}}'
+                        % component
+                    )}],
+                })
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
@@ -1163,7 +1206,70 @@ class TestUnrealRuntimeSessionPhase4:
 
         assert result["actor_path"].endswith("PointLight_0")
         assert result["params_set"] == 3  # Intensity + LightColor + CastShadows
-        assert call_count["n"] == 3
+        assert result["component_path"] == component
+        assert 'actor_component(actor_at(args["actor_path"]), unreal.LightComponent)' in scripts[0]
+        # LightColor is an FColor: 0-255 channels.
+        assert (
+            "'values': {'intensity': 5000.0, 'light_color': [255, 230, 204, 255], 'cast_shadows': True}"
+            in scripts[0]
+        )
+
+    def test_set_light_params_reports_a_value_unreal_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = self._make_session(monkeypatch)
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            return FakeResponse({
+                "ReturnValue": True,
+                "LogOutput": [{"Type": "Info", "Output": (
+                    '{"component_path": "C", "params_set": 0, "applied": {"attenuation_radius": 1000.0},'
+                    ' "success": false, "error": "Unreal did not apply: attenuation_radius"}'
+                )}],
+            })
+
+        session._session = SmartFakeClientSession(put_fn=put_fn)
+
+        result = asyncio.run(session.set_light_params(
+            actor_path="/Game/Maps/Test.Test:PersistentLevel.PointLight_0", attenuation_radius=777.0,
+        ))
+
+        assert result["success"] is False
+        assert "attenuation_radius" in result["error"]
+
+    def test_set_light_params_with_nothing_to_set_makes_no_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = self._make_session(monkeypatch)
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            raise AssertionError("no request expected")
+
+        session._session = SmartFakeClientSession(put_fn=put_fn)
+
+        result = asyncio.run(session.set_light_params(actor_path="/Game/Maps/T.T:PersistentLevel.L"))
+
+        assert result["params_set"] == 0
+
+    def test_set_light_params_without_light_component_is_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = self._make_session(monkeypatch)
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            return FakeResponse({
+                "ReturnValue": False,
+                "CommandResult": "ValueError: Actor must have a compatible root or exactly one LightComponent",
+            })
+
+        session._session = SmartFakeClientSession(put_fn=put_fn)
+
+        result = asyncio.run(session.set_light_params(
+            actor_path="/Game/Maps/Test.Test:PersistentLevel.Cube_0", intensity=1.0,
+        ))
+
+        assert result["success"] is False
+        assert "LightComponent" in result["error"]
 
     # -- set_render_settings --
 

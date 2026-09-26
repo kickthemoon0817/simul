@@ -259,3 +259,54 @@ class TestLogsTailToolFilter:
 
         plain = "2026-04-26 12:00:00 - simul_mcp - INFO - bare text"
         assert _format_jsonl_line(plain, tool_filter=None) == plain
+
+
+# ---------------------------------------------------------------------------
+# Setup warnings must stay off stdout, which carries stdio MCP JSON-RPC
+# ---------------------------------------------------------------------------
+
+
+class TestSetupWarningsGoToStderr:
+    def test_unloadable_config_warning_is_on_stderr(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import simul_mcp.logging as logging_module
+
+        fallback_calls: list = []
+        monkeypatch.setattr(
+            logging_module,
+            "_setup_fallback_logging",
+            lambda settings, level: fallback_calls.append(level),
+        )
+        bad = tmp_path / "logging.yaml"
+        bad.write_text("version: 1\nhandlers: [unclosed\n", encoding="utf-8")
+
+        logging_module.setup_logging(settings=Settings(), config_file=bad)
+
+        captured = capsys.readouterr()
+        assert fallback_calls, "an unloadable config must fall back"
+        assert "Failed to load logging config" in captured.err
+        assert captured.out == ""
+
+    def test_uncreatable_log_directory_warning_is_on_stderr(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from simul_mcp.logging import _ensure_log_directories
+
+        def refuse(self: Path, *args: object, **kwargs: object) -> None:
+            raise PermissionError("read-only filesystem")
+
+        monkeypatch.setattr(Path, "mkdir", refuse)
+        config = {"handlers": {"file": {"filename": str(tmp_path / "missing" / "simul.log")}}}
+
+        _ensure_log_directories(config)
+
+        captured = capsys.readouterr()
+        assert "Could not create log directory" in captured.err
+        assert captured.out == ""

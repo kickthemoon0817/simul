@@ -9,7 +9,7 @@ from ._shared import (
     FloatList,
     _pyval,
 )
-from .._meta import DeprecatedAlias, tool_meta
+from .._meta import DeprecatedAlias, SandboxedPath, tool_meta
 from .scene import COUNTED_PRIMS_HELPER
 
 
@@ -269,9 +269,13 @@ class ExplorationMixin:
         description=(
             "Create a light prim in the scene. Supports DomeLight (environment/HDRI), "
             "DistantLight (sun), SphereLight (point), RectLight (area), DiskLight, and "
-            "CylinderLight. Configure intensity, color, color temperature, and texture."
+            "CylinderLight. Configure intensity, color, color temperature, and texture. "
+            "texture_file must be inside the configured sandbox (security.allowed_paths); "
+            "omniverse:// URLs are allowed when their scheme is in "
+            "security.allowed_url_schemes."
         ),
         read_only=False,
+        sandboxed_paths=(SandboxedPath("texture_file"),),
     )
     async def create_isaac_light(
         self,
@@ -307,7 +311,12 @@ class ExplorationMixin:
         _prim_path = _pyval(prim_path)
         _light_type = _pyval(light_type)
         rgb = color or [1.0, 1.0, 1.0]
-        _tex = _pyval(texture_file or None)
+        # The texture is a file read like any other path parameter, so it
+        # goes through the same sandbox check and resolution.
+        denial = self._sandbox_denial(texture_file or None)
+        if denial is not None:
+            return denial
+        _tex = _pyval(self._path_policy.authorize(texture_file) if texture_file else None)
         valid_types = [
             "DomeLight", "DistantLight", "SphereLight",
             "RectLight", "DiskLight", "CylinderLight",

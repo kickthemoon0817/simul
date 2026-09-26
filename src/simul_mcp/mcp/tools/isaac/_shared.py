@@ -211,26 +211,134 @@ SET_PRIM_TRANSFORM_CORE = """\
         if not prim.IsA(UsdGeom.Xformable):
             return {"error": "Prim is not Xformable: " + prim_path}
         xformable = UsdGeom.Xformable(prim)
-        requested = (
-            (translation, UsdGeom.XformOp.TypeTranslate, xformable.AddTranslateOp, Gf.Vec3d),
-            (rotation_euler, UsdGeom.XformOp.TypeRotateXYZ, xformable.AddRotateXYZOp, Gf.Vec3f),
-            (scale, UsdGeom.XformOp.TypeScale, xformable.AddScaleOp, Gf.Vec3f),
+        Op = UsdGeom.XformOp
+        rotate_types = (
+            Op.TypeRotateXYZ, Op.TypeRotateXZY, Op.TypeRotateYXZ, Op.TypeRotateYZX,
+            Op.TypeRotateZXY, Op.TypeRotateZYX, Op.TypeRotateX, Op.TypeRotateY,
+            Op.TypeRotateZ, Op.TypeOrient,
         )
-        for value, op_type, add_op, vector in requested:
-            if value is None:
-                continue
-            existing = [op for op in xformable.GetOrderedXformOps() if op.GetOpType() == op_type]
-            if existing:
-                existing[0].Set(vector(*value))
+        ops = list(xformable.GetOrderedXformOps())
+
+        # The prim's own translate / rotate / scale are the unsuffixed,
+        # non-inverse ops; pivots and other suffixed ops are left untouched.
+        def _primary(types):
+            for index, op in enumerate(ops):
+                if op.IsInverseOp() or op.GetOpType() not in types:
+                    continue
+                if len(op.GetOpName().split(":")) == 2:
+                    return index
+            return None
+
+        def _set_vec(op, value):
+            precision = op.GetPrecision()
+            if precision == Op.PrecisionDouble:
+                op.Set(Gf.Vec3d(*value))
+            elif precision == Op.PrecisionHalf:
+                op.Set(Gf.Vec3h(*value))
             else:
-                add_op().Set(vector(*value))
+                op.Set(Gf.Vec3f(*value))
+
+        def _set_orient(op, euler):
+            # rotateXYZ semantics: rotate about X first, then Y, then Z.
+            quat = (
+                Gf.Rotation(Gf.Vec3d(1, 0, 0), float(euler[0]))
+                * Gf.Rotation(Gf.Vec3d(0, 1, 0), float(euler[1]))
+                * Gf.Rotation(Gf.Vec3d(0, 0, 1), float(euler[2]))
+            ).GetQuat()
+            precision = op.GetPrecision()
+            if precision == Op.PrecisionDouble:
+                op.Set(Gf.Quatd(quat))
+            elif precision == Op.PrecisionHalf:
+                op.Set(Gf.Quath(quat))
+            else:
+                op.Set(Gf.Quatf(quat))
+
+        def _op_for(attr_name, add_op, precision):
+            # An attribute left over from an earlier op stack is reused;
+            # adding the op again would fail on the existing attribute.
+            attr = prim.GetAttribute(attr_name)
+            return UsdGeom.XformOp(attr) if attr.IsValid() else add_op(precision)
+
+        t_index = _primary((Op.TypeTranslate,))
+        r_index = _primary(rotate_types)
+        s_index = _primary((Op.TypeScale,))
+
+        # A missing op is inserted at its canonical slot (translate, then
+        # rotate, then scale) rather than appended: an op appended after an
+        # existing scale would, for example, scale the translation.
+        if translation is not None:
+            if t_index is None:
+                ops.insert(0, _op_for("xformOp:translate", xformable.AddTranslateOp, Op.PrecisionDouble))
+                t_index = 0
+                r_index = None if r_index is None else r_index + 1
+                s_index = None if s_index is None else s_index + 1
+            _set_vec(ops[t_index], translation)
+
+        if rotation_euler is not None:
+            rotate_op = None if r_index is None else ops[r_index]
+            if rotate_op is not None and rotate_op.GetOpType() == Op.TypeOrient:
+                _set_orient(rotate_op, rotation_euler)
+            elif rotate_op is not None and rotate_op.GetOpType() == Op.TypeRotateXYZ:
+                _set_vec(rotate_op, rotation_euler)
+            else:
+                # No rotation yet, or one in another axis order: the value is
+                # XYZ Euler, so a rotateXYZ op takes that slot. An op of
+                # another order leaves the stack; its attribute stays.
+                new_op = _op_for("xformOp:rotateXYZ", xformable.AddRotateXYZOp, Op.PrecisionFloat)
+                _set_vec(new_op, rotation_euler)
+                if r_index is not None:
+                    ops[r_index] = new_op
+                else:
+                    if s_index is not None:
+                        r_index = s_index
+                        s_index += 1
+                    else:
+                        r_index = 0 if t_index is None else t_index + 1
+                    ops.insert(r_index, new_op)
+            # The value is the prim's whole rotation. Any other unsuffixed
+            # rotate op (a split rotateX / rotateY / rotateZ stack) would
+            # compose on top of it, so those leave the stack too.
+            kept = ops[r_index]
+            ops = [
+                op for index, op in enumerate(ops)
+                if index == r_index
+                or op.IsInverseOp()
+                or op.GetOpType() not in rotate_types
+                or len(op.GetOpName().split(":")) != 2
+            ]
+            r_index = next(index for index, op in enumerate(ops) if op is kept)
+            t_index = _primary((Op.TypeTranslate,))
+            s_index = _primary((Op.TypeScale,))
+
+        if scale is not None:
+            if s_index is None:
+                anchor = r_index if r_index is not None else t_index
+                s_index = 0 if anchor is None else anchor + 1
+                ops.insert(s_index, _op_for("xformOp:scale", xformable.AddScaleOp, Op.PrecisionFloat))
+            _set_vec(ops[s_index], scale)
+
+        xformable.SetXformOpOrder(ops, xformable.GetResetXformStack())
         world = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
         return {
             "prim_path": prim_path,
             "translation": list(world.ExtractTranslation()),
             "rotation_euler_set": rotation_euler,
             "scale_set": scale,
+            "xform_op_order": [op.GetOpName() for op in ops],
         }
+"""
+
+OPEN_ASSET_CORE = """\
+    def _open_asset(path):
+        # AddReference accepts a missing or unreadable file silently and
+        # composes nothing; opening the layer first makes that a failure.
+        try:
+            layer = Sdf.Layer.FindOrOpen(path)
+        except Exception as exc:
+            return "Asset is not a readable USD layer: " + path + " (" + str(exc).strip() + ")"
+        if layer is None:
+            return "Asset not found: " + path
+        return None
 """
 
 APPLY_RIGID_BODY_CORE = """\

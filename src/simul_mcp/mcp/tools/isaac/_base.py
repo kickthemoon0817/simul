@@ -4,6 +4,7 @@ import json
 from typing import Any, Callable, Dict, Optional
 
 from ....adapters import IsaacSocketClient
+from ....adapters.isaac_socket_client import BridgeRequestDeliveredError
 from ....config import Settings, get_settings
 from ....logging import LoggerMixin
 from ....utils.paths import PathPolicy
@@ -185,6 +186,14 @@ class IsaacScriptBase(LoggerMixin):
 
         try:
             response = await self._client.bridge_request(action, payload or {})
+        except BridgeRequestDeliveredError as exc:
+            # The bridge already holds the request and may have acted on it
+            # (a typed create/delete/simulation_control is not idempotent).
+            # Running the script fallback now would apply it a second time.
+            return ErrorResponse(
+                error=str(exc),
+                error_type=type(exc).__name__,
+            ).model_dump()
         except (ConnectionRefusedError, TimeoutError, OSError) as exc:
             # The bridge is unreachable, not the action unsupported. When a
             # script transport sits below us, defer to it exactly as an

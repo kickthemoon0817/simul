@@ -322,7 +322,16 @@ class ScriptExecutor:
             self._driver = driver
             self._loop = loop
         driver.start()
-        return await future
+        try:
+            return await future
+        except asyncio.CancelledError:
+            # The handler was cancelled (the lifecycle's request timeout, a
+            # client disconnect). The driver steps the coroutine from loop
+            # callbacks, not from this Task, so cancelling us does not stop
+            # it: without this it would run on unbounded after the client
+            # was told the request failed.
+            driver.interrupt("cancelled: the bridge request was abandoned")
+            raise
 
     def _begin(self, phase: str) -> None:
         """Record that a script is starting on the current thread."""

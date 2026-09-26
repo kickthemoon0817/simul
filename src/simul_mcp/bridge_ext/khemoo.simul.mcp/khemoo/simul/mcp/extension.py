@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from .executor import ScriptExecutor
 from .lifecycle import BridgeServerLifecycle
-from .protocol import BridgeRequest, BridgeResponse
+from .protocol import DEFAULT_REQUEST_TIMEOUT_SECONDS, BridgeRequest, BridgeResponse
 from .service import BridgeCommandService, LOCK_FREE_ACTIONS
 from .ui_builder import BridgeUIBuilder
 
@@ -327,6 +327,7 @@ class IsaacMCPServerExtension(_extension_base()):
         self._service = BridgeCommandService(
             executor=self._executor,
             allow_unsafe_execution=self._allow_unsafe_execution,
+            request_timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
         )
         self._request_lock = asyncio.Lock()
         self._loop_thread_ident = threading.get_ident()
@@ -339,6 +340,7 @@ class IsaacMCPServerExtension(_extension_base()):
             max_port_retries=self._max_port_retries,
             vscode_handler=self._handle_vscode_script,
             socket_path=self._socket_path or None,
+            request_timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
         )
         await self._server.start()
         # Write actual bound port back to Carb settings
