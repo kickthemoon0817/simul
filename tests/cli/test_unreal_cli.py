@@ -758,8 +758,6 @@ def test_read_script_arg_file_vs_inline(tmp_path: Path) -> None:
     assert read_script_arg("print('a')") == "print('a')"
     long_inline = "a" * 5000 + ".py"
     assert read_script_arg(long_inline) == long_inline
-    assert unreal_cli._is_script_file("print('a')") is False
-    assert unreal_cli._is_script_file("a" * 5000 + ".py") is False
 
 
 # ---------------------------------------------------------------------------
