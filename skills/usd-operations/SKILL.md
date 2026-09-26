@@ -1,6 +1,6 @@
 ---
 name: usd-operations
-description: This skill should be used when the user asks to "analyze a USD file", "load a USD file", "inspect USD", "headless USD", "prim info", "search prims", "mesh info", "scene summary", "bounding box", or needs to work with USD files without a running Isaac Sim instance.
+description: Use when the user asks to "analyze a USD file", "load a USD file", "inspect USD", "headless USD", "prim info", "search prims", "mesh info", "scene summary", "bounding box", or needs to work with USD files without a running Isaac Sim instance.
 version: 0.1.0
 ---
 

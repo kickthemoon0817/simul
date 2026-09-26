@@ -193,11 +193,8 @@ def bridge_up(
     3. Else enable ``khemoo.simul.mcp`` via the VS Code fallback, then
        re-probe the bridge.
 
-    Closes the iter8 UX gap: a fresh ``isaac-sim.sh`` launch leaves the
-    bridge extension registered-but-disabled, so port 8229 silently
-    stays down. Pre-iter10 the manual fix was
-    ``simul-mcp isaac enable-extension khemoo.simul.mcp``; this command
-    bundles that into a single transparent step.
+    A fresh ``isaac-sim.sh`` launch leaves the bridge extension registered
+    but disabled, so port 8229 stays down until something enables it.
     """
     # The re-probe loop below expects refusals while Kit binds the port; with
     # the breaker on, three of them would skip every later probe for 30 s.
@@ -258,10 +255,8 @@ def bridge_up(
         )
         fail(msg, "ExtensionNotRegistered")
 
-    # Code-reviewer HIGH from iter10: the bridge needs a frame or two
-    # to bind its TCP socket after the extension is enabled. A single
-    # immediate re-probe was flaky on the very happy path this command
-    # exists for. Poll up to ~3 s in 0.5 s steps.
+    # The bridge needs a frame or two to bind its TCP socket after the
+    # extension is enabled, so poll up to ~3 s in 0.5 s steps.
     async def _probe_bridge_with_retry(attempts: int = 6, delay: float = 0.5) -> bool:
         for i in range(attempts):
             if await _probe_bridge():
@@ -699,12 +694,9 @@ def install_bridge(
 ) -> None:
     """Publish the bridge ext into Isaac's extsUser directory.
 
-    Closes the iter11 verifier finding: ``simul-mcp isaac list-extensions``
-    returned ``khemoo.simul.mcp-0.0.13`` even after the repo bumped to
-    0.0.33, because Isaac loads from ``<isaac-root>/extsUser/``, not from
-    the wheel. The bridge ext now ships inside the wheel under
-    ``simul_mcp/bridge_ext/khemoo.simul.mcp/`` so pip-installed users can
-    publish it without a repo checkout (closes iter12 publish-gap todo).
+    Isaac loads the extension from ``<isaac-root>/extsUser/``, not from the
+    wheel, so a stale copy there keeps running until it is republished. The
+    source ships inside the package at ``simul_mcp/bridge_ext/khemoo.simul.mcp/``.
 
     Workflow:
 
@@ -738,11 +730,8 @@ def install_bridge(
         msg = f"extsUser/ not found under {isaac_root_p} — is this an Isaac Sim install root?"
         fail(msg, "InvalidArgument", exit_code=2)
 
-    # 2. Resolve source — bundled copy ships inside the package so this
-    # works in both editable installs and pip wheels. The legacy repo
-    # path (exts/khemoo.simul.mcp/) is checked as a fallback for users
-    # who still have an old checkout layout, but new installs find the
-    # bundled copy first.
+    # 2. Resolve source: the copy bundled in the package, else a repo-level
+    # exts/khemoo.simul.mcp/ from an older checkout layout.
     source_p: Optional[Path] = source.expanduser().resolve() if source else None
     if source_p is None:
         import simul_mcp as _sm
@@ -751,7 +740,6 @@ def install_bridge(
         if (bundled / "config" / "extension.toml").is_file():
             source_p = bundled
         else:
-            # Fallback: legacy repo layout for very old editable checkouts.
             for parent in package_root.parents:
                 candidate = parent / "exts" / "khemoo.simul.mcp"
                 if (candidate / "config" / "extension.toml").is_file():

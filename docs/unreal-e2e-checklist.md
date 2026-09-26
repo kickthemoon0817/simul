@@ -7,12 +7,12 @@ shape so pass/fail is unambiguous.
 
 ## State of the test suite
 
-| Layer | File | Count | Live UE needed |
-|---|---|---|---|
-| Adapter unit tests | `tests/unreal/test_unreal_runtime.py` | 79 | No (aiohttp mocked) |
-| MCP registration | `tests/unreal/test_server_unreal_registration.py` | 2 | No |
-| Setup patcher | `tests/unreal/test_setup.py` | 9 | No |
-| **Live E2E (C1–C5)** | `tests/unreal/test_live.py` | 6 | Yes — auto-skip when down |
+| Layer | File | Live UE needed |
+|---|---|---|
+| Adapter unit tests | `tests/unreal/test_unreal_runtime.py` | No (aiohttp mocked) |
+| MCP registration | `tests/unreal/test_server_unreal_registration.py` | No |
+| Setup patcher | `tests/unreal/test_setup.py` | No |
+| **Live E2E (C1–C5)** | `tests/unreal/test_live.py` | Yes — auto-skip when down |
 
 The live tier mirrors the C1–C5 probes below as `@pytest.mark.unreal_live`
 tests. They auto-skip when the configured UE port doesn't answer, so
@@ -22,8 +22,8 @@ installed.
 Run modes:
 
 ```sh
-pytest tests/unreal/                              # all 96 tests; live skips if UE down
-pytest tests/ -v -m unreal_live                   # only the @unreal_live tier (6 tests)
+pytest tests/unreal/                              # all Unreal tests; live skips if UE down
+pytest tests/ -v -m unreal_live                   # only the @unreal_live tier
 pytest tests/unreal/test_live.py -v               # same set, by file
 ```
 
@@ -49,7 +49,7 @@ Per-OS coverage: the live tests are OS-agnostic at the Python level
 
 ## Available tools (thin-mode MCP surface)
 
-simul ships thin mode by default — only 5 Unreal tools register. The full
+simul ships thin mode by default — only 6 Unreal tools register. The full
 ~50-tool set is opt-in via `simul-mcp server --unreal-tools full` (or
 `unreal.tool_surface: full` in config); this checklist targets the thin
 surface because that's what agents see by default.
@@ -58,9 +58,10 @@ surface because that's what agents see by default.
 |---|---|---|
 | `mcp__simul__unreal_health_check` | `() → {connected, engine_version, project_name, is_editor}` | ~150 B |
 | `mcp__simul__ping_unreal` | `() → {reachable, latency_ms, ...}` | ~100 B |
-| `mcp__simul__list_unreal_instances` | `({scan_port_start?, scan_port_end?}) → [{port, project_name, ...}]` | ~200 B × N |
+| `mcp__simul__list_unreal_instances` | `({scan: bool = true}) → [{port, project_name, ...}]` | ~200 B × N |
 | `mcp__simul__execute_unreal_script` | `({code, mode}) → {success, ...printed JSON}`; `{success, result}` for `EvaluateStatement`, `{success, output}` when nothing JSON was printed | depends on what the script prints |
 | `mcp__simul__capture_unreal_viewport` | `({resolution_x, resolution_y, format, inline}) → {path, size_bytes, ...}` plus an image content block when `inline` | ~200 B of JSON; the image travels as `ImageContent`, not as text |
+| `mcp__simul__control_unreal_ui` | `({agent_control, target?, ...}) → {success, ...}`; named editor controls, requires `simul unreal attach` | ~200 B |
 
 ## Sanity checklist
 
@@ -176,11 +177,11 @@ probes burn tokens fast.
 
 ### Prefer granular tools over `execute_unreal_script`
 
-In thin mode this matters less (thin mode exposes only 5 tools), but if
+In thin mode this matters less (thin mode exposes only 6 tools), but if
 you enable full registration, reach for:
 
-- `get_unreal_scene_info` instead of a Python script that walks the world
-- `list_unreal_actors(max=N)` with a cap instead of unbounded list comprehensions
+- `summarize_unreal_scene` instead of a Python script that walks the world
+- `list_unreal_actors(max_results=N)` with a cap instead of unbounded list comprehensions
 - `get_unreal_viewport_info` instead of a script that dumps camera state
 - `capture_unreal_viewport` with native args instead of scripting `HighResShot`
 
@@ -238,6 +239,7 @@ You have access to these MCP tools:
   mcp__simul__list_unreal_instances
   mcp__simul__execute_unreal_script
   mcp__simul__capture_unreal_viewport
+  mcp__simul__control_unreal_ui
 
 Do not use Bash to launch or kill the editor. Do not edit any files.
 EOF
@@ -250,13 +252,14 @@ the summary is what matters to the parent conversation.
 
 ## Known caveats
 
-- **Thin vs full registration.** This checklist targets the thin 5-tool
+- **Thin vs full registration.** This checklist targets the thin 6-tool
   surface that ships by default. If you've enabled the full ~50-tool
   registration, additional granular tools are available but this doc does
   not enumerate them (see `src/simul_mcp/mcp/registration/_reg_unreal.py`).
-- **macOS `open -a UnrealEditor --args`** is the default launch path and
-  relies on LaunchServices having registered the app. Epic Launcher
-  installs register automatically; custom builds may not.
+- **macOS `open -a "Unreal Editor" --args`** is used only with
+  `--no-headless` (and no `--engine-path`), and relies on LaunchServices
+  having registered the app. Headless launches (the default) run the
+  `UnrealEditor.app` binary directly; see `docs/unreal-setup.md`.
 - **Linux** requires `--engine-path` on `simul unreal setup` unless
   `UnrealEditor` is on `$PATH` or `$UE_ENGINE_PATH` / `$UNREAL_ENGINE_PATH`
   points at the engine root. The CLI refuses to guess.
@@ -279,6 +282,6 @@ the summary is what matters to the parent conversation.
   available (today the marker exists and runs locally; CI doesn't ship
   UE, so the live tier currently lives outside CI).
 - Extend `tests/unreal/test_live.py` to cover the full ~50-tool
-  registration mode beyond the thin 5-tool surface.
+  registration mode beyond the thin 6-tool surface.
 - Cross-link `examples/unreal/EXAMPLES.md` to this doc so readers
   starting from the example have a clear path to verification.

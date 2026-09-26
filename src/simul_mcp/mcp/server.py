@@ -81,7 +81,12 @@ _MCP_INSTRUCTIONS: str = (
     "execute_isaac_script when none does (custom extensions, replicator "
     "workflows, robotics APIs, warp kernels). Read the "
     "'simul://isaac-sim/skills' resource for scripting patterns and API "
-    "reference when writing scripts.\n\n"
+    "reference when writing scripts.\n"
+    "  Finding Isaac prims: get_isaac_scene_summary for counts first; "
+    "list_isaac_prims to browse a level; get_isaac_subtree for the structure "
+    "under one prim; search_isaac_prims by name or exact type anywhere below a "
+    "root; query_isaac_typed_prims by schema (subclasses too) with attribute "
+    "values; find_isaac_prims_in_area by position.\n\n"
     "CONVENTIONS — Isaac Sim stages are Z-up with metersPerUnit=1, so "
     "positions and distances are metres, gravity points along -Z, and "
     "rotations are XYZ Euler degrees; get_isaac_stage_info reports the "
@@ -95,13 +100,9 @@ _MCP_INSTRUCTIONS: str = (
     "Blender and Unreal; each one's description names the runtime it targets.\n"
     + "".join(f"  {spec.routing_rule}\n" for spec in BACKENDS if spec.name == "usd")
     + "  The two *_tool_usage_stats tools are server metadata, not a backend.\n\n"
-    "MULTI-INSTANCE — when multiple Isaac Sim applications are running:\n"
-    "  1. Call list_isaac_instances to discover all running instances "
-    "and see which stage each has loaded.\n"
-    "  2. Call set_active_isaac_instance to switch within the current MCP session.\n"
-    "  3. All subsequent Isaac tool calls in that same session route to that instance.\n"
-    "  4. For containerized Isaac Sim, use the host-published bridge / VS Code ports, "
-    "not the container-internal ports."
+    "MULTI-INSTANCE — list_isaac_instances, then set_active_isaac_instance; "
+    "later Isaac calls in this session go there. For containerized Isaac Sim use "
+    "the host-published ports, not the container-internal ones."
 )
 
 _FASTMCP_SUPPORTS_INSTRUCTIONS: bool = (
@@ -262,7 +263,6 @@ class SimulMCPServer(LoggerMixin):
             client_resolver=self._get_request_isaac_client,
         )
 
-        # Initialize FastMCP server
         mcp_kwargs: Dict[str, Any] = {
             "name": "Simul – 3D Simulation & DCC Tools",
             "version": _PACKAGE_VERSION,
@@ -872,7 +872,10 @@ class SimulMCPServer(LoggerMixin):
             response_model: Schema a successful payload is validated against.
             call: Receives an open session and returns the payload, or an
                 error envelope (``success`` False with ``error``) that is
-                passed through as is. May be sync or async.
+                passed through as is. May be sync or async. Parse tool
+                input inside ``call``, not before it, so malformed input
+                comes back as an error payload instead of escaping as an
+                unhandled exception.
             params: Call parameters worth keeping in the usage log.
 
         Returns:
@@ -1356,9 +1359,8 @@ class SimulMCPServer(LoggerMixin):
         per-instance override, and any bridge advertised by a discovery file
         or already registered — are excluded from the scan. Probing one with
         the stock-socket protocol never finds an instance: the bridge waits
-        for a length prefix that never comes, and the probe only returns
-        when its read deadline expires, which used to add the full cap to
-        every listing.
+        for a length prefix that never comes, and the probe would only return
+        once its read deadline expired.
         """
         # Phase 1: fast discovery via files
         file_discovered = await self._discover_from_files()

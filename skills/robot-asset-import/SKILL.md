@@ -1,6 +1,6 @@
 ---
 name: robot-asset-import
-description: This skill should be used when the user asks to "import a robot", "load a URDF", "import a USD asset", "add a robot to the scene", "load an asset", "add a reference", "import from Nucleus", or needs to bring external 3D assets and robots into an Isaac Sim scene.
+description: Use when the user asks to "import a robot", "load a URDF", "import a USD asset", "add a robot to the scene", "load an asset", "add a reference", "import from Nucleus", or needs to bring external 3D assets and robots into an Isaac Sim scene.
 version: 0.1.0
 ---
 

@@ -37,7 +37,6 @@ from simul_mcp.cli.output import emit, emit_error, is_json_mode, set_json_mode
 from simul_mcp.config import get_settings, load_settings, validate_settings
 from simul_mcp.logging import setup_logging, get_logger
 
-# Import sub-apps
 from simul_mcp.cli.isaac import app as isaac_app
 from simul_mcp.cli.usd_cli import app as usd_app
 from simul_mcp.cli.unreal_cli import app as unreal_app

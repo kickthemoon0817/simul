@@ -99,9 +99,9 @@ class BridgeRequestDeliveredError(Exception):
 
     The bridge may already be acting on the request (for ``execute_script``,
     the script may be running in Kit), so callers must not retry it on
-    another transport. Concrete subclasses also derive from the builtin
-    error the failure used to raise, so existing ``except TimeoutError`` /
-    ``except ConnectionError`` / ``except ValueError`` handlers still match.
+    another transport. Concrete subclasses also derive from the matching
+    builtin error, so ``except TimeoutError`` / ``except ConnectionError`` /
+    ``except ValueError`` handlers still catch them.
     """
 
 

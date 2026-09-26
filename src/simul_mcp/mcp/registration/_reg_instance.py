@@ -16,15 +16,10 @@ if TYPE_CHECKING:
     from ..server import SimulMCPServer
 
 
+# Short pointer; the full claim policy is stated once, on claim_isaac_instance.
 _CLAIM_MODE_SENTENCE = {
-    True: (
-        "Claims are ENFORCED on this server (isaac_sim.enforce_claims=true): a live "
-        "claim blocks mutating Isaac tools from every other agent with InstanceClaimed."
-    ),
-    False: (
-        "Claims are ADVISORY on this server (isaac_sim.enforce_claims=false): a "
-        "listed session tells you who is working there but does not block you."
-    ),
+    True: "Claims are ENFORCED on this server (see claim_isaac_instance).",
+    False: "Claims are ADVISORY on this server (see claim_isaac_instance).",
 }
 
 
@@ -322,16 +317,8 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         name="release_isaac_instance",
         description=(
             "Release your own claim on the active Isaac Sim instance; an "
-            "agent_id that is not yours is refused. Call this when you're done "
-            "so other agents can use the instance. Claims also expire after "
-            "120 seconds of inactivity. "
-            + (
-                "Claims are ENFORCED on this server (isaac_sim.enforce_claims=true): "
-                "releasing lifts the InstanceClaimed refusal for other agents."
-                if enforced
-                else "Claims are ADVISORY on this server (isaac_sim.enforce_claims=false): "
-                "releasing only changes what other agents see."
-            )
+            "agent_id that is not yours is refused. Call this when you're done. "
+            + _CLAIM_MODE_SENTENCE[enforced]
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False

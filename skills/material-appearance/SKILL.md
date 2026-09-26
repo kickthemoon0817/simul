@@ -1,12 +1,12 @@
 ---
 name: material-appearance
-description: This skill should be used when the user asks to "create a material", "assign a material", "change the color", "set material properties", "add a texture", "make it red/blue/green", "PBR material", "preview surface", or needs to create and manage materials and appearance in Isaac Sim.
+description: Use when the user asks to "create a material", "assign a material", "change the color", "set material properties", "add a texture", "make it red/blue/green", "PBR material", "preview surface", or needs to create and manage materials and appearance in Isaac Sim.
 version: 0.1.0
 ---
 
 # Material and Appearance Management
 
-This skill teaches you how to create, inspect, assign, and modify materials in a live Isaac Sim 5.1.0 scene. There is no dedicated "create material" MCP tool — material creation is done via `execute_isaac_script` with the UsdPreviewSurface API. All other material operations have dedicated tools.
+This skill teaches you how to create, inspect, assign, and modify materials in a live Isaac Sim scene. Every step has a dedicated tool: `create_isaac_material` builds a UsdPreviewSurface or OmniPBR material, and `create_isaac_object` can create a prim and bind a material in one call. Fall back to `execute_isaac_script` only for shader inputs those tools don't expose (emissive, IOR, textures).
 
 ## Tool Chain Overview
 
@@ -16,7 +16,7 @@ list_isaac_materials
     → set_isaac_material_property     (modify a property)
     → assign_isaac_material           (bind to a prim)
 
-execute_isaac_script (UsdPreviewSurface)
+create_isaac_material             (UsdPreviewSurface or OmniPBR)
     → assign_isaac_material           (bind new material to prim)
 ```
 
@@ -38,16 +38,26 @@ Get the current properties of an existing material.
 
 ```
 mcp__simul__get_isaac_prim_detail  aspects: ["material"]
-  material_path: "/World/Looks/RedPlastic"
+  prim_path: "/World/Looks/RedPlastic"
 ```
 
 Returns shader type, diffuseColor, roughness, metallic, opacity, and other inputs.
 
-### 3. Create a Material via Script
+### 3. Create a Material
 
-Use `execute_isaac_script` with the UsdPreviewSurface pattern. This is the only way to create a new material — there is no dedicated create-material tool.
+```
+mcp__simul__create_isaac_material
+  material_path: "/World/Looks/RedMaterial"
+  shader_type: "UsdPreviewSurface"      # or "OmniPBR"
+  diffuse_color: [1.0, 0.0, 0.0]
+  roughness: 0.4
+  metallic: 0.0
+```
 
-**Solid color material (red):**
+For inputs the tool doesn't take (emissive, IOR, textures), author the
+shader with `execute_isaac_script` instead:
+
+**Solid color material (red) via script:**
 ```python
 import json
 import omni.usd
@@ -150,14 +160,15 @@ shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.0,
 |---|---|
 | "What materials are in the scene?" | `list_isaac_materials` |
 | "What color is that material?" | `get_isaac_prim_detail` with `aspects=["material"]` |
-| "Create a red material" | `execute_isaac_script` with UsdPreviewSurface |
-| "Make this object red" | `execute_isaac_script` to create + `assign_isaac_material` |
+| "Create a red material" | `create_isaac_material` |
+| "Make this object red" | `create_isaac_material` + `assign_isaac_material` |
+| "Emissive / glass with IOR / textured" | `execute_isaac_script` with UsdPreviewSurface |
 | "Change roughness of existing material" | `set_isaac_material_property` |
 | "Apply material X to object Y" | `assign_isaac_material` |
 
 ## Common Pitfalls
 
-- **No dedicated create-material tool**: You must use `execute_isaac_script`. Do not look for a `create_isaac_material` tool — it does not exist.
+- **Prefer `create_isaac_material` over scripts**: script only when you need a shader input the tool doesn't expose.
 - **Property name prefix**: Always include `inputs:` when calling `set_isaac_material_property` (e.g. `inputs:roughness`, not `roughness`).
 - **Material path vs shader path**: The material lives at `/World/Looks/Mat`. The shader is at `/World/Looks/Mat/Shader`. Use the material path for `assign_isaac_material` and `get_isaac_prim_detail` with `aspects=["material"]`. Use the shader path only in scripts.
 - **Opacity requires translucency enabled**: Setting `inputs:opacity` below 1.0 via `set_isaac_material_property` may not render correctly unless the material was created with opacity support. Create the material with the opacity input defined from the start.
