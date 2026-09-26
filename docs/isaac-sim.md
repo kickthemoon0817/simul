@@ -13,14 +13,14 @@ ideally in your shell rc. The `isaac` commands also accept `--isaac-root`.
 
 ### 1. Publish the bridge extension (once per Isaac install)
 
-The `khemoo.simul.mcp` Kit extension (shown in the Extension Manager as
-**Simul MCP Bridge**) ships inside the `simul-mcp` package. Isaac loads it
+The `khemoo.simul` Kit extension (shown in the Extension Manager as
+**Simul Bridge**) ships inside the `simul-toolkit` package (under `simul/bridge_ext/`). Isaac loads it
 only from `<isaac-root>/extsUser/`, and does not pick up a newer copy until
 you publish it again.
 
 ```bash
-ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac install-bridge            # copy
-ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac install-bridge --symlink  # track a repo checkout
+ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul isaac install-bridge            # copy
+ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul isaac install-bridge --symlink  # track a repo checkout
 ```
 
 - `--symlink` makes later `git pull`s take effect without re-running the
@@ -40,13 +40,13 @@ A plain `isaac-sim.sh` start leaves the bridge registered but disabled, so
 port 8229 never opens. On 6.0 the Python socket on 8226 is off as well.
 
 ```bash
-ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac launch               # headless, waits for the ports
-simul-mcp isaac launch --isaac-root ~/isaac-sim-5.1.0 --no-headless    # with the GUI
-simul-mcp isaac launch --dry-run                                       # print the command only
+ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul isaac launch               # headless, waits for the ports
+simul isaac launch --isaac-root ~/isaac-sim-5.1.0 --no-headless    # with the GUI
+simul isaac launch --dry-run                                       # print the command only
 ```
 
 `launch` reads `<isaac-root>/VERSION`, starts `isaac-sim.sh` detached with
-`--enable <python socket extension> --enable khemoo.simul.mcp` (and
+`--enable <python socket extension> --enable khemoo.simul` (and
 `--no-window` unless `--no-headless`), then polls both ports until they answer
 or `--wait-timeout` (default 180 s) expires. Its JSON output includes `pid`,
 `log_file`, `version`, `transport_extension`, `socket_reachable`,
@@ -62,7 +62,7 @@ options below.
 socket on 8226 at startup, so simul can switch the bridge on afterwards:
 
 ```bash
-simul-mcp isaac bridge-up
+simul isaac bridge-up
 ```
 
 It reports `action: "already-up"` or `"auto-enabled"` with `success` and
@@ -73,9 +73,9 @@ you should restart Isaac through `launch`.
 ### 3. Verify
 
 ```bash
-simul-mcp isaac ping
-simul-mcp isaac runtime-info
-simul-mcp isaac scene
+simul isaac ping
+simul isaac runtime-info
+simul isaac scene
 ```
 
 From an agent, `ping_isaac` does the same check.
@@ -88,10 +88,10 @@ From an agent, `ping_isaac` does the same check.
   with one probe; set `ISAAC_SIM__SOCKET_PROTOCOL=python_server` or `vscode`
   only to skip the probe.
 - Neither the Python socket nor the bridge is enabled at startup. Use
-  `simul-mcp isaac launch`. The equivalent manual command is
-  `isaac-sim.sh --enable isaacsim.code_editor.python_server --enable khemoo.simul.mcp --no-window`.
+  `simul isaac launch`. The equivalent manual command is
+  `isaac-sim.sh --enable isaacsim.code_editor.python_server --enable khemoo.simul --no-window`.
 - The python_server can require a token. Start Isaac with
-  `simul-mcp isaac launch --auth-token <secret>` and give the MCP server
+  `simul isaac launch --auth-token <secret>` and give the MCP server
   `ISAAC_SIM__SOCKET_AUTH_TOKEN=<secret>`. Alternatively
   `--generate-auth-token` creates one and writes it to the discovery
   directory, where the server finds it for the newest running editor.
@@ -105,14 +105,14 @@ From an agent, `ping_isaac` does the same check.
 
 | Port | Transport | Notes |
 |---|---|---|
-| 8229 | `khemoo.simul.mcp` bridge | Preferred: typed protocol, fewer round trips, script interruption, busy state |
+| 8229 | `khemoo.simul` bridge | Preferred: typed protocol, fewer round trips, script interruption, busy state |
 | 8226 | Stock Python socket | `isaacsim.code_editor.vscode` on 5.x, `isaacsim.code_editor.python_server` on 6.0; used when the bridge is unavailable |
 
 - **Timeouts.** Every script carries a server-side execution timeout derived
   from `ISAAC_SIM__SOCKET_TIMEOUT` (one second under it, minimum 1 s). The
   bridge interrupts an overrunning script inside Kit; the 6.0 python_server
   reports the overrun in its response.
-- **Interrupting.** `interrupt_isaac_script` / `simul-mcp isaac interrupt`
+- **Interrupting.** `interrupt_isaac_script` / `simul isaac interrupt`
   stops a running script when it is a coroutine or suspended at an `await`. A
   synchronous loop that never yields also blocks the bridge's event loop, so
   only the timeout reaches it; a blocking C call is interrupted when it
@@ -126,7 +126,7 @@ From an agent, `ping_isaac` does the same check.
   `ping_isaac`, `list_isaac_instances` and `get_isaac_runtime_info` report
   this as `bridge_circuit_open`.
 - **Raw scripts over the bridge.** The bridge's `allow_unsafe_execution`
-  setting (`simul-mcp isaac bridge-set-unsafe`) only gates raw scripts on
+  setting (`simul isaac bridge-set-unsafe`) only gates raw scripts on
   8229. It is not a security boundary; to remove scripting from agents use
   `SECURITY__ALLOW_SCRIPT_EXECUTION=false`
   ([configuration.md](configuration.md#script-execution)).
@@ -134,7 +134,7 @@ From an agent, `ping_isaac` does the same check.
 ## Multiple instances
 
 Each bridge writes a discovery file to `isaac_sim.discovery_dir` (default
-`/tmp/simul-mcp`) with its bridge port and Python socket port. Agents list
+`/tmp/simul`) with its bridge port and Python socket port. Agents list
 them with `list_isaac_instances` and switch with `set_active_isaac_instance`.
 `claim_isaac_instance` / `release_isaac_instance` mark an instance as in use;
 claims are advisory unless `ISAAC_SIM__ENFORCE_CLAIMS=true`.
@@ -145,7 +145,7 @@ Cross-host Isaac Sim is not supported. The server trusts only loopback
 addresses in discovery files, `launch` binds the transports on the local
 machine, and neither transport authenticates beyond the optional
 python_server token: anything that can reach the ports can run Python inside
-Isaac Sim. Run `simul-mcp` on the same host as Isaac, or for a container,
+Isaac Sim. Run `simul` on the same host as Isaac, or for a container,
 publish the ports to the host's loopback as the Compose file does. Unreal's
 `--bind` / `--allow-public` / `--passphrase` flow has no Isaac counterpart.
 
@@ -162,8 +162,8 @@ docker compose -f compose.isaac-sim.yml down
 
 The Compose file:
 
-- mounts `./src/simul_mcp/bridge_ext/khemoo.simul.mcp` read-only into
-  `/tmp/extsUser/khemoo.simul.mcp` and starts
+- mounts `./src/simul/bridge_ext/khemoo.simul` read-only into
+  `/tmp/extsUser/khemoo.simul` and starts
   `isaac-sim.sh --allow-root --no-window` with the bridge and the Python socket
   extension enabled;
 - binds both transports to `0.0.0.0` *inside* the container (a
@@ -171,7 +171,7 @@ The Compose file:
   connect and then be closed on with no data) and publishes them to
   `127.0.0.1` on the host, which is where the loopback restriction belongs;
 - also exposes the bridge as a Unix socket on the shared discovery volume
-  (`SIMUL_DISCOVERY_DIR`, default `/tmp/simul-mcp`);
+  (`SIMUL_DISCOVERY_DIR`, default `/tmp/simul`);
 - enables the bridge's raw `execute_script` action, which only gates the
   bridge transport and is not a security boundary;
 - keeps the container stateless, so each run starts clean.
@@ -198,7 +198,7 @@ docker compose -f compose.isaac-sim.yml up -d
 
 | Symptom | Likely cause |
 |---|---|
-| `ping` fails on 6.0 after a plain `isaac-sim.sh` start | Nothing is enabled; restart through `simul-mcp isaac launch` |
+| `ping` fails on 6.0 after a plain `isaac-sim.sh` start | Nothing is enabled; restart through `simul isaac launch` |
 | Bridge port 8229 never opens | Bridge not published (`install-bridge`) or not enabled (`launch` / `bridge-up`) |
 | Old behaviour after upgrading simul | Stale copy in `extsUser`; run `install-bridge --force` |
 | Every call is slow, then falls back | Bridge port filtered or half-open; the circuit breaker will route to 8226 |

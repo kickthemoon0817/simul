@@ -18,8 +18,8 @@ from pathlib import Path
 import pytest
 
 
-from simul_mcp.config import Settings
-from simul_mcp.utils.paths import PathPolicy, SandboxDenied
+from simul.config import Settings
+from simul.utils.paths import PathPolicy, SandboxDenied
 
 
 def _policy(tmp_path: Path, **overrides: object) -> PathPolicy:
@@ -212,7 +212,7 @@ class TestCaptureDirectory:
         temp_dir = tmp_path / "tmp"
         temp_dir.mkdir()
         monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp_dir))
-        temp_root = temp_dir / "simul_mcp"
+        temp_root = temp_dir / "simul"
         policy = PathPolicy(
             enabled=True,
             allowed_paths=[str(tmp_path / "sandbox"), str(temp_root)],
@@ -244,5 +244,5 @@ class TestCaptureDirectory:
 
     def test_disabled_sandbox_uses_the_system_temp_dir(self, tmp_path: Path) -> None:
         policy = _policy(tmp_path, enabled=False)
-        expected = str(Path(tempfile.gettempdir()) / "simul_mcp" / "captures")
+        expected = str(Path(tempfile.gettempdir()) / "simul" / "captures")
         assert policy.default_capture_dir() == expected

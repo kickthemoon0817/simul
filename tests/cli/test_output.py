@@ -1,4 +1,4 @@
-"""Tests for the shared CLI plumbing in ``simul_mcp.cli.output``."""
+"""Tests for the shared CLI plumbing in ``simul.cli.output``."""
 
 from __future__ import annotations
 
@@ -12,9 +12,9 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from simul_mcp.cli import isaac as isaac_cli
-from simul_mcp.cli import output
-from simul_mcp.cli.main import app as main_app
+from simul.cli import isaac as isaac_cli
+from simul.cli import output
+from simul.cli.main import app as main_app
 
 runner = CliRunner()
 

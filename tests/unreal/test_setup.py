@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from simul_mcp.adapters import unreal_setup
-from simul_mcp.adapters.unreal_setup import (
+from simul.adapters import unreal_setup
+from simul.adapters.unreal_setup import (
     HEADLESS_FLAGS,
     HTTP_LISTENERS_SECTION,
     REMOTE_CONTROL_SECTION,
@@ -237,7 +237,7 @@ def test_missing_keys_and_passphrase_stay_inside_existing_section(
 def test_missing_http_bind_stays_inside_listener_section(tmp_path: Path) -> None:
     import configparser
 
-    from simul_mcp.adapters.unreal_setup import patch_default_engine_ini
+    from simul.adapters.unreal_setup import patch_default_engine_ini
 
     config = tmp_path / "Config"
     config.mkdir()
@@ -402,7 +402,7 @@ def test_headless_flags_cover_window_focus_and_logging() -> None:
 
 def test_resolve_launch_argv_appends_headless_flags(tmp_path: Path, monkeypatch) -> None:
     """`--headless` must propagate all the way through to argv."""
-    from simul_mcp.adapters import unreal_setup as us
+    from simul.adapters import unreal_setup as us
 
     uproject = _write_uproject(tmp_path, {"FileVersion": 3})
 

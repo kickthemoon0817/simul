@@ -31,8 +31,8 @@ def main() -> int:
         repo_root = Path(__file__).resolve().parents[2]
         sys.path.insert(0, str(repo_root / "src"))
 
-        log_path = Path("/tmp/simul_mcp_smoke.log")
-        logger = logging.getLogger("simul_mcp.smoke")
+        log_path = Path("/tmp/simul_smoke.log")
+        logger = logging.getLogger("simul.smoke")
         logger.setLevel(logging.INFO)
         if not logger.handlers:
             formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
@@ -54,7 +54,7 @@ def main() -> int:
             if carb:
                 carb.log_warn(message)
 
-        from simul_mcp.adapters import IsaacRuntimeAdapter, is_isaac_available
+        from simul.adapters import IsaacRuntimeAdapter, is_isaac_available
 
         log(f"Logging to {log_path}")
         log(f"Isaac runtime available: {is_isaac_available()}")

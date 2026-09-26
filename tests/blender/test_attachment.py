@@ -15,13 +15,13 @@ from unittest.mock import Mock
 import pytest
 from typer.testing import CliRunner
 
-from simul_mcp.adapters.blender_connection import BlenderAttachments, BlenderConnection
-from simul_mcp.blender_bridge.protocol import PROTOCOL_VERSION, BridgeFiles, BridgeWire
-from simul_mcp.cli import blender_cli
-from simul_mcp.cli.main import app
-from simul_mcp.config import Settings
-from simul_mcp.mcp.backends import backend_spec
-from simul_mcp.mcp.server import SimulMCPServer
+from simul.adapters.blender_connection import BlenderAttachments, BlenderConnection
+from simul.blender_bridge.protocol import PROTOCOL_VERSION, BridgeFiles, BridgeWire
+from simul.cli import blender_cli
+from simul.cli.main import app
+from simul.config import Settings
+from simul.mcp.backends import backend_spec
+from simul.mcp.server import SimulMCPServer
 
 
 @pytest.fixture
@@ -150,7 +150,7 @@ def test_no_bridge_never_creates_an_embedded_scene(settings: Settings) -> None:
 def test_attached_tools_register_without_local_bpy(
     settings: Settings, monkeypatch: pytest.MonkeyPatch, fake_fastmcp: Any
 ) -> None:
-    monkeypatch.setattr("simul_mcp.mcp.backends.is_blender_available", lambda: False)
+    monkeypatch.setattr("simul.mcp.backends.is_blender_available", lambda: False)
     server = SimulMCPServer(settings, backends={"blender"})
     assert "create_blender_object" in {tool.name for tool in server.mcp.tools}
     assert backend_spec("blender").adapter_factory(settings).is_available()
@@ -331,7 +331,7 @@ def test_dead_process_is_reported_as_stale_without_connecting(
     settings: Settings, advertised: tuple, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Issue #217: a dead pid names itself and the recovery commands, not Errno 61."""
-    from simul_mcp.adapters.blender_connection import AttachmentStale
+    from simul.adapters.blender_connection import AttachmentStale
 
     pid = _exited_pid()
     _attach_with_pid(settings, advertised, monkeypatch, pid)
@@ -356,7 +356,7 @@ def test_dead_process_is_reported_as_stale_without_connecting(
 def test_refused_bridge_of_a_live_process_is_stale(
     settings: Settings, advertised: tuple, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from simul_mcp.adapters.blender_connection import AttachmentStale
+    from simul.adapters.blender_connection import AttachmentStale
 
     _attach_with_pid(settings, advertised, monkeypatch, os.getpid())
     monkeypatch.setattr(
@@ -398,8 +398,8 @@ def test_document_change_names_the_new_document_and_recovery(
     message: str,
 ) -> None:
     """Issue #216: the pin stays strict but the error says what changed and how to re-attach."""
-    from simul_mcp.adapters.blender_connection import AttachmentTargetChanged
-    from simul_mcp.blender_bridge.protocol import BridgeRemoteError
+    from simul.adapters.blender_connection import AttachmentTargetChanged
+    from simul.blender_bridge.protocol import BridgeRemoteError
 
     _, info = advertised
     monkeypatch.setattr(BlenderAttachments, "_hello", lambda self, target: info)
@@ -499,8 +499,8 @@ def test_attach_blender_window_tool_requires_attached_mode(
 
     from tests.fakes import AvailableAdapter
 
-    monkeypatch.setattr("simul_mcp.mcp.backends.is_blender_available", lambda: True)
-    monkeypatch.setattr("simul_mcp.mcp.backends.BlenderRuntimeAdapter", AvailableAdapter)
+    monkeypatch.setattr("simul.mcp.backends.is_blender_available", lambda: True)
+    monkeypatch.setattr("simul.mcp.backends.BlenderRuntimeAdapter", AvailableAdapter)
     monkeypatch.setattr(AvailableAdapter, "create_session", lambda self: nullcontext(object()))
     embedded = Settings(blender={"mode": "embedded", "attachment_path": str(tmp_path / "a.json")})
     server = SimulMCPServer(embedded, backends={"blender"})

@@ -5,7 +5,7 @@ selected (`--backends`), on `--unreal-tools` / `--blender-tools`, and on
 `security.allow_script_execution`. To see exactly what your server exposes:
 
 ```bash
-simul-mcp tools            # add --json for descriptions and input schemas
+simul tools            # add --json for descriptions and input schemas
 ```
 
 Every tool returns a JSON object. Failures carry `success: false` and an
@@ -79,7 +79,7 @@ Requires an editor with Remote Control and Python enabled; run
 | `execute_unreal_script` | Run Python inside the editor |
 
 The rest of the operation set is available from the CLI
-(`simul-mcp unreal ...`, see [cli.md](cli.md#simul-mcp-unreal)).
+(`simul unreal ...`, see [cli.md](cli.md#simul-unreal)).
 
 ### Full surface (`--unreal-tools full`)
 
@@ -121,7 +121,7 @@ Behaviour worth knowing:
 Registered when Blender is available: either `bpy` is importable by the
 server (embedded mode) or a window is attached through the bridge add-on
 (attached mode, [blender-attachment.md](blender-attachment.md)). `--blender-tools thin`
-registers only `THIN_BLENDER_TOOLS` from `src/simul_mcp/tool_surfaces.py`.
+registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 
 | Group | Tools |
 |---|---|
@@ -140,7 +140,7 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul_mcp/tool_surfaces.py`.
 
 | Tool | Purpose |
 |---|---|
-| `get_tool_usage_stats` | Per-tool call counts, success rates and durations from the persistent usage log. Clearing it is operator-only: `simul-mcp stats --reset` |
+| `get_tool_usage_stats` | Per-tool call counts, success rates and durations from the persistent usage log. Clearing it is operator-only: `simul stats --reset` |
 
 ## MCP resources
 

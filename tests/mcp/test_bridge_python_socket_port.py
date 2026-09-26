@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 
-from khemoo.simul.mcp.extension import resolve_python_socket_port
-from khemoo.simul.mcp.lifecycle import PYTHON_SERVER_TOKEN_HEADER
+from khemoo.simul.extension import resolve_python_socket_port
+from khemoo.simul.lifecycle import PYTHON_SERVER_TOKEN_HEADER
 
 
 def test_prefers_python_server_setting_on_isaac_six() -> None:

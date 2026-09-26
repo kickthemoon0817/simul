@@ -24,8 +24,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul.adapters.isaac_socket_client import ScriptResult
+from simul.mcp.tools.isaac_tools import IsaacTools
 
 # The error Kit raises when target_world transforms a None center-of-interest.
 _BOOST_ARGUMENT_ERROR = (

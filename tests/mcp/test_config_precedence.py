@@ -18,10 +18,10 @@ import yaml
 from pydantic import BaseModel
 from typer.testing import CliRunner
 
-import simul_mcp.config as config_module
-from simul_mcp.cli.main import app
-from simul_mcp.config import IsaacSimConfig, LoggingConfig, Settings
-from simul_mcp.resources import resource_filesystem_path
+import simul.config as config_module
+from simul.cli.main import app
+from simul.config import IsaacSimConfig, LoggingConfig, Settings
+from simul.resources import resource_filesystem_path
 
 _REPO = Path(__file__).resolve().parents[2]
 _DEFAULT_YAML = resource_filesystem_path("config", "default.yaml")
@@ -108,7 +108,7 @@ def test_yaml_values_apply_when_no_env_var_is_set() -> None:
         "server": "INFO",
         "isaac": "INFO",
     }
-    assert settings.security.allowed_paths == ["examples", "tests/data", "/tmp/simul_mcp"]
+    assert settings.security.allowed_paths == ["examples", "tests/data", "/tmp/simul-work"]
     assert settings.logging.audit_path == "~/.simul/logs/audit.jsonl"
 
 
@@ -280,12 +280,12 @@ def test_stale_isaac_sim_path_is_a_warning_not_a_failure(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setenv("ISAAC_SIM_PATH", "/nonexistent/isaac-sim")
-    # setup_logging in other tests turns propagation off for simul_mcp loggers,
+    # setup_logging in other tests turns propagation off for simul loggers,
     # so capture at the emitting logger rather than at the root.
-    config_logger = logging.getLogger("simul_mcp.config")
+    config_logger = logging.getLogger("simul.config")
     config_logger.addHandler(caplog.handler)
     try:
-        with caplog.at_level(logging.WARNING, logger="simul_mcp.config"):
+        with caplog.at_level(logging.WARNING, logger="simul.config"):
             settings = Settings()
     finally:
         config_logger.removeHandler(caplog.handler)

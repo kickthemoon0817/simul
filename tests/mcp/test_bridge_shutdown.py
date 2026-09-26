@@ -20,10 +20,10 @@ from typing import Any
 import pytest
 
 
-from khemoo.simul.mcp import extension as extension_module
-from khemoo.simul.mcp.extension import IsaacMCPServerExtension
-from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle
-from khemoo.simul.mcp.protocol import BridgeRequest, BridgeResponse
+from khemoo.simul import extension as extension_module
+from khemoo.simul.extension import IsaacMCPServerExtension
+from khemoo.simul.lifecycle import BridgeServerLifecycle
+from khemoo.simul.protocol import BridgeRequest, BridgeResponse
 
 
 class _FakeCarb:
@@ -76,7 +76,7 @@ def _started_extension(
 
 
 def _discovery_files(discovery_dir: Path) -> list[Path]:
-    return sorted(discovery_dir.glob("simul-mcp-*.json"))
+    return sorted(discovery_dir.glob("simul-*.json"))
 
 
 def test_lifecycle_close_refuses_connections_before_wait_closed() -> None:
@@ -219,9 +219,9 @@ def test_only_the_bridge_extension_class_is_visible_to_kits_scan(monkeypatch) ->
     monkeypatch.setitem(sys.modules, "omni", fake_omni)
     monkeypatch.setitem(sys.modules, "omni.ext", fake_omni_ext)
     monkeypatch.setitem(sys.modules, "carb", fake_carb)
-    monkeypatch.delitem(sys.modules, "khemoo.simul.mcp.extension", raising=False)
+    monkeypatch.delitem(sys.modules, "khemoo.simul.extension", raising=False)
     try:
-        extension_module = importlib.import_module("khemoo.simul.mcp.extension")
+        extension_module = importlib.import_module("khemoo.simul.extension")
         exposed = [
             name
             for name, obj in vars(extension_module).items()
@@ -229,5 +229,5 @@ def test_only_the_bridge_extension_class_is_visible_to_kits_scan(monkeypatch) ->
         ]
         assert exposed == ["IsaacMCPServerExtension"]
     finally:
-        sys.modules.pop("khemoo.simul.mcp.extension", None)
-        importlib.import_module("khemoo.simul.mcp.extension")
+        sys.modules.pop("khemoo.simul.extension", None)
+        importlib.import_module("khemoo.simul.extension")

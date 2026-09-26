@@ -1,4 +1,4 @@
-# CLAUDE.md — Simul MCP
+# CLAUDE.md — Simul
 
 `AGENTS.md` is canonical for repo layout, build/test commands and coding
 conventions. This file holds behavioral instructions for Claude Code when
@@ -49,25 +49,25 @@ Supported: Isaac Sim 5.1.0, 6.0.0, 6.0.1. Isaac Sim 5.1 ships with the
 VS Code transport (`isaacsim.code_editor.vscode`) auto-enabled on port
 8226; Isaac Sim 6.0 moved that socket into
 `isaacsim.code_editor.python_server` and enables **nothing** at startup.
-simul's preferred transport on every version is the `khemoo.simul.mcp`
+simul's preferred transport on every version is the `khemoo.simul`
 bridge extension on port 8229 (typed protocol, faster, fewer
 round-trips). Two post-clone steps wire it up cleanly:
 
-### 1. One-time per Isaac install: `simul-mcp isaac install-bridge`
+### 1. One-time per Isaac install: `simul isaac install-bridge`
 
-The bridge extension ships **inside** the `simul-mcp` Python package
-at `src/simul_mcp/bridge_ext/khemoo.simul.mcp/` (so pip installs and
+The bridge extension ships **inside** the `simul` Python package
+at `src/simul/bridge_ext/khemoo.simul/` (so pip installs and
 editable installs both have it on disk), and must be physically
-present at `<isaac-root>/extsUser/khemoo.simul.mcp/` for the editor
+present at `<isaac-root>/extsUser/khemoo.simul/` for the editor
 to load it. Repo bumps and pip upgrades don't propagate by themselves
 — Isaac keeps loading whatever stale copy is in `extsUser` until you
 publish.
 
-`simul-mcp isaac install-bridge` does the publish. Recommended for repo
+`simul isaac install-bridge` does the publish. Recommended for repo
 workflows:
 
 ```
-ISAAC_SIM_PATH=~/isaac-sim-5.1.0 simul-mcp isaac install-bridge --symlink
+ISAAC_SIM_PATH=~/isaac-sim-5.1.0 simul isaac install-bridge --symlink
 ```
 
 `--symlink` (vs the default copy) means future `git pull`s on the repo
@@ -78,25 +78,25 @@ if Isaac runs as a different user from the repo owner.
 switching copy ↔ symlink mode). Without `--force` the command no-ops
 when the dest version already matches the source.
 
-### 2. Per Isaac launch: `simul-mcp isaac launch` (all versions) or `bridge-up` (5.x, editor already running)
+### 2. Per Isaac launch: `simul isaac launch` (all versions) or `bridge-up` (5.x, editor already running)
 
 A fresh `isaac-sim.sh` start leaves the bridge extension
 **registered but disabled** — port 8229 silently doesn't bind, even
 though the ext is present in `extsUser`. On 6.0 the Python socket on
 8226 is disabled too, so nothing can enable the bridge after the fact.
 
-`simul-mcp isaac launch` is the version-agnostic answer: it reads
+`simul isaac launch` is the version-agnostic answer: it reads
 `<isaac-root>/VERSION`, starts `isaac-sim.sh` detached with
-`--enable <python socket ext> --enable khemoo.simul.mcp` (plus
+`--enable <python socket ext> --enable khemoo.simul` (plus
 `--no-window` unless `--no-headless`), and polls both ports until they
 answer or `--wait-timeout` (default 180 s) expires. Its JSON output
 carries `pid`, `log_file`, `version`, `transport_extension`,
 `socket_reachable`, `bridge_reachable`, and `socket_protocol`.
 
 ```
-ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul-mcp isaac launch
-simul-mcp isaac launch --isaac-root ~/isaac-sim-5.1.0 --no-headless
-simul-mcp isaac launch --dry-run        # show the command, start nothing
+ISAAC_SIM_PATH=~/isaac-sim-6.0.1 simul isaac launch
+simul isaac launch --isaac-root ~/isaac-sim-5.1.0 --no-headless
+simul isaac launch --dry-run        # show the command, start nothing
 ```
 
 Useful flags: `--socket-port`, `--bridge-port`, `--generate-auth-token`
@@ -108,13 +108,13 @@ argv — prefer it over `--auth-token <value>`, which needs a matching
 `extsUser/`, the command still starts Isaac with the Python socket only
 and prints the `install-bridge` hint.
 
-When the user already has a **5.x** editor running, `simul-mcp isaac
+When the user already has a **5.x** editor running, `simul isaac
 bridge-up` auto-enables the bridge via the VS Code transport (8226),
 then re-probes the bridge with a 6×0.5s retry loop (Kit needs a frame
 to bind the socket).
 
 ```
-simul-mcp isaac bridge-up
+simul isaac bridge-up
 ```
 
 The command's JSON output reports `action: "already-up" | "auto-enabled"`,
@@ -142,13 +142,17 @@ launch hint; restart the editor through `launch` instead.
   `ISAAC_SIM__SOCKET_PROTOCOL=python_server|vscode` only to skip the
   probe; never send EOF unconditionally.
 - Never tell the user to manually run
-  `simul-mcp isaac enable-extension khemoo.simul.mcp`; `bridge-up` does
+  `simul isaac enable-extension khemoo.simul`; `bridge-up` does
   the same thing plus the retry loop and structured payload.
 
 ## Project scope
 
-Simul is a Model Context Protocol (MCP) server that gives Claude Code and
-other MCP clients live control over 3D simulation and DCC backends:
+Simul is an agent toolkit for 3D simulation: it connects AI agents to Isaac
+Sim, Unreal Engine 5, Blender and OpenUSD through an MCP server
+(`simul server`), an engine setup CLI (`simul unreal setup`,
+`simul isaac launch`, `simul blender attach`), in-editor bridges (the
+`khemoo.simul` Kit extension, the Blender add-on, the Unreal overlay plugin),
+a headless USD library and this Claude Code plugin. Backends:
 
 - **Isaac Sim 5.1.0 / 6.0.0 / 6.0.1** — granular tools over a TCP socket
   bridge: scene/prim inspection, physics, materials, viewport/camera,
@@ -165,7 +169,8 @@ other MCP clients live control over 3D simulation and DCC backends:
 - **Blender** — connected adapter when a Blender runtime is up.
 - **USD (headless)** — file-level operations that don't need a running engine.
 
-The Python package is `simul-mcp`, installed editable from this repo
+The distribution is `simul-toolkit` (import package `simul`, command
+`simul`), installed editable from this repo
 (`uv venv .venv && uv pip install -e ".[dev]"`, or `uv sync --extra dev`).
 The editor-facing skills, slash commands, and the `.claude-plugin/plugin.json`
 manifest live in this same repo.
@@ -205,7 +210,7 @@ Hard rules for Claude:
   `tests/conftest.py`. When FastMCP grows a call the server makes at
   construction time, add it to that one class rather than to a test file.
   Tests that want a runtime to look present or absent patch the probes on
-  `simul_mcp.mcp.backends` (`is_headless_available`,
+  `simul.mcp.backends` (`is_headless_available`,
   `is_blender_available`, `is_unreal_available`, the adapter classes), which
   is where the server reads them from.
 - Isaac tools are declared once: the `@tool_meta` decorator on the
@@ -215,25 +220,25 @@ Hard rules for Claude:
   lacks the decorator or a wrapper drifts from its implementation.
 - The simul MCP server in a running Claude Code session does **not**
   hot-reload — Python loads source at process start, edits don't
-  propagate. To live-verify a `simul_mcp` source change, run the
-  editable-installed `simul-mcp` CLI as a fresh subprocess (it picks up
+  propagate. To live-verify a `simul` source change, run the
+  editable-installed `simul` CLI as a fresh subprocess (it picks up
   edits via `pip install -e .`).
-- `_execute_json_script` (`src/simul_mcp/mcp/tools/isaac/_base.py`) passes
+- `_execute_json_script` (`src/simul/mcp/tools/isaac/_base.py`) passes
   script JSON through `apply_success_from_error`: an explicit `success` is
   trusted; otherwise an `error` key or any non-null `*_error` key marks the
   call failed. A script reporting a domain failure should emit `error`
   (or set `success: false`).
-- `simul-mcp` CLI exit codes: `1` = the operation failed (the JSON payload
+- `simul` CLI exit codes: `1` = the operation failed (the JSON payload
   has `success: false` — read it, it's not an infrastructure failure),
   `2` = bad invocation (invalid arguments).
-- Strings shaped like `/exts/khemoo.simul.mcp/<key>` (in
+- Strings shaped like `/exts/khemoo.simul/<key>` (in
   `compose.isaac-sim.yml`'s kit args, the bridge ext's `extension.py`,
   and the CLI's `settings.set(...)` calls) are **Carb settings keys**,
   not filesystem paths. The `/exts/<ext_name>/` namespace is Carb's
   convention; it doesn't move when the bridge ext directory moves on
   disk. Don't refactor them as part of a path rename.
 - The dev test runner is `~/pt/simul/.venv/bin/python` (and
-  `~/pt/simul/.venv/bin/simul-mcp` for the fresh-subprocess live
+  `~/pt/simul/.venv/bin/simul` for the fresh-subprocess live
   verification pattern); system `python` won't have the editable install.
   Create it with `uv venv .venv && uv pip install -e ".[dev]"` (or
   `uv sync --extra dev`).
@@ -258,7 +263,7 @@ How to detect "the machine has it":
   `~/isaac-sim-6.0.0/`, `~/isaac-sim-6.0.1/` (or `$ISAAC_SIM_PATH`).
   Launcher is `isaac-sim.sh`. Live socket on 8226 (stock Python socket)
   and optional 8229 (bridge). If the binary exists but isn't running,
-  **start it with `ISAAC_SIM_PATH=<root> simul-mcp isaac launch`** (it
+  **start it with `ISAAC_SIM_PATH=<root> simul isaac launch`** (it
   enables the right transports per version and waits for the ports),
   then run `pytest tests/isaac/live -m isaac`. A transport change must be
   verified on both a 5.1 and a 6.0 install. Don't claim a fix works
@@ -285,9 +290,9 @@ Hard rules:
   UE editors at the end of the session unless the user asked you to
   leave them running.
 
-## When simul MCP misbehaves — propose filing an issue
+## When simul misbehaves — propose filing an issue
 
-When you're using simul (`mcp__simul__*` tools or the `simul-mcp` CLI)
+When you're using simul (`mcp__simul__*` tools or the `simul` CLI)
 and hit something that looks like a real defect — wrong result,
 unhelpful error, missing capability, behavior that contradicts the docs
 or tool description, undocumented gotcha that cost the user time —
@@ -296,7 +301,7 @@ or tool description, undocumented gotcha that cost the user time —
 The right move:
 
 1. Diagnose enough to be confident it's a defect, not a misuse on your
-   end. Read the relevant code in `~/pt/simul/src/simul_mcp/` and write
+   end. Read the relevant code in `~/pt/simul/src/simul/` and write
    down what you observed vs. what the docs / tool description claim.
 2. Tell the user: *"This looks like a bug in simul. Want me to file an
    issue at https://github.com/kickthemoon0817/simul/issues?"* Wait for
@@ -311,7 +316,7 @@ The right move:
      description if applicable
    - **Observed** — what actually happened, including the verbatim error
      payload
-   - **Environment** — `simul-mcp` version, backend (Isaac Sim/UE/Blender)
+   - **Environment** — `simul` version, backend (Isaac Sim/UE/Blender)
      version, OS, anything that scopes the regression
    - **What works** — bullets of related-but-functioning behavior so the
      maintainer can localize the defect

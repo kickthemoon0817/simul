@@ -1,19 +1,19 @@
 """Wheel-build regression test — locks the iter14 bundling invariant.
 
 iter14 moved the Isaac Sim Kit bridge extension into the Python
-wheel so pip-installed users can run ``simul-mcp isaac install-bridge``
+wheel so pip-installed users can run ``simul isaac install-bridge``
 without a repo checkout. The whole feature relies on a single
 setuptools mechanism — a ``[tool.setuptools.package-data]`` glob
 on a dotted-name subdirectory:
 
     [tool.setuptools.package-data]
-    "simul_mcp.bridge_ext" = ["khemoo.simul.mcp/**/*"]
+    "simul.bridge_ext" = ["khemoo.simul/**/*"]
 
 Setuptools' handling of dotted-name dirs in package-data globs has
 had regressions in the past (for example, setuptools #3341, fixed
 in 62.3; the project now pins >=77 for PEP 639 license metadata). A future setuptools
 release that quietly changes this behavior would silently produce
-wheels with an empty ``bridge_ext/khemoo.simul.mcp/`` directory,
+wheels with an empty ``bridge_ext/khemoo.simul/`` directory,
 and ``install-bridge`` would fail at runtime for every pip user
 without any signal at build time.
 
@@ -106,7 +106,7 @@ def _run_build(tmp_path: Path) -> Path:
     )
     assert proc.returncode == 0, _build_error_msg(label, proc)
 
-    wheels = sorted(out_dir.glob("simul_mcp-*-py3-none-any.whl"))
+    wheels = sorted(out_dir.glob("simul_toolkit-*-py3-none-any.whl"))
     assert len(wheels) == 1, f"Expected exactly one wheel, got {wheels}"
     return wheels[0]
 
@@ -131,15 +131,35 @@ def test_wheel_ships_blender_attachment_sources(tmp_path: Path) -> None:
         "resources/unreal/SimulAgentOverlay/Source/SimulAgentOverlay/Public/SimulAgentOverlayLibrary.h",
         "resources/unreal/SimulAgentOverlay/Source/SimulAgentOverlay/Private/SimulAgentOverlay.cpp",
     ):
-        assert f"simul_mcp/{member}" in names
+        assert f"simul/{member}" in names
+
+
+def test_wheel_declares_only_the_simul_console_script(tmp_path: Path) -> None:
+    """The wheel is ``simul-toolkit`` and installs exactly one command, ``simul``.
+
+    The pre-rename ``simul-mcp`` alias was dropped as a clean break; a
+    stray second console script would silently resurrect it.
+    """
+    wheel = _run_build(tmp_path)
+    assert wheel.name.startswith("simul_toolkit-")
+    with zipfile.ZipFile(wheel) as zf:
+        entry_points = next(n for n in zf.namelist() if n.endswith(".dist-info/entry_points.txt"))
+        text = zf.read(entry_points).decode("utf-8")
+    section = text.split("[console_scripts]", 1)[1].split("\n[", 1)[0]
+    scripts = {
+        line.split("=", 1)[0].strip(): line.split("=", 1)[1].strip()
+        for line in section.splitlines()
+        if "=" in line
+    }
+    assert scripts == {"simul": "simul.cli.main:app"}
 
 
 def test_wheel_ships_bundled_bridge_ext(tmp_path: Path) -> None:
     """Build a wheel and assert the bundled bridge ext is present.
 
-    Locks the iter14 contract: ``simul_mcp/bridge_ext/khemoo.simul.mcp/``
+    Locks the iter14 contract: ``simul/bridge_ext/khemoo.simul/``
     must contain at minimum the extension manifest (config/extension.toml)
-    and the entry-point Python module (khemoo/simul/mcp/extension.py).
+    and the entry-point Python module (khemoo/simul/extension.py).
     Failure means a future setuptools or pyproject change broke the
     package-data glob and no pip user can run ``install-bridge``.
     """
@@ -149,14 +169,14 @@ def test_wheel_ships_bundled_bridge_ext(tmp_path: Path) -> None:
         names = zf.namelist()
 
     required = [
-        "simul_mcp/bridge_ext/__init__.py",
-        "simul_mcp/bridge_ext/khemoo.simul.mcp/config/extension.toml",
-        "simul_mcp/bridge_ext/khemoo.simul.mcp/khemoo/simul/mcp/extension.py",
-        "simul_mcp/bridge_ext/khemoo.simul.mcp/khemoo/simul/mcp/lifecycle.py",
-        "simul_mcp/bridge_ext/khemoo.simul.mcp/khemoo/simul/mcp/protocol.py",
-        "simul_mcp/bridge_ext/khemoo.simul.mcp/khemoo/simul/mcp/service.py",
-        "simul_mcp/bridge_ext/khemoo.simul.mcp/khemoo/simul/mcp/executor.py",
-        "simul_mcp/bridge_ext/khemoo.simul.mcp/khemoo/simul/mcp/ui_builder.py",
+        "simul/bridge_ext/__init__.py",
+        "simul/bridge_ext/khemoo.simul/config/extension.toml",
+        "simul/bridge_ext/khemoo.simul/khemoo/simul/extension.py",
+        "simul/bridge_ext/khemoo.simul/khemoo/simul/lifecycle.py",
+        "simul/bridge_ext/khemoo.simul/khemoo/simul/protocol.py",
+        "simul/bridge_ext/khemoo.simul/khemoo/simul/service.py",
+        "simul/bridge_ext/khemoo.simul/khemoo/simul/executor.py",
+        "simul/bridge_ext/khemoo.simul/khemoo/simul/ui_builder.py",
     ]
     missing = [r for r in required if r not in names]
     assert not missing, (
@@ -171,7 +191,7 @@ def test_wheel_excludes_pyc_bytecode(tmp_path: Path) -> None:
     """Pyc files must NOT ship in the wheel.
 
     The pyproject ``[tool.setuptools.exclude-package-data]`` rule
-    drops ``khemoo.simul.mcp/**/__pycache__/*`` so a developer
+    drops ``khemoo.simul/**/__pycache__/*`` so a developer
     building from a dirty tree does not accidentally publish stale
     bytecode. This test runs after a build and asserts the exclude
     actually fired — silent inclusion would mean the rule was either
@@ -185,8 +205,8 @@ def test_wheel_excludes_pyc_bytecode(tmp_path: Path) -> None:
     process owns).
     """
     pycache = (
-        _REPO / "src" / "simul_mcp" / "bridge_ext"
-        / "khemoo.simul.mcp" / "khemoo" / "simul" / "mcp" / "__pycache__"
+        _REPO / "src" / "simul" / "bridge_ext"
+        / "khemoo.simul" / "khemoo" / "simul" / "__pycache__"
     )
     pycache_pre_existed = pycache.exists()
     pycache.mkdir(exist_ok=True)
@@ -228,10 +248,10 @@ def test_wheel_extension_toml_version_matches_package(tmp_path: Path) -> None:
     mode the lockstep was created to prevent.
     """
     wheel = _run_build(tmp_path)
-    # Wheel filename: simul_mcp-X.Y.Z-py3-none-any.whl → "X.Y.Z"
+    # Wheel filename: simul_toolkit-X.Y.Z-py3-none-any.whl → "X.Y.Z"
     wheel_version = wheel.name.split("-")[1]
 
-    member = "simul_mcp/bridge_ext/khemoo.simul.mcp/config/extension.toml"
+    member = "simul/bridge_ext/khemoo.simul/config/extension.toml"
     with zipfile.ZipFile(wheel) as zf:
         toml_text = zf.read(member).decode("utf-8")
 
@@ -270,11 +290,11 @@ def test_wheel_ships_packaged_resources(tmp_path: Path) -> None:
         names = zf.namelist()
 
     required = [
-        "simul_mcp/resources/__init__.py",
-        "simul_mcp/resources/skills.md",
-        "simul_mcp/resources/config/default.yaml",
-        "simul_mcp/resources/config/logging.yaml",
-    ] + [f"simul_mcp/resources/docs/api/{doc}.md" for doc in _API_DOCS]
+        "simul/resources/__init__.py",
+        "simul/resources/skills.md",
+        "simul/resources/config/default.yaml",
+        "simul/resources/config/logging.yaml",
+    ] + [f"simul/resources/docs/api/{doc}.md" for doc in _API_DOCS]
     missing = [r for r in required if r not in names]
     assert not missing, (
         f"Packaged resources are incomplete in wheel {wheel.name}. "
@@ -284,7 +304,7 @@ def test_wheel_ships_packaged_resources(tmp_path: Path) -> None:
 
 
 def _install_wheel_into_fresh_venv(tmp_path: Path, wheel: Path) -> Path:
-    """Create a venv holding only the wheel and the imports ``simul_mcp`` needs.
+    """Create a venv holding only the wheel and the imports ``simul`` needs.
 
     Returns the venv's python executable. Uses uv when present (no network
     once the cache is warm), otherwise stdlib venv plus pip.
@@ -301,7 +321,7 @@ def _install_wheel_into_fresh_venv(tmp_path: Path, wheel: Path) -> Path:
         )
         pip_install = [str(python), "-m", "pip", "install"]
     # The wheel goes in without its dependency closure (usd-core, fastmcp, ...)
-    # so the venv stays small; only what ``import simul_mcp`` touches follows.
+    # so the venv stays small; only what ``import simul`` touches follows.
     for install_cmd in (pip_install + ["--no-deps", str(wheel)], pip_install + runtime_deps):
         proc = subprocess.run(install_cmd, capture_output=True, text=True, timeout=600)
         assert proc.returncode == 0, _build_error_msg("wheel install", proc)
@@ -310,9 +330,9 @@ def _install_wheel_into_fresh_venv(tmp_path: Path, wheel: Path) -> Path:
 
 _WHEEL_SMOKE_SCRIPT = """
 import json
-from simul_mcp.config import Settings, get_settings
-from simul_mcp.resources import find_checkout_root, resource
-from simul_mcp.utils.paths import PathPolicy
+from simul.config import Settings, get_settings
+from simul.resources import find_checkout_root, resource
+from simul.utils.paths import PathPolicy
 
 settings = get_settings()
 checkout_root = find_checkout_root()
@@ -357,5 +377,5 @@ def test_wheel_install_serves_settings_and_resources(tmp_path: Path) -> None:
     assert payload["api_core_is_file"] is True
     assert payload["socket_protocol"] == "vscode"
     assert payload["log_components"].get("isaac") == "INFO", "packaged default.yaml was not loaded"
-    assert payload["allowed_roots"] == [str(Path("/tmp/simul_mcp").resolve())]
+    assert payload["allowed_roots"] == [str(Path("/tmp/simul-work").resolve())]
     assert payload["bare_settings_ok"] is True

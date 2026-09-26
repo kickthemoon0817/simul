@@ -26,9 +26,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock, MagicMock
 
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult
-from simul_mcp.config import Settings
-from simul_mcp.mcp.tools.isaac_tools import MAX_RETAINED_CAPTURES, IsaacTools
+from simul.adapters.isaac_socket_client import ScriptResult
+from simul.config import Settings
+from simul.mcp.tools.isaac_tools import MAX_RETAINED_CAPTURES, IsaacTools
 
 
 def _settings(sandbox_root: Path, capture_dir: Optional[str] = None) -> Settings:

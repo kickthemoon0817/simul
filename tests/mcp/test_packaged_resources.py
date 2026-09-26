@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-import simul_mcp.utils.paths as paths_module
-from simul_mcp.resources import find_checkout_root, resource, resource_filesystem_path
-from simul_mcp.utils.paths import PathPolicy
+import simul.utils.paths as paths_module
+from simul.resources import find_checkout_root, resource, resource_filesystem_path
+from simul.utils.paths import PathPolicy
 
 _API_DOCS = ("core", "sensors", "physics", "replicator", "robots", "rendering", "assets")
 
@@ -54,14 +54,14 @@ def test_checkout_root_is_detected_for_the_source_tree() -> None:
 
     assert root is not None
     assert (root / "pyproject.toml").is_file()
-    assert (root / "src" / "simul_mcp" / "resources" / "skills.md").is_file()
+    assert (root / "src" / "simul" / "resources" / "skills.md").is_file()
 
 
 def test_relative_allowlist_entries_resolve_against_the_checkout(tmp_path: Path) -> None:
     (tmp_path / "examples").mkdir()
-    policy = PathPolicy(enabled=True, allowed_paths=["examples", "/tmp/simul_mcp"], project_root=tmp_path)
+    policy = PathPolicy(enabled=True, allowed_paths=["examples", "/tmp/simul-work"], project_root=tmp_path)
 
-    assert policy.allowed_roots == [(tmp_path / "examples").resolve(), Path("/tmp/simul_mcp").resolve()]
+    assert policy.allowed_roots == [(tmp_path / "examples").resolve(), Path("/tmp/simul-work").resolve()]
     assert policy.is_allowed("examples/scene.usd")
     assert not policy.is_allowed("/etc/shadow")
 
@@ -70,17 +70,17 @@ def test_relative_allowlist_entries_are_dropped_without_a_checkout(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(paths_module, "find_checkout_root", lambda: None)
-    # setup_logging in other tests turns propagation off for simul_mcp loggers,
+    # setup_logging in other tests turns propagation off for simul loggers,
     # so capture at the emitting logger rather than at the root.
-    paths_logger = logging.getLogger("simul_mcp.utils.paths")
+    paths_logger = logging.getLogger("simul.utils.paths")
     paths_logger.addHandler(caplog.handler)
     try:
-        with caplog.at_level(logging.INFO, logger="simul_mcp.utils.paths"):
-            policy = PathPolicy(enabled=True, allowed_paths=["examples", "tests/data", "/tmp/simul_mcp"])
+        with caplog.at_level(logging.INFO, logger="simul.utils.paths"):
+            policy = PathPolicy(enabled=True, allowed_paths=["examples", "tests/data", "/tmp/simul-work"])
     finally:
         paths_logger.removeHandler(caplog.handler)
 
-    assert policy.allowed_roots == [Path("/tmp/simul_mcp").resolve()]
+    assert policy.allowed_roots == [Path("/tmp/simul-work").resolve()]
     # The record may reach caplog twice (at the logger and, when propagation is
     # still on, at the root), so compare the set of dropped entries, not a count.
     dropped = {

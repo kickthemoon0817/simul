@@ -17,9 +17,9 @@ import pytest
 from aiohttp import web
 from PIL import Image
 
-from simul_mcp.adapters import unreal_runtime
-from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
-from simul_mcp.config import Settings
+from simul.adapters import unreal_runtime
+from simul.adapters.unreal_runtime import UnrealRuntimeSession
+from simul.config import Settings
 
 
 @asynccontextmanager

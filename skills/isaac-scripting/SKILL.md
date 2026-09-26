@@ -30,7 +30,7 @@ version: 0.1.0
 
 ## Execution Model
 
-Scripts go to the `khemoo.simul.mcp` bridge on port **8229** when it is up, and otherwise to the stock Python socket on port **8226** (`isaacsim.code_editor.vscode` on 5.x, `isaacsim.code_editor.python_server` on 6.0). The executor runs your code with `compile()` inside Kit's Python process, giving full access to the global namespace including `omni.*`, `pxr.*`, and `isaacsim.*`.
+Scripts go to the `khemoo.simul` bridge on port **8229** when it is up, and otherwise to the stock Python socket on port **8226** (`isaacsim.code_editor.vscode` on 5.x, `isaacsim.code_editor.python_server` on 6.0). The executor runs your code with `compile()` inside Kit's Python process, giving full access to the global namespace including `omni.*`, `pxr.*`, and `isaacsim.*`.
 
 Key rules:
 - `stdout` is captured and returned — use `print()` for all output

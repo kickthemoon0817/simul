@@ -20,11 +20,11 @@ from typing import Any, Dict
 import pytest
 
 
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
-from simul_mcp.mcp.schemas.common import ErrorResponse
-from simul_mcp.utils.paths import SandboxDenied
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
+from simul.mcp.schemas.common import ErrorResponse
+from simul.utils.paths import SandboxDenied
 from tests.fakes import FakeFastMCP
 
 OUTSIDE_SANDBOX = "/etc/shadow"

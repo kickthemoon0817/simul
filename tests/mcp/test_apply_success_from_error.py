@@ -1,6 +1,6 @@
 """Direct tests for the success-from-error helper.
 
-iter16 introduced ``simul_mcp.mcp.registration._helpers.apply_success_from_error``
+iter16 introduced ``simul.mcp.registration._helpers.apply_success_from_error``
 to replace 56 unconditional ``payload['success'] = True`` lines in
 ``_reg_unreal.py``. The helper's contract is small but load-bearing
 — every Unreal tool now passes its adapter response through it
@@ -11,7 +11,7 @@ misleading-success bug iter8 fixed for Isaac.
 
 from __future__ import annotations
 
-from simul_mcp.mcp.registration._helpers import apply_success_from_error
+from simul.mcp.registration._helpers import apply_success_from_error
 
 
 def test_payload_with_no_error_marks_success_true() -> None:
@@ -68,7 +68,7 @@ def test_returns_same_dict_for_chaining() -> None:
 def test_unreal_health_check_failure_shape_marks_false() -> None:
     """Concrete shape: the actual return shape from
     ``UnrealRuntimeSession.health_check()`` on connection failure
-    (per src/simul_mcp/adapters/unreal_runtime.py:573-578).
+    (per src/simul/adapters/unreal_runtime.py:573-578).
     """
     payload = {
         "connected": False,
@@ -81,7 +81,7 @@ def test_unreal_health_check_failure_shape_marks_false() -> None:
 
 def test_unreal_ping_success_shape_marks_true() -> None:
     """Concrete shape: ``UnrealRuntimeSession.ping()`` on success
-    (per src/simul_mcp/adapters/unreal_runtime.py:350-354)."""
+    (per src/simul/adapters/unreal_runtime.py:350-354)."""
     payload = {
         "reachable": True,
         "address": "127.0.0.1:30010",

@@ -12,7 +12,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
-from simul_mcp.config import Settings
+from simul.config import Settings
 
 ToolFunction = Callable[..., Any]
 

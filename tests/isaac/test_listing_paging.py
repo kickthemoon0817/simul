@@ -15,8 +15,8 @@ from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
 
-from simul_mcp.config import Settings
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul.config import Settings
+from simul.mcp.tools.isaac_tools import IsaacTools
 from tests.isaac.fake_usd import (
     FakePrim,
     FakeStage,

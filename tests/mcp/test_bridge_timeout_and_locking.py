@@ -20,14 +20,14 @@ from typing import Any, Dict
 import pytest
 
 
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
 from tests.fakes import FakeFastMCP
 
 
-from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle
-from khemoo.simul.mcp.service import READ_ONLY_ACTIONS
+from khemoo.simul.lifecycle import BridgeServerLifecycle
+from khemoo.simul.service import READ_ONLY_ACTIONS
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +87,7 @@ def test_a_prompt_handler_is_unaffected_by_the_timeout() -> None:
 
     async def _exercise() -> Dict[str, Any]:
         async def _prompt(request: Any) -> Any:
-            from khemoo.simul.mcp.protocol import BridgeResponse
+            from khemoo.simul.protocol import BridgeResponse
 
             return BridgeResponse.success(request.request_id, {"reachable": True})
 

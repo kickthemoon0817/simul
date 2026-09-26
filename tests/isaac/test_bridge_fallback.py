@@ -16,8 +16,8 @@ from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul.adapters.isaac_socket_client import ScriptResult
+from simul.mcp.tools.isaac_tools import IsaacTools
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ def test_delivered_bridge_action_is_not_replayed_on_the_script_path() -> None:
     The bridge may already have applied the action (e.g. ``simulation_control``
     start, a prim create); the script fallback would apply it twice.
     """
-    from simul_mcp.adapters.isaac_socket_client import BridgeResponseTimeoutError
+    from simul.adapters.isaac_socket_client import BridgeResponseTimeoutError
 
     client = _client_with_unreachable_bridge({"state": "playing", "started": True})
     client.bridge_request = AsyncMock(

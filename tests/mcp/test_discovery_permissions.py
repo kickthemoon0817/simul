@@ -5,7 +5,7 @@ to run as root — the compose file's attempt to run it as uid 1000 fails at
 exec with "Permission denied". Root then wrote the discovery file through
 ``tempfile.mkstemp``, which creates 0600, so the MCP server running as a normal
 user on the host shared the volume and still could not read it. Measured against
-a live container: ``cat /tmp/simul-mcp/simul-mcp-1.json`` -> Permission denied.
+a live container: ``cat /tmp/simul/simul-1.json`` -> Permission denied.
 
 The file holds a pid, a host and two ports — nothing secret. The directory it
 sits in stays 0700, so a single-user host is unchanged; the mode only matters
@@ -20,14 +20,14 @@ import stat
 from pathlib import Path
 
 
-from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle
+from khemoo.simul.lifecycle import BridgeServerLifecycle
 
 
 def _write(tmp_path: Path) -> Path:
     lifecycle = BridgeServerLifecycle(host="0.0.0.0", port=8229, request_handler=None)
     lifecycle._actual_port = 8229
     lifecycle.write_discovery_file(str(tmp_path), pid=1, vscode_port=8226)
-    return tmp_path / "simul-mcp-1.json"
+    return tmp_path / "simul-1.json"
 
 
 def test_discovery_file_is_readable_by_other_users(tmp_path: Path) -> None:

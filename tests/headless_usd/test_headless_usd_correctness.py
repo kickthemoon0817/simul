@@ -16,9 +16,9 @@ pytest.importorskip("pxr", reason="pxr library not available")
 
 from pxr import Usd, UsdGeom  # noqa: E402
 
-from simul_mcp.adapters.headless_usd import HeadlessUSDSession  # noqa: E402
-from simul_mcp.usd.bbox import BBoxCache  # noqa: E402
-from simul_mcp.usd.mesh_ops import MeshOperations  # noqa: E402
+from simul.adapters.headless_usd import HeadlessUSDSession  # noqa: E402
+from simul.usd.bbox import BBoxCache  # noqa: E402
+from simul.usd.mesh_ops import MeshOperations  # noqa: E402
 
 CUBE_POINTS: List[Tuple[float, float, float]] = [
     (-1, -1, -1),

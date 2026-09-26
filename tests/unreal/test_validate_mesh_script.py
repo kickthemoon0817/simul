@@ -16,7 +16,7 @@ from typing import Any, Dict
 
 import pytest
 
-from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
+from simul.adapters.unreal_runtime import UnrealRuntimeSession
 
 MESH_PATH = "/Game/Map.Map:PersistentLevel.DynamicMeshActor_0"
 

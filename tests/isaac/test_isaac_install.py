@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 
-from simul_mcp.adapters.isaac_install import (
+from simul.adapters.isaac_install import (
     NEWEST_KNOWN_MAJOR,
     PYTHON_SERVER_EXTENSION,
     PYTHON_SOCKET_PORT_SETTINGS,
@@ -17,9 +17,9 @@ from simul_mcp.adapters.isaac_install import (
     read_isaac_version,
 )
 
-extension_root = Path(__file__).resolve().parents[2] / "src" / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"
+extension_root = Path(__file__).resolve().parents[2] / "src" / "simul" / "bridge_ext" / "khemoo.simul"
 
-from khemoo.simul.mcp import extension as bridge_extension  # noqa: E402
+from khemoo.simul import extension as bridge_extension  # noqa: E402
 
 
 @pytest.mark.parametrize(
@@ -88,7 +88,7 @@ def test_older_major_has_no_transport_extension() -> None:
 
 
 def test_port_setting_table_matches_the_bridge_extension() -> None:
-    """The bridge runs inside Kit and cannot import simul_mcp, so it carries its own copy."""
+    """The bridge runs inside Kit and cannot import simul, so it carries its own copy."""
     assert bridge_extension.PYTHON_SOCKET_PORT_SETTINGS == PYTHON_SOCKET_PORT_SETTINGS
     newest_first = [PYTHON_TRANSPORT_EXTENSIONS[major] for major in sorted(PYTHON_TRANSPORT_EXTENSIONS, reverse=True)]
     assert PYTHON_SOCKET_PORT_SETTINGS == tuple(f"/exts/{ext}/port" for ext in newest_first)

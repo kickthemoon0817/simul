@@ -1,8 +1,8 @@
 # CLI reference
 
-The package installs one command under two names, `simul-mcp` and `simul`.
+The `simul-toolkit` package installs one command, `simul`.
 Every subcommand accepts `--help`. For a machine-readable list of all
-commands and their parameters, run `simul-mcp commands` (always JSON).
+commands and their parameters, run `simul commands` (always JSON).
 
 ## Output
 
@@ -13,35 +13,35 @@ commands and their parameters, run `simul-mcp commands` (always JSON).
   domain result, not a crash: read the JSON payload.
 
 ```bash
-simul-mcp --json info
-simul-mcp isaac scene | jq .
+simul --json info
+simul isaac scene | jq .
 ```
 
 ## Server and general commands
 
 | Command | Purpose |
 |---|---|
-| `simul-mcp server` | Start the MCP server |
-| `simul-mcp info [--config FILE]` | Backends reachable from this machine and the tools registered for them |
-| `simul-mcp commands` | Every CLI command with its parameters, as JSON |
-| `simul-mcp validate-config FILE` | Validate a YAML configuration file |
-| `simul-mcp version` | Version information |
-| `simul-mcp stats [--tool NAME] [--recent N] [--reset]` | Tool usage statistics from the persistent log; `--reset` clears it |
-| `simul-mcp logs paths` | Resolved log file paths for the current settings |
-| `simul-mcp logs tail [-n N] [--follow] [--audit] [--json-log] [--tool NAME] [--file PATH]` | Pretty-print the end of a log file |
+| `simul server` | Start the MCP server |
+| `simul info [--config FILE]` | Backends reachable from this machine and the tools registered for them |
+| `simul commands` | Every CLI command with its parameters, as JSON |
+| `simul validate-config FILE` | Validate a YAML configuration file |
+| `simul version` | Version information |
+| `simul stats [--tool NAME] [--recent N] [--reset]` | Tool usage statistics from the persistent log; `--reset` clears it |
+| `simul logs paths` | Resolved log file paths for the current settings |
+| `simul logs tail [-n N] [--follow] [--audit] [--json-log] [--tool NAME] [--file PATH]` | Pretty-print the end of a log file |
 
-### `simul-mcp server`
+### `simul server`
 
 ```bash
-simul-mcp server                                   # stdio, every available backend
-simul-mcp server --backends unreal                 # only Unreal tools (plus usage stats)
-simul-mcp server --backends isaac,usd
-simul-mcp server --backends unreal --unreal-tools full
-simul-mcp server --backends blender --blender-tools thin
-simul-mcp server --backends unreal --unreal-mode attached
-simul-mcp server --backends blender --blender-mode attached
-simul-mcp server --transport http                  # streamable HTTP on server.host:server.port
-simul-mcp server --config /abs/path/config.yaml --log-level DEBUG
+simul server                                   # stdio, every available backend
+simul server --backends unreal                 # only Unreal tools (plus usage stats)
+simul server --backends isaac,usd
+simul server --backends unreal --unreal-tools full
+simul server --backends blender --blender-tools thin
+simul server --backends unreal --unreal-mode attached
+simul server --backends blender --blender-mode attached
+simul server --transport http                  # streamable HTTP on server.host:server.port
+simul server --config /abs/path/config.yaml --log-level DEBUG
 ```
 
 | Option | Meaning |
@@ -59,18 +59,18 @@ simul-mcp server --config /abs/path/config.yaml --log-level DEBUG
 `--backends` also limits the startup probes: backends you did not select are
 neither probed nor built.
 
-### `simul-mcp tools`
+### `simul tools`
 
 Lists the MCP tools the server would register, grouped by backend, without
 connecting to any engine. It takes the same `--backends`, `--unreal-tools`,
 `--blender-tools`, `--unreal-mode` and `--blender-mode` options as `server`.
 
 ```bash
-simul-mcp tools                                    # names, grouped by backend
-simul-mcp --json tools --backends blender --blender-tools thin   # with descriptions and schemas
+simul tools                                    # names, grouped by backend
+simul --json tools --backends blender --blender-tools thin   # with descriptions and schemas
 ```
 
-## `simul-mcp isaac`
+## `simul isaac`
 
 Commands that talk to a running Isaac Sim accept `-H/--host` and `-p/--port`
 to override the configured socket. See [isaac-sim.md](isaac-sim.md) for the
@@ -80,7 +80,7 @@ lifecycle.
 
 | Command | Purpose |
 |---|---|
-| `install-bridge [--isaac-root PATH] [--symlink] [--force] [--source PATH]` | Publish the bundled `khemoo.simul.mcp` extension into `<isaac-root>/extsUser/` |
+| `install-bridge [--isaac-root PATH] [--symlink] [--force] [--source PATH]` | Publish the bundled `khemoo.simul` extension into `<isaac-root>/extsUser/` |
 | `launch [--isaac-root PATH] [--no-headless] [--dry-run] ...` | Start Isaac Sim with the Python socket and the bridge enabled, and wait for the ports |
 | `bridge-up` | On a running 5.x editor, enable the bridge through the Python socket and wait for port 8229 |
 | `ping` | Check connectivity |
@@ -111,12 +111,12 @@ lifecycle.
 | `exec CODE_OR_FILE [--raw]` | Run Python inside Isaac Sim |
 
 ```bash
-simul-mcp isaac exec "print('hello')"
-simul-mcp isaac step 120
-simul-mcp isaac capture shot.png --eye 3,3,2 --target 0,0,0
+simul isaac exec "print('hello')"
+simul isaac step 120
+simul isaac capture shot.png --eye 3,3,2 --target 0,0,0
 ```
 
-## `simul-mcp unreal`
+## `simul unreal`
 
 Commands accept `-H/--host` and `-p/--port` for the Remote Control endpoint
 (default `localhost:30010`).
@@ -151,7 +151,7 @@ Captures move from the editor to disk in bounded chunks, so files larger than
 the MCP inline limit still arrive. `--format jpeg` converts the downloaded PNG
 locally.
 
-## `simul-mcp blender`
+## `simul blender`
 
 | Command | Purpose |
 |---|---|
@@ -163,7 +163,7 @@ locally.
 
 See [blender-attachment.md](blender-attachment.md).
 
-## `simul-mcp usd`
+## `simul usd`
 
 Headless commands; no application needs to be running.
 

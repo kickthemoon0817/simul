@@ -17,9 +17,9 @@ import pytest
 from typer.testing import CliRunner
 
 
-from simul_mcp.cli import main as cli_main
-from simul_mcp.cli.main import app
-from simul_mcp.config import Settings
+from simul.cli import main as cli_main
+from simul.cli.main import app
+from simul.config import Settings
 
 runner = CliRunner()
 

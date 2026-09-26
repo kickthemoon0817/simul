@@ -6,10 +6,10 @@ The version lives in **four places that always move together**:
 
 - `pyproject.toml` → `[project] version = "X.Y.Z"`
 - `.claude-plugin/plugin.json` → `"version": "X.Y.Z"`
-- `src/simul_mcp/__init__.py` → `__version__ = "X.Y.Z"`
-- `src/simul_mcp/bridge_ext/khemoo.simul.mcp/config/extension.toml` →
+- `src/simul/__init__.py` → `__version__ = "X.Y.Z"`
+- `src/simul/bridge_ext/khemoo.simul/config/extension.toml` →
   `[package] version = "X.Y.Z"`. The Isaac Sim bridge extension ships inside
-  the wheel; its version-suffixed Kit ID (`khemoo.simul.mcp-X.Y.Z`) must
+  the wheel; its version-suffixed Kit ID (`khemoo.simul-X.Y.Z`) must
   match the package so either side reports the same version.
 
 ## Policy

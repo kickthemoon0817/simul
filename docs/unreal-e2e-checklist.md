@@ -50,7 +50,7 @@ Per-OS coverage: the live tests are OS-agnostic at the Python level
 ## Available tools (thin-mode MCP surface)
 
 simul ships thin mode by default — only 6 Unreal tools register. The full
-~50-tool set is opt-in via `simul-mcp server --unreal-tools full` (or
+~50-tool set is opt-in via `simul server --unreal-tools full` (or
 `unreal.tool_surface: full` in config); this checklist targets the thin
 surface because that's what agents see by default.
 
@@ -255,7 +255,7 @@ the summary is what matters to the parent conversation.
 - **Thin vs full registration.** This checklist targets the thin 6-tool
   surface that ships by default. If you've enabled the full ~50-tool
   registration, additional granular tools are available but this doc does
-  not enumerate them (see `src/simul_mcp/mcp/registration/_reg_unreal.py`).
+  not enumerate them (see `src/simul/mcp/registration/_reg_unreal.py`).
 - **macOS `open -a "Unreal Editor" --args`** is used only with
   `--no-headless` (and no `--engine-path`), and relies on LaunchServices
   having registered the app. Headless launches (the default) run the

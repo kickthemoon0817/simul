@@ -11,7 +11,7 @@ File bugs and feature requests at
 - **What** happened, in one sentence
 - **Reproduction**: the exact command or MCP tool call with its inputs
 - **Expected** and **observed** behaviour, including the JSON error payload
-- **Environment**: `simul-mcp version`, the backend and its version (Isaac Sim,
+- **Environment**: `simul version`, the backend and its version (Isaac Sim,
   Unreal Engine, Blender), and your OS
 
 For a security problem, open an issue asking for a private contact and leave

@@ -16,14 +16,14 @@ from typing import Any, Dict, List
 import pytest
 from typer.testing import CliRunner
 
-from simul_mcp.adapters import HeadlessUSDAdapter, IsaacRuntimeAdapter, UnrealRuntimeAdapter
-from simul_mcp.adapters.base import BackendAdapter
-from simul_mcp.cli import main as cli_main
-from simul_mcp.cli.main import app
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
-from simul_mcp.mcp.backends import ALL_BACKEND_NAMES, BACKENDS, BackendSpec, backend_spec
+from simul.adapters import HeadlessUSDAdapter, IsaacRuntimeAdapter, UnrealRuntimeAdapter
+from simul.adapters.base import BackendAdapter
+from simul.cli import main as cli_main
+from simul.cli.main import app
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
+from simul.mcp.backends import ALL_BACKEND_NAMES, BACKENDS, BackendSpec, backend_spec
 from tests.fakes import AvailableAdapter
 
 runner = CliRunner()

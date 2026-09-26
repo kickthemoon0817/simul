@@ -39,7 +39,7 @@ def overlay(monkeypatch):
         ),
     )
     monkeypatch.setitem(sys.modules, "bpy", bpy)
-    path = Path(__file__).parents[2] / "src/simul_mcp/blender_bridge/agent_cursor.py"
+    path = Path(__file__).parents[2] / "src/simul/blender_bridge/agent_cursor.py"
     spec = importlib.util.spec_from_file_location("agent_cursor_under_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

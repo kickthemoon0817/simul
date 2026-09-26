@@ -17,9 +17,9 @@ import pytest
 from fastmcp import Client
 
 
-from simul_mcp.adapters import is_headless_available
-from simul_mcp.config import Settings
-from simul_mcp.mcp.server import SimulMCPServer
+from simul.adapters import is_headless_available
+from simul.config import Settings
+from simul.mcp.server import SimulMCPServer
 
 FIXTURE_SCENE: Path = Path(__file__).resolve().parents[1] / "data" / "simple_scene.usda"
 

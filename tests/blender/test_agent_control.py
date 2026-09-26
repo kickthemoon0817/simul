@@ -12,7 +12,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from simul_mcp.mcp.schemas.blender_ui import BlenderUIRequest
+from simul.mcp.schemas.blender_ui import BlenderUIRequest
 
 
 @pytest.fixture
@@ -52,12 +52,12 @@ def ui(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, Any]:
     }
     monkeypatch.setitem(
         sys.modules,
-        "simul_mcp.blender_bridge.agent_cursor",
+        "simul.blender_bridge.agent_cursor",
         SimpleNamespace(cursors=cursors, observations=Mock()),
     )
-    path = Path(__file__).parents[2] / "src/simul_mcp/blender_bridge/agent_control.py"
+    path = Path(__file__).parents[2] / "src/simul/blender_bridge/agent_control.py"
     spec = importlib.util.spec_from_file_location(
-        "simul_mcp.blender_bridge.agent_control_under_test", path
+        "simul.blender_bridge.agent_control_under_test", path
     )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

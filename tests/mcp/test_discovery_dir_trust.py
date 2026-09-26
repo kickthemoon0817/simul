@@ -13,19 +13,19 @@ from typing import Any, List
 import pytest
 
 
-from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle
-from simul_mcp.config import Settings
-from simul_mcp.adapters import isaac_runtime as isaac_runtime_module
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
-from simul_mcp.utils.discovery import DiscoveryDir
+from khemoo.simul.lifecycle import BridgeServerLifecycle
+from simul.config import Settings
+from simul.adapters import isaac_runtime as isaac_runtime_module
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
+from simul.utils.discovery import DiscoveryDir
 from tests.fakes import FakeFastMCP
 
 DEAD_PID = 2**31 - 1
 
 
 _WARNING_LOGGERS = (
-    "simul_mcp.utils.discovery",
+    "simul.utils.discovery",
     f"{server_module.SimulMCPServer.__module__}.SimulMCPServer",
 )
 
@@ -34,7 +34,7 @@ class _Records(logging.Handler):
     """Collect records straight from the loggers under test.
 
     Tests elsewhere call ``setup_logging``, whose dictConfig stops propagation
-    from ``simul_mcp`` and disables loggers it does not name; after that
+    from ``simul`` and disables loggers it does not name; after that
     caplog's root handler never sees these warnings, so listen on the emitting
     loggers themselves.
     """
@@ -91,7 +91,7 @@ def _make_server(monkeypatch: pytest.MonkeyPatch, discovery_dir: Path) -> server
 
 
 def _write_discovery_file(discovery_dir: Path) -> None:
-    (discovery_dir / "simul-mcp-4242.json").write_text(
+    (discovery_dir / "simul-4242.json").write_text(
         json.dumps({"pid": 4242, "host": "127.0.0.1", "port": 9229, "vscode_port": 9226})
     )
 
@@ -129,7 +129,7 @@ def test_directory_owned_by_someone_else_is_a_problem(tmp_path: Path, monkeypatc
         values[stat.ST_UID] = os.getuid() + 1
         return os.stat_result(values)
 
-    monkeypatch.setattr("simul_mcp.utils.discovery.os.stat", foreign_stat)
+    monkeypatch.setattr("simul.utils.discovery.os.stat", foreign_stat)
     problem = DiscoveryDir(tmp_path).problem()
     assert problem is not None
     assert "owned by uid" in problem
@@ -153,7 +153,7 @@ async def test_discovery_refuses_world_writable_directory(
 
     assert discovered == {}
     assert any("Skipping Isaac discovery files" in m and "writable by other users" in m for m in simul_warnings)
-    assert (tmp_path / "simul-mcp-4242.json").exists(), "refusing must not delete the file"
+    assert (tmp_path / "simul-4242.json").exists(), "refusing must not delete the file"
 
 
 @pytest.mark.asyncio
@@ -179,10 +179,10 @@ def test_bridge_warns_but_still_writes_into_shared_directory(
     lifecycle = BridgeServerLifecycle(host="127.0.0.1", port=8229, request_handler=None)
     lifecycle._actual_port = 8229
 
-    with caplog.at_level(logging.WARNING, logger="khemoo.simul.mcp.lifecycle"):
+    with caplog.at_level(logging.WARNING, logger="khemoo.simul.lifecycle"):
         lifecycle.write_discovery_file(str(tmp_path), pid=1, vscode_port=8226)
 
-    assert (tmp_path / "simul-mcp-1.json").exists()
+    assert (tmp_path / "simul-1.json").exists()
     assert any("not trustworthy" in record.getMessage() for record in caplog.records)
 
 
@@ -191,7 +191,7 @@ def test_bridge_is_quiet_on_private_directory(tmp_path: Path, caplog: pytest.Log
     lifecycle = BridgeServerLifecycle(host="127.0.0.1", port=8229, request_handler=None)
     lifecycle._actual_port = 8229
 
-    with caplog.at_level(logging.WARNING, logger="khemoo.simul.mcp.lifecycle"):
+    with caplog.at_level(logging.WARNING, logger="khemoo.simul.lifecycle"):
         lifecycle.write_discovery_file(str(tmp_path), pid=1)
 
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

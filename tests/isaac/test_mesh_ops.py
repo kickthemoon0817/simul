@@ -14,8 +14,8 @@ from unittest.mock import Mock, patch, MagicMock
 
 pytest.importorskip("pxr", reason="pxr library not available")
 
-from simul_mcp.usd.mesh_ops import MeshOperations, MeshInfo  # noqa: E402
-from simul_mcp.utils.math import BBox  # noqa: E402
+from simul.usd.mesh_ops import MeshOperations, MeshInfo  # noqa: E402
+from simul.utils.math import BBox  # noqa: E402
 
 
 class TestMeshOperations:
@@ -116,7 +116,7 @@ class TestMeshOperations:
         """Test MeshOperations initialization."""
         assert isinstance(MeshOperations(), MeshOperations)
 
-    @patch("simul_mcp.usd.mesh_ops.UsdGeom")
+    @patch("simul.usd.mesh_ops.UsdGeom")
     def test_extract_mesh_data_success(self, mock_usd_geom, mesh_ops, mock_mesh_prim):
         """Test successful mesh data extraction."""
         mock_prim, mock_mesh = mock_mesh_prim
@@ -133,7 +133,7 @@ class TestMeshOperations:
         assert len(mesh_data["face_vertex_indices"]) == 24
         assert mesh_data["subdivision_scheme"] == "none"
 
-    @patch("simul_mcp.usd.mesh_ops.UsdGeom")
+    @patch("simul.usd.mesh_ops.UsdGeom")
     def test_extract_mesh_data_not_mesh(self, mock_usd_geom, mesh_ops):
         """Test mesh data extraction on non-mesh prim."""
         mock_prim = Mock()
@@ -143,7 +143,7 @@ class TestMeshOperations:
         with pytest.raises(ValueError, match="is not a mesh"):
             mesh_ops.extract_mesh_data(mock_prim)
 
-    @patch("simul_mcp.usd.mesh_ops.UsdGeom")
+    @patch("simul.usd.mesh_ops.UsdGeom")
     def test_get_mesh_statistics(self, mock_usd_geom, mesh_ops, mock_mesh_prim):
         """Test mesh statistics computation."""
         mock_prim, mock_mesh = mock_mesh_prim
@@ -298,7 +298,7 @@ class TestMeshOperations:
 
         assert volume == 0.0
 
-    @patch("simul_mcp.usd.mesh_ops.UsdGeom")
+    @patch("simul.usd.mesh_ops.UsdGeom")
     def test_get_mesh_materials_empty(self, mock_usd_geom, mesh_ops):
         """Test getting mesh materials when none are bound."""
         mock_prim = Mock()
@@ -310,7 +310,7 @@ class TestMeshOperations:
 
         assert materials == []
 
-    @patch("simul_mcp.usd.mesh_ops.UsdGeom")
+    @patch("simul.usd.mesh_ops.UsdGeom")
     def test_get_geometry_subsets_empty(self, mock_usd_geom, mesh_ops):
         """Test getting geometry subsets when none exist."""
         mock_prim = Mock()
@@ -371,10 +371,10 @@ class TestMeshInfo:
 class TestConvenienceFunctions:
     """Test cases for convenience functions."""
 
-    @patch("simul_mcp.usd.mesh_ops.MeshOperations")
+    @patch("simul.usd.mesh_ops.MeshOperations")
     def test_extract_mesh_data_function(self, mock_mesh_ops_class):
         """Test extract_mesh_data convenience function."""
-        from simul_mcp.usd.mesh_ops import extract_mesh_data
+        from simul.usd.mesh_ops import extract_mesh_data
 
         mock_ops = Mock()
         mock_mesh_ops_class.return_value = mock_ops
@@ -387,10 +387,10 @@ class TestConvenienceFunctions:
         mock_ops.extract_mesh_data.assert_called_once_with(mock_prim, None)
         assert result == {"test": "data"}
 
-    @patch("simul_mcp.usd.mesh_ops.MeshOperations")
+    @patch("simul.usd.mesh_ops.MeshOperations")
     def test_get_mesh_statistics_function(self, mock_mesh_ops_class):
         """Test get_mesh_statistics convenience function."""
-        from simul_mcp.usd.mesh_ops import get_mesh_statistics
+        from simul.usd.mesh_ops import get_mesh_statistics
 
         mock_ops = Mock()
         mock_mesh_ops_class.return_value = mock_ops

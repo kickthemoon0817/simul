@@ -1,0 +1,1191 @@
+"""
+Unreal Engine CLI sub-commands.
+
+Provides direct terminal access to a running Unreal Engine instance via
+the Remote Control HTTP API. Designed as the primary interface for AI
+agents — thin MCP registration keeps context small while this CLI
+exposes the full operation set.
+
+All commands support ``--json`` (or auto-detect via TTY) for structured
+JSON output on stdout, making them consumable by AI agents via Bash.
+"""
+
+import asyncio
+import hashlib
+import json
+import subprocess
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Coroutine, Dict, List, NoReturn, Optional
+
+import typer
+from rich.markup import escape as rich_escape
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.table import Table
+
+from simul.adapters.unreal_setup import (
+    LauncherNotFound,
+    ensure_remote_control_config,
+    is_loopback_bind,
+    launch_editor,
+    resolve_launch_argv,
+)
+from simul.cli.output import (
+    console,
+    emit,
+    emit_error,
+    exit_if_failed,
+    fail,
+    is_json_mode,
+    read_script_arg,
+    run_or_exit,
+)
+from simul.config import get_settings
+
+if TYPE_CHECKING:
+    # Imported where a session is built: unreal_runtime pulls in aiohttp,
+    # which `simul --help` and `simul unreal setup` never need.
+    from simul.adapters.unreal_runtime import UnrealRuntimeSession
+
+app = typer.Typer(
+    name="unreal",
+    help="Unreal Engine commands -- interact with a running UE5 instance via Remote Control API.",
+    add_completion=False,
+)
+
+
+def _session(
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    timeout: Optional[int] = None,
+    *,
+    passphrase: Optional[str] = None,
+    mode: Optional[str] = None,
+) -> "UnrealRuntimeSession":
+    """Build an UnrealRuntimeSession with optional overrides.
+
+    ``passphrase`` accepts either plaintext or a pre-computed MD5 hex
+    digest — UnrealRuntimeSession's __init__ normalises via
+    ``_passphrase_to_md5``. Used by the setup CLI so its polling
+    loop can authenticate when --passphrase enabled enforcement on
+    the editor.
+    """
+    settings = get_settings()
+    overrides: Dict[str, Any] = {}
+    if mode is not None:
+        overrides["mode"] = mode
+    elif settings.unreal.mode == "attached" and (host is not None or port is not None):
+        emit_error(
+            "Host/port overrides cannot replace an attached editor; attach the desired endpoint first",
+            "ValueError",
+        )
+    if host is not None:
+        overrides["host"] = host
+    if port is not None:
+        overrides["port"] = port
+    if timeout is not None:
+        overrides["timeout"] = timeout
+    if passphrase is not None:
+        overrides["passphrase"] = passphrase
+    if overrides:
+        unreal_cfg = settings.unreal.model_copy(update=overrides)
+        settings = settings.model_copy(update={"unreal": unreal_cfg})
+    from simul.adapters.unreal_runtime import UnrealRuntimeSession
+
+    return UnrealRuntimeSession(settings)
+
+
+async def _script_refusal(session: "UnrealRuntimeSession") -> Dict[str, Any]:
+    return session._script_execution_denied()
+
+
+def _run(coro: Coroutine[Any, Any, Dict[str, Any]]) -> Dict[str, Any]:
+    """Run an async session method; exit non-zero on an exception or failed payload."""
+    return run_or_exit(coro, catch_exceptions=True)
+
+
+# Common options
+_host_opt = typer.Option(None, "--host", "-H", help="Remote Control API host")
+_port_opt = typer.Option(None, "--port", "-p", help="Remote Control API port")
+_timeout_opt = typer.Option(None, "--timeout", "-t", help="HTTP timeout in seconds")
+
+
+async def _attached_call(method: str, **kwargs: Any) -> Dict[str, Any]:
+    settings = get_settings()
+    settings = settings.model_copy(
+        update={"unreal": settings.unreal.model_copy(update={"mode": "attached"})}
+    )
+    from simul.adapters.unreal_runtime import UnrealRuntimeSession
+
+    session = UnrealRuntimeSession(settings)
+    try:
+        return await getattr(session, method)(**kwargs)
+    finally:
+        await session.close()
+
+
+@app.command("instances")
+def instances(host: Optional[str] = _host_opt, port: Optional[int] = _port_opt) -> None:
+    """Discover running editors and their level viewport identifiers."""
+    from ..adapters.unreal_connection import UnrealAttachments
+
+    async def inspect() -> Dict[str, Any]:
+        return {
+            "instances": await UnrealAttachments(get_settings()).instances(host, port)
+        }
+
+    emit(_run(inspect()))
+
+
+@app.command("attach")
+def attach(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+    viewport: Optional[str] = typer.Option(
+        None, "--viewport", help="Viewport config key from instances"
+    ),
+) -> None:
+    """Select an existing editor/map/viewport without loading, saving or launching."""
+    from ..adapters.unreal_connection import UnrealAttachments
+
+    emit(_run(UnrealAttachments(get_settings()).attach(host, port, viewport)))
+
+
+@app.command("status")
+def status() -> None:
+    """Verify the saved editor selection and report current identity."""
+    emit(_run(_attached_call("attachment_status")))
+
+
+@app.command("detach")
+def detach() -> None:
+    """Forget the selected editor, leaving its scene and process untouched."""
+    from ..adapters.unreal_connection import UnrealAttachments
+
+    try:
+        emit(UnrealAttachments(get_settings()).detach())
+    except (OSError, ValueError) as exc:
+        emit_error(str(exc), type(exc).__name__)
+
+
+@app.command("control")
+def control(
+    action: str = typer.Argument(
+        ...,
+        help="inspect, select_actor, clear_selection, set_property, "
+        "pilot_actor, eject_actor, set_game_view, move_cursor or clear_cursor",
+    ),
+    target: Optional[str] = typer.Option(
+        None, "--target", help="Actor path or unique label"
+    ),
+    property_name: Optional[str] = typer.Option(
+        None, "--property", help="location, rotation or scale"
+    ),
+    value: Optional[str] = typer.Option(
+        None, "--value", help="JSON vector, e.g. '[100,0,200]'"
+    ),
+    enabled: Optional[bool] = typer.Option(
+        None, "--enabled/--disabled", help="Game view state"
+    ),
+    agent_id: str = typer.Option(
+        "agent", "--agent-id", help="Unique label for this agent"
+    ),
+    position: Optional[str] = typer.Option(
+        None,
+        "--position",
+        help="move_cursor: normalized JSON [x,y], bottom-left origin",
+    ),
+    activity: Optional[str] = typer.Option(
+        None, "--activity", help="move_cursor: current activity label"
+    ),
+) -> None:
+    """Apply a named control to the explicitly attached editor."""
+    try:
+        parsed = json.loads(value) if value is not None else None
+        from ..mcp.schemas.unreal_ui import UnrealUIRequest
+
+        request = UnrealUIRequest(
+            agent_control=action,
+            target=target,
+            property_name=property_name,
+            value=parsed,
+            enabled=enabled,
+            agent_id=agent_id,
+            position=json.loads(position) if position is not None else None,
+            activity=activity,
+        )
+    except ValueError as exc:
+        emit_error(str(exc), "ValueError")
+    # overlay_error means the editor action completed but its cursor annotation
+    # did not: keep the result on stdout, then exit non-zero like the MCP envelope.
+    result = run_or_exit(
+        _attached_call("control_ui", **request.model_dump()),
+        catch_exceptions=True,
+        allow_partial=True,
+    )
+    emit(result)
+    exit_if_failed(result)
+
+
+# ---------------------------------------------------------------------------
+# health
+# ---------------------------------------------------------------------------
+@app.command()
+def health(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Check connectivity to Unreal Engine Remote Control API."""
+    session = _session(host, port)
+    result = _run(session.health_check())
+    if is_json_mode():
+        emit(result)
+        return
+    connected = result.get("connected", False)
+    if connected:
+        console.print(
+            f"[green]Connected[/green] to UE5 @ {session.settings.unreal.host}:{session.settings.unreal.port}"
+        )
+        if result.get("engine_version"):
+            console.print(f"  Engine: {result['engine_version']}")
+        if result.get("project_name"):
+            console.print(f"  Project: {result['project_name']}")
+    else:
+        console.print("[red]Not connected[/red]")
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# info
+# ---------------------------------------------------------------------------
+@app.command()
+def info(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Get Unreal Engine runtime information."""
+    session = _session(host, port)
+    result = _run(session.get_engine_info())
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(Syntax(json.dumps(result, indent=2, default=str), "json", theme="monokai"))
+
+
+# ---------------------------------------------------------------------------
+# scene
+# ---------------------------------------------------------------------------
+@app.command()
+def scene(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Summarize the current Unreal scene for AI consumption."""
+    session = _session(host, port)
+    result = _run(session.summarize_scene())
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(Syntax(json.dumps(result, indent=2, default=str), "json", theme="monokai"))
+
+
+# ---------------------------------------------------------------------------
+# map
+# ---------------------------------------------------------------------------
+@app.command()
+def map(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Get the currently loaded persistent level path."""
+    session = _session(host, port)
+    result = _run(session.get_loaded_map())
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(f"Map: {result.get('map_path', '?')}")
+
+
+# ---------------------------------------------------------------------------
+# list-actors
+# ---------------------------------------------------------------------------
+@app.command("list-actors")
+def list_actors(
+    actor_class: Optional[str] = typer.Option(None, "--class", "-c", help="Filter by actor class"),
+    tag: Optional[str] = typer.Option(None, "--tag", help="Filter by actor tag"),
+    limit: int = typer.Option(200, "--limit", "-n", help="Max actors to return"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """List actors in the current level."""
+    session = _session(host, port)
+    result = _run(session.list_actors(
+        class_filter=actor_class,
+        tag_filter=tag,
+        max_results=limit,
+    ))
+    if is_json_mode():
+        emit(result)
+        return
+    actors = result.get("actors", [])
+    table = Table(title=f"Actors ({len(actors)})")
+    table.add_column("Path", style="cyan")
+    table.add_column("Class")
+    table.add_column("Label")
+    for a in actors:
+        if isinstance(a, dict):
+            table.add_row(
+                a.get("path", "?"),
+                a.get("class", "?"),
+                a.get("label", ""),
+            )
+        else:
+            table.add_row(str(a), "", "")
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# actor-info
+# ---------------------------------------------------------------------------
+@app.command("actor-info")
+def actor_info(
+    actor_path: str = typer.Argument(..., help="Actor path in the level"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Get detailed information about a specific actor."""
+    session = _session(host, port)
+    result = _run(session.get_actor_info(actor_path))
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(Syntax(json.dumps(result, indent=2, default=str), "json", theme="monokai"))
+
+
+# ---------------------------------------------------------------------------
+# spawn
+# ---------------------------------------------------------------------------
+@app.command()
+def spawn(
+    actor_class: str = typer.Argument(..., help="Actor class or asset path to spawn"),
+    label: Optional[str] = typer.Option(None, "--label", "-l", help="Actor label"),
+    location: Optional[str] = typer.Option(None, "--location", "--pos", help="Location as x,y,z"),
+    rotation: Optional[str] = typer.Option(None, "--rotation", "--rot", help="Rotation as pitch,yaw,roll"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Spawn an actor from a class or asset path."""
+    try:
+        loc = tuple(float(v) for v in location.split(",")) if location else (0.0, 0.0, 0.0)
+        rot = tuple(float(v) for v in rotation.split(",")) if rotation else (0.0, 0.0, 0.0)
+    except (ValueError, IndexError) as e:
+        fail(f"Invalid transform value: {e}", "ValueError")
+
+    session = _session(host, port)
+    result = _run(session.spawn_actor(
+        asset_path=actor_class,
+        location=loc,
+        rotation=rot,
+        label=label,
+    ))
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(f"[green]Spawned[/green] {result.get('actor_path', actor_class)}")
+
+
+# ---------------------------------------------------------------------------
+# delete
+# ---------------------------------------------------------------------------
+@app.command()
+def delete(
+    actor_path: str = typer.Argument(..., help="Actor path to delete"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Delete an actor from the level."""
+    session = _session(host, port)
+    result = _run(session.delete_actor(actor_path))
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(f"[green]Deleted[/green] {actor_path}")
+
+
+# ---------------------------------------------------------------------------
+# set-transform
+# ---------------------------------------------------------------------------
+@app.command("set-transform")
+def set_transform(
+    actor_path: str = typer.Argument(..., help="Actor path"),
+    location: Optional[str] = typer.Option(None, "--location", "--pos", help="Location as x,y,z"),
+    rotation: Optional[str] = typer.Option(None, "--rotation", "--rot", help="Rotation as pitch,yaw,roll"),
+    scale: Optional[str] = typer.Option(None, "--scale", help="Scale as x,y,z"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Set an actor's location, rotation, and scale."""
+    try:
+        loc = tuple(float(v) for v in location.split(",")) if location else None
+        rot = tuple(float(v) for v in rotation.split(",")) if rotation else None
+        sc = tuple(float(v) for v in scale.split(",")) if scale else None
+    except ValueError as e:
+        fail(f"Invalid numeric value: {e}", "ValueError")
+
+    session = _session(host, port)
+    result = _run(session.set_actor_transform(
+        actor_path=actor_path,
+        location=loc,
+        rotation=rot,
+        scale=sc,
+    ))
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(f"[green]Transform set[/green] on {actor_path}")
+
+
+# ---------------------------------------------------------------------------
+# set-property
+# ---------------------------------------------------------------------------
+@app.command("set-property")
+def set_property(
+    actor_path: str = typer.Argument(..., help="Actor path"),
+    property_name: str = typer.Argument(..., help="Property name"),
+    value: str = typer.Argument(..., help="Property value (JSON)"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Set a property on an Unreal actor by name and JSON value."""
+    try:
+        parsed_value = json.loads(value)
+    except json.JSONDecodeError:
+        parsed_value = value  # treat as string
+
+    session = _session(host, port)
+    result = _run(session.set_actor_property(
+        actor_path=actor_path,
+        property_name=property_name,
+        property_value=json.dumps(parsed_value) if not isinstance(parsed_value, str) else parsed_value,
+    ))
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(f"[green]Set[/green] {property_name} on {actor_path}")
+
+
+# ---------------------------------------------------------------------------
+# search
+# ---------------------------------------------------------------------------
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Search query (name or class)"),
+    search_class: Optional[str] = typer.Option(None, "--class", "-c", help="Filter by asset class"),
+    package_path: Optional[str] = typer.Option(None, "--package", help="Filter by package path"),
+    limit: int = typer.Option(50, "--limit", "-n", help="Max results"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Search the Unreal Asset Registry."""
+    session = _session(host, port)
+    result = _run(session.search_assets(
+        query=query,
+        class_names=[search_class] if search_class else None,
+        package_paths=[package_path] if package_path else None,
+        max_results=limit,
+    ))
+    if is_json_mode():
+        emit(result)
+        return
+    assets = result.get("assets", [])
+    table = Table(title=f"Assets matching '{query}' ({len(assets)})")
+    table.add_column("Path", style="cyan")
+    table.add_column("Class")
+    for a in assets:
+        if isinstance(a, dict):
+            table.add_row(a.get("path", "?"), a.get("class", "?"))
+        else:
+            table.add_row(str(a), "")
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# sim
+# ---------------------------------------------------------------------------
+@app.command()
+def sim(
+    action: str = typer.Argument(..., help="Simulation action: start, stop, pause, resume, step"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Control Play-In-Editor simulation: start, stop, pause, resume, step."""
+    valid = {"start", "stop", "pause", "resume", "step"}
+    if action not in valid:
+        msg = f"Invalid action '{action}'. Must be one of: {', '.join(sorted(valid))}"
+        fail(msg, "ValueError")
+
+    session = _session(host, port)
+    result = _run(session.control_simulation(action))
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(f"[green]{action}[/green] OK")
+
+
+# ---------------------------------------------------------------------------
+# sim-status
+# ---------------------------------------------------------------------------
+@app.command("sim-status")
+def sim_status(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Get current Play-In-Editor simulation status."""
+    session = _session(host, port)
+    result = _run(session.get_simulation_status())
+    if is_json_mode():
+        emit(result)
+        return
+    state = result.get("state", "unknown")
+    console.print(f"Simulation: [bold]{state}[/bold]")
+
+
+# ---------------------------------------------------------------------------
+# capture
+# ---------------------------------------------------------------------------
+@app.command()
+def capture(
+    output: Path = typer.Argument("capture.png", help="Output file path"),
+    width: int = typer.Option(1920, "--width", "-W", help="Width in pixels"),
+    height: int = typer.Option(1080, "--height", help="Height in pixels"),
+    format: str = typer.Option(
+        "png", "--format", "-f", help="Image format (png, jpeg)"
+    ),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Capture viewport screenshot to a file."""
+    session = _session(host, port)
+
+    async def save() -> Dict[str, Any]:
+        try:
+            return await session.capture_to_file(output, width, height, format)
+        finally:
+            await session.close()
+
+    result = _run(save())
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(f"[green]Captured[/green] {result['file_path']}")
+
+
+# ---------------------------------------------------------------------------
+# exec
+# ---------------------------------------------------------------------------
+@app.command("exec")
+def exec_script(
+    script: Optional[str] = typer.Argument(
+        None, help="Python code string or path to .py file"
+    ),
+    mode: str = typer.Option(
+        "ExecuteFile",
+        "--mode",
+        "-m",
+        help="ExecuteFile, EvaluateStatement, ExecuteStatement",
+    ),
+    raw: bool = typer.Option(
+        False, "--raw", "-r", help="Print raw output without formatting"
+    ),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Execute Python code inside Unreal Engine."""
+    from simul.adapters.unreal_runtime import UNREAL_EXEC_MODES
+
+    if mode not in UNREAL_EXEC_MODES:
+        msg = f"Invalid mode '{mode}'. Must be one of: {', '.join(sorted(UNREAL_EXEC_MODES))}"
+        fail(msg, "ValueError")
+
+    code = read_script_arg(script)
+
+    session = _session(host, port)
+    if not session.settings.security.allow_script_execution:
+        _run(_script_refusal(session))
+    try:
+        raw_result = asyncio.run(session._execute_python(code, mode=mode))
+    except Exception as e:
+        fail(str(e), type(e).__name__)
+
+    # UE's PythonScriptLibrary.ExecutePythonCommandEx returns:
+    #   ReturnValue: bool  — true iff the Python script ran without raising
+    #   CommandResult: str — error message when ReturnValue is False
+    #   LogOutput: [{Type, Output}, ...] — every print/log line, where Type
+    #              is one of "Info" / "Warning" / "Error".
+    # Trust ReturnValue for success. Render Info / Warning / Error log
+    # entries separately so a script that calls unreal.log_warning(...)
+    # or unreal.log_error(...) doesn't silently lose its diagnostic output.
+    # Don't use _parse_python_json here — that helper is for internal
+    # callers whose scripts print exactly one JSON object; using it on
+    # user `exec` would reject any plain print("hello").
+    success = bool(raw_result.get("ReturnValue", False))
+    log_output = raw_result.get("LogOutput") or []
+    output_text = ""
+    warnings_text = ""
+    errors_text = ""
+    for entry in log_output:
+        if not isinstance(entry, dict):
+            continue
+        t = entry.get("Type")
+        o = entry.get("Output", "")
+        if t == "Info":
+            output_text += o
+        elif t == "Warning":
+            warnings_text += o
+        elif t == "Error":
+            errors_text += o
+    error_text = (
+        ""
+        if success
+        else str(raw_result.get("CommandResult") or "Python execution failed")
+    )
+
+    if is_json_mode() and not raw:
+        payload: Dict[str, Any] = {
+            "success": success,
+            "return_value": success,
+            "output": output_text,
+            "warnings": warnings_text,
+            "errors": errors_text,
+            "raw": raw_result,
+        }
+        if not success:
+            payload["error"] = error_text
+        print(json.dumps(payload, default=str))
+        if not success:
+            raise typer.Exit(1)
+        return
+
+    if raw:
+        print(json.dumps(raw_result, default=str))
+        if not success:
+            raise typer.Exit(1)
+        return
+
+    # Human mode: render each stream prefixed and color-coded. Escape any
+    # Rich markup the script might have printed (e.g. a literal "[red]")
+    # so a malicious or accidental UE LogOutput entry can't inject styling
+    # into the user's terminal.
+    rendered_anything = False
+    if output_text:
+        text = output_text[:-1] if output_text.endswith("\n") else output_text
+        console.print(rich_escape(text))
+        rendered_anything = True
+    if warnings_text:
+        text = warnings_text[:-1] if warnings_text.endswith("\n") else warnings_text
+        console.print(f"[yellow]warnings:[/yellow]\n{rich_escape(text)}")
+        rendered_anything = True
+    if errors_text:
+        text = errors_text[:-1] if errors_text.endswith("\n") else errors_text
+        console.print(f"[red]errors:[/red]\n{rich_escape(text)}")
+        rendered_anything = True
+
+    if not success:
+        console.print(f"[red]Error:[/red] {rich_escape(error_text)}")
+        raise typer.Exit(1)
+    if not rendered_anything:
+        console.print("[dim]ok (no output)[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# materials
+# ---------------------------------------------------------------------------
+@app.command("materials")
+def list_materials(
+    actor_path: str = typer.Argument(..., help="Actor path to inspect materials"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Get material information for an actor."""
+    session = _session(host, port)
+    result = _run(session.get_material_info(actor_path))
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(Syntax(json.dumps(result, indent=2, default=str), "json", theme="monokai"))
+
+
+# ---------------------------------------------------------------------------
+# scene-graph
+# ---------------------------------------------------------------------------
+@app.command("scene-graph")
+def scene_graph(
+    root: Optional[str] = typer.Option(None, "--root", "-r", help="Root actor path"),
+    depth: int = typer.Option(3, "--depth", "-d", help="Max traversal depth"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Query the Unreal scene graph hierarchy."""
+    session = _session(host, port)
+    result = _run(session.query_scene_graph(
+        root_path=root,
+        max_depth=depth,
+    ))
+    if is_json_mode():
+        emit(result)
+        return
+    console.print(Syntax(json.dumps(result, indent=2, default=str), "json", theme="monokai"))
+
+
+# ---------------------------------------------------------------------------
+# set-visibility
+# ---------------------------------------------------------------------------
+@app.command("set-visibility")
+def set_visibility(
+    actor_path: str = typer.Argument(..., help="Actor path"),
+    visible: bool = typer.Argument(..., help="True or False"),
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = _port_opt,
+) -> None:
+    """Set actor visibility."""
+    session = _session(host, port)
+    result = _run(session.set_actor_visibility(
+        actor_path=actor_path,
+        visible=visible,
+    ))
+    if is_json_mode():
+        emit(result)
+        return
+    state = "visible" if visible else "hidden"
+    console.print(f"[green]{state}[/green] {actor_path}")
+
+
+# ---------------------------------------------------------------------------
+# setup -- auto-configure Remote Control, optionally launch the editor,
+#          then poll until Remote Control accepts connections.
+# ---------------------------------------------------------------------------
+def _editor_exit(proc: Optional[subprocess.Popen]) -> Optional[Dict[str, Any]]:
+    """Return a health payload describing a dead editor, or None if it runs."""
+    if proc is None:
+        return None
+    code = proc.poll()
+    if code is None:
+        return None
+    return {
+        "connected": False,
+        "editor_exited": True,
+        "exit_code": code,
+        "error": f"Unreal Editor (pid {proc.pid}) exited with code {code} before Remote Control came up",
+    }
+
+
+async def _poll_health(
+    session: "UnrealRuntimeSession",
+    timeout: float,
+    interval: float,
+    proc: Optional[subprocess.Popen] = None,
+) -> Dict[str, Any]:
+    """Call health_check repeatedly until connected or timeout elapses.
+
+    When ``proc`` (the editor this command spawned) exits first, stop
+    polling and return a payload with ``editor_exited: True`` instead of
+    waiting out the full timeout.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    last: Dict[str, Any] = {}
+    while loop.time() < deadline:
+        last = await session.health_check()
+        if last.get("connected"):
+            return last
+        exited = _editor_exit(proc)
+        if exited is not None:
+            return exited
+        await asyncio.sleep(interval)
+    return last
+
+
+# Private alias used by the safety gate and its tests.
+_is_loopback_bind = is_loopback_bind
+
+_WILDCARD_BINDS = {"0.0.0.0", "::", "[::]", "any", "*"}
+
+
+def _poll_host(bind: Optional[str]) -> Optional[str]:
+    """Host the setup poller should contact for a given ``--bind``.
+
+    A specific address (loopback or interface IP) is where the listener
+    lives, so poll it. No bind or a wildcard bind keeps the configured
+    ``unreal.host`` (None). IPv6 literals are bracketed for the URL.
+    """
+    if bind is None:
+        return None
+    host = bind.strip()
+    if not host or host.lower() in _WILDCARD_BINDS:
+        return None
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
+def _fail_launch(error: str) -> NoReturn:
+    """Report a launcher failure and exit non-zero (never returns)."""
+    msg = (
+        f"Cannot launch Unreal Editor: {error.rstrip('.')}. Start the editor yourself and "
+        "re-run with --no-launch, or pass --engine-path."
+    )
+    if is_json_mode():
+        emit_error(msg, "LauncherNotFound")
+    console.print(f"[red]{rich_escape(msg)}[/red]")
+    raise typer.Exit(1)
+
+
+@app.command("setup")
+def setup(
+    uproject: Path = typer.Argument(..., help="Path to the .uproject file"),
+    port: int = typer.Option(
+        30010, "--port", "-p", help="Remote Control HTTP port to configure"
+    ),
+    engine_path: Optional[Path] = typer.Option(
+        None,
+        "--engine-path",
+        help="Unreal install root (contains Engine/). Usually auto-detected.",
+    ),
+    bind: Optional[str] = typer.Option(
+        None,
+        "--bind",
+        help=(
+            "Set the HTTP listener bind address. Writes "
+            "[HTTPServer.Listeners] DefaultBindAddress in "
+            "Config/DefaultEngine.ini (UE reads HTTP bind from there, "
+            "not from URemoteControlSettings) and the matching "
+            "RemoteControlWebsocketServerBindAddress in "
+            "Config/DefaultRemoteControl.ini. Leave unset for loopback: "
+            "a public bind left by an earlier run is cleared unless "
+            "--allow-public is also given. Pass an interface IP "
+            "or 0.0.0.0 to enable cross-host access — combine with "
+            "--allow-public for non-loopback binds."
+        ),
+    ),
+    websocket_port: Optional[int] = typer.Option(
+        None,
+        "--websocket-port",
+        help=(
+            "Override RemoteControlWebSocketServerPort. Leave unset to keep "
+            "UE's default (30020). Use this when running multiple UE editors "
+            "on the same host so their WebSocket endpoints don't collide."
+        ),
+    ),
+    allow_public: bool = typer.Option(
+        False,
+        "--allow-public",
+        help=(
+            "Required acknowledgment when --bind is non-loopback. UE Remote "
+            "Control runs WITHOUT authentication and bEnableRemotePythonExecution "
+            "is True, so a public bind exposes arbitrary Python execution to "
+            "anything on the network. Pass this flag only after confirming the "
+            "trust radius (firewall, trusted LAN, etc.)."
+        ),
+    ),
+    passphrase: Optional[str] = typer.Option(
+        None,
+        "--passphrase",
+        help=(
+            "Plaintext passphrase to require on every Remote Control "
+            "request. Hashed with MD5 (UE 5.x's FMD5::HashAnsiString) and "
+            "written to the ini's +Passphrases array, plus pins "
+            "bEnforcePassphraseForRemoteClients=True. To let simul "
+            "itself talk to the resulting editor, set the matching "
+            "plaintext (or MD5 hex) on the client side via the "
+            "UNREAL__PASSPHRASE env var or .env — simul will "
+            "then attach 'Passphrase: <md5>' to every request. Requires "
+            "--bind <non-loopback> --allow-public; it hardens a public bind "
+            "on top of the IP allowlist."
+        ),
+    ),
+    agent_overlay: bool = typer.Option(
+        False,
+        "--agent-overlay",
+        help="Build/install visible agent cursors (C++ toolchain required; close this project first)",
+    ),
+    launch: bool = typer.Option(
+        True, "--launch/--no-launch", help="Launch the editor after configuring"
+    ),
+    headless: bool = typer.Option(
+        True,
+        "--headless/--no-headless",
+        help=(
+            "Default: headless. UE launches with -RenderOffScreen so no "
+            "window opens. The render pipeline still runs so viewport "
+            "capture, scene capture, and replicator workflows work — they "
+            "just don't depend on the editor having OS-level focus. Pass "
+            "--no-headless when you want the GUI editor open (e.g. to "
+            "hand-edit a scene at the same time)."
+        ),
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the interactive confirmation prompt",
+    ),
+    wait_timeout: float = typer.Option(
+        90.0,
+        "--wait-timeout",
+        help="Seconds to wait for Remote Control to accept connections",
+    ),
+    poll_interval: float = typer.Option(
+        2.0,
+        "--poll-interval",
+        help="Seconds between health-check polls",
+    ),
+) -> None:
+    """Auto-configure Remote Control + Python in a UE project and launch the editor.
+
+    This is the one-call path that replaces the manual checklist of enabling
+    ``RemoteControl`` / ``PythonScriptPlugin`` in the .uproject and editing
+    ``Config/DefaultRemoteControl.ini`` before every simul session.
+
+    What gets enabled (the only two plugins required by simul):
+
+      * ``RemoteControl``       — UE's HTTP/WebSocket API server (the thing
+                                  simul talks to). Not the Marketplace
+                                  ``RemoteControlWebInterface`` browser UI,
+                                  which simul does NOT need.
+      * ``PythonScriptPlugin``  — embedded Python interpreter for the
+                                  remote ``exec`` endpoint. Required because
+                                  ``bEnableRemotePythonExecution=True``.
+
+    See ``docs/unreal-setup.md`` for the full disambiguation, including which
+    similarly-named plugins (PixelStreaming, Concert, Remote Control Presets,
+    Web Remote Control, Movie Render Queue Remote) are explicitly NOT
+    required and should not be enabled just because you're running simul.
+    """
+    uproject = uproject.expanduser().resolve()
+    if not uproject.is_file() or uproject.suffix != ".uproject":
+        msg = f"Not a .uproject file: {uproject}"
+        fail(msg, "InvalidArgument", exit_code=2)
+
+    # Safety gate: a non-loopback bind exposes UE Remote Control to the
+    # network. Since we also enable bEnableRemotePythonExecution=True, that
+    # means anyone reachable can run arbitrary Python in the editor. Force
+    # an explicit acknowledgment via --allow-public.
+    if bind is not None and not _is_loopback_bind(bind) and not allow_public:
+        msg = (
+            f"--bind {bind!r} would expose UE Remote Control (with "
+            f"bEnableRemotePythonExecution=True) to the network. Re-run with "
+            f"--allow-public to acknowledge the trust-radius implication, or "
+            f"pick a loopback bind (omit --bind, or pass 127.0.0.1)."
+        )
+        fail(msg, "InvalidArgument", exit_code=2)
+
+    # Compute the MD5 hash UE expects (FMD5::HashAnsiString) and refuse the
+    # combination of --passphrase with a loopback-only bind: passphrase
+    # enforcement is layer-2 on top of the IP allowlist; it has no effect
+    # over loopback (where the IP allowlist alone already blocks remote
+    # access) but DOES break clients that don't send the Passphrase header.
+    # Refusing here surfaces the foot-gun before the user has a half-broken
+    # editor.
+    passphrase_md5: Optional[str] = None
+    if passphrase is not None:
+        if bind is None or _is_loopback_bind(bind):
+            msg = (
+                "--passphrase only adds value when --bind is set to a "
+                "non-loopback host. With the default loopback bind the IP "
+                "allowlist already blocks remote access, and enabling the "
+                "passphrase would break every client that doesn't send the "
+                "Passphrase header. Either drop --passphrase, or also pass "
+                "--bind <non-loopback> --allow-public."
+            )
+            fail(msg, "InvalidArgument", exit_code=2)
+        # UE's FMD5::HashAnsiString operates on the narrowed ANSI byte
+        # representation. A non-ASCII passphrase would silently produce a
+        # different hash on UE's side from what we compute here. Reject
+        # explicitly with an actionable message rather than leaking a
+        # raw UnicodeEncodeError stack trace.
+        try:
+            ascii_bytes = passphrase.encode("ascii", errors="strict")
+        except UnicodeEncodeError as exc:
+            msg = (
+                "--passphrase must be ASCII-only. UE's "
+                "FMD5::HashAnsiString narrows wide characters before "
+                f"hashing, so non-ASCII bytes silently mismatch. ({exc})"
+            )
+            fail(msg, "InvalidArgument", exit_code=2)
+        passphrase_md5 = hashlib.md5(ascii_bytes).hexdigest()
+
+    # Preview-only launch resolution so we can tell the user what WOULD happen.
+    launch_plan: Optional[List[str]] = None
+    launch_plan_error: Optional[str] = None
+    if launch:
+        try:
+            launch_plan = resolve_launch_argv(uproject, engine_path, headless=headless)
+        except (LauncherNotFound, FileNotFoundError) as exc:
+            launch_plan_error = str(exc)
+    if launch_plan_error is not None:
+        # Fail before touching the project: polling for an editor that was
+        # never started would only burn --wait-timeout and hide the reason.
+        _fail_launch(launch_plan_error)
+
+    if not yes and not is_json_mode():
+        console.print(Panel.fit(
+            f"[bold]simul unreal setup[/bold]\n"
+            f"  project:    {uproject}\n"
+            f"  port:       {port}\n"
+            + (f"  bind:       {bind}\n" if bind is not None else "")
+            + (f"  ws port:    {websocket_port}\n" if websocket_port is not None else "")
+            + ("  [yellow]allow-public:[/yellow] yes\n" if allow_public else "")
+            + (
+                # Don't echo the MD5 hash to the terminal — it's a credential
+                # equivalent (UE's CheckPassphrase compares the header verbatim
+                # against the stored hash). The hash necessarily lives in the
+                # project ini on disk; that's unavoidable. Leaking it to
+                # scrollback/CI logs is not.
+                "  [yellow]passphrase:[/yellow] enabled\n"
+                if passphrase_md5
+                else ""
+            )
+            + f"  launch:     {'yes' if launch else 'no'}\n"
+            + (f"  launch cmd: {' '.join(launch_plan)}\n" if launch_plan else ""),
+            title="Plan",
+        ))
+        console.print(
+            "This will edit the .uproject, DefaultRemoteControl.ini and (to set or "
+            "clear a bind address) DefaultEngine.ini in place. "
+            "Re-run with [bold]--yes[/bold] to skip this prompt."
+        )
+        if not typer.confirm("Proceed?", default=True):
+            console.print("[yellow]Aborted by user.[/yellow]")
+            raise typer.Exit(1)
+
+    # Patch config files.
+    try:
+        overlay = None
+        if agent_overlay:
+            from ..adapters.unreal_overlay import install_agent_overlay
+
+            overlay = install_agent_overlay(uproject, engine_path)
+        patch = ensure_remote_control_config(
+            uproject,
+            port=port,
+            bind=bind,
+            websocket_port=websocket_port,
+            passphrase_md5=passphrase_md5,
+            keep_public_bind=allow_public,
+            **({"agent_overlay": True} if agent_overlay else {}),
+        )
+    except Exception as exc:
+        if is_json_mode():
+            emit_error(str(exc), type(exc).__name__)
+        console.print(f"[red]config patch failed: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if not is_json_mode():
+        console.print(patch.uproject.summary())
+        console.print(patch.ini.summary())
+        if patch.engine_ini is not None and patch.engine_ini.changed:
+            console.print(patch.engine_ini.summary())
+        for warning in patch.ini.warnings + (patch.engine_ini.warnings if patch.engine_ini else []):
+            console.print(f"[yellow]warning:[/yellow] {warning}")
+
+    # Launch if requested.
+    launched = False
+    pid: Optional[int] = None
+    proc: Optional[subprocess.Popen] = None
+    if launch:
+        try:
+            proc = launch_editor(uproject, engine_path, headless=headless)
+        except (LauncherNotFound, OSError) as exc:
+            _fail_launch(str(exc))
+        launched = True
+        pid = proc.pid
+        if not is_json_mode():
+            console.print(
+                f"[green]Launched[/green] editor (pid {pid}): {' '.join(launch_plan or [])}"
+            )
+
+    # Poll Remote Control. If we didn't launch, the user is expected to
+    # already have the editor running. When --passphrase is set the
+    # editor enforces auth on /remote/info, so the polling session must
+    # also carry the Passphrase header — otherwise the editor is healthy
+    # but the poller hits 401 and times out at --wait-timeout. A specific
+    # --bind address is where the listener lives, so poll that host.
+    session = _session(host=_poll_host(bind), port=port, passphrase=passphrase, mode="endpoint")
+    if not is_json_mode():
+        console.print(f"Waiting for Remote Control @ {session.host}:{port} ...")
+    # `open -a` hands the editor to LaunchServices and exits right away, so
+    # its exit says nothing about the editor; only watch a direct spawn.
+    watch = proc if launch_plan and launch_plan[0] != "open" else None
+    poll_kwargs: Dict[str, Any] = {"proc": watch} if watch is not None else {}
+    health = asyncio.run(_poll_health(session, wait_timeout, poll_interval, **poll_kwargs))
+
+    payload: Dict[str, Any] = {
+        "uproject": str(uproject),
+        "agent_overlay": overlay,
+        "port": port,
+        "bind": bind,
+        "websocket_port": websocket_port,
+        "allow_public": allow_public,
+        "passphrase_enabled": passphrase_md5 is not None,
+        "patched": {
+            "uproject": {
+                "changed": patch.uproject.changed,
+                "added": patch.uproject.added,
+                "updated": patch.uproject.updated,
+            },
+            "ini": {
+                "changed": patch.ini.changed,
+                "added": patch.ini.added,
+                "updated": patch.ini.updated,
+                "removed": patch.ini.removed,
+                "warnings": patch.ini.warnings,
+            },
+            # engine_ini is populated by ensure_remote_control_config
+            # when --bind was supplied (HTTP bind lives in
+            # Config/DefaultEngine.ini, separate from the RC ini) or, without
+            # --bind, when an existing DefaultEngine.ini was checked for a
+            # stale public bind. None means the file does not exist and was
+            # not created.
+            "engine_ini": (
+                {
+                    "changed": patch.engine_ini.changed,
+                    "added": patch.engine_ini.added,
+                    "updated": patch.engine_ini.updated,
+                    "removed": patch.engine_ini.removed,
+                    "warnings": patch.engine_ini.warnings,
+                }
+                if patch.engine_ini is not None
+                else None
+            ),
+        },
+        "launched": launched,
+        "launch_pid": pid,
+        "launch_error": launch_plan_error,
+        "health": health,
+        "connected": bool(health.get("connected")),
+    }
+
+    if is_json_mode():
+        emit(payload)
+        if not payload["connected"]:
+            raise typer.Exit(1)
+        return
+
+    if payload["connected"]:
+        console.print(
+            "[green]Remote Control is up[/green] — simul can now talk to this editor."
+        )
+        return
+    if health.get("editor_exited"):
+        console.print(
+            f"[red]{rich_escape(str(health.get('error')))}.[/red] "
+            "The editor crashed or quit during startup; check its log under "
+            "<project>/Saved/Logs."
+        )
+        raise typer.Exit(1)
+    console.print(
+        "[red]Remote Control did not respond in time.[/red] "
+        "Check that the editor finished loading, that plugins are enabled, "
+        "and that the port is not already in use."
+    )
+    raise typer.Exit(1)

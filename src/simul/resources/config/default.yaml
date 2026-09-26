@@ -1,0 +1,158 @@
+# Simul 3D MCP Server Default Configuration
+#
+# Every key here can be overridden per leaf by the environment using the
+# SECTION__KEY convention (for example ISAAC_SIM__SOCKET_PROTOCOL=vscode);
+# the environment always wins over this file.
+
+# Server Configuration
+server:
+  name: "simul"
+  host: "localhost"
+  port: 8765
+  timeout: 30
+
+# Isaac Sim Configuration
+isaac_sim:
+  # Path to Isaac Sim installation (can be overridden by environment variable)
+  path: "${ISAAC_SIM_PATH}"
+
+  # TCP socket connection to the stock Isaac Sim Python socket:
+  # isaacsim.code_editor.python_server on 6.0+, isaacsim.code_editor.vscode on 5.x
+  socket_host: "127.0.0.1"
+  socket_port: 8226
+  socket_timeout: 30.0
+  # Stock socket flavour: auto probes the server once; python_server / vscode pin it.
+  socket_protocol: "auto"
+  # Only for a 6.0 python_server started with require_auth=true. Precedence:
+  # ISAAC_SIM__SOCKET_AUTH_TOKEN / .env, then this key, then the
+  # <discovery_dir>/auth-token-<pid> file written by
+  # `simul isaac launch --generate-auth-token` for the newest running editor.
+  # socket_auth_token: ""
+
+  # Preferred bridge extension transport. Falls back to the stock socket when unavailable.
+  bridge:
+    enabled: true
+    host: "127.0.0.1"
+    port: 8229
+    timeout: 30.0
+    fallback_to_vscode: true
+    # Circuit breaker: after this many consecutive transport failures the
+    # bridge is skipped for cooldown_seconds and calls go straight to the
+    # stock socket. A filtered or half-open port otherwise costs the full
+    # timeout on every call.
+    failure_threshold: 3
+    cooldown_seconds: 30.0
+
+  # Discovery directory for bridge extension port files
+  discovery_dir: "/tmp/simul"
+
+  # When true, a live claim_isaac_instance by one agent makes mutating Isaac
+  # tools from every other agent fail with InstanceClaimed until the claim is
+  # released or expires (120 s without activity). False keeps claims advisory.
+  enforce_claims: false
+
+# Blender Configuration
+blender:
+  enabled: true
+  mode: embedded  # attached controls the existing window selected by `simul blender attach`
+  discovery_dir: "~/.simul/blender"
+  attachment_path: "~/.simul/blender/attachment.json"
+  connection_timeout: 30.0
+  max_scene_objects: 200
+
+# USD Configuration
+usd:
+  # Cache settings
+  cache:
+    enabled: true
+
+  # File handling
+  files:
+    allowed_extensions:
+      - ".usd"
+      - ".usda"
+      - ".usdc"
+      - ".usdz"
+    max_file_size_mb: 500
+
+# Viewport Configuration
+viewport:
+  # Default capture settings
+  capture:
+    max_size: 2048
+    # Where captures land on the Isaac Sim host. Must sit inside the sandbox
+    # when it is enabled; unset picks <writable allowed root>/captures.
+    # directory: "/tmp/simul-work/captures"
+
+# Logging Configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "detailed"  # simple, detailed, json
+
+  # File logging
+  file:
+    enabled: true
+    path: "~/.simul/logs/simul.log"
+    # Suffix filenames with the process PID so concurrent servers do not interleave
+    per_instance: false
+    # Daily rotations kept by the timed handler
+    retention_days: 14
+
+  # Console logging
+  console:
+    enabled: true
+    colored: true
+
+  # Per-tool-call audit JSONL stream
+  audit:
+    enabled: true
+    path: "~/.simul/logs/audit.jsonl"
+
+  # Structured JSON copy of every log record (simul.json)
+  structured:
+    enabled: false
+
+  # Component-specific logging levels
+  components:
+    usd: "INFO"
+    mesh: "INFO"
+    viewport: "INFO"
+    server: "INFO"
+    isaac: "INFO"
+
+# Security Configuration
+security:
+  # Sandbox settings. Relative entries resolve against the source checkout when
+  # simul runs from one and are dropped for a wheel install, where they name nothing.
+  sandbox:
+    enabled: true
+    allowed_paths:
+      - "examples"
+      - "tests/data"
+      - "/tmp/simul-work"
+    # URL schemes that may be read from (open, import, reference). Strings
+    # shaped like <scheme>://... are URLs, never project-relative paths.
+    allowed_url_schemes:
+      - "omniverse"
+    # URL schemes that may be written to. Empty keeps writes local-only.
+    allowed_write_url_schemes: []
+
+  # Register the arbitrary-code tools: execute_isaac_script,
+  # execute_unreal_script, execute_blender_script, and generic Unreal
+  # function/batch dispatch. Set false to keep agents on fixed granular tools. This is the server-side control; the bridge
+  # extension's allow_unsafe_execution only gates raw scripts sent over the
+  # bridge transport and is not a security boundary.
+  allow_script_execution: true
+
+  # Rate limiting. Buckets are per agent (MCP session) and per tool; an
+  # agent's calls across every tool are also capped by global_requests_per_minute.
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 60
+    burst_size: 10
+    global_requests_per_minute: 600
+
+# Unreal connection: endpoint uses host/port; attached uses simul unreal attach.
+unreal:
+  mode: endpoint
+  attachment_path: "~/.simul/unreal/attachment.json"

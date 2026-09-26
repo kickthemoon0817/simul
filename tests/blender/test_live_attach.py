@@ -16,15 +16,15 @@ from typing import Any
 
 import pytest
 
-from simul_mcp.adapters.blender_connection import (
+from simul.adapters.blender_connection import (
     AttachmentStale,
     AttachmentTargetChanged,
     BlenderAttachments,
     BlenderConnection,
 )
-from simul_mcp.blender_bridge.protocol import BridgeFiles, BridgeWire
-from simul_mcp.config import Settings
-from simul_mcp.mcp.server import SimulMCPServer
+from simul.blender_bridge.protocol import BridgeFiles, BridgeWire
+from simul.config import Settings
+from simul.mcp.server import SimulMCPServer
 
 pytestmark = pytest.mark.blender_live
 

@@ -11,9 +11,9 @@ from typing import List
 import pytest
 
 
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
 from tests.fakes import FakeFastMCP
 
 
@@ -45,11 +45,10 @@ class TestMCPDiscoverability:
     def test_server_name_identifies_purpose(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Server name must clearly indicate 3D simulation / DCC scope."""
+        """The server identifies as ``simul``; its instructions carry the 3D scope."""
         instance = _make_server(monkeypatch)
-        name: str = instance.mcp.name
-        assert "Simul" in name
-        assert "3D" in name or "DCC" in name
+        assert instance.mcp.name == "simul"
+        assert "3D simulation" in server_module._MCP_INSTRUCTIONS
 
     def test_server_version_is_set(
         self, monkeypatch: pytest.MonkeyPatch

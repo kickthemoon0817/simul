@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from simul_mcp.cli import usd_cli
-from simul_mcp.cli.main import app
+from simul.cli import usd_cli
+from simul.cli.main import app
 
 pxr = pytest.importorskip("pxr")
 

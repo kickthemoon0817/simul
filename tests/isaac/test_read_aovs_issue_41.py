@@ -25,8 +25,8 @@ from __future__ import annotations
 import asyncio
 import re
 
-from simul_mcp.config import Settings
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul.config import Settings
+from simul.mcp.tools.isaac_tools import IsaacTools
 
 
 class _FakeIsaacClient:

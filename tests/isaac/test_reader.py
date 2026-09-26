@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch, MagicMock
 
 pytest.importorskip("pxr", reason="pxr library not available")
 
-from simul_mcp.usd.reader import PrimType, USDLayerInfo, USDPrimInfo, USDReader, USDStageInfo  # noqa: E402
+from simul.usd.reader import PrimType, USDLayerInfo, USDPrimInfo, USDReader, USDStageInfo  # noqa: E402
 
 
 class TestUSDReader:
@@ -82,8 +82,8 @@ class TestUSDReader:
         reader = USDReader()
         assert isinstance(reader, USDReader)
 
-    @patch("simul_mcp.usd.reader.os.path.exists", return_value=True)
-    @patch("simul_mcp.usd.reader.Usd")
+    @patch("simul.usd.reader.os.path.exists", return_value=True)
+    @patch("simul.usd.reader.Usd")
     def test_open_stage_success(self, mock_usd, _mock_exists, usd_reader, mock_usd_stage):
         """Test successful stage opening."""
         mock_usd.Stage.Open.return_value = mock_usd_stage
@@ -93,7 +93,7 @@ class TestUSDReader:
         assert stage == mock_usd_stage
         mock_usd.Stage.Open.assert_called_once_with("/test/path.usd")
 
-    @patch("simul_mcp.usd.reader.Usd")
+    @patch("simul.usd.reader.Usd")
     def test_open_stage_failure(self, mock_usd, usd_reader):
         """Test stage opening failure."""
         mock_usd.Stage.Open.return_value = None
@@ -102,7 +102,7 @@ class TestUSDReader:
 
         assert stage is None
 
-    @patch("simul_mcp.usd.reader.UsdGeom")
+    @patch("simul.usd.reader.UsdGeom")
     def test_get_stage_info(self, mock_usd_geom, usd_reader, mock_usd_stage):
         """Test stage information extraction."""
         # Mock prim traversal

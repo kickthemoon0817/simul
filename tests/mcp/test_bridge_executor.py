@@ -17,9 +17,9 @@ from typing import Any
 import pytest
 
 
-from khemoo.simul.mcp.executor import ScriptExecutor, ScriptInterrupted
-from khemoo.simul.mcp.protocol import BridgeRequest
-from khemoo.simul.mcp.service import (
+from khemoo.simul.executor import ScriptExecutor, ScriptInterrupted
+from khemoo.simul.protocol import BridgeRequest
+from khemoo.simul.service import (
     LOCK_FREE_ACTIONS,
     READ_ONLY_ACTIONS,
     BridgeCommandService,
@@ -83,7 +83,7 @@ _TRACED_INTERRUPT_SCRIPT = """
 import asyncio, sys, threading, time
 
 sys.path.insert(0, {ext_root!r})
-from khemoo.simul.mcp.executor import ScriptExecutor, ScriptInterrupted
+from khemoo.simul.executor import ScriptExecutor, ScriptInterrupted
 
 
 def tracer(frame, event, arg):
@@ -122,9 +122,9 @@ def test_interrupt_under_an_active_tracer_does_not_wedge_the_interpreter() -> No
     import sys
     from pathlib import Path
 
-    import khemoo.simul.mcp.executor as executor_module
+    import khemoo.simul.executor as executor_module
 
-    ext_root = str(Path(executor_module.__file__).resolve().parents[3])
+    ext_root = str(Path(executor_module.__file__).resolve().parents[2])
     try:
         completed = subprocess.run(
             [sys.executable, "-c", _TRACED_INTERRUPT_SCRIPT.format(ext_root=ext_root)],

@@ -11,10 +11,10 @@ import pytest
 from aiohttp import web
 from typer.testing import CliRunner
 
-from simul_mcp.adapters.unreal_connection import UnrealAttachments, read_attachment
-from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
-from simul_mcp.cli.main import app
-from simul_mcp.config import Settings
+from simul.adapters.unreal_connection import UnrealAttachments, read_attachment
+from simul.adapters.unreal_runtime import UnrealRuntimeSession
+from simul.cli.main import app
+from simul.config import Settings
 
 
 @pytest.fixture
@@ -243,7 +243,7 @@ def _valid_record():
 
 
 def test_attachment_record_is_private_and_round_trips(tmp_path):
-    from simul_mcp.utils.private_files import BridgeFiles
+    from simul.utils.private_files import BridgeFiles
 
     path = tmp_path / "nested" / "attachment.json"
     BridgeFiles.write(path, _valid_record())
@@ -252,8 +252,8 @@ def test_attachment_record_is_private_and_round_trips(tmp_path):
 
 
 def test_attachment_refuses_symlink_loose_mode_and_oversize(tmp_path):
-    from simul_mcp.adapters.unreal_connection import MAX_ATTACHMENT_BYTES
-    from simul_mcp.utils.private_files import BridgeFiles
+    from simul.adapters.unreal_connection import MAX_ATTACHMENT_BYTES
+    from simul.utils.private_files import BridgeFiles
 
     real = tmp_path / "attachment.json"
     BridgeFiles.write(real, _valid_record())
@@ -273,7 +273,7 @@ def test_attachment_refuses_symlink_loose_mode_and_oversize(tmp_path):
 
 
 def test_attachment_keeps_its_schema_checks(tmp_path):
-    from simul_mcp.utils.private_files import BridgeFiles
+    from simul.utils.private_files import BridgeFiles
 
     path = tmp_path / "attachment.json"
     BridgeFiles.write(path, {**_valid_record(), "port": 80})
@@ -282,7 +282,7 @@ def test_attachment_keeps_its_schema_checks(tmp_path):
 
 
 def test_cli_status_refuses_missing_attachment(monkeypatch, settings):
-    monkeypatch.setattr("simul_mcp.cli.unreal_cli.get_settings", lambda: settings)
+    monkeypatch.setattr("simul.cli.unreal_cli.get_settings", lambda: settings)
     result = CliRunner().invoke(app, ["--json", "unreal", "status"])
     assert result.exit_code == 1
     assert "No Unreal editor attached" in json.loads(result.stdout)["error"]
@@ -292,7 +292,7 @@ def test_cli_status_refuses_missing_attachment(monkeypatch, settings):
 def test_cli_attached_endpoint_override_returns_json_error(
     monkeypatch, settings, option, value
 ):
-    monkeypatch.setattr("simul_mcp.cli.unreal_cli.get_settings", lambda: settings)
+    monkeypatch.setattr("simul.cli.unreal_cli.get_settings", lambda: settings)
     result = CliRunner().invoke(app, ["--json", "unreal", "health", option, value])
     assert result.exit_code == 1
     payload = json.loads(result.stdout)

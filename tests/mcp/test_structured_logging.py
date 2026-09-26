@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 
 
-from simul_mcp.config import Settings
-from simul_mcp.logging import (  # noqa: E402  (sys.path manipulation above)
+from simul.config import Settings
+from simul.logging import (  # noqa: E402  (sys.path manipulation above)
     AuditFormatter,
     JsonFormatter,
     _configure_file_handler_paths,
@@ -108,7 +108,7 @@ class TestRequestContextMiddlewareContextVarReset:
             def emit(self, record: logging.LogRecord) -> None:
                 records.append(record)
 
-        audit_logger = logging.getLogger("simul_mcp.audit")
+        audit_logger = logging.getLogger("simul.audit")
         handler = _Collect(level=logging.INFO)
         previous_level = audit_logger.level
         audit_logger.addHandler(handler)
@@ -139,7 +139,7 @@ class TestJsonFormatter:
     @staticmethod
     def _record(msg: str = "hello", exc_info=None) -> logging.LogRecord:
         record = logging.LogRecord(
-            name="simul_mcp.test",
+            name="simul.test",
             level=logging.INFO,
             pathname="x.py",
             lineno=7,
@@ -181,7 +181,7 @@ class TestJsonFormatter:
 class TestAuditFormatter:
     def test_emits_only_audit_payload(self) -> None:
         record = logging.LogRecord(
-            name="simul_mcp.audit",
+            name="simul.audit",
             level=logging.INFO,
             pathname="x.py",
             lineno=1,
@@ -219,7 +219,7 @@ class TestSetupAuditHandlerIdempotency:
         _setup_audit_handler(config, settings)
 
         assert list(config["handlers"]).count("audit_file") == 1
-        assert config["loggers"]["simul_mcp.audit"]["handlers"] == ["audit_file"]
+        assert config["loggers"]["simul.audit"]["handlers"] == ["audit_file"]
         # Cleanup the listener thread the second call started.
         _stop_audit_listener()
 
@@ -233,7 +233,7 @@ class TestConfigureFileHandlerPaths:
     def test_per_instance_inserts_pid_before_extension(self, tmp_path: Path) -> None:
         handlers = {"file": {"filename": ""}, "file_json": {"filename": ""}}
         _configure_file_handler_paths(
-            handlers, str(tmp_path / "simul_mcp.log"), per_instance=True
+            handlers, str(tmp_path / "simul.log"), per_instance=True
         )
 
         pid = str(os.getpid())
@@ -246,9 +246,9 @@ class TestConfigureFileHandlerPaths:
     def test_per_instance_false_yields_stable_filename(self, tmp_path: Path) -> None:
         handlers = {"file": {"filename": ""}}
         _configure_file_handler_paths(
-            handlers, str(tmp_path / "simul_mcp.log"), per_instance=False
+            handlers, str(tmp_path / "simul.log"), per_instance=False
         )
-        assert Path(handlers["file"]["filename"]).name == "simul_mcp.log"
+        assert Path(handlers["file"]["filename"]).name == "simul.log"
 
 
 # ---------------------------------------------------------------------------
@@ -258,22 +258,22 @@ class TestConfigureFileHandlerPaths:
 
 class TestLogsTailToolFilter:
     def test_filters_out_non_matching_tool(self) -> None:
-        from simul_mcp.cli.main import _format_jsonl_line
+        from simul.cli.main import _format_jsonl_line
 
         line = json.dumps({"tool": "other", "msg": "x", "level": "INFO"})
         assert _format_jsonl_line(line, tool_filter="my_tool") is None
 
     def test_passes_matching_tool_name_alias(self) -> None:
-        from simul_mcp.cli.main import _format_jsonl_line
+        from simul.cli.main import _format_jsonl_line
 
         line = json.dumps({"tool_name": "my_tool", "msg": "x", "level": "INFO"})
         rendered = _format_jsonl_line(line, tool_filter="my_tool")
         assert rendered is not None and "my_tool" in rendered
 
     def test_plain_text_line_returned_as_is(self) -> None:
-        from simul_mcp.cli.main import _format_jsonl_line
+        from simul.cli.main import _format_jsonl_line
 
-        plain = "2026-04-26 12:00:00 - simul_mcp - INFO - bare text"
+        plain = "2026-04-26 12:00:00 - simul - INFO - bare text"
         assert _format_jsonl_line(plain, tool_filter=None) == plain
 
 
@@ -289,7 +289,7 @@ class TestSetupWarningsGoToStderr:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        import simul_mcp.logging as logging_module
+        import simul.logging as logging_module
 
         fallback_calls: list = []
         monkeypatch.setattr(
@@ -313,7 +313,7 @@ class TestSetupWarningsGoToStderr:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        from simul_mcp.logging import _ensure_log_directories
+        from simul.logging import _ensure_log_directories
 
         def refuse(self: Path, *args: object, **kwargs: object) -> None:
             raise PermissionError("read-only filesystem")

@@ -13,7 +13,7 @@ from typing import Any, Dict
 import pytest
 
 
-from simul_mcp.mcp.usage_tracker import CallRecord, ToolStats, ToolUsageTracker
+from simul.mcp.usage_tracker import CallRecord, ToolStats, ToolUsageTracker
 
 
 # ---------------------------------------------------------------------------

@@ -21,14 +21,14 @@ from fastmcp import Client
 from mcp.types import ImageContent, TextContent
 from pydantic import BaseModel
 
-from simul_mcp.config import Settings
-from simul_mcp.mcp import server as server_module
-from simul_mcp.mcp.registration import register_blender_tools, register_unreal_tools
-from simul_mcp.mcp.schemas.blender import (
+from simul.config import Settings
+from simul.mcp import server as server_module
+from simul.mcp.registration import register_blender_tools, register_unreal_tools
+from simul.mcp.schemas.blender import (
     BlenderCaptureSequenceResponse,
     BlenderCaptureViewportResponse,
 )
-from simul_mcp.mcp.schemas.unreal import (
+from simul.mcp.schemas.unreal import (
     UnrealCaptureViewportResponse,
     UnrealGetThumbnailResponse,
 )

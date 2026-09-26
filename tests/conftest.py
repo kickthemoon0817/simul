@@ -1,7 +1,7 @@
 """Suite-wide setup: import paths and the shared FastMCP double.
 
 The checkout's ``src`` goes first on ``sys.path`` so the tests exercise the
-source they sit next to, whatever ``simul-mcp`` is installed in the
+source they sit next to, whatever ``simul`` is installed in the
 interpreter. The bridge extension root follows, for the tests that import the
 Kit extension's modules directly, and the repository root last so test
 modules can import ``tests.fakes``.
@@ -17,7 +17,7 @@ import pytest
 
 _REPO = Path(__file__).resolve().parents[1]
 _SRC = _REPO / "src"
-_BRIDGE_EXT = _SRC / "simul_mcp" / "bridge_ext" / "khemoo.simul.mcp"
+_BRIDGE_EXT = _SRC / "simul" / "bridge_ext" / "khemoo.simul"
 
 for _path in (_REPO, _BRIDGE_EXT, _SRC):
     if str(_path) in sys.path:
@@ -37,7 +37,7 @@ def fake_fastmcp(monkeypatch: pytest.MonkeyPatch) -> Iterator[Type[FakeFastMCP]]
     Yields:
         The double's class; the instance the server built is ``server.mcp``.
     """
-    from simul_mcp.mcp import server as server_module
+    from simul.mcp import server as server_module
 
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)

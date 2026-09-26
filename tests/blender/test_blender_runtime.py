@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 
-from simul_mcp.adapters import blender_runtime
-from simul_mcp.config import SecurityConfig, Settings
+from simul.adapters import blender_runtime
+from simul.config import SecurityConfig, Settings
 
 
 class FakeVector:
@@ -1929,7 +1929,7 @@ class TestFileIOTools:
 
         session = blender_runtime.BlenderRuntimeSession()
         with pytest.raises(FileNotFoundError, match="File not found"):
-            session.open_blend_file("/tmp/simul_mcp/nonexistent/path.blend")
+            session.open_blend_file("/tmp/simul-work/nonexistent/path.blend")
 
     def test_open_blend_file_wrong_ext(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1955,21 +1955,21 @@ class TestFileIOTools:
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        result = session.save_blend_file(file_path="/tmp/simul_mcp/out.blend")
+        result = session.save_blend_file(file_path="/tmp/simul-work/out.blend")
 
-        assert result["file_path"] == str(Path("/tmp/simul_mcp/out.blend").resolve())
+        assert result["file_path"] == str(Path("/tmp/simul-work/out.blend").resolve())
         assert fake_bpy._ops_calls[0]["op"] == "wm.save_as_mainfile"
 
     def test_save_blend_file_in_place(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Save without path calls save_mainfile when filepath is set."""
-        fake_bpy = self._make_fake_bpy_with_file_io(filepath="/tmp/simul_mcp/existing.blend")
+        fake_bpy = self._make_fake_bpy_with_file_io(filepath="/tmp/simul-work/existing.blend")
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
         result = session.save_blend_file()
 
-        assert result["file_path"] == "/tmp/simul_mcp/existing.blend"
+        assert result["file_path"] == "/tmp/simul-work/existing.blend"
         assert fake_bpy._ops_calls[0]["op"] == "wm.save_mainfile"
 
     def test_save_blend_file_no_path_unsaved(
@@ -2101,7 +2101,7 @@ class TestFileIOTools:
 
         session = blender_runtime.BlenderRuntimeSession()
         with pytest.raises(ValueError, match="Unsupported format"):
-            session.import_file("/tmp/simul_mcp/file.abc", "ABC")
+            session.import_file("/tmp/simul-work/file.abc", "ABC")
 
     def test_import_file_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Importing a nonexistent file raises FileNotFoundError."""
@@ -2111,7 +2111,7 @@ class TestFileIOTools:
 
         session = blender_runtime.BlenderRuntimeSession()
         with pytest.raises(FileNotFoundError, match="File not found"):
-            session.import_file("/tmp/simul_mcp/nonexistent/model.obj", "OBJ")
+            session.import_file("/tmp/simul-work/nonexistent/model.obj", "OBJ")
 
     # -- export_file ---------------------------------------------------------
 
@@ -2122,10 +2122,10 @@ class TestFileIOTools:
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        result = session.export_file("/tmp/simul_mcp/out.obj", "OBJ")
+        result = session.export_file("/tmp/simul-work/out.obj", "OBJ")
 
         assert result["file_format"] == "OBJ"
-        assert result["file_path"] == str(Path("/tmp/simul_mcp/out.obj").resolve())
+        assert result["file_path"] == str(Path("/tmp/simul-work/out.obj").resolve())
         assert fake_bpy._ops_calls[0]["op"] == "wm.obj_export"
 
     def test_export_obj_v36(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2135,7 +2135,7 @@ class TestFileIOTools:
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        result = session.export_file("/tmp/simul_mcp/out.obj", "OBJ")
+        result = session.export_file("/tmp/simul-work/out.obj", "OBJ")
 
         assert result["file_format"] == "OBJ"
         assert fake_bpy._ops_calls[0]["op"] == "export_scene.obj"
@@ -2147,7 +2147,7 @@ class TestFileIOTools:
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        session.export_file("/tmp/simul_mcp/out.obj", "OBJ", selected_only=True)
+        session.export_file("/tmp/simul-work/out.obj", "OBJ", selected_only=True)
 
         call = fake_bpy._ops_calls[0]
         assert call["export_selected_objects"] is True
@@ -2160,7 +2160,7 @@ class TestFileIOTools:
 
         session = blender_runtime.BlenderRuntimeSession()
         with pytest.raises(ValueError, match="Unsupported format"):
-            session.export_file("/tmp/simul_mcp/out.abc", "ABC")
+            session.export_file("/tmp/simul-work/out.abc", "ABC")
 
 
 class TestAnimationTools:
@@ -2532,7 +2532,7 @@ class TestExecuteScript:
             app=SimpleNamespace(version=(4, 0, 0)),
             data=SimpleNamespace(
                 objects=SimpleNamespace(get=lambda name: None),
-                filepath="/tmp/simul_mcp/test.blend",
+                filepath="/tmp/simul-work/test.blend",
             ),
             context=SimpleNamespace(
                 scene=SimpleNamespace(name="Scene"),

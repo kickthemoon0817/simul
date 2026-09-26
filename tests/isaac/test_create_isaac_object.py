@@ -17,7 +17,7 @@ import pytest
 from pxr import Usd, UsdGeom, UsdPhysics, UsdShade
 
 
-from simul_mcp.mcp.tools.isaac._shared import (
+from simul.mcp.tools.isaac._shared import (
     APPLY_COLLISION_CORE,
     APPLY_RIGID_BODY_CORE,
     BIND_MATERIAL_CORE,
@@ -26,7 +26,7 @@ from simul_mcp.mcp.tools.isaac._shared import (
     SET_MASS_PROPERTIES_CORE,
     SET_PRIM_TRANSFORM_CORE,
 )
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul.mcp.tools.isaac_tools import IsaacTools
 
 STEP_FUNCTIONS: Dict[str, str] = {
     "prim": "_define_prim",

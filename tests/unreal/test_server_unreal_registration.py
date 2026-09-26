@@ -9,10 +9,10 @@ from typing import Any, Dict
 import pytest
 
 
-from simul_mcp import tool_surfaces
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
+from simul import tool_surfaces
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
 from tests.fakes import FakeFastMCP
 
 
@@ -154,7 +154,7 @@ class FakeUnrealAdapterErroring:
 
     Mirrors the on-the-wire shape that ``UnrealRuntimeSession.health_check()``
     emits when the editor is not running (per
-    ``src/simul_mcp/adapters/unreal_runtime.py:573-578``). Used to
+    ``src/simul/adapters/unreal_runtime.py:573-578``). Used to
     drive the iter16 contract test: the registered tool wrapper
     must surface ``success=False`` instead of the historical bug
     where a blanket ``payload["success"] = True`` masked it.

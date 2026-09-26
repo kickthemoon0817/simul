@@ -14,8 +14,8 @@ from typing import Any, Dict, List
 
 import pytest
 
-from simul_mcp.adapters import unreal_runtime
-from simul_mcp.config import Settings
+from simul.adapters import unreal_runtime
+from simul.config import Settings
 
 TRACEBACK = (
     "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n"
@@ -271,9 +271,9 @@ def test_call_actor_function_passes_a_json_object(monkeypatch: pytest.MonkeyPatc
 
 @pytest.fixture
 def unreal_server(monkeypatch: pytest.MonkeyPatch) -> Any:
-    from simul_mcp.mcp import backends as backends_module
-    from simul_mcp.mcp import server as server_module
-    from simul_mcp.mcp.registration import register_unreal_tools
+    from simul.mcp import backends as backends_module
+    from simul.mcp import server as server_module
+    from simul.mcp.registration import register_unreal_tools
     from tests.fakes import FakeFastMCP
 
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)

@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from simul_mcp.adapters import unreal_overlay
-from simul_mcp.adapters.unreal_setup import patch_uproject
+from simul.adapters import unreal_overlay
+from simul.adapters.unreal_setup import patch_uproject
 
 
 @pytest.fixture
@@ -80,7 +80,7 @@ def test_setup_enables_previously_disabled_overlay(project):
 
 
 def test_overlay_auto_detection_bypasses_macos_launchservices(project, monkeypatch):
-    from simul_mcp.adapters import unreal_setup
+    from simul.adapters import unreal_setup
 
     uproject, engine = project
     binary = engine / "Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor"

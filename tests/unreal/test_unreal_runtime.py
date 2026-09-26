@@ -8,9 +8,9 @@ from typing import Any, Dict
 
 import pytest
 
-from simul_mcp.adapters import unreal_runtime
-from simul_mcp.config import Settings
-from simul_mcp.utils.paths import SandboxDenied
+from simul.adapters import unreal_runtime
+from simul.config import Settings
+from simul.utils.paths import SandboxDenied
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1939,7 +1939,7 @@ class TestUnrealRuntimeSessionPhase8:
 
 
 # ---------------------------------------------------------------------------
-# Passphrase header support — closes the iter3 deferred work where simul-mcp
+# Passphrase header support — closes the iter3 deferred work where simul
 # itself couldn't talk to a passphrase-enforcing UE editor.
 # ---------------------------------------------------------------------------
 
@@ -1984,7 +1984,7 @@ class TestPassphraseHeader:
         monkeypatch.setattr(unreal_runtime, "AIOHTTP_AVAILABLE", True)
         # UnrealConfig is a frozen pydantic BaseModel; build a fresh
         # Settings with a tweaked unreal section.
-        from simul_mcp.config import UnrealConfig
+        from simul.config import UnrealConfig
         settings = Settings(unreal=UnrealConfig(passphrase=passphrase))
         return unreal_runtime.UnrealRuntimeSession(settings=settings)
 
@@ -2116,7 +2116,7 @@ class TestPassphraseHeader:
         lru cache), so no cache management is needed.
         """
         monkeypatch.setenv("UNREAL__PASSPHRASE", "from-env")
-        from simul_mcp.config import Settings as _Settings
+        from simul.config import Settings as _Settings
         settings = _Settings()
         assert settings.unreal.passphrase == "from-env"
 

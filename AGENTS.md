@@ -1,4 +1,4 @@
-# AGENTS.md — Simul MCP Server
+# AGENTS.md — Simul
 
 This file is canonical for repo layout, build/test commands, coding
 conventions and runtime notes. `CLAUDE.md` holds Claude Code behavioral rules
@@ -6,29 +6,30 @@ conventions and runtime notes. `CLAUDE.md` holds Claude Code behavioral rules
 
 ## Repository Layout
 
-- Primary package: `src/simul_mcp`
-- CLI entrypoint: `src/simul_mcp/cli/main.py`
-- MCP server: `src/simul_mcp/mcp/server.py`
-- Backend registry: `src/simul_mcp/mcp/backends.py` (one `BackendSpec` per
+- Primary package: `src/simul` (import `simul`; distribution `simul-toolkit`;
+  console script `simul`)
+- CLI entrypoint: `src/simul/cli/main.py`
+- MCP server: `src/simul/mcp/server.py`
+- Backend registry: `src/simul/mcp/backends.py` (one `BackendSpec` per
   backend; the server iterates it for adapters, tool registration, the
   capability report and the ROUTING instructions)
-- Adapter interface: `src/simul_mcp/adapters/base.py` (`BackendAdapter`);
-  adapters: `src/simul_mcp/adapters/`
-- Isaac Sim tools: `src/simul_mcp/mcp/tools/isaac/` (per-domain mixins;
+- Adapter interface: `src/simul/adapters/base.py` (`BackendAdapter`);
+  adapters: `src/simul/adapters/`
+- Isaac Sim tools: `src/simul/mcp/tools/isaac/` (per-domain mixins;
   each tool method carries its MCP metadata as a `@tool_meta` decorator from
-  `src/simul_mcp/mcp/tools/_meta.py`). `src/simul_mcp/mcp/tools/isaac_tools.py`
+  `src/simul/mcp/tools/_meta.py`). `src/simul/mcp/tools/isaac_tools.py`
   is the compatibility shim that re-exports the package.
-- Tool registration: `src/simul_mcp/mcp/registration/` (`_reg_isaac.py`
+- Tool registration: `src/simul/mcp/registration/` (`_reg_isaac.py`
   iterates the decorated methods; the USD, Blender and Unreal modules
   register their wrappers by hand over the adapter sessions)
-- USD tools: `src/simul_mcp/mcp/registration/_reg_usd.py` over
-  `src/simul_mcp/adapters/headless_usd.py`
+- USD tools: `src/simul/mcp/registration/_reg_usd.py` over
+  `src/simul/adapters/headless_usd.py`
 - Tests: `tests/` (`tests/conftest.py` puts `src` first on `sys.path` and
   provides the shared `FakeFastMCP` double from `tests/fakes.py`; the Isaac
   live tier is `tests/isaac/live/`)
-- Config: `src/simul_mcp/resources/config/default.yaml` (shipped in the wheel; environment
+- Config: `src/simul/resources/config/default.yaml` (shipped in the wheel; environment
   variables override it per key), `.env.example`
-- Packaged data (skills document, API docs, default + logging YAML): `src/simul_mcp/resources/`
+- Packaged data (skills document, API docs, default + logging YAML): `src/simul/resources/`
 
 ## Build / Run
 
@@ -36,16 +37,16 @@ conventions and runtime notes. `CLAUDE.md` holds Claude Code behavioral rules
 uv venv .venv && uv pip install -e ".[dev]"   # dev venv (or: uv sync --extra dev)
 pip install -e .                              # install package (editable)
 python -m build                               # build sdist + wheel
-simul-mcp server                              # MCP server (dev, stdio)
-simul-mcp server --transport http             # streamable HTTP on server.host:server.port
-simul-mcp server --backends usd               # MCP server (headless USD only)
-simul-mcp server --unreal-tools full          # MCP server with every granular Unreal tool
+simul server                                  # MCP server (dev, stdio)
+simul server --transport http                 # streamable HTTP on server.host:server.port
+simul server --backends usd                   # MCP server (headless USD only)
+simul server --unreal-tools full              # MCP server with every granular Unreal tool
 ```
 
 The server runs in its own interpreter, never inside Isaac Sim's
 `python.sh` (that interpreter ships without `fastmcp`, `typer` and
 `pydantic-settings`); it reaches Isaac Sim over the socket transports. Set
-`ISAAC_SIM_PATH` to your Isaac Sim install root so the `simul-mcp isaac`
+`ISAAC_SIM_PATH` to your Isaac Sim install root so the `simul isaac`
 commands can find the install (export it from your shell rc; the server
 warns at startup if it's expected but not set).
 
@@ -63,12 +64,12 @@ pytest tests/packaging -m packaging                           # wheel build + in
 
 Run the suite with the checkout's source: `tests/conftest.py` puts `src`
 first on `sys.path`, so `pytest tests/` from the repo root exercises the
-files next to it whatever `simul-mcp` is installed in the interpreter.
+files next to it whatever `simul` is installed in the interpreter.
 
 ## Versioning
 
 The version lives in four constants that move together (`pyproject.toml`,
-`.claude-plugin/plugin.json`, `src/simul_mcp/__init__.py`, the bridge ext's
+`.claude-plugin/plugin.json`, `src/simul/__init__.py`, the bridge ext's
 `config/extension.toml`); `tests/test_version_lockstep.py` enforces it.
 
 - **Patch (`0.X.Y` → `0.X.Y+1`) — use actively.** Bump the patch version
@@ -102,15 +103,15 @@ Procedure for both: `docs/releasing.md`.
   Run `simul server --backends blender --blender-mode attached`; no server-side bpy is
   required. See `docs/blender-attachment.md`. `SIMUL_BLENDER_LIVE=1 pytest
   tests/blender/test_live_attach.py -m blender_live` launches and closes a disposable GUI.
-- Isaac Sim tools require a running Isaac Sim instance (5.1.0, 6.0.0, or 6.0.1) with the bridge on port 8229 or the stock Python socket on port 8226. `simul-mcp isaac launch` starts one with both enabled.
+- Isaac Sim tools require a running Isaac Sim instance (5.1.0, 6.0.0, or 6.0.1) with the bridge on port 8229 or the stock Python socket on port 8226. `simul isaac launch` starts one with both enabled.
 - Headless USD tools work without Omniverse.
 - `tests/isaac/live/` is the `@pytest.mark.isaac` tier: ping, stage info,
   create/delete prim, viewport capture, AOV reads and the bridge extension
   toggle against a running Isaac Sim. It skips unless the configured socket
-  answers (the probe `simul-mcp isaac ping` runs) and never starts the engine.
+  answers (the probe `simul isaac ping` runs) and never starts the engine.
 - Adding a backend: implement `BackendAdapter` (`adapters/base.py`), write
   its registration module under `mcp/registration/`, and add one
   `BackendSpec` to `mcp/backends.py`. The server, the CLI's `info` grouping,
   `get_capabilities` and the ROUTING instructions pick it up from there.
-- `src/simul_mcp/resources/skills.md` documents Isaac Sim 5.1 / 6.0 scripting patterns for
+- `src/simul/resources/skills.md` documents Isaac Sim 5.1 / 6.0 scripting patterns for
   `execute_isaac_script`; the server exposes it as the `simul://isaac-sim/skills` resource.

@@ -16,10 +16,10 @@ import pytest
 from fastmcp import Client
 
 
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
-from simul_mcp.mcp.registration._helpers import (
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
+from simul.mcp.registration._helpers import (
     describe_params,
     resolve_deprecated_alias,
 )
