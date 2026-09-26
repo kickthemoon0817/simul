@@ -26,7 +26,7 @@ import re
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 from urllib.request import url2pathname
 
 from ..resources import find_checkout_root
@@ -324,7 +324,9 @@ class PathPolicy:
         parts = urlsplit(url)
         if parts.netloc not in ("", "localhost"):
             raise ValueError(f"file URL names a remote host: {url}")
-        return url2pathname(unquote(parts.path))
+        # url2pathname already percent-decodes; decoding first as well would
+        # turn a literal %25XX in the file name into a second escape.
+        return url2pathname(parts.path)
 
     @staticmethod
     def _is_relative_to(path: Path, ancestor: Path) -> bool:

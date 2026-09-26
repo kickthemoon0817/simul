@@ -57,6 +57,23 @@ class BBoxCache(LoggerMixin):
         """Return the USD default time code."""
         return Usd.TimeCode.Default()
     
+    @staticmethod
+    def _aligned_range_to_bbox(usd_bbox: Any) -> Optional[BBox]:
+        """Convert a ``Gf.BBox3d`` to a ``(min, max)`` pair, or None when empty.
+
+        ``Gf.BBox3d`` has no ``IsEmpty``/``GetMin``/``GetMax``; the axis-aligned
+        range (with the box's matrix applied) carries them.
+        """
+        aligned = usd_bbox.ComputeAlignedRange()
+        if aligned.IsEmpty():
+            return None
+        min_point = aligned.GetMin()
+        max_point = aligned.GetMax()
+        return (
+            [float(min_point[0]), float(min_point[1]), float(min_point[2])],
+            [float(max_point[0]), float(max_point[1]), float(max_point[2])],
+        )
+
     def clear_cache(self) -> None:
         """Clear all cached bounding boxes."""
         self._world_bbox_cache.clear()
@@ -89,12 +106,7 @@ class BBoxCache(LoggerMixin):
             # Try using USD's built-in bbox cache first
             if self._usd_bbox_cache:
                 try:
-                    usd_bbox = self._usd_bbox_cache.ComputeWorldBound(prim)
-                    if not usd_bbox.IsEmpty():
-                        min_point = usd_bbox.GetMin()
-                        max_point = usd_bbox.GetMax()
-                        bbox = ([min_point[0], min_point[1], min_point[2]], 
-                               [max_point[0], max_point[1], max_point[2]])
+                    bbox = self._aligned_range_to_bbox(self._usd_bbox_cache.ComputeWorldBound(prim))
                 except Exception as e:
                     self.logger.debug(f"USD BBoxCache failed for {prim_path}: {e}")
             
@@ -136,12 +148,8 @@ class BBoxCache(LoggerMixin):
             # Try using USD's built-in bbox cache first
             if self._usd_bbox_cache:
                 try:
-                    usd_bbox = self._usd_bbox_cache.ComputeLocalBound(prim)
-                    if not usd_bbox.IsEmpty():
-                        min_point = usd_bbox.GetMin()
-                        max_point = usd_bbox.GetMax()
-                        bbox = ([min_point[0], min_point[1], min_point[2]], 
-                               [max_point[0], max_point[1], max_point[2]])
+                    # Object space: children's transforms apply, the prim's own does not.
+                    bbox = self._aligned_range_to_bbox(self._usd_bbox_cache.ComputeUntransformedBound(prim))
                 except Exception as e:
                     self.logger.debug(f"USD BBoxCache failed for {prim_path}: {e}")
             
@@ -235,10 +243,14 @@ class BBoxCache(LoggerMixin):
                 cylinder = UsdGeom.Cylinder(prim)
                 radius_attr = cylinder.GetRadiusAttr()
                 height_attr = cylinder.GetHeightAttr()
+                axis_attr = cylinder.GetAxisAttr()
                 radius = radius_attr.Get(self.time_code) if radius_attr else 1.0
                 height = height_attr.Get(self.time_code) if height_attr else 2.0
-                half_height = height / 2.0
-                return ([-radius, -half_height, -radius], [radius, half_height, radius])
+                # USD's schema default for Cylinder.axis is "Z".
+                axis = (axis_attr.Get(self.time_code) if axis_attr else None) or "Z"
+                half_extent = [radius, radius, radius]
+                half_extent["XYZ".index(axis) if axis in ("X", "Y", "Z") else 2] = height / 2.0
+                return ([-e for e in half_extent], list(half_extent))
             
             elif prim.IsA(UsdGeom.Xform):
                 # For Xform prims, compute union of children bboxes
@@ -255,8 +267,9 @@ class BBoxCache(LoggerMixin):
                         union_bbox = bbox_union(union_bbox, bbox)
                     return union_bbox
             
-            # Default fallback - return unit cube
-            return ([-0.5, -0.5, -0.5], [0.5, 0.5, 0.5])
+            # No geometry to bound (Camera, Scope, Light, empty Xform, ...).
+            # Report "no bound" rather than fabricating a unit cube.
+            return None
             
         except Exception as e:
             self.logger.debug(f"Manual local bbox computation failed: {e}")

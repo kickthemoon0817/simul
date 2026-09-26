@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable
 # Kit these records land in the app log through the root handlers.
 logger = logging.getLogger(__name__)
 
-from .protocol import BridgeRequest, BridgeResponse
+from .protocol import DEFAULT_REQUEST_TIMEOUT_SECONDS, BridgeRequest, BridgeResponse
 
 
 #: Raw-source auth header of Isaac Sim 6.0's isaacsim.code_editor.python_server.
@@ -41,7 +41,7 @@ class BridgeServerLifecycle:
         max_response_bytes: int = 10 * 1024 * 1024,
         max_port_retries: int = 10,
         vscode_handler: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
-        request_timeout: float = 120.0,
+        request_timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         socket_path: str | None = None,
     ) -> None:
         self._host = host

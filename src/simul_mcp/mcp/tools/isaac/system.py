@@ -166,12 +166,23 @@ class SystemMixin:
                 ename = ext.get("name", "")
                 if ext_id in (eid, ename) or bare_query == ename:
                     found = True
-                    print(json.dumps({{
+                    enabled = bool(ext.get("enabled", False))
+                    payload = {{
                         "extension_id": eid or ename,
                         "name": ename,
-                        "enabled": ext.get("enabled", False),
+                        "enabled": enabled,
                         "version": ext.get("version", ""),
-                    }}))
+                    }}
+                    if not enabled:
+                        # The manager refuses silently (unresolved dependency,
+                        # startup exception); without an explicit failure the
+                        # envelope would report success for a no-op.
+                        payload["success"] = False
+                        payload["error"] = (
+                            "Extension did not enable: " + (eid or ename)
+                            + " (check the Kit log for dependency or startup errors)"
+                        )
+                    print(json.dumps(payload))
                     break
 
             if not found:
