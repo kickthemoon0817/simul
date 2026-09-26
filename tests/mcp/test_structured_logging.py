@@ -66,22 +66,32 @@ class TestRequestContextMiddlewareContextVarReset:
             return 42
 
         middleware = build_request_context_middleware()
-        result = asyncio.run(middleware.on_call_tool(_FakeContext("my_tool"), call_next))
+
+        async def run() -> tuple:
+            # asyncio.run gives the task its own context copy, so the reset
+            # must be observed from inside the same task, not after run().
+            result = await middleware.on_call_tool(_FakeContext("my_tool"), call_next)
+            return result, _REQUEST_ID_VAR.get(), _TOOL_NAME_VAR.get()
+
+        result, rid_after, tool_after = asyncio.run(run())
         assert result == 42
         assert seen["tool_name"] == "my_tool"
         assert len(seen["request_id"]) == 12
-        assert _REQUEST_ID_VAR.get() == "-"
-        assert _TOOL_NAME_VAR.get() == "-"
+        assert rid_after == "-"
+        assert tool_after == "-"
 
     def test_resets_after_exception(self) -> None:
         async def call_next(context):  # type: ignore[no-untyped-def]
             raise ValueError("async oops")
 
         middleware = build_request_context_middleware()
-        with pytest.raises(ValueError):
-            asyncio.run(middleware.on_call_tool(_FakeContext("boom_tool"), call_next))
-        assert _REQUEST_ID_VAR.get() == "-"
-        assert _TOOL_NAME_VAR.get() == "-"
+
+        async def run() -> tuple:
+            with pytest.raises(ValueError):
+                await middleware.on_call_tool(_FakeContext("boom_tool"), call_next)
+            return _REQUEST_ID_VAR.get(), _TOOL_NAME_VAR.get()
+
+        assert asyncio.run(run()) == ("-", "-")
 
     def test_emits_one_audit_record_per_call(self, caplog: pytest.LogCaptureFixture) -> None:
         async def ok(context):  # type: ignore[no-untyped-def]
