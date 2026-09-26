@@ -13,7 +13,7 @@ __email__ = ""
 __title__ = "simul-mcp"
 __description__ = "MCP server for simulation and DCC tools with USD scene understanding"
 __url__ = "https://github.com/kickthemoon0817/simul"
-__license__ = "MIT"
+__license__ = "Apache-2.0"
 
 # Version info tuple
 VERSION = tuple(map(int, __version__.split(".")))
