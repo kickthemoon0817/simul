@@ -97,9 +97,9 @@ def info(
                 "start_time_code": stage_info.start_time_code,
                 "end_time_code": stage_info.end_time_code,
                 "frame_rate": stage_info.frame_rate,
-                "total_prims": len(stage_info.all_prims),
+                "total_prims": stage_info.prim_count,
                 "root_prims": len(stage_info.root_prims),
-                "default_prim": stage_info.default_prim,
+                "default_prim": stage_info.default_prim_path,
             }
             if summary:
                 data["prim_type_counts"] = summary.prim_type_counts or {}
@@ -116,9 +116,9 @@ def info(
         table.add_row("Start Time", str(stage_info.start_time_code))
         table.add_row("End Time", str(stage_info.end_time_code))
         table.add_row("Frame Rate", str(stage_info.frame_rate))
-        table.add_row("Total Prims", str(len(stage_info.all_prims)))
+        table.add_row("Total Prims", str(stage_info.prim_count))
         table.add_row("Root Prims", str(len(stage_info.root_prims)))
-        table.add_row("Default Prim", stage_info.default_prim or "None")
+        table.add_row("Default Prim", stage_info.default_prim_path or "None")
         console.print(table)
 
         if summary and summary.prim_type_counts:
