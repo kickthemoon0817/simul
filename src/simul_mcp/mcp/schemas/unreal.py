@@ -387,12 +387,16 @@ class UnrealViewportInfoResponse(BaseModel):
     camera_rotation: Tuple[float, float, float] = Field(
         ..., description="Camera rotation (Pitch, Yaw, Roll) in degrees"
     )
-    viewport_size: Tuple[int, int] = Field(
-        ..., description="Viewport dimensions (width, height)"
+    viewport_size: Optional[Tuple[int, int]] = Field(
+        None,
+        description="Viewport dimensions (width, height); None when Remote Control does not expose them",
     )
-    fov: float = Field(90.0, description="Field of view in degrees")
-    projection_type: str = Field(
-        "Perspective", description="Perspective or Orthographic"
+    fov: Optional[float] = Field(
+        None, description="Field of view in degrees; None when Remote Control does not expose it"
+    )
+    projection_type: Optional[str] = Field(
+        None,
+        description="Perspective or Orthographic; None when Remote Control does not expose it",
     )
 
 
@@ -405,7 +409,6 @@ class UnrealSetCameraViewRequest(BaseModel):
     rotation: Optional[Tuple[float, float, float]] = Field(
         None, description="Camera rotation (Pitch, Yaw, Roll) in degrees"
     )
-    fov: Optional[float] = Field(None, description="Field of view in degrees")
 
 
 class UnrealSetCameraViewResponse(BaseModel):
@@ -415,13 +418,12 @@ class UnrealSetCameraViewResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    location: Tuple[float, float, float] = Field(
-        ..., description="Applied camera position"
+    location: Optional[Tuple[float, float, float]] = Field(
+        None, description="Applied camera position; None when left unchanged"
     )
-    rotation: Tuple[float, float, float] = Field(
-        ..., description="Applied camera rotation"
+    rotation: Optional[Tuple[float, float, float]] = Field(
+        None, description="Applied camera rotation; None when left unchanged"
     )
-    fov: float = Field(90.0, description="Applied field of view")
 
 
 class UnrealFocusActorRequest(BaseModel):
@@ -761,7 +763,13 @@ class UnrealSetLightParamsResponse(BaseModel):
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Light actor path")
+    component_path: Optional[str] = Field(
+        None, description="Light component the parameters were written to"
+    )
     params_set: int = Field(0, description="Number of params changed")
+    applied: Optional[Dict[str, Any]] = Field(
+        None, description="Values read back from the light component after the write"
+    )
 
 
 class UnrealSetRenderSettingsRequest(BaseModel):
