@@ -22,6 +22,7 @@ from pydantic_settings import (
 )
 
 from .resources import find_checkout_root, resource_filesystem_path
+from .tool_surfaces import THIN_BLENDER_TOOLS, THIN_UNREAL_TOOLS, describe_tools
 
 _CHECKOUT_ROOT: Optional[Path] = find_checkout_root()
 _DEFAULT_CONFIG_FILE: Path = resource_filesystem_path("config", "default.yaml")
@@ -292,6 +293,14 @@ class BlenderConfig(BaseModel):
         ge=1,
         le=5000,
     )
+    tool_surface: Literal["thin", "full"] = Field(
+        default="full",
+        description=(
+            f"Which Blender tools the MCP server registers. 'full' (default) exposes "
+            f"every Blender and SimReady tool; 'thin' exposes only "
+            f"{describe_tools(THIN_BLENDER_TOOLS)}. Env: BLENDER__TOOL_SURFACE."
+        ),
+    )
 
     @field_validator("binary_path")
     @classmethod
@@ -344,10 +353,9 @@ class UnrealConfig(BaseModel):
     tool_surface: Literal["thin", "full"] = Field(
         default="thin",
         description=(
-            "Which Unreal tools the MCP server registers. 'thin' exposes only "
-            "unreal_health_check, ping_unreal, list_unreal_instances, "
-            "control_unreal_ui, capture_unreal_viewport and execute_unreal_script; 'full' exposes "
-            "every granular Unreal tool. Env: UNREAL__TOOL_SURFACE."
+            f"Which Unreal tools the MCP server registers. 'thin' exposes only "
+            f"{describe_tools(THIN_UNREAL_TOOLS)}; 'full' exposes every granular "
+            f"Unreal tool. Env: UNREAL__TOOL_SURFACE."
         ),
     )
 

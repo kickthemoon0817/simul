@@ -188,6 +188,7 @@ class SimulMCPServer(LoggerMixin):
         self,
         settings: Optional[Settings] = None,
         backends: Optional[Set[str]] = None,
+        require_available: bool = True,
     ):
         """
         Initialize Simul 3D MCP Server.
@@ -197,9 +198,14 @@ class SimulMCPServer(LoggerMixin):
             backends: Set of backend names to register MCP tools for.
                       ``None`` (default) registers all available backends.
                       Valid names: ``isaac``, ``unreal``, ``usd``, ``blender``.
+            require_available: When False, register an enabled backend's
+                tools even if its runtime is missing here. Only for listing
+                the tool surface (``simul-mcp tools``); such tools fail on
+                every call.
         """
         self.settings = settings or get_settings()
         self._backends = backends  # None means "all available"
+        self._require_available = require_available
         self._path_policy = PathPolicy.from_settings(
             self.settings, project_root=find_checkout_root()
         )
@@ -229,9 +235,17 @@ class SimulMCPServer(LoggerMixin):
         self._instance_lock_timeout = float(self.settings.server.timeout)
 
         # One adapter per registered backend; None when its runtime is not
-        # importable in this process.
+        # importable in this process or the backend was not selected, so a
+        # disabled backend's runtime (bpy, pxr, aiohttp) is never probed.
+        # Isaac's adapter is always built: it owns the default client the
+        # instance registry and IsaacTools hold, and building it dials nothing.
         self._adapters: Dict[str, Optional[BackendAdapter]] = {
-            spec.name: spec.adapter_factory(self.settings) for spec in BACKENDS
+            spec.name: (
+                spec.adapter_factory(self.settings)
+                if spec.name == "isaac" or self._backend_enabled(spec.name)
+                else None
+            )
+            for spec in BACKENDS
         }
         # Which backend registered each tool, for the CLI's grouping.
         self._tool_backends: Dict[str, str] = {}
@@ -1509,7 +1523,9 @@ class SimulMCPServer(LoggerMixin):
         """
         for spec in BACKENDS:
             adapter = self._adapters[spec.name]
-            if not self._backend_enabled(spec.name) or adapter is None or not adapter.is_available():
+            if not self._backend_enabled(spec.name):
+                continue
+            if self._require_available and (adapter is None or not adapter.is_available()):
                 continue
             before = self._registered_tool_names()
             spec.register_tools(self)
@@ -1577,7 +1593,9 @@ class SimulMCPServer(LoggerMixin):
         Returns:
             Mapping of every registered backend name to ``{"enabled": bool,
             "available": bool, "capabilities": list[str]}``. ``enabled`` is
-            whether the backend was selected for tool registration.
+            whether the backend was selected for tool registration; a
+            backend that is not enabled has no adapter and reports
+            ``available`` false (Isaac excepted, whose adapter always exists).
         """
         return {
             spec.name: self._adapter_capabilities(spec.name, self._adapters[spec.name])

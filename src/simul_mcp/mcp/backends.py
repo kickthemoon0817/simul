@@ -97,6 +97,11 @@ def _register_unreal(server: "SimulMCPServer") -> None:
     register_unreal_tools(server, thin=server.settings.unreal.tool_surface == "thin")
 
 
+def _register_blender(server: "SimulMCPServer") -> None:
+    """Register the thin or the full Blender surface, as ``blender.tool_surface`` says."""
+    register_blender_tools(server, thin=server.settings.blender.tool_surface == "thin")
+
+
 BACKENDS: Tuple[BackendSpec, ...] = (
     BackendSpec(
         name="isaac",
@@ -123,7 +128,7 @@ BACKENDS: Tuple[BackendSpec, ...] = (
         label="Blender",
         settings_attribute="blender",
         adapter_factory=_blender_adapter,
-        register_tools=register_blender_tools,
+        register_tools=_register_blender,
         routing_rule=(
             "Tools containing 'blender' or 'simready' → use local bpy in embedded mode, or the exact "
             "window selected with 'simul blender attach' in attached mode; never switch targets automatically."
