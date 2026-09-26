@@ -12,6 +12,7 @@ import hashlib
 import inspect
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import (
@@ -56,6 +57,10 @@ from .tools.isaac_tools import IsaacTools
 from .usage_tracker import ToolUsageTracker
 
 logger = get_logger(__name__)
+
+# sizeof(sockaddr_un.sun_path), terminating NUL included: 104 on macOS and the
+# BSDs, 108 on Linux.
+_UNIX_SOCKET_PATH_MAX = 108 if sys.platform.startswith("linux") else 104
 
 try:
     from importlib.metadata import version as _pkg_version
@@ -189,6 +194,7 @@ class SimulMCPServer(LoggerMixin):
         self,
         settings: Optional[Settings] = None,
         backends: Optional[Set[str]] = None,
+        require_available: bool = True,
     ):
         """
         Initialize Simul 3D MCP Server.
@@ -198,9 +204,14 @@ class SimulMCPServer(LoggerMixin):
             backends: Set of backend names to register MCP tools for.
                       ``None`` (default) registers all available backends.
                       Valid names: ``isaac``, ``unreal``, ``usd``, ``blender``.
+            require_available: When False, register an enabled backend's
+                tools even if its runtime is missing here. Only for listing
+                the tool surface (``simul-mcp tools``); such tools fail on
+                every call.
         """
         self.settings = settings or get_settings()
         self._backends = backends  # None means "all available"
+        self._require_available = require_available
         self._path_policy = PathPolicy.from_settings(
             self.settings, project_root=find_checkout_root()
         )
@@ -230,9 +241,17 @@ class SimulMCPServer(LoggerMixin):
         self._instance_lock_timeout = float(self.settings.server.timeout)
 
         # One adapter per registered backend; None when its runtime is not
-        # importable in this process.
+        # importable in this process or the backend was not selected, so a
+        # disabled backend's runtime (bpy, pxr, aiohttp) is never probed.
+        # Isaac's adapter is always built: it owns the default client the
+        # instance registry and IsaacTools hold, and building it dials nothing.
         self._adapters: Dict[str, Optional[BackendAdapter]] = {
-            spec.name: spec.adapter_factory(self.settings) for spec in BACKENDS
+            spec.name: (
+                spec.adapter_factory(self.settings)
+                if spec.name == "isaac" or self._backend_enabled(spec.name)
+                else None
+            )
+            for spec in BACKENDS
         }
         # Which backend registered each tool, for the CLI's grouping.
         self._tool_backends: Dict[str, str] = {}
@@ -965,8 +984,15 @@ class SimulMCPServer(LoggerMixin):
             return self._validate_output(sandbox_error(exc.details), models, tool_name)
         except Exception as exc:
             self.logger.error("Error in %s: %s", tool_name, exc)
+            # Structured errors (e.g. Blender's AttachmentStale) name their own
+            # type and details so clients can branch on them.
+            details = getattr(exc, "details", None)
             return self._validate_output(
-                ErrorResponse(error=str(exc), error_type="Exception").model_dump(),
+                ErrorResponse(
+                    error=str(exc),
+                    error_type=str(getattr(exc, "error_type", "Exception")),
+                    details=details if isinstance(details, dict) and details else None,
+                ).model_dump(),
                 models,
                 tool_name,
             )
@@ -995,12 +1021,16 @@ class SimulMCPServer(LoggerMixin):
         """
         content: List[Any] = []
         image = payload.get("image_base64")
-        if isinstance(image, str) and image:
+        if "image_base64" in payload:
+            # The transport keys never reach the client: a present image moves
+            # to its own block, an absent one (a null a response model filled
+            # in) would only be noise in the record.
             payload = {
                 key: value
                 for key, value in payload.items()
                 if key not in ("image_base64", "encoding")
             }
+        if isinstance(image, str) and image:
             payload["image_attached"] = True
             image_format = _sniff_image_format(image) or str(
                 payload.get("format", "png")
@@ -1294,6 +1324,14 @@ class SimulMCPServer(LoggerMixin):
                     )
                 if not resolved.startswith(boundary) or not os.path.exists(resolved):
                     socket_path = None
+                elif len(os.fsencode(resolved)) >= _UNIX_SOCKET_PATH_MAX:
+                    # The host's discovery dir can be deeper than the
+                    # container's, and connect(2) rejects a path sun_path
+                    # cannot hold; TCP still reaches the bridge.
+                    logger.warning(
+                        "Bridge socket %s is too long for AF_UNIX; using TCP instead", resolved
+                    )
+                    socket_path = None
                 else:
                     socket_path = resolved
 
@@ -1511,7 +1549,9 @@ class SimulMCPServer(LoggerMixin):
         """
         for spec in BACKENDS:
             adapter = self._adapters[spec.name]
-            if not self._backend_enabled(spec.name) or adapter is None or not adapter.is_available():
+            if not self._backend_enabled(spec.name):
+                continue
+            if self._require_available and (adapter is None or not adapter.is_available()):
                 continue
             before = self._registered_tool_names()
             spec.register_tools(self)
@@ -1579,7 +1619,9 @@ class SimulMCPServer(LoggerMixin):
         Returns:
             Mapping of every registered backend name to ``{"enabled": bool,
             "available": bool, "capabilities": list[str]}``. ``enabled`` is
-            whether the backend was selected for tool registration.
+            whether the backend was selected for tool registration; a
+            backend that is not enabled has no adapter and reports
+            ``available`` false (Isaac excepted, whose adapter always exists).
         """
         return {
             spec.name: self._adapter_capabilities(spec.name, self._adapters[spec.name])

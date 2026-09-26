@@ -23,10 +23,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import stat
 import struct
+import tempfile
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterator
 
 import pytest
 
@@ -40,16 +42,31 @@ from simul_mcp.mcp import server as server_module
 from tests.fakes import FakeFastMCP
 
 
+@pytest.fixture
+def sock_dir() -> Iterator[Path]:
+    """A short scratch directory for socket files.
+
+    ``sun_path`` holds 104 bytes on macOS (108 on Linux), and pytest's
+    ``tmp_path`` under ``/var/folders/...`` already runs past that, so
+    ``bind(2)`` would fail with "AF_UNIX path too long".
+    """
+    path = Path(tempfile.mkdtemp(prefix="simul-uds-", dir="/tmp")).resolve()
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 async def _ping_handler(request: Any) -> BridgeResponse:
     return BridgeResponse.success(request.request_id, {"reachable": True, "via": "uds"})
 
 
-def _lifecycle(tmp_path: Path) -> BridgeServerLifecycle:
+def _lifecycle(sock_dir: Path) -> BridgeServerLifecycle:
     return BridgeServerLifecycle(
         host="127.0.0.1",
         port=0,
         request_handler=_ping_handler,
-        socket_path=str(tmp_path / "bridge.sock"),
+        socket_path=str(sock_dir / "bridge.sock"),
     )
 
 
@@ -72,12 +89,12 @@ async def _uds_round_trip(path: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_bridge_answers_over_the_unix_socket(tmp_path: Path) -> None:
+def test_bridge_answers_over_the_unix_socket(sock_dir: Path) -> None:
     async def _exercise() -> Dict[str, Any]:
-        lifecycle = _lifecycle(tmp_path)
+        lifecycle = _lifecycle(sock_dir)
         await lifecycle.start()
         try:
-            return await _uds_round_trip(str(tmp_path / "bridge.sock"))
+            return await _uds_round_trip(str(sock_dir / "bridge.sock"))
         finally:
             await lifecycle.stop()
 
@@ -87,11 +104,11 @@ def test_bridge_answers_over_the_unix_socket(tmp_path: Path) -> None:
     assert response["payload"]["reachable"] is True
 
 
-def test_tcp_still_serves_alongside_the_socket(tmp_path: Path) -> None:
+def test_tcp_still_serves_alongside_the_socket(sock_dir: Path) -> None:
     """Additive means additive: the TCP listener must not disappear."""
 
     async def _exercise() -> Dict[str, Any]:
-        lifecycle = _lifecycle(tmp_path)
+        lifecycle = _lifecycle(sock_dir)
         await lifecycle.start()
         try:
             port = lifecycle.actual_port
@@ -117,7 +134,7 @@ def test_tcp_still_serves_alongside_the_socket(tmp_path: Path) -> None:
     assert asyncio.run(_exercise())["status"] == "ok"
 
 
-def test_socket_file_is_connectable_by_other_users(tmp_path: Path) -> None:
+def test_socket_file_is_connectable_by_other_users(sock_dir: Path) -> None:
     """connect(2) on a Unix socket needs write permission on the inode.
 
     In the container the bridge runs as root (#120), so a default-mode socket
@@ -126,10 +143,10 @@ def test_socket_file_is_connectable_by_other_users(tmp_path: Path) -> None:
     """
 
     async def _exercise() -> int:
-        lifecycle = _lifecycle(tmp_path)
+        lifecycle = _lifecycle(sock_dir)
         await lifecycle.start()
         try:
-            return stat.S_IMODE(os.stat(tmp_path / "bridge.sock").st_mode)
+            return stat.S_IMODE(os.stat(sock_dir / "bridge.sock").st_mode)
         finally:
             await lifecycle.stop()
 
@@ -138,45 +155,45 @@ def test_socket_file_is_connectable_by_other_users(tmp_path: Path) -> None:
     assert mode & stat.S_IWOTH, f"socket mode {mode:o}: host user cannot connect"
 
 
-def test_stale_socket_file_is_replaced_on_start(tmp_path: Path) -> None:
+def test_stale_socket_file_is_replaced_on_start(sock_dir: Path) -> None:
     """A crash leaves the socket file behind; rebinding must not need cleanup."""
-    (tmp_path / "bridge.sock").touch()
+    (sock_dir / "bridge.sock").touch()
 
     async def _exercise() -> Dict[str, Any]:
-        lifecycle = _lifecycle(tmp_path)
+        lifecycle = _lifecycle(sock_dir)
         await lifecycle.start()
         try:
-            return await _uds_round_trip(str(tmp_path / "bridge.sock"))
+            return await _uds_round_trip(str(sock_dir / "bridge.sock"))
         finally:
             await lifecycle.stop()
 
     assert asyncio.run(_exercise())["status"] == "ok"
 
 
-def test_stop_removes_the_socket_file(tmp_path: Path) -> None:
+def test_stop_removes_the_socket_file(sock_dir: Path) -> None:
     async def _exercise() -> None:
-        lifecycle = _lifecycle(tmp_path)
+        lifecycle = _lifecycle(sock_dir)
         await lifecycle.start()
         await lifecycle.stop()
 
     asyncio.run(_exercise())
 
-    assert not (tmp_path / "bridge.sock").exists()
+    assert not (sock_dir / "bridge.sock").exists()
 
 
-def test_discovery_file_advertises_the_socket_path(tmp_path: Path) -> None:
+def test_discovery_file_advertises_the_socket_path(sock_dir: Path) -> None:
     async def _exercise() -> Dict[str, Any]:
-        lifecycle = _lifecycle(tmp_path)
+        lifecycle = _lifecycle(sock_dir)
         await lifecycle.start()
         try:
-            lifecycle.write_discovery_file(str(tmp_path), pid=7, vscode_port=8226)
-            return json.loads((tmp_path / "simul-mcp-7.json").read_text())
+            lifecycle.write_discovery_file(str(sock_dir), pid=7, vscode_port=8226)
+            return json.loads((sock_dir / "simul-mcp-7.json").read_text())
         finally:
             await lifecycle.stop()
 
     written = asyncio.run(_exercise())
 
-    assert written["socket_path"] == str(tmp_path / "bridge.sock")
+    assert written["socket_path"] == str(sock_dir / "bridge.sock")
     # TCP details stay, for clients that do not speak UDS.
     assert written["host"] == "127.0.0.1"
     assert written["port"]
@@ -187,9 +204,9 @@ def test_discovery_file_advertises_the_socket_path(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_client_bridge_request_uses_the_unix_socket(tmp_path: Path) -> None:
+def test_client_bridge_request_uses_the_unix_socket(sock_dir: Path) -> None:
     async def _exercise() -> Dict[str, Any]:
-        lifecycle = _lifecycle(tmp_path)
+        lifecycle = _lifecycle(sock_dir)
         await lifecycle.start()
         try:
             client = IsaacSocketClient(
@@ -197,7 +214,7 @@ def test_client_bridge_request_uses_the_unix_socket(tmp_path: Path) -> None:
                 port=1,  # deliberately dead: TCP must not be touched
                 bridge_host="127.0.0.1",
                 bridge_port=1,
-                bridge_socket_path=str(tmp_path / "bridge.sock"),
+                bridge_socket_path=str(sock_dir / "bridge.sock"),
                 prefer_bridge=True,
             )
             return await client.bridge_request("ping", {})
@@ -210,11 +227,11 @@ def test_client_bridge_request_uses_the_unix_socket(tmp_path: Path) -> None:
     assert response["payload"]["via"] == "uds"
 
 
-def test_client_ping_works_over_the_socket_alone(tmp_path: Path) -> None:
+def test_client_ping_works_over_the_socket_alone(sock_dir: Path) -> None:
     """No TCP anywhere: the socket path alone must be enough to ping."""
 
     async def _exercise() -> bool:
-        lifecycle = _lifecycle(tmp_path)
+        lifecycle = _lifecycle(sock_dir)
         await lifecycle.start()
         try:
             client = IsaacSocketClient(
@@ -222,7 +239,7 @@ def test_client_ping_works_over_the_socket_alone(tmp_path: Path) -> None:
                 port=1,
                 bridge_host="127.0.0.1",
                 bridge_port=1,
-                bridge_socket_path=str(tmp_path / "bridge.sock"),
+                bridge_socket_path=str(sock_dir / "bridge.sock"),
                 prefer_bridge=True,
                 fallback_to_vscode=False,
             )
@@ -254,13 +271,13 @@ def _server(monkeypatch: pytest.MonkeyPatch, discovery_dir: Path) -> Any:
     return server_module.SimulMCPServer(settings=settings, backends={"isaac"})
 
 
-def _write_entry(discovery_dir: Path, socket_path: str) -> None:
+def _write_entry(discovery_dir: Path, socket_path: str, port: int = 8229) -> None:
     (discovery_dir / "simul-mcp-7.json").write_text(
         json.dumps(
             {
                 "pid": os.getpid(),  # alive, so the stale-pid sweep keeps it
                 "host": "127.0.0.1",
-                "port": 8229,
+                "port": port,
                 "vscode_port": 8226,
                 "socket_path": socket_path,
             }
@@ -269,19 +286,19 @@ def _write_entry(discovery_dir: Path, socket_path: str) -> None:
 
 
 def test_discovery_builds_a_socket_client(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, sock_dir: Path
 ) -> None:
     async def _exercise() -> Dict[str, Any]:
         lifecycle = BridgeServerLifecycle(
             host="127.0.0.1",
             port=0,
             request_handler=_ping_handler,
-            socket_path=str(tmp_path / "bridge.sock"),
+            socket_path=str(sock_dir / "bridge.sock"),
         )
         await lifecycle.start()
         try:
-            _write_entry(tmp_path, str(tmp_path / "bridge.sock"))
-            srv = _server(monkeypatch, tmp_path)
+            _write_entry(sock_dir, str(sock_dir / "bridge.sock"))
+            srv = _server(monkeypatch, sock_dir)
             found = await srv._discover_from_files()
             assert found, "discovery returned nothing"
             client = next(iter(found.values()))
@@ -295,16 +312,16 @@ def test_discovery_builds_a_socket_client(
 
 
 def test_discovery_rejects_a_socket_outside_the_discovery_dir(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, sock_dir: Path
 ) -> None:
     """The discovery dir is the trust boundary, exactly as loopback is for TCP.
 
     A hostile or corrupted entry must not be able to point the client at an
     arbitrary socket elsewhere on the filesystem.
     """
-    inside = tmp_path / "disc"
+    inside = sock_dir / "disc"
     inside.mkdir()
-    outside = tmp_path / "elsewhere.sock"
+    outside = sock_dir / "elsewhere.sock"
 
     async def _exercise() -> Dict[str, Any]:
         _write_entry(inside, str(outside))
@@ -320,7 +337,7 @@ def test_discovery_rejects_a_socket_outside_the_discovery_dir(
 
 
 def test_discovery_translates_a_container_side_socket_path(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, sock_dir: Path
 ) -> None:
     """The container advertises its own mount point, not the host's.
 
@@ -336,13 +353,13 @@ def test_discovery_translates_a_container_side_socket_path(
             host="127.0.0.1",
             port=0,
             request_handler=_ping_handler,
-            socket_path=str(tmp_path / "bridge.sock"),
+            socket_path=str(sock_dir / "bridge.sock"),
         )
         await lifecycle.start()
         try:
             # Advertise the path as a container would see it.
-            _write_entry(tmp_path, "/tmp/simul-mcp/bridge.sock")
-            srv = _server(monkeypatch, tmp_path)
+            _write_entry(sock_dir, "/tmp/simul-mcp/bridge.sock")
+            srv = _server(monkeypatch, sock_dir)
             found = await srv._discover_from_files()
             assert found, "discovery returned nothing"
             return await next(iter(found.values())).bridge_request("ping", {})
@@ -352,12 +369,44 @@ def test_discovery_translates_a_container_side_socket_path(
     assert asyncio.run(_exercise())["payload"]["via"] == "uds"
 
 
+def test_discovery_falls_back_to_tcp_when_the_socket_path_is_too_long(
+    monkeypatch: pytest.MonkeyPatch, sock_dir: Path
+) -> None:
+    """A host discovery dir deeper than ``sun_path`` allows must not break the bridge.
+
+    The container advertises its short mount-point path, the reader
+    translates it into the host dir, and ``connect(2)`` would then refuse the
+    result on every request. Discovery keeps the TCP endpoint instead.
+    """
+    deep = sock_dir / ("d" * 120)
+    deep.mkdir()
+    (deep / "bridge.sock").touch()
+
+    async def _exercise() -> Any:
+        lifecycle = BridgeServerLifecycle(
+            host="127.0.0.1", port=0, request_handler=_ping_handler
+        )
+        await lifecycle.start()
+        try:
+            _write_entry(deep, "/tmp/simul-mcp/bridge.sock", port=lifecycle.actual_port)
+            srv = _server(monkeypatch, deep)
+            found = await srv._discover_from_files()
+            assert found, "discovery dropped the entry instead of falling back to TCP"
+            return next(iter(found.values()))
+        finally:
+            await lifecycle.stop()
+
+    client = asyncio.run(_exercise())
+
+    assert client._bridge_socket_path is None
+
+
 # ---------------------------------------------------------------------------
 # Two instances sharing one discovery dir must stay distinct (#121 review)
 # ---------------------------------------------------------------------------
 
 
-def _tagged_lifecycle(tmp_path: Path, tag: str) -> BridgeServerLifecycle:
+def _tagged_lifecycle(sock_dir: Path, tag: str) -> BridgeServerLifecycle:
     async def handler(request: Any) -> BridgeResponse:
         return BridgeResponse.success(request.request_id, {"who": tag})
 
@@ -365,7 +414,7 @@ def _tagged_lifecycle(tmp_path: Path, tag: str) -> BridgeServerLifecycle:
         host="127.0.0.1",
         port=0,
         request_handler=handler,
-        socket_path=str(tmp_path / "bridge.sock"),
+        socket_path=str(sock_dir / "bridge.sock"),
     )
 
 
@@ -385,7 +434,7 @@ async def _who(path: str) -> str:
     return payload["payload"]["who"]
 
 
-def test_second_bridge_does_not_hijack_a_live_socket(tmp_path: Path) -> None:
+def test_second_bridge_does_not_hijack_a_live_socket(sock_dir: Path) -> None:
     """Both containers ship the same configured name; both must stay reachable.
 
     Every container is pid 1 in its own namespace, so per-pid names collide
@@ -394,8 +443,8 @@ def test_second_bridge_does_not_hijack_a_live_socket(tmp_path: Path) -> None:
     """
 
     async def _exercise() -> tuple[str, str]:
-        a = _tagged_lifecycle(tmp_path, "A")
-        b = _tagged_lifecycle(tmp_path, "B")
+        a = _tagged_lifecycle(sock_dir, "A")
+        b = _tagged_lifecycle(sock_dir, "B")
         await a.start()
         await b.start()
         try:
@@ -412,12 +461,12 @@ def test_second_bridge_does_not_hijack_a_live_socket(tmp_path: Path) -> None:
     assert (who_a, who_b) == ("A", "B")
 
 
-def test_stopping_one_bridge_leaves_the_other_reachable(tmp_path: Path) -> None:
+def test_stopping_one_bridge_leaves_the_other_reachable(sock_dir: Path) -> None:
     """Unlink on stop must only remove a socket the stopper actually owns."""
 
     async def _exercise() -> str:
-        a = _tagged_lifecycle(tmp_path, "A")
-        b = _tagged_lifecycle(tmp_path, "B")
+        a = _tagged_lifecycle(sock_dir, "A")
+        b = _tagged_lifecycle(sock_dir, "B")
         await a.start()
         await b.start()
         try:
@@ -429,17 +478,17 @@ def test_stopping_one_bridge_leaves_the_other_reachable(tmp_path: Path) -> None:
     assert asyncio.run(_exercise()) == "B"
 
 
-def test_discovery_file_advertises_the_actual_socket(tmp_path: Path) -> None:
+def test_discovery_file_advertises_the_actual_socket(sock_dir: Path) -> None:
     """A generated sibling name must be what gets advertised."""
 
     async def _exercise() -> tuple[str, str]:
-        a = _tagged_lifecycle(tmp_path, "A")
-        b = _tagged_lifecycle(tmp_path, "B")
+        a = _tagged_lifecycle(sock_dir, "A")
+        b = _tagged_lifecycle(sock_dir, "B")
         await a.start()
         await b.start()
         try:
-            b.write_discovery_file(str(tmp_path), pid=99)
-            written = json.loads((tmp_path / "simul-mcp-99.json").read_text())
+            b.write_discovery_file(str(sock_dir), pid=99)
+            written = json.loads((sock_dir / "simul-mcp-99.json").read_text())
             return written["socket_path"], b.actual_socket_path
         finally:
             await a.stop()
@@ -451,19 +500,19 @@ def test_discovery_file_advertises_the_actual_socket(tmp_path: Path) -> None:
 
 
 def test_two_discovered_instances_resolve_to_distinct_backends(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, sock_dir: Path
 ) -> None:
     """The end-to-end misrouting from the review: tools for instance A must not
     execute inside instance B."""
 
     async def _exercise() -> tuple[str, str]:
-        a = _tagged_lifecycle(tmp_path, "A")
-        b = _tagged_lifecycle(tmp_path, "B")
+        a = _tagged_lifecycle(sock_dir, "A")
+        b = _tagged_lifecycle(sock_dir, "B")
         await a.start()
         await b.start()
         try:
             for i, lc in enumerate((a, b)):
-                (tmp_path / f"simul-mcp-{100 + i}.json").write_text(
+                (sock_dir / f"simul-mcp-{100 + i}.json").write_text(
                     json.dumps(
                         {
                             "pid": os.getpid(),
@@ -474,7 +523,7 @@ def test_two_discovered_instances_resolve_to_distinct_backends(
                         }
                     )
                 )
-            srv = _server(monkeypatch, tmp_path)
+            srv = _server(monkeypatch, sock_dir)
             found = await srv._discover_from_files()
             assert len(found) == 2, f"expected 2 instances, found {list(found)}"
             answers = []
@@ -490,7 +539,7 @@ def test_two_discovered_instances_resolve_to_distinct_backends(
 
 
 def test_socket_client_failures_name_the_socket_not_the_tcp_pair(
-    tmp_path: Path,
+    sock_dir: Path,
 ) -> None:
     """Diagnostics must point at the endpoint that was dialled.
 
@@ -498,7 +547,7 @@ def test_socket_client_failures_name_the_socket_not_the_tcp_pair(
     sends the operator to a port that was never touched: the same
     misdirection class #119/#120 were about.
     """
-    sock = str(tmp_path / "nothing-here.sock")
+    sock = str(sock_dir / "nothing-here.sock")
     client = IsaacSocketClient(
         host="127.0.0.1",
         port=1,

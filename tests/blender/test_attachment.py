@@ -307,6 +307,227 @@ def test_mcp_transform_forwards_validated_values_over_attachment(
     assert json.loads(result.content[0].text)["success"] is True
 
 
+def _exited_pid() -> int:
+    import subprocess
+    import sys
+
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait()
+    return process.pid
+
+
+def _attach_with_pid(
+    settings: Settings, advertised: tuple, monkeypatch: pytest.MonkeyPatch, pid: int
+) -> None:
+    endpoint, info = advertised
+    BridgeFiles.write(
+        Path(settings.blender.discovery_dir) / "instance-one.json", {**endpoint, "pid": pid}
+    )
+    monkeypatch.setattr(BlenderAttachments, "_hello", lambda self, target: info)
+    BlenderAttachments(settings).attach()
+
+
+def test_dead_process_is_reported_as_stale_without_connecting(
+    settings: Settings, advertised: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #217: a dead pid names itself and the recovery commands, not Errno 61."""
+    from simul_mcp.adapters.blender_connection import AttachmentStale
+
+    pid = _exited_pid()
+    _attach_with_pid(settings, advertised, monkeypatch, pid)
+    request = Mock()
+    monkeypatch.setattr(BridgeWire, "request", request)
+    with pytest.raises(AttachmentStale) as raised:
+        BlenderConnection(settings).get_runtime_info()
+    request.assert_not_called()
+    assert f"pid {pid}" in str(raised.value) and "not running" in str(raised.value)
+    assert "simul blender attach" in str(raised.value)
+    assert "attach_blender_window" in str(raised.value)
+    assert raised.value.details["process_alive"] is False
+
+    monkeypatch.setattr(blender_cli, "get_settings", lambda: settings)
+    result = CliRunner().invoke(app, ["--json", "blender", "status"])
+    assert result.exit_code == 1
+    envelope = json.loads(result.stdout)
+    assert envelope["error_type"] == "AttachmentStale"
+    assert envelope["details"]["pid"] == pid
+
+
+def test_refused_bridge_of_a_live_process_is_stale(
+    settings: Settings, advertised: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from simul_mcp.adapters.blender_connection import AttachmentStale
+
+    _attach_with_pid(settings, advertised, monkeypatch, os.getpid())
+    monkeypatch.setattr(
+        BridgeWire, "request", Mock(side_effect=ConnectionRefusedError(61, "Connection refused"))
+    )
+    with pytest.raises(AttachmentStale, match="not accepting bridge connections") as raised:
+        BlenderConnection(settings).create_object("CUBE")
+    assert raised.value.details["process_alive"] is True
+
+
+def test_mcp_tools_surface_the_stale_error_type(
+    settings: Settings,
+    advertised: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_fastmcp: Any,
+) -> None:
+    _attach_with_pid(settings, advertised, monkeypatch, _exited_pid())
+    server = SimulMCPServer(settings, backends={"blender"})
+    tool = next(t for t in server.mcp.tools if t.name == "get_blender_info")
+    payload = json.loads(asyncio.run(tool.func()).content[0].text)
+    assert payload["success"] is False
+    assert payload["error_type"] == "AttachmentStale"
+    assert "not running" in payload["error"]
+
+
+@pytest.mark.parametrize(
+    ("remote_type", "message"),
+    [
+        ("AttachmentTargetChanged", "Blender loaded another file (attached document doc, now new)"),
+        # An add-on built before the typed error still gets the structured path.
+        ("ValueError", "ValueError: Blender loaded another file; run simul blender attach again"),
+    ],
+)
+def test_document_change_names_the_new_document_and_recovery(
+    settings: Settings,
+    advertised: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+    remote_type: str,
+    message: str,
+) -> None:
+    """Issue #216: the pin stays strict but the error says what changed and how to re-attach."""
+    from simul_mcp.adapters.blender_connection import AttachmentTargetChanged
+    from simul_mcp.blender_bridge.protocol import BridgeRemoteError
+
+    _, info = advertised
+    monkeypatch.setattr(BlenderAttachments, "_hello", lambda self, target: info)
+    BlenderAttachments(settings).attach()
+    fresh = {
+        **info,
+        "document_id": "new",
+        "windows": [{**info["windows"][0], "window_id": "w2", "scene_id": "s2"}],
+    }
+    monkeypatch.setattr(BlenderAttachments, "_hello", lambda self, target: fresh)
+    monkeypatch.setattr(
+        BridgeWire, "request", Mock(side_effect=BridgeRemoteError(message, remote_type, {}))
+    )
+    with pytest.raises(AttachmentTargetChanged) as raised:
+        BlenderConnection(settings).get_runtime_info()
+    assert "now new" in str(raised.value)
+    assert "attach_blender_window" in str(raised.value)
+    assert raised.value.details["document_id"] == "new"
+    assert raised.value.details["attached_document_id"] == "doc"
+    assert raised.value.details["windows"][0]["window_id"] == "w2"
+    # Strict pin: the attachment was not silently moved.
+    stored = BridgeFiles.read(Path(settings.blender.attachment_path))
+    assert stored["target"]["document_id"] == "doc"
+
+
+def test_open_blend_file_follows_its_own_document_change(
+    settings: Settings, advertised: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, info = advertised
+    monkeypatch.setattr(BlenderAttachments, "_hello", lambda self, target: info)
+    BlenderAttachments(settings).attach()
+    new_window = {**info["windows"][0], "window_id": "w2", "scene_id": "s2", "scene_name": "Loaded"}
+    fresh = {**info, "document_id": "new", "windows": [new_window]}
+    monkeypatch.setattr(BlenderAttachments, "_hello", lambda self, target: fresh)
+    monkeypatch.setattr(
+        BridgeWire, "request", Mock(return_value={"file_path": "/x.blend", "object_count": 2})
+    )
+    result = BlenderConnection(settings).open_blend_file("/x.blend")
+    assert result["reattached"] is True
+    assert result["document_id"] == "new" and result["window_id"] == "w2"
+    stored = BridgeFiles.read(Path(settings.blender.attachment_path))
+    assert stored["target"] == {"document_id": "new", **new_window}
+
+
+def test_open_blend_file_reports_an_ambiguous_follow_instead_of_guessing(
+    settings: Settings, advertised: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, info = advertised
+    monkeypatch.setattr(BlenderAttachments, "_hello", lambda self, target: info)
+    BlenderAttachments(settings).attach()
+    windows = [
+        {**info["windows"][0], "window_id": "a", "scene_id": "s"},
+        {**info["windows"][0], "window_id": "b", "scene_id": "s"},
+    ]
+    monkeypatch.setattr(
+        BlenderAttachments, "_hello", lambda self, target: {**info, "document_id": "new", "windows": windows}
+    )
+    monkeypatch.setattr(
+        BridgeWire, "request", Mock(return_value={"file_path": "/x.blend", "object_count": 2})
+    )
+    result = BlenderConnection(settings).open_blend_file("/x.blend")
+    assert result["reattached"] is False
+    assert "attach_blender_window" in result["reattach_error"]
+    stored = BridgeFiles.read(Path(settings.blender.attachment_path))
+    assert stored["target"]["document_id"] == "doc"
+
+
+def test_attach_blender_window_tool_attaches_and_lists_candidates_when_ambiguous(
+    settings: Settings,
+    advertised: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_fastmcp: Any,
+) -> None:
+    _, info = advertised
+    monkeypatch.setattr(BlenderAttachments, "_hello", lambda self, target: info)
+    server = SimulMCPServer(settings, backends={"blender"})
+    tool = next(t for t in server.mcp.tools if t.name == "attach_blender_window")
+    payload = json.loads(asyncio.run(tool.func()).content[0].text)
+    assert payload["success"] is True, payload
+    assert payload["window"]["window_id"] == "window"
+    assert "token" not in json.dumps(payload)
+    assert BridgeFiles.read(Path(settings.blender.attachment_path))["target"]["window_id"] == "window"
+
+    info["windows"].append({**info["windows"][0], "window_id": "second"})
+    payload = json.loads(asyncio.run(tool.func()).content[0].text)
+    assert payload["success"] is False
+    assert payload["error_type"] == "ValueError"
+    assert {w["window_id"] for w in payload["details"]["instances"][0]["windows"]} == {"window", "second"}
+    payload = json.loads(asyncio.run(tool.func(window_id="second")).content[0].text)
+    assert payload["success"] is True and payload["window"]["window_id"] == "second"
+
+
+def test_attach_blender_window_tool_requires_attached_mode(
+    monkeypatch: pytest.MonkeyPatch, fake_fastmcp: Any, tmp_path: Path
+) -> None:
+    from contextlib import nullcontext
+
+    from tests.fakes import AvailableAdapter
+
+    monkeypatch.setattr("simul_mcp.mcp.backends.is_blender_available", lambda: True)
+    monkeypatch.setattr("simul_mcp.mcp.backends.BlenderRuntimeAdapter", AvailableAdapter)
+    monkeypatch.setattr(AvailableAdapter, "create_session", lambda self: nullcontext(object()))
+    embedded = Settings(blender={"mode": "embedded", "attachment_path": str(tmp_path / "a.json")})
+    server = SimulMCPServer(embedded, backends={"blender"})
+    tool = next(t for t in server.mcp.tools if t.name == "attach_blender_window")
+    payload = json.loads(asyncio.run(tool.func()).content[0].text)
+    assert payload["success"] is False and "attached" in payload["error"]
+    assert not (tmp_path / "a.json").exists()
+
+
+def test_script_context_errors_get_the_override_recipe(
+    settings: Settings, advertised: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #215: an older add-on's bare AttributeError still gets the recipe client-side."""
+    _, info = advertised
+    monkeypatch.setattr(BlenderAttachments, "_hello", lambda self, target: info)
+    BlenderAttachments(settings).attach()
+    error = "AttributeError: 'Context' object has no attribute 'active_object'"
+    monkeypatch.setattr(
+        BridgeWire,
+        "request",
+        Mock(return_value={"output": None, "return_value": None, "duration_seconds": 0.1, "error": error}),
+    )
+    result = BlenderConnection(settings).execute_script("import bpy")
+    assert result["error"].startswith(error)
+    assert "temp_override(window=win, screen=win.screen" in result["error"]
+
+
 def test_private_files_reject_symlinks_and_world_readable_credentials(
     tmp_path: Path,
 ) -> None:

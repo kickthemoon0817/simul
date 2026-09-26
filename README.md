@@ -323,6 +323,12 @@ simul-mcp server --backends isaac,usd
 # Register every granular Unreal tool instead of the default thin set
 simul-mcp server --backends unreal --unreal-tools full
 
+# Register only the essential Blender tools (default is full)
+simul-mcp server --backends blender --blender-tools thin
+
+# List the MCP tools (names, descriptions, input schemas) a server would register
+simul-mcp --json tools --backends blender --blender-tools thin
+
 # Start with custom configuration (copy src/simul_mcp/resources/config/default.yaml to start)
 simul-mcp server --config /path/to/your-config.yaml
 
@@ -448,7 +454,6 @@ usd:
 viewport:
   capture:
     max_size: 2048
-    format: "png"
 
 isaac_sim:
   path: "${ISAAC_SIM_PATH}"

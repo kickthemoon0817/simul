@@ -2605,6 +2605,26 @@ class TestExecuteScript:
 
         assert result["error"] is not None
         assert "ZeroDivisionError" in result["error"]
+        assert "temp_override" not in result["error"]
+
+    def test_execute_script_context_member_error_gets_override_recipe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Issue #215: a missing bpy.context member names the override that fixes it."""
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.execute_script(
+            "class Context:\n    pass\nContext().active_object"
+        )
+
+        assert result["error"].startswith(
+            "AttributeError: 'Context' object has no attribute 'active_object'"
+        )
+        assert "view_layer=win.view_layer" in result["error"]
+        assert blender_runtime.add_context_hint(result["error"]) == result["error"]
 
     def test_execute_script_timeout_returns_instead_of_blocking(
         self, monkeypatch: pytest.MonkeyPatch

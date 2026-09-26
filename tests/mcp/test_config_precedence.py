@@ -92,12 +92,7 @@ def test_get_settings_applies_env_over_shipped_yaml_and_keeps_other_yaml_values(
     assert settings.isaac_sim.socket_protocol == "python_server"
     # Sibling keys of the overridden leaf still come from the YAML.
     assert settings.isaac_sim.bridge_port == 8229
-    assert settings.server.cors_origins == [
-        "http://localhost:8765",
-        "https://localhost:8765",
-        "http://localhost:8226",
-        "http://localhost:8229",
-    ]
+    assert settings.logging.components.get("isaac") == "INFO"
 
 
 @pytest.mark.usefixtures("clean_settings_env")
@@ -113,7 +108,6 @@ def test_yaml_values_apply_when_no_env_var_is_set() -> None:
         "server": "INFO",
         "isaac": "INFO",
     }
-    assert settings.server.cors_origins[-1] == "http://localhost:8229"
     assert settings.security.allowed_paths == ["examples", "tests/data", "/tmp/simul_mcp"]
     assert settings.logging.audit_path == "~/.simul/logs/audit.jsonl"
 
@@ -123,8 +117,67 @@ def test_bare_settings_ignore_the_yaml_file() -> None:
     """``Settings()`` stays defaults plus environment; only ``from_yaml`` adds the file."""
     settings = Settings()
 
-    assert settings.server.cors_origins == ["http://localhost:*", "https://localhost:*"]
     assert settings.logging.components == {}
+
+
+_RETIRED_ENV = {
+    "SERVER__CORS_ORIGINS": '["http://localhost:*"]',
+    "ISAAC_SIM__HEADLESS": "true",
+    "ISAAC_SIM__WIDTH": "1280",
+    "ISAAC_SIM__HEIGHT": "720",
+    "VIEWPORT__FORMAT": "jpg",
+    "VIEWPORT__QUALITY": "80",
+    "VIEWPORT__FOV": "60.0",
+}
+
+_RETIRED_YAML = """
+server:
+  port: 8766
+  cors_origins: ["http://localhost:8765"]
+isaac_sim:
+  headless: true
+  width: 1280
+  height: 720
+  kit:
+    headless: true
+    resolution: {width: 1280, height: 720}
+viewport:
+  max_size: 1024
+  format: jpg
+  quality: 80
+  fov: 60.0
+  capture: {format: jpg, quality: 80}
+  camera: {fov: 60.0}
+"""
+
+
+@pytest.mark.usefixtures("clean_settings_env")
+def test_retired_settings_keys_still_load(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keys that no code read were removed; old ``.env`` files and YAML must keep loading.
+
+    Covers ``server.cors_origins``, ``isaac_sim.headless/width/height`` and
+    ``viewport.format/quality/fov``, as environment variables and as YAML keys
+    in both the flat and the nested layout.
+    """
+    for name, value in _RETIRED_ENV.items():
+        monkeypatch.setenv(name, value)
+    config_file = tmp_path / "legacy.yaml"
+    config_file.write_text(_RETIRED_YAML)
+
+    from_env = Settings()
+    from_yaml = Settings.from_yaml(config_file)
+
+    for settings in (from_env, from_yaml):
+        for section, retired in (
+            ("server", ("cors_origins",)),
+            ("isaac_sim", ("headless", "width", "height")),
+            ("viewport", ("format", "quality", "fov")),
+        ):
+            for name in retired:
+                assert not hasattr(getattr(settings, section), name)
+    # The live keys beside the retired ones still load.
+    assert from_yaml.server.port == 8766
+    assert from_yaml.viewport.max_size == 1024
 
 
 @pytest.mark.usefixtures("clean_settings_env")
