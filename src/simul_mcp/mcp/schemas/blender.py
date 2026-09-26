@@ -3,6 +3,7 @@
 from typing import Annotated, Any, Dict, List, Optional
 
 from pydantic import AfterValidator, BaseModel, Field
+from pydantic.json_schema import SkipJsonSchema
 
 
 def _printable_agent_label(value: str) -> str:
@@ -385,13 +386,25 @@ class BlenderCaptureViewportRequest(BaseModel):
 
 
 class BlenderCaptureViewportResponse(BaseModel):
-    """Base64-encoded JPEG viewport capture result."""
+    """Viewport capture result: an image content block plus this JSON record.
+
+    The client receives the JPEG as an MCP ``ImageContent`` block ahead of the
+    JSON text block, which carries ``image_attached: true`` instead of the
+    bytes. ``image_base64`` is what the Blender session hands the server; the
+    server lifts it into the image block, so it is left out of the schema.
+    """
 
     success: bool = Field(..., description="Whether capture succeeded")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    image_base64: str = Field(..., description="Base64-encoded JPEG image data")
+    image_base64: SkipJsonSchema[str] = Field(
+        ..., description="Session-side JPEG data, lifted into the image content block"
+    )
+    image_attached: bool = Field(
+        False,
+        description="True when the image was sent as an MCP image content block",
+    )
     width: int = Field(..., description="Captured image width")
     height: int = Field(..., description="Captured image height")
     engine: str = Field(
@@ -400,7 +413,7 @@ class BlenderCaptureViewportResponse(BaseModel):
     capture_method: str = Field(
         ..., description="Method used: gpu_offscreen or render_fallback"
     )
-    format: str = Field("jpeg", description="Encoded image format of image_base64")
+    format: str = Field("jpeg", description="Encoded format of the attached image")
 
 
 class BlenderSetCameraViewRequest(BaseModel):

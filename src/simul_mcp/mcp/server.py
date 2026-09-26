@@ -992,12 +992,16 @@ class SimulMCPServer(LoggerMixin):
         """
         content: List[Any] = []
         image = payload.get("image_base64")
-        if isinstance(image, str) and image:
+        if "image_base64" in payload:
+            # The transport keys never reach the client: a present image moves
+            # to its own block, an absent one (a null a response model filled
+            # in) would only be noise in the record.
             payload = {
                 key: value
                 for key, value in payload.items()
                 if key not in ("image_base64", "encoding")
             }
+        if isinstance(image, str) and image:
             payload["image_attached"] = True
             image_format = _sniff_image_format(image) or str(
                 payload.get("format", "png")

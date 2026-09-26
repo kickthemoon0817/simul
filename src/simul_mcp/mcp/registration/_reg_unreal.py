@@ -606,7 +606,11 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @server.mcp.tool(
         name="get_unreal_actor_thumbnail",
-        description="Get a thumbnail image for an Unreal asset.",
+        description=(
+            "Get a thumbnail image for an Unreal asset. The image arrives as an "
+            "MCP image content block, followed by a JSON block with asset_path, "
+            "format, width, height and image_attached=true."
+        ),
         annotations=server._tool_annotations(
             read_only=True,
             idempotent=False,
@@ -630,7 +634,8 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             height: Thumbnail height in pixels.
 
         Returns:
-            Thumbnail data or error response.
+            An image content block plus the thumbnail record, or an error
+            response.
         """
         return await server._exec_backend(
             "get_unreal_actor_thumbnail",

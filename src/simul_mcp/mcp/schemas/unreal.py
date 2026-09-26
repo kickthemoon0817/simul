@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 # ---------------------------------------------------------------------------
 # Unreal Engine schemas -- Phase 0
@@ -233,14 +234,25 @@ class UnrealDescribeObjectResponse(BaseModel):
 
 
 class UnrealGetThumbnailResponse(BaseModel):
-    """Response with a base64-encoded thumbnail image."""
+    """Thumbnail result: an image content block plus this JSON record.
+
+    ``image_base64`` is what the Unreal session hands the server; the server
+    lifts it into an MCP ``ImageContent`` block and sets ``image_attached``,
+    so it is left out of the schema.
+    """
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     asset_path: str = Field(..., description="Asset path queried")
-    image_base64: str = Field(..., description="Base64-encoded thumbnail image")
+    image_base64: SkipJsonSchema[str] = Field(
+        ..., description="Session-side image data, lifted into the image content block"
+    )
+    image_attached: bool = Field(
+        False,
+        description="True when the image was sent as an MCP image content block",
+    )
     format: str = Field("png", description="Image format: png or jpeg")
     width: int = Field(..., description="Image width in pixels")
     height: int = Field(..., description="Image height in pixels")
@@ -286,7 +298,14 @@ class UnrealExecuteScriptResponse(BaseModel):
 
 
 class UnrealCaptureViewportResponse(BaseModel):
-    """Response with captured viewport image."""
+    """Viewport capture result: a path record, plus an image block when inline.
+
+    With ``inline`` and a small enough capture, the client receives the image
+    as an MCP ``ImageContent`` block ahead of this JSON record, which then
+    carries ``image_attached: true``. ``image_base64``/``encoding`` are what
+    the Unreal session hands the server; the server lifts them into the image
+    block, so they are left out of the schema.
+    """
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
@@ -294,10 +313,16 @@ class UnrealCaptureViewportResponse(BaseModel):
     )
     path: str = Field("", description="Capture path on the Unreal editor host")
     size_bytes: int = Field(0, description="Size of the capture file in bytes")
-    image_base64: Optional[str] = Field(
-        None, description="Base64 image data; only present for small inline captures"
+    image_base64: SkipJsonSchema[Optional[str]] = Field(
+        None, description="Session-side image data, lifted into the image content block"
     )
-    encoding: Optional[str] = Field(None, description="Encoding of image_base64")
+    encoding: SkipJsonSchema[Optional[str]] = Field(
+        None, description="Encoding of image_base64; dropped with it"
+    )
+    image_attached: bool = Field(
+        False,
+        description="True when the image was sent as an MCP image content block",
+    )
     inline_skipped: Optional[str] = Field(
         None, description="Why inline data was omitted, when it was"
     )
