@@ -59,7 +59,7 @@ surface because that's what agents see by default.
 | `mcp__simul__unreal_health_check` | `() → {connected, engine_version, project_name, is_editor}` | ~150 B |
 | `mcp__simul__ping_unreal` | `() → {reachable, latency_ms, ...}` | ~100 B |
 | `mcp__simul__list_unreal_instances` | `({scan_port_start?, scan_port_end?}) → [{port, project_name, ...}]` | ~200 B × N |
-| `mcp__simul__execute_unreal_script` | `({code, mode}) → {success, result}` | depends on what the script prints |
+| `mcp__simul__execute_unreal_script` | `({code, mode}) → {success, ...printed JSON}`; `{success, result}` for `EvaluateStatement`, `{success, output}` when nothing JSON was printed | depends on what the script prints |
 | `mcp__simul__capture_unreal_viewport` | `({resolution_x, resolution_y, format, inline}) → {path, size_bytes, ...}` plus an image content block when `inline` | ~200 B of JSON; the image travels as `ImageContent`, not as text |
 
 ## Sanity checklist
@@ -91,15 +91,26 @@ pass when:
 
 ### C3 — `execute_unreal_script` contract
 
-The tool requires a JSON object printed to stdout. Verify both halves.
+The tool returns the first JSON object the script printed; a script that
+ran but printed no JSON returns its printed `output`, and a script that
+raised returns a `ScriptError`. Verify all three.
 
-**C3.a — malformed (negative):**
+**C3.a — no JSON printed:**
 ```text
 tool: mcp__simul__execute_unreal_script
 args: {code: "print('hello')"}
 pass when:
+  - success == true
+  - output == "hello\n"
+```
+
+**C3.a2 — script raised (negative):**
+```text
+tool: mcp__simul__execute_unreal_script
+args: {code: "raise RuntimeError('boom')"}
+pass when:
   - success == false
-  - error mentions "JSON" (the tool rejects non-JSON output)
+  - error_type == "ScriptError" and error mentions "boom"
 ```
 
 **C3.b — well-formed (positive):**
@@ -175,7 +186,7 @@ you enable full registration, reach for:
 
 ### `execute_unreal_script` hygiene
 
-- **Print exactly one JSON object.** The tool parses the last JSON line;
+- **Print exactly one JSON object.** The tool returns the first JSON object printed;
   multiple prints or mixed stdout/print debugging wastes tokens and can
   confuse the parser.
 - **Cap list sizes.** `actors[:N]` beats the full list. 5–20 is usually
