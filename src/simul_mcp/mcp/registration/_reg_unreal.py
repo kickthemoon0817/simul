@@ -382,7 +382,8 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         )
 
     # -- Thin mode ends here: health check, ping, instance listing,
-    #    viewport capture and script execution are registered above.
+    #    viewport capture, script execution and control_unreal_ui are
+    #    registered above.
     if thin:
         return
 
