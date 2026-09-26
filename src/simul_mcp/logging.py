@@ -129,7 +129,7 @@ def setup_logging(
 
         except Exception as e:
             # Fallback to basic configuration
-            print(f"Warning: Failed to load logging config from {config_file}: {e}")
+            print(f"Warning: Failed to load logging config from {config_file}: {e}", file=sys.stderr)
             _setup_fallback_logging(settings, log_level)
     else:
         # Use fallback configuration
@@ -161,7 +161,7 @@ def _ensure_log_directories(config: Dict[str, Any]) -> None:
             try:
                 log_dir.mkdir(parents=True, exist_ok=True)
             except Exception as e:
-                print(f"Warning: Could not create log directory {log_dir}: {e}")
+                print(f"Warning: Could not create log directory {log_dir}: {e}", file=sys.stderr)
 
 
 def _resolve_logging_config_path(config_file: Union[str, Path]) -> Path:

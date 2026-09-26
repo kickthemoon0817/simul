@@ -155,7 +155,8 @@ class RateLimiter:
         self.rate = rate
         self.burst = burst
         self.tokens = burst
-        self.last_update = time.time()
+        # Monotonic, so a wall-clock step backwards cannot stall refills.
+        self.last_update = time.monotonic()
 
     def acquire(self, tokens: int = 1) -> bool:
         """
@@ -193,7 +194,7 @@ class RateLimiter:
 
     def _refill(self) -> None:
         """Add the tokens earned since the last update, up to the burst size."""
-        now = time.time()
+        now = time.monotonic()
         elapsed = now - self.last_update
         self.tokens = min(self.burst, self.tokens + elapsed * self.rate)
         self.last_update = now

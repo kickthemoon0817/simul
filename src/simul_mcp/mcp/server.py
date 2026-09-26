@@ -6,6 +6,7 @@ connection management, and 3D simulation/DCC integration based on FastMCP.
 """
 
 import asyncio
+import hashlib
 import inspect
 import json
 import os
@@ -528,6 +529,19 @@ class SimulMCPServer(LoggerMixin):
             return binding.agent_id
         return self._resolve_agent_id(None)
 
+    def _claim_owner(self) -> str:
+        """Return the opaque owner token for claims made by the current request.
+
+        A claim is bound to the MCP session that made it, because ``agent_id``
+        is chosen by the caller and shown to every agent by
+        ``list_isaac_instances``. The token is a digest of the transport's
+        session id, so publishing it in session records reveals nothing, or of
+        this server process when the request carries no session.
+        """
+        session_id = self._get_request_session_id()
+        source = f"session:{session_id}" if session_id else f"process:{os.getpid()}:{id(self):x}"
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
+
     def _foreign_claim(
         self, instance_name: str, caller_agent_id: str
     ) -> Optional[Dict[str, Any]]:
@@ -540,29 +554,47 @@ class SimulMCPServer(LoggerMixin):
         Returns:
             The holder's session record when ``isaac_sim.enforce_claims`` is on
             and a live claim by a different agent exists, otherwise ``None``.
-            Expired claims are pruned by the session manager, so a stale holder
-            never blocks.
+            A claim is foreign when its ``agent_id`` differs from the caller's
+            or when a different MCP session made it (its ``owner`` token
+            differs), so passing another agent's ``agent_id`` does not inherit
+            that agent's claim. Expired claims are pruned by the session
+            manager, so a stale holder never blocks.
         """
         if not self.settings.isaac_sim.enforce_claims:
             return None
         client = self._isaac_clients.get(instance_name)
         if client is None:
             return None
+        owner = self._claim_owner()
         sessions = self.session_manager.get_instance_session(client._port).get_status()["sessions"]
         for session in sessions:
             if session.get("agent_id") != caller_agent_id:
                 return session
+            holder_owner = session.get("owner")
+            if holder_owner is not None and holder_owner != owner:
+                return session
         return None
 
-    def _claimed_error(self, instance_name: str, holder: Dict[str, Any]) -> Dict[str, Any]:
+    def _claimed_error(
+        self,
+        instance_name: str,
+        holder: Dict[str, Any],
+        caller_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Build the InstanceClaimed payload naming the holder and the way forward."""
         expires_in = max(0.0, CLAIM_TTL_SECONDS - (time.time() - float(holder.get("last_active", 0.0))))
+        impersonation = (
+            f" The agent_id {caller_agent_id!r} is bound to a different MCP session;"
+            " pick a unique agent_id or omit it."
+            if caller_agent_id is not None and holder.get("agent_id") == caller_agent_id
+            else ""
+        )
         return ErrorResponse(
             error=(
                 f"Isaac instance {instance_name!r} is claimed by agent "
                 f"{holder.get('agent_id')!r} for {holder.get('purpose', '')!r}; "
                 "isaac_sim.enforce_claims refuses mutating tools from other agents while "
-                "that claim is live."
+                "that claim is live." + impersonation
             ),
             error_type="InstanceClaimed",
             details={
@@ -886,9 +918,9 @@ class SimulMCPServer(LoggerMixin):
             with adapter.create_session() as session:
                 # Unreal sessions are async, Blender sessions are sync; accept
                 # both so one envelope serves every backend.
-                if adapter_label == "Blender" and self.settings.blender.mode == "attached":
-                    # Only socket I/O runs here, never bpy. Keep other MCP
-                    # requests responsive while the editor executes its work.
+                if getattr(adapter, "session_blocks_io", False):
+                    # The adapter declares its session only waits on I/O (never
+                    # bpy), so keep other MCP requests responsive meanwhile.
                     payload = await asyncio.to_thread(call, session)
                 else:
                     payload = call(session)

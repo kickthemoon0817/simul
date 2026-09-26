@@ -2849,6 +2849,19 @@ class BlenderRuntimeAdapter:
         finally:
             session.cleanup()
 
+    @property
+    def session_blocks_io(self) -> bool:
+        """Report whether session calls block on I/O rather than touching ``bpy``.
+
+        Attached sessions only wait on the socket to the Blender editor, so the
+        server runs them on a worker thread; embedded sessions call ``bpy``,
+        which must stay on the calling thread.
+
+        Returns:
+            True in attached mode.
+        """
+        return self.settings.blender.mode == "attached"
+
     def is_available(self) -> bool:
         """
         Check whether Blender runtime is available.

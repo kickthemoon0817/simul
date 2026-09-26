@@ -160,8 +160,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             instance_name: Name of the instance to activate.
             purpose: Free-text description of what you're doing. Other agents
                      will see this and can decide whether to join or avoid.
-            agent_id: Unique identifier for this agent session. Defaults to
-                      a generated ID if not provided.
+            agent_id: Unique label for this agent. Defaults to the MCP
+                      session id. A claim stays bound to the MCP session that
+                      made it, so reusing another agent's label is refused.
 
         Returns:
             Confirmation with the new active instance, session info,
@@ -185,7 +186,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         if purpose:
             holder = server._foreign_claim(instance_name, _agent_id)
             if holder is not None:
-                return server._claimed_error(instance_name, holder)
+                return server._claimed_error(instance_name, holder, _agent_id)
             compat_info = server.session_manager.score_compatibility(purpose, port)
 
         server._set_request_active_instance(instance_name)
@@ -195,7 +196,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         binding_result: Dict[str, Any] = {}
         if purpose:
             inst_session = server.session_manager.get_instance_session(port)
-            session_result = inst_session.register(_agent_id, purpose)
+            session_result = inst_session.register(
+                _agent_id, purpose, owner=server._claim_owner()
+            )
             binding = server._bind_request_session(
                 instance_name=instance_name,
                 port=port,
@@ -265,7 +268,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
 
         Args:
             purpose: Free-text description of what you're doing.
-            agent_id: Unique identifier for this agent session.
+            agent_id: Unique label for this agent. Defaults to the MCP
+                      session id. A claim stays bound to the MCP session that
+                      made it, so reusing another agent's label is refused.
 
         Returns:
             Registration result with compatibility info.
@@ -283,11 +288,11 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         _agent_id = server._resolve_agent_id(agent_id)
         holder = server._foreign_claim(instance_name, _agent_id)
         if holder is not None:
-            return server._claimed_error(instance_name, holder)
+            return server._claimed_error(instance_name, holder, _agent_id)
         inst_session = server.session_manager.get_instance_session(port)
 
         compat = server.session_manager.score_compatibility(purpose, port)
-        reg = inst_session.register(_agent_id, purpose)
+        reg = inst_session.register(_agent_id, purpose, owner=server._claim_owner())
         binding = server._bind_request_session(
             instance_name=instance_name,
             port=port,
