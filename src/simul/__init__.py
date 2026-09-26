@@ -7,7 +7,7 @@ bridges (``simul.bridge_ext``, ``simul.blender_bridge``) and a headless USD
 library (``simul.usd``). Distributed as ``simul-toolkit``.
 """
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 __author__ = "khemoo"
 __email__ = ""
 

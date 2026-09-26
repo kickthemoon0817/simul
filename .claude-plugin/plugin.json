@@ -1,6 +1,6 @@
 {
   "name": "simul",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Agent toolkit for 3D simulation — an MCP server, engine setup CLI and in-editor bridges plus skills for scene setup, physics, materials, camera, scripting and headless workflows in Isaac Sim, Unreal Engine, Blender and USD",
   "author": {
     "name": "khemoo",
