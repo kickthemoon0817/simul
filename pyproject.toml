@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "simul-toolkit"
-version = "0.1.2"
+version = "0.1.3"
 description = "Agent toolkit for 3D simulation — connect AI agents to Isaac Sim, Unreal Engine 5, Blender and OpenUSD through an MCP server, an engine setup CLI and in-editor bridges"
 authors = [
     {name = "khemoo"}
