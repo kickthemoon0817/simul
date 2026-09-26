@@ -48,7 +48,7 @@ from ..utils.timing import RateLimiter
 from .backends import ALL_BACKEND_NAMES, BACKENDS
 from .registration import register_stats_tools
 from .registration._helpers import apply_success_from_error
-from .result_budget import apply_result_budget
+from .result_budget import encode_result_budget
 from .schemas.common import ErrorResponse
 from .session_manager import CLAIM_TTL_SECONDS, SessionManager
 from ..utils.discovery import DiscoveryDir
@@ -954,9 +954,10 @@ class SimulMCPServer(LoggerMixin):
                     # it through the success schema would only replace the
                     # message with a pydantic complaint.
                     return self._validate_output(payload, models, tool_name)
-                return self._validate_output(
-                    response_model(**payload).model_dump(), models, tool_name
-                )
+                # Constructing the model is the validation; its dump already
+                # conforms, so it is returned as is rather than re-validated
+                # through _validate_output (a second full pydantic pass).
+                return response_model(**payload).model_dump()
         except SandboxDenied as exc:
             return self._validate_output(sandbox_error(exc.details), models, tool_name)
         except Exception as exc:
@@ -1005,7 +1006,7 @@ class SimulMCPServer(LoggerMixin):
                 "image/jpeg" if image_format in ("jpg", "jpeg") else f"image/{image_format}"
             )
             content.append(ImageContent(type="image", data=image, mimeType=mime_type))
-        text = json.dumps(apply_result_budget(payload), default=str)
+        text = encode_result_budget(payload)
         content.append(TextContent(type="text", text=text))
         return ToolResult(content=content)
 

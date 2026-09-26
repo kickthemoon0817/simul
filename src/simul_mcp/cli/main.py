@@ -36,14 +36,27 @@ from rich.table import Table
 from simul_mcp.cli.output import emit, emit_error, is_json_mode, set_json_mode
 from simul_mcp.config import get_settings, load_settings, validate_settings
 from simul_mcp.logging import setup_logging, get_logger
-from simul_mcp.mcp.server import TRANSPORTS, SimulMCPServer, start_mcp_server
-from simul_mcp.adapters import is_blender_available, is_headless_available
 
 # Import sub-apps
 from simul_mcp.cli.isaac import app as isaac_app
 from simul_mcp.cli.usd_cli import app as usd_app
 from simul_mcp.cli.unreal_cli import app as unreal_app
 from simul_mcp.cli.blender_cli import app as blender_app
+
+# The MCP server (fastmcp + every backend adapter) and the adapter availability
+# probes (pxr, bpy) are imported inside the commands that use them, so
+# ``simul --help`` and the light sub-commands don't pay for them at startup.
+
+
+def start_mcp_server(*args, **kwargs):
+    """Lazily forward to :func:`simul_mcp.mcp.server.start_mcp_server`.
+
+    A module-level name (rather than an import inside ``server``) so tests can
+    monkeypatch ``simul_mcp.cli.main.start_mcp_server``.
+    """
+    from simul_mcp.mcp.server import start_mcp_server as _start_mcp_server
+
+    return _start_mcp_server(*args, **kwargs)
 
 
 def _is_isaac_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -304,6 +317,9 @@ def server(
 ) -> None:
     """Start the Simul MCP Server."""
     try:
+        from simul_mcp.adapters import is_blender_available, is_headless_available
+        from simul_mcp.mcp.server import TRANSPORTS, SimulMCPServer
+
         if config:
             settings = load_settings(config)
         else:
@@ -428,6 +444,9 @@ def info(
 ) -> None:
     """Show server information and capabilities."""
     try:
+        from simul_mcp.adapters import is_blender_available, is_headless_available
+        from simul_mcp.mcp.server import SimulMCPServer
+
         if config:
             settings = load_settings(config)
         else:
@@ -716,6 +735,8 @@ def version() -> None:
         version_str = __version__
     except ImportError:
         version_str = "unknown"
+
+    from simul_mcp.adapters import is_blender_available, is_headless_available
 
     settings = get_settings()
     isaac_port = settings.isaac_sim.socket_port

@@ -43,20 +43,41 @@ _HARD_LIMIT_HINT = (
 )
 
 
+def _encode(payload: Any) -> str:
+    return json.dumps(payload, default=str)
+
+
 def _encoded_size(payload: Any) -> int:
-    return len(json.dumps(payload, default=str))
+    return len(_encode(payload))
 
 
-def _largest_list_field(payload: Dict[str, Any]) -> Optional[Tuple[str, List[Any]]]:
-    """Return the (key, list) pair contributing the most encoded bytes."""
-    candidates = [
-        (key, value)
-        for key, value in payload.items()
-        if isinstance(value, list) and value
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: _encoded_size(item[1]))
+def _list_size(item_sizes: List[int], count: int) -> int:
+    """Encoded length of a list's first ``count`` items, from per-item sizes.
+
+    ``json.dumps`` without ``indent`` writes a list as ``[`` + items joined by
+    ``", "`` + ``]`` and encodes each item independently of its neighbours, so
+    the prefix length follows from the item lengths without re-encoding.
+    """
+    if count <= 0:
+        return 2
+    return 2 + sum(item_sizes[:count]) + 2 * (count - 1)
+
+
+def _largest_list_field(
+    payload: Dict[str, Any],
+) -> Optional[Tuple[str, List[Any], List[int]]]:
+    """Return (key, list, per-item sizes) for the list contributing the most encoded bytes."""
+    best: Optional[Tuple[str, List[Any], List[int]]] = None
+    best_size = -1
+    for key, value in payload.items():
+        if not (isinstance(value, list) and value):
+            continue
+        item_sizes = [_encoded_size(item) for item in value]
+        size = _list_size(item_sizes, len(item_sizes))
+        # Strictly greater keeps the first of equal-sized lists, as max() does.
+        if size > best_size:
+            best, best_size = (key, value, item_sizes), size
+    return best
 
 
 def _largest_string_field(payload: Dict[str, Any]) -> Optional[Tuple[str, str]]:
@@ -92,27 +113,55 @@ def apply_result_budget(
     Returns:
         The payload unchanged when it already fits, else the trimmed copy.
     """
-    if not isinstance(payload, dict):
-        return payload
-    if _encoded_size(payload) <= budget_bytes:
-        return payload
-    return _enforce_hard_limit(_trim_largest_list(payload, budget_bytes, hint), hard_limit_bytes)
+    return _budget(payload, budget_bytes, hint, hard_limit_bytes)[0]
 
 
-def _trim_largest_list(payload: Dict[str, Any], budget_bytes: int, hint: str) -> Dict[str, Any]:
-    """Cut the largest top-level list until the payload fits, or flag it oversized."""
+def encode_result_budget(
+    payload: Any,
+    budget_bytes: int = DEFAULT_RESULT_BUDGET_BYTES,
+    hint: str = _DEFAULT_HINT,
+    hard_limit_bytes: int = HARD_RESULT_LIMIT_BYTES,
+) -> str:
+    """Return ``json.dumps(apply_result_budget(payload, ...), default=str)``.
 
-    def _oversized(original: Dict[str, Any]) -> Dict[str, Any]:
+    Byte-identical to that expression, but the encoding made to measure the
+    payload is the one returned, so a payload that already fits is encoded
+    once instead of twice.
+    """
+    return _budget(payload, budget_bytes, hint, hard_limit_bytes)[1]
+
+
+def _budget(
+    payload: Any, budget_bytes: int, hint: str, hard_limit_bytes: int
+) -> Tuple[Any, str]:
+    """Apply the budget; return the resulting payload and its JSON encoding."""
+    text = _encode(payload)
+    if not isinstance(payload, dict) or len(text) <= budget_bytes:
+        return payload, text
+    trimmed, trimmed_text = _trim_largest_list(payload, len(text), budget_bytes, hint)
+    return _enforce_hard_limit(trimmed, trimmed_text, hard_limit_bytes)
+
+
+def _trim_largest_list(
+    payload: Dict[str, Any], payload_size: int, budget_bytes: int, hint: str
+) -> Tuple[Dict[str, Any], str]:
+    """Cut the largest top-level list until the payload fits, or flag it oversized.
+
+    ``payload_size`` is the payload's already-measured encoded length. Returns
+    the resulting payload together with its encoding.
+    """
+
+    def _oversized() -> Tuple[Dict[str, Any], str]:
         """Report an over-budget payload we could not usefully trim."""
-        noted = dict(original)
-        noted["oversized_bytes"] = _encoded_size(original)
-        return noted
+        noted = dict(payload)
+        noted["oversized_bytes"] = payload_size
+        return noted, _encode(noted)
 
     largest = _largest_list_field(payload)
     if largest is None:
-        return _oversized(payload)
+        return _oversized()
 
-    field, items = largest
+    field, items, item_sizes = largest
     total = len(items)
 
     # Size of everything except the list, plus room for the truncation notice.
@@ -126,9 +175,10 @@ def _trim_largest_list(payload: Dict[str, Any], budget_bytes: int, hint: str) ->
         kept = 0
     else:
         # Estimate from the average item, then shrink until it genuinely fits.
-        average = max(1, _encoded_size(items) // total)
+        # Prefix sizes come from the per-item sizes measured once above.
+        average = max(1, _list_size(item_sizes, total) // total)
         kept = max(0, min(total, remaining // average))
-        while kept > 0 and _encoded_size(items[:kept]) > remaining:
+        while kept > 0 and _list_size(item_sizes, kept) > remaining:
             kept = int(kept * 0.9) if kept > 10 else kept - 1
 
     trimmed = dict(payload)
@@ -140,6 +190,7 @@ def _trim_largest_list(payload: Dict[str, Any], budget_bytes: int, hint: str) ->
         "total": total,
         "hint": hint,
     }
+    trimmed_text = _encode(trimmed)
 
     # Only keep the trim if it actually helped. The largest *top-level* list is
     # not always where the bulk is: get_isaac_prim_detail carries its weight in
@@ -148,21 +199,26 @@ def _trim_largest_list(payload: Dict[str, Any], budget_bytes: int, hint: str) ->
     # metadata the caller needs, reports a truncation that did not happen, and
     # leaves the payload over budget — larger, in fact, since the notice costs
     # more than the list did.
-    if _encoded_size(trimmed) < _encoded_size(payload):
-        return trimmed
+    if len(trimmed_text) < payload_size:
+        return trimmed, trimmed_text
 
     # Nothing worth trimming at the top level. Say the payload is oversized
     # rather than pretending it was cut; a caller acting on a false
     # "truncated" flag would go looking for data that is all still here.
-    return _oversized(payload)
+    return _oversized()
 
 
-def _enforce_hard_limit(payload: Dict[str, Any], hard_limit_bytes: int) -> Dict[str, Any]:
-    """Replace the largest string fields with markers until the payload fits."""
-    while _encoded_size(payload) > hard_limit_bytes:
+def _enforce_hard_limit(
+    payload: Dict[str, Any], text: str, hard_limit_bytes: int
+) -> Tuple[Dict[str, Any], str]:
+    """Replace the largest string fields with markers until the payload fits.
+
+    ``text`` is ``payload``'s current encoding; the pair returned stays in step.
+    """
+    while len(text) > hard_limit_bytes:
         largest = _largest_string_field(payload)
         if largest is None:
-            return payload
+            return payload, text
         field, value = largest
         marker = {
             "truncated_field": field,
@@ -171,7 +227,8 @@ def _enforce_hard_limit(payload: Dict[str, Any], hard_limit_bytes: int) -> Dict[
         }
         if _encoded_size(marker) >= _encoded_size(value):
             # The remaining strings are all small; replacing them cannot help.
-            return payload
+            return payload, text
         payload = dict(payload)
         payload[field] = marker
-    return payload
+        text = _encode(payload)
+    return payload, text

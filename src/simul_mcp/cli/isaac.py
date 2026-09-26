@@ -16,7 +16,7 @@ import re
 import sys
 import textwrap
 from pathlib import Path
-from typing import Any, Coroutine, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Coroutine, Dict, List, Optional
 
 import typer
 from rich.markup import escape as rich_escape
@@ -41,8 +41,12 @@ from simul_mcp.cli.output import (
     run_or_exit,
 )
 from simul_mcp.config import get_settings
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
 from simul_mcp.utils.discovery import DiscoveryDir
+
+if TYPE_CHECKING:
+    # Imported in _tools(): the tools package pulls in fastmcp, which
+    # `simul --help` and the install/launch commands never need.
+    from simul_mcp.mcp.tools.isaac_tools import IsaacTools
 
 app = typer.Typer(
     name="isaac",
@@ -57,13 +61,15 @@ def _tools(
     timeout: Optional[float] = None,
     *,
     bridge_circuit_breaker: bool = True,
-) -> IsaacTools:
+) -> "IsaacTools":
     """Build an IsaacTools instance from settings with optional overrides.
 
     ``bridge_circuit_breaker=False`` is for readiness polling: a bridge that
     is still binding its port must be dialled on every poll, not skipped for
     the breaker's cooldown after the first few refusals.
     """
+    from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+
     settings = get_settings()
     isaac = settings.isaac_sim
     # The bridge endpoint stays pinned to settings: --host/--port address the

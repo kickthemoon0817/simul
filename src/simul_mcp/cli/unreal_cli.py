@@ -15,7 +15,7 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
-from typing import Any, Coroutine, Dict, List, NoReturn, Optional
+from typing import TYPE_CHECKING, Any, Coroutine, Dict, List, NoReturn, Optional
 
 import typer
 from rich.markup import escape as rich_escape
@@ -23,7 +23,6 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
-from simul_mcp.adapters.unreal_runtime import UNREAL_EXEC_MODES, UnrealRuntimeSession
 from simul_mcp.adapters.unreal_setup import (
     LauncherNotFound,
     ensure_remote_control_config,
@@ -43,6 +42,11 @@ from simul_mcp.cli.output import (
 )
 from simul_mcp.config import get_settings
 
+if TYPE_CHECKING:
+    # Imported where a session is built: unreal_runtime pulls in aiohttp,
+    # which `simul --help` and `simul unreal setup` never need.
+    from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
+
 app = typer.Typer(
     name="unreal",
     help="Unreal Engine commands -- interact with a running UE5 instance via Remote Control API.",
@@ -57,7 +61,7 @@ def _session(
     *,
     passphrase: Optional[str] = None,
     mode: Optional[str] = None,
-) -> UnrealRuntimeSession:
+) -> "UnrealRuntimeSession":
     """Build an UnrealRuntimeSession with optional overrides.
 
     ``passphrase`` accepts either plaintext or a pre-computed MD5 hex
@@ -86,10 +90,12 @@ def _session(
     if overrides:
         unreal_cfg = settings.unreal.model_copy(update=overrides)
         settings = settings.model_copy(update={"unreal": unreal_cfg})
+    from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
+
     return UnrealRuntimeSession(settings)
 
 
-async def _script_refusal(session: UnrealRuntimeSession) -> Dict[str, Any]:
+async def _script_refusal(session: "UnrealRuntimeSession") -> Dict[str, Any]:
     return session._script_execution_denied()
 
 
@@ -109,6 +115,8 @@ async def _attached_call(method: str, **kwargs: Any) -> Dict[str, Any]:
     settings = settings.model_copy(
         update={"unreal": settings.unreal.model_copy(update={"mode": "attached"})}
     )
+    from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
+
     session = UnrealRuntimeSession(settings)
     try:
         return await getattr(session, method)(**kwargs)
@@ -593,6 +601,8 @@ def exec_script(
     port: Optional[int] = _port_opt,
 ) -> None:
     """Execute Python code inside Unreal Engine."""
+    from simul_mcp.adapters.unreal_runtime import UNREAL_EXEC_MODES
+
     if mode not in UNREAL_EXEC_MODES:
         msg = f"Invalid mode '{mode}'. Must be one of: {', '.join(sorted(UNREAL_EXEC_MODES))}"
         fail(msg, "ValueError")
@@ -770,7 +780,7 @@ def _editor_exit(proc: Optional[subprocess.Popen]) -> Optional[Dict[str, Any]]:
 
 
 async def _poll_health(
-    session: UnrealRuntimeSession,
+    session: "UnrealRuntimeSession",
     timeout: float,
     interval: float,
     proc: Optional[subprocess.Popen] = None,

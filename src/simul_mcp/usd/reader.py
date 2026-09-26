@@ -188,12 +188,14 @@ class USDReader(LoggerMixin):
             return PrimType.UNKNOWN
     
     @monitor_performance("usd_reader.get_stage_info")
-    def get_stage_info(self, stage: Usd.Stage) -> USDStageInfo:
+    def get_stage_info(self, stage: Usd.Stage, *, prim_count: Optional[int] = None) -> USDStageInfo:
         """
         Extract comprehensive information about a USD stage.
         
         Args:
             stage: USD Stage object
+            prim_count: Pre-computed ``stage.Traverse()`` count. Callers that
+                already walked the stage pass it to skip a second traversal.
             
         Returns:
             USDStageInfo with stage details
@@ -235,8 +237,9 @@ class USDReader(LoggerMixin):
                 except:
                     pass
             
-            # Count prims
-            prim_count = len(list(stage.Traverse()))
+            # Count prims without materializing the traversal into a list
+            if prim_count is None:
+                prim_count = sum(1 for _ in stage.Traverse())
             
             # Get root prims
             root_prims = [str(prim.GetPath()) for prim in stage.GetPseudoRoot().GetChildren()]
