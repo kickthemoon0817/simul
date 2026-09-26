@@ -153,6 +153,38 @@ else:
     }))
 """
 
+# Engine/project metadata in one Remote Control round trip (health_check and
+# get_engine_info used to issue one call per field).
+ENGINE_METADATA = """
+import json, unreal
+world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+print(json.dumps({
+    "engine_version": unreal.SystemLibrary.get_engine_version(),
+    "project_name": unreal.SystemLibrary.get_game_name(),
+    "loaded_map": world.get_path_name() if world else "",
+    "project_dir": unreal.Paths.project_dir(),
+}))
+"""
+
+# Scene digest in one round trip. Class keys are UClass path names
+# (``/Script/Engine.StaticMeshActor``), the same strings Remote Control's
+# ``/remote/object/describe`` reports as ``Class``.
+SCENE_SUMMARY = """
+import json, unreal
+world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+counts = {}
+total = 0
+for actor in unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors():
+    name = actor.get_class().get_path_name()
+    counts[name] = counts.get(name, 0) + 1
+    total += 1
+print(json.dumps({
+    "map_path": world.get_path_name() if world else "",
+    "total_actors": total,
+    "actor_class_counts": counts,
+}))
+"""
+
 # Expects ``args`` = {"parent", "name", "folder"}.
 CREATE_MATERIAL_INSTANCE = """
 import json, unreal

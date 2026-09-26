@@ -58,6 +58,22 @@ class FakeClientSession:
         self.closed = True
 
 
+def python_json_response(data: Dict[str, Any]) -> FakeResponse:
+    """ExecutePythonCommandEx reply whose script printed ``data`` as JSON."""
+    return FakeResponse({
+        "ReturnValue": True,
+        "LogOutput": [{"Type": "Info", "Output": json.dumps(data)}],
+    })
+
+
+ENGINE_METADATA_REPLY: Dict[str, Any] = {
+    "engine_version": "5.4.0",
+    "project_name": "TestProject",
+    "loaded_map": "/Game/Maps/TestMap",
+    "project_dir": "Win64",
+}
+
+
 REMOTE_INFO_PAYLOAD: Dict[str, Any] = {
     "EngineVersion": "5.4.0",
     "ProjectName": "TestProject",
@@ -103,15 +119,13 @@ class TestUnrealRuntimeSession:
         """Health check returns connected=True with engine info."""
         session = self._make_session(monkeypatch)
 
+        calls = []
+
         def put_fn(path: str, json: Any = None) -> FakeResponse:
             fn = (json or {}).get("functionName", "")
-            if fn == "GetEngineVersion":
-                return FakeResponse({"ReturnValue": "5.4.0"})
+            calls.append(fn)
             if fn == "ExecutePythonCommandEx":
-                return FakeResponse({
-                    "ReturnValue": True,
-                    "CommandResult": "'TestProject'",
-                })
+                return python_json_response(ENGINE_METADATA_REPLY)
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(
@@ -121,6 +135,10 @@ class TestUnrealRuntimeSession:
 
         result = asyncio.run(session.health_check())
 
+        # One metadata script after the /remote/info probe, not one call
+        # per field.
+        assert calls == ["ExecutePythonCommandEx"]
+        assert "warnings" not in result
         # ``reachable`` is the field shared by every backend ping; ``connected``
         # stays as an alias for one release.
         assert result["reachable"] is True
@@ -143,27 +161,21 @@ class TestUnrealRuntimeSession:
     def test_get_engine_info(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Engine info returns all expected fields."""
         session = self._make_session(monkeypatch)
-        # get_engine_info calls: GetEngineVersion + 3× ExecutePythonCommandEx
-        python_results = iter([
-            "'TestProject'",
-            "'/Game/Maps/TestMap'",
-            "'Win64'",
-        ])
+        calls = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
             fn = (json or {}).get("functionName", "")
-            if fn == "GetEngineVersion":
-                return FakeResponse({"ReturnValue": "5.4.0"})
+            calls.append(fn)
             if fn == "ExecutePythonCommandEx":
-                return FakeResponse({
-                    "ReturnValue": True,
-                    "CommandResult": next(python_results),
-                })
+                return python_json_response(ENGINE_METADATA_REPLY)
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
         result = asyncio.run(session.get_engine_info())
+
+        # Every field comes from one script: a single round trip.
+        assert calls == ["ExecutePythonCommandEx"]
 
         assert result["engine_version"] == "5.4.0"
         assert result["project_name"] == "TestProject"
@@ -171,6 +183,53 @@ class TestUnrealRuntimeSession:
         assert result["is_editor"] is True
         assert result["is_game"] is False
         assert result["platform"] == "Win64"
+
+    def test_get_engine_info_script_failure_is_an_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed metadata script yields an error envelope, never error
+        text inside the engine fields."""
+        session = self._make_session(monkeypatch)
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            return FakeResponse({
+                "ReturnValue": False,
+                "CommandResult": "Traceback: NameError",
+            })
+
+        session._session = SmartFakeClientSession(put_fn=put_fn)
+
+        result = asyncio.run(session.get_engine_info())
+
+        assert result["success"] is False
+        assert result["error_type"] == "ScriptError"
+        assert "NameError" in result["error"]
+        assert "engine_version" not in result
+
+    def test_health_check_script_failure_leaves_fields_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """health_check stays reachable when the metadata script fails, but
+        reports the failure as a warning rather than as a project name."""
+        session = self._make_session(monkeypatch)
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            return FakeResponse({
+                "ReturnValue": False,
+                "CommandResult": "Traceback: boom",
+            })
+
+        session._session = SmartFakeClientSession(
+            get_responses={"/remote/info": FakeResponse(REMOTE_INFO_PAYLOAD)},
+            put_fn=put_fn,
+        )
+
+        result = asyncio.run(session.health_check())
+
+        assert result["reachable"] is True
+        assert result["engine_version"] == ""
+        assert result["project_name"] == ""
+        assert any("boom" in w for w in result["warnings"])
 
     def test_get_loaded_map(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Loaded map returns the map path."""
@@ -210,13 +269,8 @@ class TestUnrealRuntimeSession:
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
             fn = (json or {}).get("functionName", "")
-            if fn == "GetEngineVersion":
-                return FakeResponse({"ReturnValue": "5.3.0"})
             if fn == "ExecutePythonCommandEx":
-                return FakeResponse({
-                    "ReturnValue": True,
-                    "CommandResult": "''",
-                })
+                return python_json_response({"engine_version": "5.3.0"})
             return FakeResponse({}, 404)
 
         sparse_payload: Dict[str, Any] = {"EngineVersion": "5.3.0"}
@@ -261,7 +315,7 @@ class TestUnrealRuntimeSession:
         assert result["engine_version"] == ""
         assert result["project_name"] == ""
         assert result["is_editor"] is True
-        assert "warnings" in result and len(result["warnings"]) == 2
+        assert "warnings" in result and len(result["warnings"]) == 1
         assert any("engine_version" in w for w in result["warnings"])
         assert any("project_name" in w for w in result["warnings"])
 
@@ -394,28 +448,21 @@ class TestUnrealRuntimeSessionPhase1:
     def test_summarize_scene_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """summarize_scene returns aggregated scene statistics."""
         session = self._make_session(monkeypatch)
-        actor_paths = [
-            "/Game/Maps/T.T:PersistentLevel.SM_0",
-            "/Game/Maps/T.T:PersistentLevel.SM_1",
-            "/Game/Maps/T.T:PersistentLevel.PointLight_0",
-        ]
+        requests = []
 
         def put_router(path: str, json: Any = None) -> FakeResponse:
-            if path == "/remote/object/call":
-                fn = (json or {}).get("functionName", "")
-                if fn == "ExecutePythonCommandEx":
-                    return FakeResponse({
-                        "ReturnValue": True,
-                        "CommandResult": "'/Game/Maps/TestMap'",
-                    })
-                if fn == "GetAllLevelActors":
-                    return FakeResponse({"ReturnValue": actor_paths})
-                return FakeResponse({})
-            if path == "/remote/object/describe":
-                obj_path = json.get("objectPath", "") if json else ""
-                if "PointLight" in obj_path:
-                    return FakeResponse({"Class": "PointLight"})
-                return FakeResponse({"Class": "StaticMeshActor"})
+            requests.append(path)
+            fn = (json or {}).get("functionName", "")
+            if path == "/remote/object/call" and fn == "ExecutePythonCommandEx":
+                # Class keys are UClass path names, as UE 5.7 reports them.
+                return python_json_response({
+                    "map_path": "/Game/Maps/TestMap",
+                    "total_actors": 3,
+                    "actor_class_counts": {
+                        "/Script/Engine.StaticMeshActor": 2,
+                        "/Script/Engine.PointLight": 1,
+                    },
+                })
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(
@@ -430,9 +477,26 @@ class TestUnrealRuntimeSessionPhase1:
         assert result["static_meshes"] == 2
         assert result["lights"] == 1
         assert result["cameras"] == 0
-        assert result["actor_class_counts"]["StaticMeshActor"] == 2
-        assert result["actor_class_counts"]["PointLight"] == 1
+        assert result["actor_class_counts"]["/Script/Engine.StaticMeshActor"] == 2
+        assert result["actor_class_counts"]["/Script/Engine.PointLight"] == 1
         assert "Map: /Game/Maps/TestMap" in result["summary_text"]
+        # One script, however many actors: no per-actor describe calls.
+        assert requests == ["/remote/object/call"]
+
+    def test_summarize_scene_script_failure_is_an_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = self._make_session(monkeypatch)
+
+        def put_router(path: str, json: Any = None) -> FakeResponse:
+            return FakeResponse({"ReturnValue": False, "CommandResult": "boom"})
+
+        session._session = SmartFakeClientSession(put_fn=put_router)
+
+        result = asyncio.run(session.summarize_scene())
+
+        assert result["success"] is False
+        assert result["error_type"] == "ScriptError"
 
 
 class TestUnrealRuntimeSessionPhase2:
@@ -458,7 +522,19 @@ class TestUnrealRuntimeSessionPhase2:
             if fn == "ExecuteConsoleCommand":
                 # RC ack — fire-and-forget for HighResShot.
                 return FakeResponse({})
+            if fn == "ExecutePythonCommandEx" and "e.path for e in shots()" in (
+                json["parameters"]["PythonCommand"]
+            ):
+                # Pre-trigger listing of the screenshot directories.
+                return FakeResponse({
+                    "ReturnValue": True,
+                    "LogOutput": [{
+                        "Type": "Info",
+                        "Output": '@@SIMUL_SCREENSHOT@@{"existing": ["/proj/Saved/Screenshots/old.png"]}',
+                    }],
+                })
             if fn == "ExecutePythonCommandEx":
+                assert "/proj/Saved/Screenshots/old.png" in json["parameters"]["PythonCommand"]
                 return FakeResponse(
                     {
                         "ReturnValue": True,
@@ -521,6 +597,13 @@ class TestUnrealRuntimeSessionPhase2:
             fn = (json or {}).get("functionName", "")
             if fn == "ExecuteConsoleCommand":
                 return FakeResponse({})
+            if fn == "ExecutePythonCommandEx" and "e.path for e in shots()" in (
+                json["parameters"]["PythonCommand"]
+            ):
+                return FakeResponse({
+                    "ReturnValue": True,
+                    "LogOutput": [{"Type": "Info", "Output": '@@SIMUL_SCREENSHOT@@{"existing": []}'}],
+                })
             if fn == "ExecutePythonCommandEx":
                 # Marker present but with an empty payload: the read script
                 # ran but the screenshot wasn't written. Adapter should keep

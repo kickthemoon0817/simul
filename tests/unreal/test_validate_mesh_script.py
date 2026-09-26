@@ -23,7 +23,11 @@ MESH_PATH = "/Game/Map.Map:PersistentLevel.DynamicMeshActor_0"
 
 def _fake_unreal(counts: Dict[str, Any]) -> SimpleNamespace:
     mesh = object()
-    actor = SimpleNamespace(
+
+    class Actor(SimpleNamespace):
+        pass
+
+    actor = Actor(
         get_path_name=lambda: MESH_PATH,
         dynamic_mesh_component=SimpleNamespace(get_dynamic_mesh=lambda: mesh),
     )
@@ -32,6 +36,9 @@ def _fake_unreal(counts: Dict[str, Any]) -> SimpleNamespace:
     )
     return SimpleNamespace(
         GeometryScript_MeshQueries=queries,
+        Actor=Actor,
+        # actor_at() (ACTOR_HELPERS) loads the actor by path.
+        load_object=lambda outer, path: actor if path == MESH_PATH else None,
         EditorActorSubsystem="actors",
         get_editor_subsystem=lambda _: SimpleNamespace(
             get_all_level_actors=lambda: [actor]

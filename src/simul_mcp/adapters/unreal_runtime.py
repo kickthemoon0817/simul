@@ -13,6 +13,7 @@ import json
 import math
 import re
 import tempfile
+import textwrap
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,7 +25,9 @@ from ..utils.paths import PathPolicy
 from ._unreal_scripts import (
     ACTOR_HELPERS,
     CREATE_MATERIAL_INSTANCE,
+    ENGINE_METADATA,
     INTERCHANGE_INFO,
+    SCENE_SUMMARY,
     SET_LIGHT_PARAMS,
     SIMULATION_STATUS,
     USD_EXPORT,
@@ -82,6 +85,14 @@ logger = get_logger(__name__)
 # above this the caller gets the path on the editor host instead. Kept local to
 # the adapter so this layer does not depend on the MCP layer.
 MAX_INLINE_CAPTURE_BYTES = 262_144
+# Editor-relative screenshot directories HighResShot writes into, per platform.
+_SCREENSHOT_SUBDIRS = ("MacEditor", "WindowsEditor", "LinuxEditor", "Mac", "Windows", "Linux")
+# Interval between screenshot polls; each poll is one cheap Remote Control call.
+_CAPTURE_POLL_SECONDS = 0.1
+# Bytes per capture_to_file transfer call. Measured on UE 5.7: Remote Control
+# returned 16 MiB script output intact; 1-2 MiB chunks had the best
+# throughput (~115 ms per MiB vs ~255 ms per MiB at 128 KiB).
+_CAPTURE_CHUNK_BYTES = 2 * 1024 * 1024
 
 
 LOADED_MAP_EXPRESSION = (
@@ -809,6 +820,24 @@ class UnrealRuntimeSession(LoggerMixin):
         )
         return await self._execute_json_script(script)
 
+    async def _run_mesh_script(self, body: str, **actors: str) -> Dict[str, Any]:
+        """Run a GeometryScript body against actors resolved by path.
+
+        Each keyword binds a script variable to ``actor_at(path)`` from
+        ``ACTOR_HELPERS`` -- a direct object load instead of a scan over every
+        level actor. ``body`` is the mesh op's block, indented one level; it
+        is dedented here. A missing actor raises inside the editor and comes
+        back as a ``ScriptError`` envelope.
+        """
+        lookups = "".join(f"{name} = actor_at({path!r})\n" for name, path in actors.items())
+        script = (
+            ACTOR_HELPERS
+            + "subsys = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)\n"
+            + lookups
+            + textwrap.dedent(body)
+        )
+        return await self._execute_json_script(script)
+
     @staticmethod
     def _script_execution_denied() -> Dict[str, Any]:
         return {
@@ -922,6 +951,28 @@ class UnrealRuntimeSession(LoggerMixin):
             return {"success": False, "error_type": "ScriptError", **parsed}
         return parsed
 
+    @staticmethod
+    def _parse_marker_json(result: Dict[str, Any], marker: str) -> Dict[str, Any]:
+        """
+        Extract the JSON object printed after ``marker`` by a script.
+
+        Returns ``{"error": ...}`` when the script failed or never printed
+        the marker, and ``{}`` when the marker carried no parseable object.
+        """
+        if not result.get("ReturnValue", False):
+            return {"error": str(result.get("CommandResult", "Unknown Python error"))}
+        for entry in result.get("LogOutput", []):
+            output = entry.get("Output", "")
+            idx = output.find(marker)
+            if idx < 0:
+                continue
+            try:
+                parsed = json.loads(output[idx + len(marker):].strip())
+            except ValueError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {"error": "Script printed no " + marker + " line"}
+
     # ------------------------------------------------------------------
     # Phase 0 session methods
     # ------------------------------------------------------------------
@@ -957,22 +1008,24 @@ class UnrealRuntimeSession(LoggerMixin):
                 "error": str(exc),
             }
 
+        # One script for all metadata: a single Remote Control round trip
+        # instead of one per field. A failed or gated script leaves the
+        # fields empty and records the failure as a warning -- never as
+        # error text inside a field.
         warnings: List[str] = []
         engine_version = ""
         project_name = ""
         try:
-            version_data = await self._call_function(
-                "/Script/Engine.Default__KismetSystemLibrary",
-                "GetEngineVersion",
+            info = self._parse_python_json(
+                await self._execute_python(ENGINE_METADATA)
             )
-            engine_version = version_data.get("ReturnValue", "")
         except Exception as exc:
-            warnings.append(f"engine_version unavailable: {exc}")
-
-        try:
-            project_name = await self._evaluate("unreal.SystemLibrary.get_game_name()")
-        except Exception as exc:
-            warnings.append(f"project_name unavailable: {exc}")
+            info = {"error": str(exc)}
+        if info.get("error"):
+            warnings.append(f"engine_version and project_name unavailable: {info['error']}")
+        else:
+            engine_version = str(info.get("engine_version", ""))
+            project_name = str(info.get("project_name", ""))
 
         result: Dict[str, Any] = {
             "reachable": True,
@@ -993,23 +1046,16 @@ class UnrealRuntimeSession(LoggerMixin):
             Dictionary with engine version, project name, loaded map, and
             editor state, or a ``ScriptError`` envelope when a probe raised.
         """
-        version_data = await self._call_function(
-            "/Script/Engine.Default__KismetSystemLibrary",
-            "GetEngineVersion",
-        )
-        try:
-            project_name = await self._evaluate("unreal.SystemLibrary.get_game_name()")
-            loaded_map = await self._evaluate(LOADED_MAP_EXPRESSION)
-            platform = await self._evaluate("unreal.Paths.project_dir()")
-        except UnrealScriptFailure as exc:
-            return self._script_error(str(exc))
+        info = await self._execute_json_script(ENGINE_METADATA)
+        if info.get("error"):
+            return info
         return {
-            "engine_version": version_data.get("ReturnValue", ""),
-            "project_name": project_name,
-            "loaded_map": loaded_map,
+            "engine_version": info["engine_version"],
+            "project_name": info["project_name"],
+            "loaded_map": info["loaded_map"],
             "is_editor": True,
             "is_game": False,
-            "platform": platform,
+            "platform": info["project_dir"],
         }
 
     async def get_loaded_map(self) -> Dict[str, Any]:
@@ -1176,42 +1222,31 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
             Dictionary with map_path, total_actors, actor_class_counts,
             and summary_text.
         """
-        # Get map info via Python (non-deprecated path)
-        try:
-            map_path = await self._evaluate(LOADED_MAP_EXPRESSION)
-        except UnrealScriptFailure as exc:
-            return self._script_error(str(exc))
+        # One script counts classes inside the editor; this used to take a
+        # ``/remote/object/describe`` round trip per actor.
+        scene = await self._execute_json_script(SCENE_SUMMARY)
+        if scene.get("error"):
+            return scene
+        map_path: str = scene["map_path"]
+        total_actors: int = scene["total_actors"]
+        class_counts: Dict[str, int] = scene["actor_class_counts"]
 
-        # Get all actors via EditorActorSubsystem (UE 5.7 compatible)
-        data = await self._call_function(
-            "/Script/UnrealEd.Default__EditorActorSubsystem",
-            "GetAllLevelActors",
+        # Keys are class path names (``/Script/Engine.StaticMeshActor``);
+        # compare the short name so the count isn't always zero.
+        static_meshes = sum(
+            v for k, v in class_counts.items()
+            if k.rsplit(".", 1)[-1] == "StaticMeshActor"
         )
-        raw_actors: list = data.get("ReturnValue", [])
-
-        # Count by class — brief describe each actor
-        class_counts: Dict[str, int] = {}
-        for actor_path in raw_actors:
-            try:
-                desc = await self._http_put(
-                    "/remote/object/describe", {"objectPath": actor_path}
-                )
-                cls = desc.get("Class", "Unknown")
-            except Exception:
-                cls = "Unknown"
-            class_counts[cls] = class_counts.get(cls, 0) + 1
-
-        static_meshes = class_counts.get("StaticMeshActor", 0)
         lights = sum(v for k, v in class_counts.items() if "Light" in k)
         cameras = sum(v for k, v in class_counts.items() if "Camera" in k)
 
-        parts: list = [f"Map: {map_path}", f"Total actors: {len(raw_actors)}"]
+        parts: list = [f"Map: {map_path}", f"Total actors: {total_actors}"]
         for cls, cnt in sorted(class_counts.items(), key=lambda x: -x[1])[:10]:
             parts.append(f"  {cls}: {cnt}")
 
         return {
             "map_path": map_path,
-            "total_actors": len(raw_actors),
+            "total_actors": total_actors,
             "actor_class_counts": class_counts,
             "static_meshes": static_meshes,
             "lights": lights,
@@ -1258,11 +1293,45 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
         # The read is a separate ExecutePythonCommandEx call so UE's main
         # thread stays free between trigger and read; the adapter, not the
         # embedded script, owns the wait via asyncio.sleep.
+        #
+        # New files are recognised by name: the editor's screenshot
+        # directories are listed once before the trigger, and each poll
+        # considers only names absent from that snapshot. That needs no
+        # clock agreement between this process and the editor host, and a
+        # coarse filesystem mtime can't hide the new file.
         marker = "@@SIMUL_SCREENSHOT@@"
-        candidates_repr = (
-            "['MacEditor', 'WindowsEditor', 'LinuxEditor', 'Mac', 'Windows', 'Linux']"
-        )
-        threshold = time.time()
+        prelude = f"""
+import os, base64, json, unreal
+ss_root = os.path.join(os.path.abspath(unreal.Paths.project_saved_dir()), 'Screenshots')
+def shots():
+    found = []
+    for subdir in {_SCREENSHOT_SUBDIRS!r}:
+        try:
+            with os.scandir(os.path.join(ss_root, subdir)) as entries:
+                found.extend(e for e in entries if e.name.endswith('.{format}') and e.is_file())
+        except OSError:
+            pass
+    return found
+"""
+        try:
+            snapshot = self._parse_marker_json(
+                await self._execute_python(
+                    prelude
+                    + f"print({marker!r} + json.dumps({{'existing': [e.path for e in shots()]}}))\n",
+                    mode="ExecuteFile",
+                ),
+                marker,
+            )
+        except Exception as exc:
+            snapshot = {"error": str(exc)}
+        if "existing" not in snapshot:
+            return {
+                "success": False,
+                "error_type": "CaptureError",
+                "error": "Could not list the editor screenshot directory before capture: "
+                + str(snapshot.get("error", "no listing returned")),
+            }
+        existing: List[str] = snapshot["existing"]
         try:
             await self._call_function(
                 "/Script/Engine.Default__KismetSystemLibrary",
@@ -1276,68 +1345,61 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
             return {"success": False, "error_type": "CaptureError", "error": str(exc)}
 
         max_inline = MAX_INLINE_CAPTURE_BYTES
-        read_code = f"""
-import os, glob, base64, json, unreal
-saved = os.path.abspath(unreal.Paths.project_saved_dir())
-ss_root = os.path.join(saved, 'Screenshots')
-candidates = {candidates_repr}
-threshold = {threshold!r}
+        # A PNG is complete once its IEND chunk is on disk; checking the tail
+        # keeps a poll from returning a file the editor is still writing.
+        read_code = prelude + f"""
+existing = set({existing!r})
 target = None
-for subdir in candidates:
-    d = os.path.join(ss_root, subdir)
-    if not os.path.isdir(d):
+target_mtime = None
+for entry in shots():
+    if entry.path in existing:
         continue
-    for f in glob.glob(os.path.join(d, '*.{format}')):
-        try:
-            if os.path.getmtime(f) >= threshold:
-                target = f
-                break
-        except OSError:
-            pass
-    if target:
-        break
-payload = {{'path': target or '', 'size_bytes': 0}}
+    try:
+        mtime = entry.stat().st_mtime
+    except OSError:
+        continue
+    if target is None or mtime > target_mtime:
+        target, target_mtime = entry.path, mtime
+payload = {{'path': '', 'size_bytes': 0}}
 if target:
     try:
-        payload['size_bytes'] = os.path.getsize(target)
-    except OSError:
-        payload['size_bytes'] = 0
-    if {inline!r} and 0 < payload['size_bytes'] <= {max_inline}:
+        size = os.path.getsize(target)
         with open(target, 'rb') as f:
-            payload['image_base64'] = base64.b64encode(f.read()).decode()
-    elif {inline!r} and payload['size_bytes'] > {max_inline}:
-        payload['inline_skipped'] = (
-            'Capture is %d bytes, above the %d byte inline cap. '
-            'Read the file at path, or lower the resolution.'
-            % (payload['size_bytes'], {max_inline})
-        )
+            f.seek(max(0, size - 12))
+            complete = size > 0 and b'IEND' in f.read()
+    except OSError:
+        complete = False
+    if complete:
+        payload = {{'path': target, 'size_bytes': size}}
+        if {inline!r} and size <= {max_inline}:
+            with open(target, 'rb') as f:
+                payload['image_base64'] = base64.b64encode(f.read()).decode()
+        elif {inline!r}:
+            payload['inline_skipped'] = (
+                'Capture is %d bytes, above the %d byte inline cap. '
+                'Read the file at path, or lower the resolution.'
+                % (size, {max_inline})
+            )
 print({marker!r} + json.dumps(payload))
 """
 
         capture_payload: Dict[str, Any] = {}
-        # Initial render budget so UE's frame loop runs HighResShot.
-        await asyncio.sleep(0.5)
+        # Short first wait so UE's frame loop runs HighResShot, then poll.
+        await asyncio.sleep(_CAPTURE_POLL_SECONDS)
         deadline = asyncio.get_event_loop().time() + 15.0
         while True:
             try:
-                py_result = await self._execute_python(read_code, mode="ExecuteFile")
+                capture_payload = self._parse_marker_json(
+                    await self._execute_python(read_code, mode="ExecuteFile"),
+                    marker,
+                )
             except Exception:
-                py_result = {}
-            for entry in py_result.get("LogOutput", []):
-                output = entry.get("Output", "")
-                idx = output.find(marker)
-                if idx >= 0:
-                    raw = output[idx + len(marker) :].strip()
-                    try:
-                        capture_payload = json.loads(raw)
-                    except ValueError:
-                        capture_payload = {}
-                    break
+                capture_payload = {}
             if capture_payload.get("path"):
                 break
             if asyncio.get_event_loop().time() >= deadline:
                 break
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(_CAPTURE_POLL_SECONDS)
 
         result: Dict[str, Any] = {
             "path": capture_payload.get("path", ""),
@@ -1385,8 +1447,8 @@ print({marker!r} + json.dumps(payload))
         try:
             with tempfile.NamedTemporaryFile(dir=output.parent, delete=False) as stream:
                 temporary = Path(stream.name)
-                for offset in range(0, size, 128 * 1024):
-                    length = min(128 * 1024, size - offset)
+                for offset in range(0, size, _CAPTURE_CHUNK_BYTES):
+                    length = min(_CAPTURE_CHUNK_BYTES, size - offset)
                     chunk = await self._execute_json_script(f"""
 import os, json, base64, unreal
 root = os.path.realpath(os.path.join(unreal.Paths.project_saved_dir(), 'Screenshots'))
@@ -3155,22 +3217,8 @@ if component.is_simulating_physics() != {target!r}:
         }
         ue_op = op_map.get(operation.lower(), "UNION")
         code = (
-            "import unreal, json\n"
-            "gs_bool = unreal.GeometryScript_MeshBooleans\n"
-            "gs_q = unreal.GeometryScript_MeshQueries\n"
-            "subsys = unreal.get_editor_subsystem("
-            "unreal.EditorActorSubsystem)\n"
-            "target_actor = None\n"
-            "tool_actor = None\n"
-            "for a in subsys.get_all_level_actors():\n"
-            "    p = a.get_path_name()\n"
-            f"    if p == {target_mesh_path!r}:\n"
-            "        target_actor = a\n"
-            f"    elif p == {tool_mesh_path!r}:\n"
-            "        tool_actor = a\n"
-            "if target_actor is None or tool_actor is None:\n"
-            "    print(json.dumps({'error': 'Actor(s) not found'}))\n"
-            "else:\n"
+            "    gs_bool = unreal.GeometryScript_MeshBooleans\n"
+            "    gs_q = unreal.GeometryScript_MeshQueries\n"
             "    t_mesh = target_actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
             "    tool_mesh = tool_actor.dynamic_mesh_component"
@@ -3192,8 +3240,7 @@ if component.is_simulating_physics() != {target!r}:
             "'result_vertex_count': verts"
             "}))\n"
         )
-        result = await self._execute_python(code)
-        return self._parse_python_json(result)
+        return await self._run_mesh_script(code, target_actor=target_mesh_path, tool_actor=tool_mesh_path)
 
     async def compute_convex_hull(
         self,
@@ -3209,21 +3256,8 @@ if component.is_simulating_physics() != {target!r}:
             Dict with hull actor path, vertex/triangle counts.
         """
         code = (
-            "import unreal, json\n"
-            "gs_c = unreal.GeometryScript_Containment\n"
-            "gs_q = unreal.GeometryScript_MeshQueries\n"
-            "subsys = unreal.get_editor_subsystem("
-            "unreal.EditorActorSubsystem)\n"
-            "src = None\n"
-            "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == {mesh_path!r}:\n"
-            "        src = a\n"
-            "        break\n"
-            "if src is None:\n"
-            "    print(json.dumps({'error': "
-            f"{('Actor not found: ' + mesh_path)!r}"
-            "}))\n"
-            "else:\n"
+            "    gs_c = unreal.GeometryScript_Containment\n"
+            "    gs_q = unreal.GeometryScript_MeshQueries\n"
             "    mesh = src.dynamic_mesh_component.get_dynamic_mesh()\n"
             "    hull_mesh = unreal.DynamicMesh()\n"
             "    sel = unreal.GeometryScriptMeshSelection()\n"
@@ -3247,8 +3281,7 @@ if component.is_simulating_physics() != {target!r}:
             "'source_triangle_count': s_tris"
             "}))\n"
         )
-        result = await self._execute_python(code)
-        return self._parse_python_json(result)
+        return await self._run_mesh_script(code, src=mesh_path)
 
     async def decompose_convex_hull(
         self,
@@ -3275,21 +3308,8 @@ if component.is_simulating_physics() != {target!r}:
         # num_hulls, error_tolerance, search_factor,
         # simplify_to_face_count, min_part_thickness
         code = (
-            "import unreal, json\n"
-            "gs_c = unreal.GeometryScript_Containment\n"
-            "gs_q = unreal.GeometryScript_MeshQueries\n"
-            "subsys = unreal.get_editor_subsystem("
-            "unreal.EditorActorSubsystem)\n"
-            "src = None\n"
-            "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == {mesh_path!r}:\n"
-            "        src = a\n"
-            "        break\n"
-            "if src is None:\n"
-            "    print(json.dumps({'error': "
-            f"{('Actor not found: ' + mesh_path)!r}"
-            "}))\n"
-            "else:\n"
+            "    gs_c = unreal.GeometryScript_Containment\n"
+            "    gs_q = unreal.GeometryScript_MeshQueries\n"
             "    mesh = src.dynamic_mesh_component.get_dynamic_mesh()\n"
             "    decomp_mesh = unreal.DynamicMesh()\n"
             "    opts = unreal.GeometryScriptConvexDecompositionOptions()\n"
@@ -3315,8 +3335,7 @@ if component.is_simulating_physics() != {target!r}:
             "'total_vertices': d_verts"
             "}))\n"
         )
-        result = await self._execute_python(code)
-        return self._parse_python_json(result)
+        return await self._run_mesh_script(code, src=mesh_path)
 
     async def edit_mesh_topology(
         self,
@@ -3388,21 +3407,8 @@ if component.is_simulating_physics() != {target!r}:
             }
 
         code = (
-            "import unreal, json\n"
-            "gs_mod = unreal.GeometryScript_MeshModeling\n"
-            "gs_q = unreal.GeometryScript_MeshQueries\n"
-            "subsys = unreal.get_editor_subsystem("
-            "unreal.EditorActorSubsystem)\n"
-            "actor = None\n"
-            "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == {mesh_path!r}:\n"
-            "        actor = a\n"
-            "        break\n"
-            "if actor is None:\n"
-            "    print(json.dumps({'error': "
-            f"{('Actor not found: ' + mesh_path)!r}"
-            "}))\n"
-            "else:\n"
+            "    gs_mod = unreal.GeometryScript_MeshModeling\n"
+            "    gs_q = unreal.GeometryScript_MeshQueries\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
             "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
@@ -3419,8 +3425,7 @@ if component.is_simulating_physics() != {target!r}:
             "'previous_triangle_count': before_tris"
             "}))\n"
         )
-        result = await self._execute_python(code)
-        return self._parse_python_json(result)
+        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def subdivide_mesh(
         self,
@@ -3456,20 +3461,7 @@ if component.is_simulating_physics() != {target!r}:
             )
 
         code = (
-            "import unreal, json\n"
-            "gs_q = unreal.GeometryScript_MeshQueries\n"
-            "subsys = unreal.get_editor_subsystem("
-            "unreal.EditorActorSubsystem)\n"
-            "actor = None\n"
-            "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == {mesh_path!r}:\n"
-            "        actor = a\n"
-            "        break\n"
-            "if actor is None:\n"
-            "    print(json.dumps({'error': "
-            f"{('Actor not found: ' + mesh_path)!r}"
-            "}))\n"
-            "else:\n"
+            "    gs_q = unreal.GeometryScript_MeshQueries\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
             "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
@@ -3487,8 +3479,7 @@ if component.is_simulating_physics() != {target!r}:
             "'previous_triangle_count': before_tris"
             "}))\n"
         )
-        result = await self._execute_python(code)
-        return self._parse_python_json(result)
+        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def simplify_mesh(
         self,
@@ -3522,21 +3513,8 @@ if component.is_simulating_physics() != {target!r}:
             target_line = "    target_count = max(1, before_tris // 2)\n"
 
         code = (
-            "import unreal, json\n"
-            "gs_s = unreal.GeometryScript_MeshSimplification\n"
-            "gs_q = unreal.GeometryScript_MeshQueries\n"
-            "subsys = unreal.get_editor_subsystem("
-            "unreal.EditorActorSubsystem)\n"
-            "actor = None\n"
-            "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == {mesh_path!r}:\n"
-            "        actor = a\n"
-            "        break\n"
-            "if actor is None:\n"
-            "    print(json.dumps({'error': "
-            f"{('Actor not found: ' + mesh_path)!r}"
-            "}))\n"
-            "else:\n"
+            "    gs_s = unreal.GeometryScript_MeshSimplification\n"
+            "    gs_q = unreal.GeometryScript_MeshQueries\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
             "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
@@ -3558,8 +3536,7 @@ if component.is_simulating_physics() != {target!r}:
             "'reduction_ratio': ratio"
             "}))\n"
         )
-        result = await self._execute_python(code)
-        return self._parse_python_json(result)
+        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def cut_mesh_plane(
         self,
@@ -3587,21 +3564,8 @@ if component.is_simulating_physics() != {target!r}:
         nx, ny, nz = plane_normal[0], plane_normal[1], plane_normal[2]
         fill_py = "True" if fill_holes else "False"
         code = (
-            "import unreal, json\n"
-            "gs_bool = unreal.GeometryScript_MeshBooleans\n"
-            "gs_q = unreal.GeometryScript_MeshQueries\n"
-            "subsys = unreal.get_editor_subsystem("
-            "unreal.EditorActorSubsystem)\n"
-            "actor = None\n"
-            "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == {mesh_path!r}:\n"
-            "        actor = a\n"
-            "        break\n"
-            "if actor is None:\n"
-            "    print(json.dumps({'error': "
-            f"{('Actor not found: ' + mesh_path)!r}"
-            "}))\n"
-            "else:\n"
+            "    gs_bool = unreal.GeometryScript_MeshBooleans\n"
+            "    gs_q = unreal.GeometryScript_MeshQueries\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
             "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
@@ -3628,8 +3592,7 @@ if component.is_simulating_physics() != {target!r}:
             "'previous_triangle_count': before_tris"
             "}))\n"
         )
-        result = await self._execute_python(code)
-        return self._parse_python_json(result)
+        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def validate_mesh(
         self,
@@ -3648,20 +3611,7 @@ if component.is_simulating_physics() != {target!r}:
             info.
         """
         code = (
-            "import unreal, json\n"
-            "gs_q = unreal.GeometryScript_MeshQueries\n"
-            "subsys = unreal.get_editor_subsystem("
-            "unreal.EditorActorSubsystem)\n"
-            "actor = None\n"
-            "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == {mesh_path!r}:\n"
-            "        actor = a\n"
-            "        break\n"
-            "if actor is None:\n"
-            "    print(json.dumps({'error': "
-            f"{('Actor not found: ' + mesh_path)!r}"
-            "}))\n"
-            "else:\n"
+            "    gs_q = unreal.GeometryScript_MeshQueries\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
             # UFUNCTIONs with out-params (e.g. GetNumOpenBorderLoops'
@@ -3703,8 +3653,7 @@ if component.is_simulating_physics() != {target!r}:
             "'issues': issues"
             "}))\n"
         )
-        result = await self._execute_python(code)
-        return self._parse_python_json(result)
+        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def convert_mesh_format(
         self,
@@ -3727,21 +3676,8 @@ if component.is_simulating_physics() != {target!r}:
         if fmt == "static_mesh":
             # DynamicMeshActor → new StaticMesh asset
             code = (
-                "import unreal, json\n"
-                "gs_a = unreal.GeometryScript_AssetUtils\n"
-                "gs_q = unreal.GeometryScript_MeshQueries\n"
-                "subsys = unreal.get_editor_subsystem("
-                "unreal.EditorActorSubsystem)\n"
-                "actor = None\n"
-                "for a in subsys.get_all_level_actors():\n"
-                f"    if a.get_path_name() == {mesh_path!r}:\n"
-                "        actor = a\n"
-                "        break\n"
-                "if actor is None:\n"
-                "    print(json.dumps({'error': "
-                f"{('Actor not found: ' + mesh_path)!r}"
-                "}))\n"
-                "else:\n"
+                "    gs_a = unreal.GeometryScript_AssetUtils\n"
+                "    gs_q = unreal.GeometryScript_MeshQueries\n"
                 "    mesh = actor.dynamic_mesh_component"
                 ".get_dynamic_mesh()\n"
                 "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
@@ -3759,6 +3695,7 @@ if component.is_simulating_physics() != {target!r}:
                 "an existing StaticMesh asset target'"
                 "}))\n"
             )
+            return await self._run_mesh_script(code, actor=mesh_path)
         elif fmt == "dynamic_mesh":
             # StaticMesh asset → DynamicMeshActor in the level
             code = (
@@ -3846,21 +3783,8 @@ if component.is_simulating_physics() != {target!r}:
             )
 
         code = (
-            "import unreal, json\n"
-            "gs_r = unreal.GeometryScript_Remeshing\n"
-            "gs_q = unreal.GeometryScript_MeshQueries\n"
-            "subsys = unreal.get_editor_subsystem("
-            "unreal.EditorActorSubsystem)\n"
-            "actor = None\n"
-            "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == {mesh_path!r}:\n"
-            "        actor = a\n"
-            "        break\n"
-            "if actor is None:\n"
-            "    print(json.dumps({'error': "
-            f"{('Actor not found: ' + mesh_path)!r}"
-            "}))\n"
-            "else:\n"
+            "    gs_r = unreal.GeometryScript_Remeshing\n"
+            "    gs_q = unreal.GeometryScript_MeshQueries\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
             "    before_tris = gs_q.get_num_triangle_i_ds(mesh)\n"
@@ -3884,8 +3808,7 @@ if component.is_simulating_physics() != {target!r}:
             "'result_vertex_count': verts"
             "}))\n"
         )
-        result = await self._execute_python(code)
-        return self._parse_python_json(result)
+        return await self._run_mesh_script(code, actor=mesh_path)
 
     async def compute_mesh_uv(
         self,
@@ -3926,21 +3849,8 @@ if component.is_simulating_physics() != {target!r}:
             method_label = "xatlas"
 
         code = (
-            "import unreal, json\n"
-            "gs_uv = unreal.GeometryScript_UVs\n"
-            "gs_q = unreal.GeometryScript_MeshQueries\n"
-            "subsys = unreal.get_editor_subsystem("
-            "unreal.EditorActorSubsystem)\n"
-            "actor = None\n"
-            "for a in subsys.get_all_level_actors():\n"
-            f"    if a.get_path_name() == {mesh_path!r}:\n"
-            "        actor = a\n"
-            "        break\n"
-            "if actor is None:\n"
-            "    print(json.dumps({'error': "
-            f"{('Actor not found: ' + mesh_path)!r}"
-            "}))\n"
-            "else:\n"
+            "    gs_uv = unreal.GeometryScript_UVs\n"
+            "    gs_q = unreal.GeometryScript_MeshQueries\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n" + uv_block + "    actor.dynamic_mesh_component"
             ".notify_mesh_modified()\n"
@@ -3954,8 +3864,7 @@ if component.is_simulating_physics() != {target!r}:
             "'vertex_count': verts"
             "}))\n"
         )
-        result = await self._execute_python(code)
-        return self._parse_python_json(result)
+        return await self._run_mesh_script(code, actor=mesh_path)
 
     # ------------------------------------------------------------------
     # Internal helpers
