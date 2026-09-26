@@ -71,3 +71,19 @@ def test_all_four_version_constants_agree() -> None:
         "Version drift detected — bump skipped at least one file. "
         f"Per-file versions: {versions}"
     )
+
+
+def test_license_metadata_agrees_with_license_file() -> None:
+    """pyproject, plugin.json and ``__license__`` all name the LICENSE file's license."""
+    import tomllib
+
+    import simul_mcp
+
+    assert (_REPO / "LICENSE").read_text(encoding="utf-8").lstrip().startswith("Apache License")
+    pyproject = tomllib.loads((_REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    licenses = {
+        "pyproject.toml": pyproject["project"]["license"],
+        ".claude-plugin/plugin.json": json.loads((_REPO / ".claude-plugin/plugin.json").read_text())["license"],
+        "src/simul_mcp/__init__.py": simul_mcp.__license__,
+    }
+    assert set(licenses.values()) == {"Apache-2.0"}, f"License metadata drift: {licenses}"
