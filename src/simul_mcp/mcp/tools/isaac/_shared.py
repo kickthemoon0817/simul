@@ -299,6 +299,20 @@ SET_PRIM_TRANSFORM_CORE = """\
                     else:
                         r_index = 0 if t_index is None else t_index + 1
                     ops.insert(r_index, new_op)
+            # The value is the prim's whole rotation. Any other unsuffixed
+            # rotate op (a split rotateX / rotateY / rotateZ stack) would
+            # compose on top of it, so those leave the stack too.
+            kept = ops[r_index]
+            ops = [
+                op for index, op in enumerate(ops)
+                if index == r_index
+                or op.IsInverseOp()
+                or op.GetOpType() not in rotate_types
+                or len(op.GetOpName().split(":")) != 2
+            ]
+            r_index = next(index for index, op in enumerate(ops) if op is kept)
+            t_index = _primary((Op.TypeTranslate,))
+            s_index = _primary((Op.TypeScale,))
 
         if scale is not None:
             if s_index is None:

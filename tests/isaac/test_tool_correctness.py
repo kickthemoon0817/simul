@@ -171,6 +171,30 @@ def test_other_rotation_order_is_replaced_in_place(
     assert Gf.IsClose(_world(stage, "/World/C"), _expected([0, 0, 1], [0, 90, 0], [3, 3, 3]), 1e-5)
 
 
+def test_split_single_axis_rotations_are_replaced(
+    capturing_tools: Tuple[IsaacTools, List[str]], run_on_stage: Any
+) -> None:
+    """A rotateX/rotateY/rotateZ stack must not compose on top of the new rotation."""
+    stage = _stage()
+    xf = UsdGeom.Xformable(UsdGeom.Xform.Define(stage, "/World/S").GetPrim())
+    xf.AddTranslateOp().Set(Gf.Vec3d(1, 0, 0))
+    xf.AddRotateXOp().Set(10.0)
+    xf.AddRotateYOp().Set(20.0)
+    xf.AddRotateZOp().Set(30.0)
+    xf.AddScaleOp().Set(Gf.Vec3f(2, 2, 2))
+
+    result = _run_transform(
+        capturing_tools, run_on_stage, stage, prim_path="/World/S", rotation_euler=[0, 0, 90]
+    )
+
+    assert result["xform_op_order"] == [
+        "xformOp:translate",
+        "xformOp:rotateXYZ",
+        "xformOp:scale",
+    ]
+    assert Gf.IsClose(_world(stage, "/World/S"), _expected([1, 0, 0], [0, 0, 90], [2, 2, 2]), 1e-5)
+
+
 def test_pivot_ops_are_left_alone(
     capturing_tools: Tuple[IsaacTools, List[str]], run_on_stage: Any
 ) -> None:
