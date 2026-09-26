@@ -43,7 +43,7 @@ from ..adapters.base import BackendAdapter
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
 from ..resources import find_checkout_root, resource
-from ..utils.paths import PathPolicy, SandboxDenied
+from ..utils.paths import PathPolicy, SandboxDenied, sandbox_error
 from ..utils.timing import RateLimiter
 from .backends import ALL_BACKEND_NAMES, BACKENDS
 from .registration import register_stats_tools
@@ -796,13 +796,7 @@ class SimulMCPServer(LoggerMixin):
         Returns:
             The error envelope naming the allowed roots and URL schemes, or None.
         """
-        if path_str is None or self._path_policy.is_allowed(path_str, write=write):
-            return None
-        return ErrorResponse(
-            error="File path is not allowed by sandbox policy",
-            error_type="SandboxError",
-            details=self._path_policy.denial_details(path_str, write=write),
-        ).model_dump()
+        return self._path_policy.denial(path_str, write=write)
 
     def _validate_input(
         self, model: Type[BaseModel], **kwargs
@@ -964,15 +958,7 @@ class SimulMCPServer(LoggerMixin):
                     response_model(**payload).model_dump(), models, tool_name
                 )
         except SandboxDenied as exc:
-            return self._validate_output(
-                ErrorResponse(
-                    error="File path is not allowed by sandbox policy",
-                    error_type="SandboxError",
-                    details=exc.details,
-                ).model_dump(),
-                models,
-                tool_name,
-            )
+            return self._validate_output(sandbox_error(exc.details), models, tool_name)
         except Exception as exc:
             self.logger.error("Error in %s: %s", tool_name, exc)
             return self._validate_output(
@@ -1316,19 +1302,13 @@ class SimulMCPServer(LoggerMixin):
             if vscode_port is not None and not isinstance(vscode_port, int):
                 continue
 
-            # Check if PID is still alive
-            if isinstance(pid, int):
+            if isinstance(pid, int) and not DiscoveryDir.pid_alive(pid):
+                # Process is dead -- clean up stale file
                 try:
-                    os.kill(pid, 0)  # signal 0 = check existence
-                except ProcessLookupError:
-                    # Process is dead -- clean up stale file
-                    try:
-                        os.remove(filepath)
-                    except OSError:
-                        pass
-                    continue
-                except PermissionError:
-                    pass  # Process exists but we can't signal it -- that's fine
+                    os.remove(filepath)
+                except OSError:
+                    pass
+                continue
 
             client = self._build_isaac_client(
                 socket_host=host,

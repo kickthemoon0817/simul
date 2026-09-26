@@ -129,7 +129,7 @@ class DiscoveryDir:
         newest_mtime = float("-inf")
         for token_file in self._path.glob(f"{AUTH_TOKEN_FILE_PREFIX}*"):
             pid = self._pid_from_name(token_file.name)
-            if pid is None or not self._pid_alive(pid):
+            if pid is None or not self.pid_alive(pid):
                 continue
             try:
                 mtime = token_file.stat().st_mtime
@@ -158,7 +158,7 @@ class DiscoveryDir:
         removed = 0
         for token_file in self._path.glob(f"{AUTH_TOKEN_FILE_PREFIX}*"):
             pid = self._pid_from_name(token_file.name)
-            if pid is not None and self._pid_alive(pid):
+            if pid is not None and self.pid_alive(pid):
                 continue
             try:
                 token_file.unlink()
@@ -200,7 +200,19 @@ class DiscoveryDir:
             return None
 
     @staticmethod
-    def _pid_alive(pid: int) -> bool:
+    def pid_alive(pid: int) -> bool:
+        """Return whether a process with ``pid`` exists.
+
+        Signal 0 probes without delivering anything. A process owned by
+        another user refuses the signal with EPERM, which still proves it
+        exists.
+
+        Args:
+            pid: Process id to probe.
+
+        Returns:
+            False only when no such process exists.
+        """
         try:
             os.kill(pid, 0)
         except ProcessLookupError:

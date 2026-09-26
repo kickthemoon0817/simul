@@ -49,8 +49,8 @@ class SystemMixin:
             Dict with a page of extensions (id, enabled, version string),
             sorted by id, plus the total number of matches.
         """
-        _enabled_only = repr(enabled_only)
-        _search = repr(search)
+        _enabled_only = _pyval(enabled_only)
+        _search = _pyval(search)
         limit = max(1, min(limit, 1000))
         offset = max(0, offset)
         script = textwrap.dedent(f"""\
@@ -135,7 +135,7 @@ class SystemMixin:
         Returns:
             Dict with success status and extension info after enabling.
         """
-        _ext_id = repr(extension_id)
+        _ext_id = _pyval(extension_id)
         script = textwrap.dedent(f"""\
             import json
             import omni.kit.app

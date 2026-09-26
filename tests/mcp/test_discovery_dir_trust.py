@@ -260,3 +260,9 @@ def test_settings_pick_up_token_file_unless_env_is_set(tmp_path: Path, monkeypat
 def test_settings_stay_unauthenticated_without_token_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ISAAC_SIM__SOCKET_AUTH_TOKEN", raising=False)
     assert Settings(isaac_sim={"discovery_dir": str(tmp_path)}).isaac_sim.socket_auth_token is None
+
+
+def test_pid_alive_is_the_shared_liveness_probe() -> None:
+    """The server's discovery scan and the token-file scan share one probe."""
+    assert DiscoveryDir.pid_alive(os.getpid()) is True
+    assert DiscoveryDir.pid_alive(DEAD_PID) is False

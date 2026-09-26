@@ -3,7 +3,7 @@
 import textwrap
 from typing import Any, Dict, Optional, Union
 
-from ...schemas.common import ErrorResponse
+from ....utils.paths import sandbox_error
 from ._shared import (
     MAX_CAPTURE_DIMENSION,
     MAX_INLINE_CAPTURE_BYTES,
@@ -463,9 +463,7 @@ class CameraMixin:
                 "No allowed root is writable, so captures have nowhere to go. Set "
                 "viewport.capture_dir to a writable directory inside security.allowed_paths."
             )
-            return ErrorResponse(
-                error="No writable capture directory inside the sandbox",
-                error_type="SandboxError",
-                details=details,
-            ).model_dump()
+            return sandbox_error(
+                details, error="No writable capture directory inside the sandbox"
+            )
         return default_dir
