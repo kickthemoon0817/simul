@@ -1047,3 +1047,86 @@ def test_launch_generated_token_is_picked_up_by_settings(tmp_path: Path, monkeyp
 
     settings = Settings(isaac_sim={"discovery_dir": str(discovery_dir)})
     assert settings.isaac_sim.socket_auth_token == "s3cret-tok"
+
+
+# ---------------------------------------------------------------------------
+# Readiness polling must not be throttled by the bridge circuit breaker
+# ---------------------------------------------------------------------------
+
+
+def _flaky_bridge_client_class(refusals: int) -> type:
+    """A real IsaacSocketClient whose bridge refuses ``refusals`` dials, then answers.
+
+    Models Kit binding port 8229 a few frames after the extension is enabled.
+    The stock socket always answers, so only the bridge probe decides readiness.
+    """
+    from simul_mcp.adapters.isaac_socket_client import IsaacSocketClient
+
+    class _FlakyBridgeClient(IsaacSocketClient):
+        dials = 0
+
+        async def _dial_bridge(self, action, payload, **kwargs):  # type: ignore[override]
+            type(self).dials += 1
+            if type(self).dials <= refusals:
+                raise ConnectionRefusedError("bridge still binding")
+            return {"status": "ok", "payload": {}}
+
+        async def execute_vscode_only(self, code: str) -> ScriptResult:
+            return ScriptResult(success=True, output="pong app-ready", transport="vscode")
+
+    return _FlakyBridgeClient
+
+
+def test_bridge_up_reprobe_loop_is_not_cut_short_by_the_circuit_breaker(monkeypatch) -> None:
+    """Initial probe + 3 refused re-probes, then the bridge binds.
+
+    With the breaker's default threshold of 3 the circuit used to open after
+    the second re-probe and skip the rest for 30 s, so bridge-up reported the
+    bridge unreachable although it came up inside the retry window.
+    """
+    client_cls = _flaky_bridge_client_class(refusals=4)
+    enable = AsyncMock(return_value={"success": True, "enabled": True})
+    monkeypatch.setattr(isaac_cli, "IsaacSocketClient", client_cls)
+    monkeypatch.setattr(
+        isaac_cli,
+        "IsaacTools",
+        lambda client, settings: SimpleNamespace(_client=client, enable_isaac_extension=enable),
+    )
+
+    result = runner.invoke(app, ["--json", "isaac", "bridge-up"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "auto-enabled"
+    assert payload["bridge_reachable"] is True
+    assert client_cls.dials == 5
+    enable.assert_awaited_once()
+
+
+def test_launch_polls_the_bridge_every_interval_despite_refusals(tmp_path: Path, monkeypatch) -> None:
+    """Launch polling must keep dialling a refusing bridge, not once per 30 s cooldown."""
+    import subprocess
+
+    from simul_mcp.config import Settings
+
+    root = _write_isaac_root(tmp_path, "6.0.1", with_bridge=True)
+    client_cls = _flaky_bridge_client_class(refusals=5)
+    monkeypatch.setattr(
+        isaac_cli, "get_settings", lambda: Settings(isaac_sim={"discovery_dir": str(tmp_path / "disc")})
+    )
+    monkeypatch.setattr(subprocess, "Popen", _FakeEditor)
+    monkeypatch.setattr(isaac_cli, "IsaacSocketClient", client_cls)
+
+    result = runner.invoke(
+        app,
+        [
+            "--json", "isaac", "launch", "--isaac-root", str(root),
+            "--wait-timeout", "5", "--poll-interval", "0.01",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert payload["bridge_reachable"] is True
+    assert client_cls.dials == 6

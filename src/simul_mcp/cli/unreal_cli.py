@@ -13,8 +13,9 @@ JSON output on stdout, making them consumable by AI agents via Bash.
 import asyncio
 import hashlib
 import json
+import subprocess
 from pathlib import Path
-from typing import Any, Coroutine, Dict, List, Optional
+from typing import Any, Coroutine, Dict, List, NoReturn, Optional
 
 import typer
 from rich.markup import escape as rich_escape
@@ -26,6 +27,7 @@ from simul_mcp.adapters.unreal_runtime import UNREAL_EXEC_MODES, UnrealRuntimeSe
 from simul_mcp.adapters.unreal_setup import (
     LauncherNotFound,
     ensure_remote_control_config,
+    is_loopback_bind,
     launch_editor,
     resolve_launch_argv,
 )
@@ -752,8 +754,33 @@ def set_visibility(
 # setup -- auto-configure Remote Control, optionally launch the editor,
 #          then poll until Remote Control accepts connections.
 # ---------------------------------------------------------------------------
-async def _poll_health(session: UnrealRuntimeSession, timeout: float, interval: float) -> Dict[str, Any]:
-    """Call health_check repeatedly until connected or timeout elapses."""
+def _editor_exit(proc: Optional[subprocess.Popen]) -> Optional[Dict[str, Any]]:
+    """Return a health payload describing a dead editor, or None if it runs."""
+    if proc is None:
+        return None
+    code = proc.poll()
+    if code is None:
+        return None
+    return {
+        "connected": False,
+        "editor_exited": True,
+        "exit_code": code,
+        "error": f"Unreal Editor (pid {proc.pid}) exited with code {code} before Remote Control came up",
+    }
+
+
+async def _poll_health(
+    session: UnrealRuntimeSession,
+    timeout: float,
+    interval: float,
+    proc: Optional[subprocess.Popen] = None,
+) -> Dict[str, Any]:
+    """Call health_check repeatedly until connected or timeout elapses.
+
+    When ``proc`` (the editor this command spawned) exits first, stop
+    polling and return a payload with ``editor_exited: True`` instead of
+    waiting out the full timeout.
+    """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     last: Dict[str, Any] = {}
@@ -761,24 +788,46 @@ async def _poll_health(session: UnrealRuntimeSession, timeout: float, interval: 
         last = await session.health_check()
         if last.get("connected"):
             return last
+        exited = _editor_exit(proc)
+        if exited is not None:
+            return exited
         await asyncio.sleep(interval)
     return last
 
 
-def _is_loopback_bind(host: str) -> bool:
-    """Return True when ``host`` is a loopback or unspecified-loopback bind.
+# Kept under the old private name: the safety gate and its tests use it.
+_is_loopback_bind = is_loopback_bind
 
-    Anything else is treated as a network-exposed bind by the safety gate.
-    Conservative on purpose — better to make the user pass --allow-public
-    once than to silently expose remote Python execution.
+_WILDCARD_BINDS = {"0.0.0.0", "::", "[::]", "any", "*"}
+
+
+def _poll_host(bind: Optional[str]) -> Optional[str]:
+    """Host the setup poller should contact for a given ``--bind``.
+
+    A specific address (loopback or interface IP) is where the listener
+    lives, so poll it. No bind or a wildcard bind keeps the configured
+    ``unreal.host`` (None). IPv6 literals are bracketed for the URL.
     """
-    if not host:
-        return True
-    h = host.strip().lower()
-    return (
-        h in {"localhost", "::1"}
-        or h.startswith("127.")
+    if bind is None:
+        return None
+    host = bind.strip()
+    if not host or host.lower() in _WILDCARD_BINDS:
+        return None
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
+def _fail_launch(error: str) -> NoReturn:
+    """Report a launcher failure and exit non-zero (never returns)."""
+    msg = (
+        f"Cannot launch Unreal Editor: {error.rstrip('.')}. Start the editor yourself and "
+        "re-run with --no-launch, or pass --engine-path."
     )
+    if is_json_mode():
+        emit_error(msg, "LauncherNotFound")
+    console.print(f"[red]{rich_escape(msg)}[/red]")
+    raise typer.Exit(1)
 
 
 @app.command("setup")
@@ -801,8 +850,9 @@ def setup(
             "Config/DefaultEngine.ini (UE reads HTTP bind from there, "
             "not from URemoteControlSettings) and the matching "
             "RemoteControlWebsocketServerBindAddress in "
-            "Config/DefaultRemoteControl.ini. Leave unset to keep UE's "
-            "default (typically loopback for HTTP). Pass an interface IP "
+            "Config/DefaultRemoteControl.ini. Leave unset for loopback: "
+            "a public bind left by an earlier run is cleared unless "
+            "--allow-public is also given. Pass an interface IP "
             "or 0.0.0.0 to enable cross-host access — combine with "
             "--allow-public for non-loopback binds."
         ),
@@ -963,6 +1013,10 @@ def setup(
             launch_plan = resolve_launch_argv(uproject, engine_path, headless=headless)
         except (LauncherNotFound, FileNotFoundError) as exc:
             launch_plan_error = str(exc)
+    if launch_plan_error is not None:
+        # Fail before touching the project: polling for an editor that was
+        # never started would only burn --wait-timeout and hide the reason.
+        _fail_launch(launch_plan_error)
 
     if not yes and not is_json_mode():
         console.print(Panel.fit(
@@ -983,8 +1037,7 @@ def setup(
                 else ""
             )
             + f"  launch:     {'yes' if launch else 'no'}\n"
-            + (f"  launch cmd: {' '.join(launch_plan)}\n" if launch_plan else "")
-            + (f"  [yellow]launch issue:[/yellow] {launch_plan_error}\n" if launch_plan_error else ""),
+            + (f"  launch cmd: {' '.join(launch_plan)}\n" if launch_plan else ""),
             title="Plan",
         ))
         console.print(
@@ -1008,6 +1061,7 @@ def setup(
             bind=bind,
             websocket_port=websocket_port,
             passphrase_md5=passphrase_md5,
+            keep_public_bind=allow_public,
             **({"agent_overlay": True} if agent_overlay else {}),
         )
     except Exception as exc:
@@ -1019,33 +1073,41 @@ def setup(
     if not is_json_mode():
         console.print(patch.uproject.summary())
         console.print(patch.ini.summary())
-        for warning in patch.ini.warnings:
+        if patch.engine_ini is not None and patch.engine_ini.changed:
+            console.print(patch.engine_ini.summary())
+        for warning in patch.ini.warnings + (patch.engine_ini.warnings if patch.engine_ini else []):
             console.print(f"[yellow]warning:[/yellow] {warning}")
 
     # Launch if requested.
     launched = False
     pid: Optional[int] = None
-    if launch and launch_plan_error is None:
+    proc: Optional[subprocess.Popen] = None
+    if launch:
         try:
             proc = launch_editor(uproject, engine_path, headless=headless)
-            launched = True
-            pid = proc.pid
-            if not is_json_mode():
-                console.print(
-                    f"[green]Launched[/green] editor (pid {pid}): {' '.join(launch_plan or [])}"
-                )
-        except (LauncherNotFound, FileNotFoundError) as exc:
-            launch_plan_error = str(exc)
+        except (LauncherNotFound, OSError) as exc:
+            _fail_launch(str(exc))
+        launched = True
+        pid = proc.pid
+        if not is_json_mode():
+            console.print(
+                f"[green]Launched[/green] editor (pid {pid}): {' '.join(launch_plan or [])}"
+            )
 
     # Poll Remote Control. If we didn't launch, the user is expected to
     # already have the editor running. When --passphrase is set the
     # editor enforces auth on /remote/info, so the polling session must
     # also carry the Passphrase header — otherwise the editor is healthy
-    # but the poller hits 401 and times out at --wait-timeout.
-    session = _session(port=port, passphrase=passphrase, mode="endpoint")
+    # but the poller hits 401 and times out at --wait-timeout. A specific
+    # --bind address is where the listener lives, so poll that host.
+    session = _session(host=_poll_host(bind), port=port, passphrase=passphrase, mode="endpoint")
     if not is_json_mode():
-        console.print(f"Waiting for Remote Control @ {session.settings.unreal.host}:{port} ...")
-    health = asyncio.run(_poll_health(session, wait_timeout, poll_interval))
+        console.print(f"Waiting for Remote Control @ {session.host}:{port} ...")
+    # `open -a` hands the editor to LaunchServices and exits right away, so
+    # its exit says nothing about the editor; only watch a direct spawn.
+    watch = proc if launch_plan and launch_plan[0] != "open" else None
+    poll_kwargs: Dict[str, Any] = {"proc": watch} if watch is not None else {}
+    health = asyncio.run(_poll_health(session, wait_timeout, poll_interval, **poll_kwargs))
 
     payload: Dict[str, Any] = {
         "uproject": str(uproject),
@@ -1065,19 +1127,22 @@ def setup(
                 "changed": patch.ini.changed,
                 "added": patch.ini.added,
                 "updated": patch.ini.updated,
+                "removed": patch.ini.removed,
                 "warnings": patch.ini.warnings,
             },
             # engine_ini is populated by ensure_remote_control_config
-            # only when --bind was supplied (HTTP bind lives in
-            # Config/DefaultEngine.ini, separate from the RC ini).
-            # Emit it as None when not patched so callers can tell the
-            # difference between "we touched DefaultEngine.ini" and
-            # "we did not".
+            # when --bind was supplied (HTTP bind lives in
+            # Config/DefaultEngine.ini, separate from the RC ini) or, without
+            # --bind, when an existing DefaultEngine.ini was checked for a
+            # stale public bind. None means the file does not exist and was
+            # not created.
             "engine_ini": (
                 {
                     "changed": patch.engine_ini.changed,
                     "added": patch.engine_ini.added,
                     "updated": patch.engine_ini.updated,
+                    "removed": patch.engine_ini.removed,
+                    "warnings": patch.engine_ini.warnings,
                 }
                 if patch.engine_ini is not None
                 else None
@@ -1101,6 +1166,13 @@ def setup(
             "[green]Remote Control is up[/green] — simul can now talk to this editor."
         )
         return
+    if health.get("editor_exited"):
+        console.print(
+            f"[red]{rich_escape(str(health.get('error')))}.[/red] "
+            "The editor crashed or quit during startup; check its log under "
+            "<project>/Saved/Logs."
+        )
+        raise typer.Exit(1)
     console.print(
         "[red]Remote Control did not respond in time.[/red] "
         "Check that the editor finished loading, that plugins are enabled, "

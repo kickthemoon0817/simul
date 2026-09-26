@@ -227,6 +227,60 @@ async def test_invalid_controls_fail_before_any_connection(settings, kwargs):
     session._ensure_http_session.assert_not_called()
 
 
+def _valid_record():
+    return {
+        "version": 1,
+        "host": "127.0.0.1",
+        "port": 30010,
+        "target": {
+            "instance_id": "i",
+            "document_id": "d",
+            "project_path": "/p.uproject",
+            "map_path": "/Game/Map",
+            "viewport": "viewport-a",
+        },
+    }
+
+
+def test_attachment_record_is_private_and_round_trips(tmp_path):
+    from simul_mcp.utils.private_files import BridgeFiles
+
+    path = tmp_path / "nested" / "attachment.json"
+    BridgeFiles.write(path, _valid_record())
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert read_attachment(path) == _valid_record()
+
+
+def test_attachment_refuses_symlink_loose_mode_and_oversize(tmp_path):
+    from simul_mcp.adapters.unreal_connection import MAX_ATTACHMENT_BYTES
+    from simul_mcp.utils.private_files import BridgeFiles
+
+    real = tmp_path / "attachment.json"
+    BridgeFiles.write(real, _valid_record())
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    with pytest.raises(OSError):
+        read_attachment(link)
+
+    real.chmod(0o644)
+    with pytest.raises(PermissionError):
+        read_attachment(real)
+
+    big = tmp_path / "big.json"
+    BridgeFiles.write(big, {**_valid_record(), "pad": "x" * MAX_ATTACHMENT_BYTES})
+    with pytest.raises(ValueError):
+        read_attachment(big)
+
+
+def test_attachment_keeps_its_schema_checks(tmp_path):
+    from simul_mcp.utils.private_files import BridgeFiles
+
+    path = tmp_path / "attachment.json"
+    BridgeFiles.write(path, {**_valid_record(), "port": 80})
+    with pytest.raises(ValueError, match="Invalid Unreal attachment port"):
+        read_attachment(path)
+
+
 def test_cli_status_refuses_missing_attachment(monkeypatch, settings):
     monkeypatch.setattr("simul_mcp.cli.unreal_cli.get_settings", lambda: settings)
     result = CliRunner().invoke(app, ["--json", "unreal", "status"])

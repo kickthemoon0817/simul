@@ -262,16 +262,35 @@ class MeshOperations(LoggerMixin):
             return False
     
     def _is_mesh_closed(self, points: np.ndarray, face_counts: np.ndarray, face_indices: np.ndarray) -> bool:
-        """Check if mesh is closed (watertight)."""
-        # This is a simplified check - a full implementation would need edge analysis
+        """Check if mesh is closed (watertight).
+
+        A mesh is closed when it has no boundary edges: every undirected edge
+        is shared by exactly two faces. An edge used once lies on an open
+        boundary (e.g. a grid or a box missing a face); an edge used three or
+        more times is non-manifold. Either way the surface does not enclose a
+        volume.
+        """
         try:
             if len(points) == 0 or len(face_counts) == 0:
                 return False
-            
-            # For now, just check if we have a reasonable number of faces relative to vertices
-            # A proper implementation would check for boundary edges
-            return len(face_counts) >= len(points) // 2
-            
+
+            edge_uses: Dict[Tuple[int, int], int] = {}
+            index_offset = 0
+            for face_count in face_counts:
+                face_count = int(face_count)
+                face = [int(i) for i in face_indices[index_offset:index_offset + face_count]]
+                index_offset += face_count
+                if len(face) < 3:
+                    return False
+                for i, a in enumerate(face):
+                    b = face[(i + 1) % len(face)]
+                    if a == b:
+                        continue
+                    edge = (a, b) if a < b else (b, a)
+                    edge_uses[edge] = edge_uses.get(edge, 0) + 1
+
+            return bool(edge_uses) and all(uses == 2 for uses in edge_uses.values())
+
         except Exception:
             return False
     

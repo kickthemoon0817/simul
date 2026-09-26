@@ -1,27 +1,15 @@
 """Physics Inspection tools for Isaac Sim."""
 
-import json
 import textwrap
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from ....adapters import IsaacSocketClient, ScriptResult
-from ...schemas.common import ErrorResponse
 from ._shared import (
     APPLY_COLLISION_CORE,
     APPLY_RIGID_BODY_CORE,
-    BULK_GEOMETRY_ATTRIBUTES,
-    DEFAULT_MAX_RESULTS,
-    LOG_SCAN_WINDOW_BYTES,
-    MAX_CAPTURE_DIMENSION,
-    MAX_INLINE_CAPTURE_BYTES,
-    MAX_RETAINED_CAPTURES,
-    MAX_SCRIPT_BYTES,
-    PRIM_DETAIL_ASPECTS,
     SET_MASS_PROPERTIES_CORE,
     FloatList,
     _compose_script,
     _pyval,
-    logger,
 )
 from .._meta import tool_meta
 
@@ -172,10 +160,14 @@ class PhysicsMixin:
             from pxr import Usd, UsdPhysics
 
             stage = omni.usd.get_context().get_stage()
+            root = stage.GetPrimAtPath({_root_path}) if stage is not None else None
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
+            elif not root.IsValid():
+                # Usd.PrimRange over an invalid prim is empty, which would read
+                # as "no physics objects" rather than as a bad path.
+                print(json.dumps({{"error": "Root path not found: " + {_root_path}}}))
             else:
-                root = stage.GetPrimAtPath({_root_path})
                 rigid_bodies = []
                 colliders = []
                 joints = []

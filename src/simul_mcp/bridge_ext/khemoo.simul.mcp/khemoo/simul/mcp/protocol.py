@@ -6,6 +6,11 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+# Wall-clock budget the lifecycle gives one bridge request before it stops
+# waiting. The service keeps script timeouts below it so a script is
+# interrupted (and reported) by the executor instead of outliving the request.
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
+
 
 @dataclass(frozen=True)
 class BridgeError:

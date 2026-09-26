@@ -55,8 +55,15 @@ def _tools(
     host: Optional[str] = None,
     port: Optional[int] = None,
     timeout: Optional[float] = None,
+    *,
+    bridge_circuit_breaker: bool = True,
 ) -> IsaacTools:
-    """Build an IsaacTools instance from settings with optional overrides."""
+    """Build an IsaacTools instance from settings with optional overrides.
+
+    ``bridge_circuit_breaker=False`` is for readiness polling: a bridge that
+    is still binding its port must be dialled on every poll, not skipped for
+    the breaker's cooldown after the first few refusals.
+    """
     settings = get_settings()
     isaac = settings.isaac_sim
     # The bridge endpoint stays pinned to settings: --host/--port address the
@@ -68,6 +75,7 @@ def _tools(
         bridge_enabled=isaac.bridge_enabled,
         bridge_host=isaac.bridge_host,
         bridge_port=isaac.bridge_port,
+        bridge_circuit_breaker=bridge_circuit_breaker,
     )
     return IsaacTools(client, settings)
 
@@ -185,7 +193,9 @@ def bridge_up(
     ``simul-mcp isaac enable-extension khemoo.simul.mcp``; this command
     bundles that into a single transparent step.
     """
-    tools = _tools(host, port, timeout)
+    # The re-probe loop below expects refusals while Kit binds the port; with
+    # the breaker on, three of them would skip every later probe for 30 s.
+    tools = _tools(host, port, timeout, bridge_circuit_breaker=False)
     client = tools._client
     bridge_addr = client.bridge_address
     vscode_addr = client.vscode_address
@@ -537,6 +547,9 @@ def launch(
             bridge_timeout_seconds=5.0,
             socket_protocol=settings.isaac_sim.socket_protocol,
             auth_token=token,
+            # Polling must dial the bridge every interval while Kit starts,
+            # not once per breaker cooldown.
+            bridge_circuit_breaker=False,
         )
 
     client = _probe_client(auth_token or settings.isaac_sim.socket_auth_token)

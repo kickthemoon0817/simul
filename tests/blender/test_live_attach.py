@@ -197,6 +197,27 @@ def test_attach_existing_gui_and_refuse_changed_targets(
                 width=64, height=64, use_render_fallback=True, agent_id="viewer"
             )
             assert base64.b64decode(capture["image_base64"]).startswith(b"\xff\xd8")
+            assert capture["format"] == "jpeg"
+            # Through MCP the JPEG is labelled as one, and a label the overlay
+            # cannot draw is refused before Blender is touched.
+            capture_tool = next(
+                t for t in server.mcp.tools if t.name == "capture_blender_viewport"
+            )
+            mcp_capture = asyncio.run(
+                capture_tool.func(
+                    width=64, height=64, use_render_fallback=True, agent_id="viewer"
+                )
+            )
+            assert mcp_capture.content[0].mimeType == "image/jpeg"
+            refused = json.loads(
+                asyncio.run(capture_tool.func(width=64, height=64, agent_id="   "))
+                .content[0]
+                .text
+            )
+            assert refused["success"] is False
+            # A server newer than the installed add-on names the fix.
+            with pytest.raises(ValueError, match="protocol mismatch"):
+                BridgeWire.request({**endpoint, "protocol": 1}, request, 2)
             watching = ui("inspect")["agent_observations"]
             assert [m["agent_id"] for m in watching] == ["viewer"]
             assert watching[0]["area_id"] == view["area_id"]

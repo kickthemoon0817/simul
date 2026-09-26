@@ -1,21 +1,13 @@
 """Cross-domain tools: aspect dispatch and raw script execution."""
 
 import json
-import textwrap
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from ....adapters import IsaacSocketClient, ScriptResult
+from ...registration._helpers import apply_success_from_error
 from ...schemas.common import ErrorResponse
 from ._shared import (
-    BULK_GEOMETRY_ATTRIBUTES,
-    LOG_SCAN_WINDOW_BYTES,
-    MAX_CAPTURE_DIMENSION,
-    MAX_INLINE_CAPTURE_BYTES,
-    MAX_RETAINED_CAPTURES,
     MAX_SCRIPT_BYTES,
     PRIM_DETAIL_ASPECTS,
-    FloatList,
-    _pyval,
     logger,
 )
 from .._meta import tool_meta
@@ -169,13 +161,7 @@ class CoreToolsMixin:
             ).model_dump()
 
         if not result.success:
-            return ErrorResponse(
-                error=result.error_value or "Script execution failed",
-                error_type=result.error_name or "RuntimeError",
-                details=(
-                    {"traceback": result.traceback} if result.traceback else None
-                ),
-            ).model_dump()
+            return self._script_failure(result)
 
         output = result.output.strip()
         if output:
@@ -184,10 +170,12 @@ class CoreToolsMixin:
             except json.JSONDecodeError:
                 parsed = None
             if isinstance(parsed, dict):
-                # A generated script reports failure as {"error": ...}; stamping
-                # success onto that contradicts it, and the caller reading
-                # "success" is usually an LLM that will believe the flag.
-                parsed.setdefault("success", "error" not in parsed)
+                # A generated script reports failure as {"error": ...} or a
+                # partial one as {"<section>_error": ...}; stamping success onto
+                # that contradicts it, and the caller reading "success" is
+                # usually an LLM that will believe the flag. Same rule as the
+                # granular tools' script path.
+                apply_success_from_error(parsed)
                 if keep_raw_output:
                     parsed.setdefault("output", result.output)
                 return parsed

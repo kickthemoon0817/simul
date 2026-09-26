@@ -386,3 +386,58 @@ def test_execute_script_rejects_a_non_numeric_timeout(bad_timeout: Any) -> None:
     assert response.status == "error"
     assert response.error is not None
     assert response.error.name == "InvalidRequest"
+
+
+# ---------------------------------------------------------------------------
+# Abandoned requests: a cancelled handler must stop its coroutine script
+# ---------------------------------------------------------------------------
+
+
+def test_cancelled_execute_stops_the_coroutine_driver() -> None:
+    """The lifecycle's wait_for cancels the handler after request_timeout.
+
+    The driver steps the script from loop callbacks, outside the cancelled
+    Task, so without an explicit interrupt the script kept running unbounded
+    after its client had already been told the request timed out.
+    """
+    scope: dict[str, Any] = {"asyncio": asyncio, "ticks": [0]}
+    executor = ScriptExecutor(scope, scope)
+    source = "while True:\n    await asyncio.sleep(0)\n    ticks[0] += 1"
+
+    async def scenario() -> tuple[int, int]:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(executor.execute(source), timeout=0.05)
+        at_cancel = scope["ticks"][0]
+        for _ in range(200):
+            await asyncio.sleep(0)
+        return at_cancel, scope["ticks"][0]
+
+    at_cancel, later = asyncio.run(scenario())
+    assert at_cancel > 0, "the script never ran"
+    assert later == at_cancel, "the script kept running after its request was cancelled"
+    assert executor.is_running is False
+
+
+@pytest.mark.parametrize("requested", [None, 30])
+def test_script_timeout_is_clamped_below_the_request_timeout(requested: Any) -> None:
+    """A script budget at or past the lifecycle timeout would never fire first."""
+    scope: dict[str, Any] = {}
+    executor = ScriptExecutor(scope, scope)
+    service = BridgeCommandService(executor, allow_unsafe_execution=True, request_timeout=0.5)
+    payload: dict[str, Any] = {"code": "await never"}
+    if requested is not None:
+        payload["timeout"] = requested
+
+    async def scenario() -> Any:
+        scope["never"] = asyncio.get_running_loop().create_future()
+        return await service.dispatch(
+            BridgeRequest(request_id="script", action="execute_script", payload=payload)
+        )
+
+    started = time.monotonic()
+    response = asyncio.run(scenario())
+    assert time.monotonic() - started < 5.0
+    assert response.status == "error"
+    assert response.error is not None
+    assert response.error.name == "ScriptInterrupted"
+    assert response.error.message == "timed out after 0.45s"

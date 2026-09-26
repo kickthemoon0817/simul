@@ -322,3 +322,27 @@ def test_private_files_reject_symlinks_and_world_readable_credentials(
     link.symlink_to(target)
     with pytest.raises(OSError):
         BridgeFiles.read(link)
+
+
+def test_addon_bundles_the_private_file_helpers(tmp_path: Path) -> None:
+    """The add-on imports BridgeFiles from utils/, so the ZIP must carry it."""
+    import subprocess
+    import sys
+    import zipfile
+
+    addon = BlenderAttachments.build_addon(tmp_path / "addon.zip")
+    with zipfile.ZipFile(addon) as archive:
+        assert "simul_blender_bridge/utils/private_files.py" in archive.namelist()
+        archive.extractall(tmp_path / "addons")
+    probe = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "from simul_blender_bridge.blender_bridge.protocol import BridgeFiles; "
+        "print(BridgeFiles.__module__)"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(tmp_path / "addons")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert completed.stdout.strip() == "simul_blender_bridge.utils.private_files"

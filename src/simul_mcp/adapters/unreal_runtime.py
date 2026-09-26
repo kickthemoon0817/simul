@@ -8,6 +8,7 @@ Remote Control API (HTTP on port 30010) or the embedded ``unreal`` Python module
 import asyncio
 import base64
 import hashlib
+import importlib
 import json
 import math
 import re
@@ -22,7 +23,9 @@ from ..logging import LoggerMixin, get_logger
 from ..utils.paths import PathPolicy
 from ._unreal_scripts import (
     ACTOR_HELPERS,
+    CREATE_MATERIAL_INSTANCE,
     INTERCHANGE_INFO,
+    SET_LIGHT_PARAMS,
     SIMULATION_STATUS,
     USD_EXPORT,
     USD_IMPORT,
@@ -63,11 +66,10 @@ except ImportError:
     AIOHTTP_AVAILABLE = False
 
 try:
-    import unreal as _unreal_module  # type: ignore[import-untyped]
+    importlib.import_module("unreal")
 
     UNREAL_EMBEDDED_AVAILABLE = True
 except ImportError:
-    _unreal_module = None
     UNREAL_EMBEDDED_AVAILABLE = False
 
 UNREAL_AVAILABLE = AIOHTTP_AVAILABLE or UNREAL_EMBEDDED_AVAILABLE
@@ -80,6 +82,16 @@ logger = get_logger(__name__)
 # above this the caller gets the path on the editor host instead. Kept local to
 # the adapter so this layer does not depend on the MCP layer.
 MAX_INLINE_CAPTURE_BYTES = 262_144
+
+
+LOADED_MAP_EXPRESSION = (
+    "unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)"
+    ".get_editor_world().get_path_name()"
+)
+
+
+class UnrealScriptFailure(RuntimeError):
+    """Python run inside the editor raised; the message is UE's traceback."""
 
 
 class UnrealRuntimeSession(LoggerMixin):
@@ -574,30 +586,6 @@ class UnrealRuntimeSession(LoggerMixin):
             timeout_override=timeout_override, max_retries=max_retries,
         )
 
-    async def _http_post(
-        self,
-        path: str,
-        body: Dict[str, Any],
-        timeout_override: Optional[float] = None,
-        max_retries: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """
-        Perform an HTTP POST against the Remote Control API.
-
-        Args:
-            path: URL path.
-            body: JSON-serializable request body.
-            timeout_override: Per-call timeout in seconds.
-            max_retries: Override for ``self.max_retries``.
-
-        Returns:
-            Parsed JSON response as a dictionary.
-        """
-        return await self._http_request(
-            "POST", path, body=body,
-            timeout_override=timeout_override, max_retries=max_retries,
-        )
-
     # ------------------------------------------------------------------
     # Ping / discovery
     # ------------------------------------------------------------------
@@ -714,7 +702,11 @@ class UnrealRuntimeSession(LoggerMixin):
                     ) as proj_resp:
                         if proj_resp.status == 200:
                             proj_data = await proj_resp.json()
-                            project_name = proj_data.get("CommandResult", "").strip("'\"")
+                            # A traceback in CommandResult is not a name.
+                            if proj_data.get("ReturnValue"):
+                                project_name = str(
+                                    proj_data.get("CommandResult", "")
+                                ).strip("'\"")
                 except Exception:
                     pass
 
@@ -840,17 +832,95 @@ class UnrealRuntimeSession(LoggerMixin):
         if not result.get("ReturnValue", False):
             error_msg = result.get("CommandResult", "Unknown Python error")
             return {"error": str(error_msg)}
+        parsed = UnrealRuntimeSession._first_json_object(result)
+        if parsed is None:
+            return {"error": "No JSON output from Python execution"}
+        return parsed
 
-        for entry in result.get("LogOutput", []):
-            if entry.get("Type") != "Info":
+    @staticmethod
+    def _first_json_object(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Return the first JSON object printed on an Info log line, or None."""
+        for entry in result.get("LogOutput") or []:
+            if not isinstance(entry, dict) or entry.get("Type") != "Info":
                 continue
-            output = entry.get("Output", "").strip()
+            output = str(entry.get("Output", "")).strip()
             if output.startswith("{"):
                 try:
-                    return json.loads(output)
+                    parsed = json.loads(output)
                 except json.JSONDecodeError:
                     continue
-        return {"error": "No JSON output from Python execution"}
+                if isinstance(parsed, dict):
+                    return parsed
+        return None
+
+    @staticmethod
+    def _python_failure(result: Dict[str, Any]) -> Optional[str]:
+        """Return the error text of a failed ``ExecutePythonCommandEx`` call, else None.
+
+        ``ReturnValue`` is False when the Python raised; UE then puts the
+        traceback in ``CommandResult``, which is never a value to report.
+        """
+        if result.get("ReturnValue", False):
+            return None
+        message = str(result.get("CommandResult") or "").strip()
+        if not message:
+            message = "".join(
+                str(entry.get("Output", ""))
+                for entry in result.get("LogOutput") or []
+                if isinstance(entry, dict) and entry.get("Type") == "Error"
+            ).strip()
+        return message or "Unknown Python error"
+
+    @staticmethod
+    def _script_error(message: str) -> Dict[str, Any]:
+        return {"success": False, "error": message, "error_type": "ScriptError"}
+
+    async def _evaluate(self, expression: str) -> str:
+        """Evaluate one Python expression and return its value, unquoted.
+
+        Raises:
+            UnrealScriptFailure: The expression raised inside the editor.
+        """
+        result = await self._execute_python(expression, mode="EvaluateStatement")
+        failure = self._python_failure(result)
+        if failure is not None:
+            raise UnrealScriptFailure(failure)
+        return str(result.get("CommandResult", "")).strip("'\"")
+
+    async def execute_script(self, code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
+        """Run caller-supplied Python and report what it produced.
+
+        ``EvaluateStatement`` returns the expression's value (UE's
+        ``CommandResult``) as ``result``. The file and statement modes return
+        the first JSON object the script printed; a script that ran but
+        printed no JSON returns its printed ``output`` instead of failing.
+
+        Args:
+            code: Python source code.
+            mode: ``ExecuteFile``, ``EvaluateStatement`` or ``ExecuteStatement``.
+
+        Returns:
+            The script's JSON object, ``result``/``output`` fields, or a
+            ``ScriptError`` envelope when the Python raised.
+        """
+        raw = await self._execute_python(code, mode=mode)
+        failure = self._python_failure(raw)
+        if failure is not None:
+            return self._script_error(failure)
+        info = [
+            str(entry.get("Output", ""))
+            for entry in raw.get("LogOutput") or []
+            if isinstance(entry, dict) and entry.get("Type") == "Info"
+        ]
+        output = "".join(info)
+        if mode == "EvaluateStatement":
+            return {"success": True, "result": raw.get("CommandResult"), "output": output}
+        parsed = self._first_json_object(raw)
+        if parsed is None:
+            return {"success": True, "output": output}
+        if parsed.get("error"):
+            return {"success": False, "error_type": "ScriptError", **parsed}
+        return parsed
 
     # ------------------------------------------------------------------
     # Phase 0 session methods
@@ -900,11 +970,7 @@ class UnrealRuntimeSession(LoggerMixin):
             warnings.append(f"engine_version unavailable: {exc}")
 
         try:
-            project_result = await self._execute_python(
-                "unreal.SystemLibrary.get_game_name()",
-                mode="EvaluateStatement",
-            )
-            project_name = project_result.get("CommandResult", "").strip("'\"")
+            project_name = await self._evaluate("unreal.SystemLibrary.get_game_name()")
         except Exception as exc:
             warnings.append(f"project_name unavailable: {exc}")
 
@@ -925,32 +991,25 @@ class UnrealRuntimeSession(LoggerMixin):
 
         Returns:
             Dictionary with engine version, project name, loaded map, and
-            editor state.
+            editor state, or a ``ScriptError`` envelope when a probe raised.
         """
         version_data = await self._call_function(
             "/Script/Engine.Default__KismetSystemLibrary",
             "GetEngineVersion",
         )
-        project_result = await self._execute_python(
-            "unreal.SystemLibrary.get_game_name()",
-            mode="EvaluateStatement",
-        )
-        map_result = await self._execute_python(
-            "unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)"
-            ".get_editor_world().get_path_name()",
-            mode="EvaluateStatement",
-        )
-        platform_result = await self._execute_python(
-            "unreal.Paths.project_dir()",
-            mode="EvaluateStatement",
-        )
+        try:
+            project_name = await self._evaluate("unreal.SystemLibrary.get_game_name()")
+            loaded_map = await self._evaluate(LOADED_MAP_EXPRESSION)
+            platform = await self._evaluate("unreal.Paths.project_dir()")
+        except UnrealScriptFailure as exc:
+            return self._script_error(str(exc))
         return {
             "engine_version": version_data.get("ReturnValue", ""),
-            "project_name": project_result.get("CommandResult", "").strip("'\""),
-            "loaded_map": map_result.get("CommandResult", "").strip("'\""),
+            "project_name": project_name,
+            "loaded_map": loaded_map,
             "is_editor": True,
             "is_game": False,
-            "platform": platform_result.get("CommandResult", "").strip("'\""),
+            "platform": platform,
         }
 
     async def get_loaded_map(self) -> Dict[str, Any]:
@@ -958,16 +1017,13 @@ class UnrealRuntimeSession(LoggerMixin):
         Return the currently loaded persistent level path.
 
         Returns:
-            Dictionary with ``map_path`` string.
+            Dictionary with ``map_path`` string, or a ``ScriptError``
+            envelope when the editor world could not be read.
         """
-        result = await self._execute_python(
-            "unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)"
-            ".get_editor_world().get_path_name()",
-            mode="EvaluateStatement",
-        )
-        return {
-            "map_path": result.get("CommandResult", "").strip("'\""),
-        }
+        try:
+            return {"map_path": await self._evaluate(LOADED_MAP_EXPRESSION)}
+        except UnrealScriptFailure as exc:
+            return self._script_error(str(exc))
 
     # ------------------------------------------------------------------
     # Phase 1 session methods — Scene Read Operations
@@ -1121,12 +1177,10 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
             and summary_text.
         """
         # Get map info via Python (non-deprecated path)
-        map_result = await self._execute_python(
-            "unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)"
-            ".get_editor_world().get_path_name()",
-            mode="EvaluateStatement",
-        )
-        map_path: str = map_result.get("CommandResult", "").strip("'\"")
+        try:
+            map_path = await self._evaluate(LOADED_MAP_EXPRESSION)
+        except UnrealScriptFailure as exc:
+            return self._script_error(str(exc))
 
         # Get all actors via EditorActorSubsystem (UE 5.7 compatible)
         data = await self._call_function(
@@ -1373,64 +1427,58 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Get active editor viewport camera and render information.
 
-        Reads the LevelEditorViewportClient properties via Remote Control.
+        Reads the camera through ``UnrealEditorSubsystem.GetLevelViewportCameraInfo``.
+        Remote Control exposes no viewport size, field of view or projection
+        type, so those are reported as None rather than guessed. A failed
+        read is an error, never a default camera.
 
         Returns:
             Dictionary with camera_location, camera_rotation, viewport_size,
             fov, projection_type.
         """
-        # Read viewport camera via UnrealEditorSubsystem (UE 5.7 compatible)
-        try:
-            data = await self._call_function(
-                "/Script/UnrealEd.Default__UnrealEditorSubsystem",
-                "GetLevelViewportCameraInfo",
-            )
-            loc = data.get("CameraLocation", {})
-            rot = data.get("CameraRotation", {})
-            location = (
-                loc.get("X", 0.0),
-                loc.get("Y", 0.0),
-                loc.get("Z", 0.0),
-            )
-            rotation = (
-                rot.get("Pitch", 0.0),
-                rot.get("Yaw", 0.0),
-                rot.get("Roll", 0.0),
-            )
-        except Exception:
-            location = (0.0, 0.0, 0.0)
-            rotation = (0.0, 0.0, 0.0)
-
+        data = await self._call_function(
+            "/Script/UnrealEd.Default__UnrealEditorSubsystem",
+            "GetLevelViewportCameraInfo",
+        )
+        loc = data.get("CameraLocation")
+        rot = data.get("CameraRotation")
+        if data.get("ReturnValue") is False or not isinstance(loc, dict) or not isinstance(rot, dict):
+            return {
+                "success": False,
+                "error": "No active level editor viewport camera to read",
+                "error_type": "ViewportUnavailable",
+            }
         return {
-            "camera_location": location,
-            "camera_rotation": rotation,
-            "viewport_size": (1920, 1080),
-            "fov": 90.0,
-            "projection_type": "Perspective",
+            "camera_location": (loc.get("X", 0.0), loc.get("Y", 0.0), loc.get("Z", 0.0)),
+            "camera_rotation": (rot.get("Pitch", 0.0), rot.get("Yaw", 0.0), rot.get("Roll", 0.0)),
+            "viewport_size": None,
+            "fov": None,
+            "projection_type": None,
         }
 
     async def set_camera_view(
         self,
         location: Optional[tuple] = None,
         rotation: Optional[tuple] = None,
-        fov: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Set the editor viewport camera position and rotation.
 
+        Field of view is not settable: Remote Control exposes no setter for
+        the level viewport's FOV.
+
         Args:
-            location: Camera position (X, Y, Z) in cm.
-            rotation: Camera rotation (Pitch, Yaw, Roll) in degrees.
-            fov: Field of view in degrees.
+            location: Camera position (X, Y, Z) in cm; None leaves it unchanged.
+            rotation: Camera rotation (Pitch, Yaw, Roll) in degrees; None
+                leaves it unchanged.
 
         Returns:
-            Dictionary with applied location, rotation, fov.
+            Dictionary with the applied location and rotation; a field that
+            was not set is None.
         """
-        applied_location = location or (0.0, 0.0, 0.0)
-        applied_rotation = rotation or (0.0, 0.0, 0.0)
-        applied_fov = fov or 90.0
-
-        # Build SetLevelViewportCameraInfo call
+        # SetLevelViewportCameraInfo takes both location and rotation, and
+        # Remote Control zero-fills an omitted one; resend the current value
+        # for whichever the caller left unset.
         params: Dict[str, Any] = {}
         if location is not None:
             params["CameraLocation"] = {
@@ -1444,6 +1492,20 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 "Yaw": rotation[1],
                 "Roll": rotation[2],
             }
+        if len(params) == 1:
+            current = await self._call_function(
+                "/Script/UnrealEd.Default__UnrealEditorSubsystem",
+                "GetLevelViewportCameraInfo",
+            )
+            key = "CameraRotation" if location is not None else "CameraLocation"
+            if current.get("ReturnValue") is False or not isinstance(current.get(key), dict):
+                return {
+                    "success": False,
+                    "error": "Could not read the current viewport camera to keep "
+                             + ("rotation" if location is not None else "location"),
+                    "error_type": "ViewportUnavailable",
+                }
+            params[key] = current[key]
 
         if params:
             await self._call_function(
@@ -1453,9 +1515,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             )
 
         return {
-            "location": applied_location,
-            "rotation": applied_rotation,
-            "fov": applied_fov,
+            "location": tuple(location) if location is not None else None,
+            "rotation": tuple(rotation) if rotation is not None else None,
         }
 
     async def focus_on_actor(
@@ -1507,6 +1568,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
         # Read back viewport camera position
         info = await self.get_viewport_info()
+        if info.get("success") is False:
+            return info
 
         return {
             "actor_path": actor_path,
@@ -1747,9 +1810,20 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         }
         if parameters:
             try:
-                body["parameters"] = json_lib.loads(parameters)
-            except (json_lib.JSONDecodeError, TypeError):
-                body["parameters"] = {}
+                decoded = json_lib.loads(parameters)
+            except (json_lib.JSONDecodeError, TypeError) as exc:
+                return {
+                    "success": False,
+                    "error": f"parameters is not valid JSON: {exc}",
+                    "error_type": "ValidationError",
+                }
+            if not isinstance(decoded, dict):
+                return {
+                    "success": False,
+                    "error": "parameters must be a JSON object mapping parameter names to values",
+                    "error_type": "ValidationError",
+                }
+            body["parameters"] = decoded
 
         data = await self._http_put("/remote/object/call", body)
         return_value = json_lib.dumps(data) if data else None
@@ -2017,44 +2091,27 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Create a Material Instance Constant from a parent material.
 
-        Uses ``EditorAssetLibrary.DuplicateAsset`` or
-        ``MaterialInstanceConstantFactoryNew`` via Remote Control.
+        Uses ``MaterialInstanceConstantFactoryNew`` through ``AssetTools`` and
+        sets the parent, then saves the new asset.
 
         Args:
-            parent_path: Parent material asset path.
+            parent_path: Parent material (or material instance) asset path.
             instance_name: Name for the new MIC.
             save_path: Content-relative save directory (auto if empty).
 
         Returns:
-            Dictionary with instance_path, parent_path.
+            Dictionary with instance_path, parent_path, or a ``ScriptError``
+            envelope when the parent is missing, the destination exists or
+            the asset could not be created.
         """
         if not save_path:
             # Derive save path from parent: /Game/Materials/M_Base -> /Game/Materials/
             parts = parent_path.rsplit("/", 1)
             save_path = parts[0] if len(parts) > 1 else "/Game"
-
-        full_save_path = f"{save_path}/{instance_name}"
-
-        body: Dict[str, Any] = {
-            "objectPath": (
-                "/Script/EditorScriptingUtilities"
-                ".Default__EditorAssetLibrary"
-            ),
-            "functionName": "DuplicateAsset",
-            "parameters": {
-                "SourceAssetPath": parent_path,
-                "DestinationAssetPath": full_save_path,
-            },
-        }
-        data = await self._http_put("/remote/object/call", body)
-        created = data.get("ReturnValue", False)
-
-        instance_path = full_save_path if created else ""
-
-        return {
-            "instance_path": instance_path,
-            "parent_path": parent_path,
-        }
+        save_path = save_path.rstrip("/")
+        args = {"parent": parent_path, "name": instance_name, "folder": save_path}
+        code = f"args = {args!r}\n" + CREATE_MATERIAL_INSTANCE
+        return await self._execute_json_script(code)
 
     async def assign_material(
         self,
@@ -2111,7 +2168,8 @@ component.set_material({slot_index!r}, material)
         """
         Set light component parameters on a light actor.
 
-        Uses ``PUT /remote/object/property`` for each parameter.
+        Writes the actor's light component in one editor transaction and
+        reads every value back.
 
         Args:
             actor_path: Light actor path.
@@ -2121,49 +2179,42 @@ component.set_material({slot_index!r}, material)
             color_b: Color blue component (0-1).
             temperature: Color temperature in Kelvin.
             use_temperature: Use color temperature instead of direct color.
-            attenuation_radius: Light attenuation radius in cm.
+            attenuation_radius: Light attenuation radius in cm (point and
+                spot lights only).
             cast_shadows: Enable shadow casting.
 
         Returns:
-            Dictionary with actor_path, params_set count.
+            Dictionary with actor_path, component_path, params_set and the
+            read-back ``applied`` values, or a ``ScriptError`` envelope when
+            the actor has no light component, a property does not exist on
+            it, or Unreal did not apply a value.
         """
-        params_set = 0
-
-        # Map parameter names to UE property names and values
-        property_map: list = []
+        # Python editor-property names on ULightComponent and subclasses.
+        values: Dict[str, Any] = {}
         if intensity is not None:
-            property_map.append(("Intensity", intensity))
+            values["intensity"] = intensity
         if color_r is not None or color_g is not None or color_b is not None:
-            color = {
-                "R": color_r if color_r is not None else 1.0,
-                "G": color_g if color_g is not None else 1.0,
-                "B": color_b if color_b is not None else 1.0,
-                "A": 1.0,
-            }
-            property_map.append(("LightColor", color))
+            # LightColor is an FColor: 0-255 channels.
+            def _byte(channel: Optional[float]) -> int:
+                value = 1.0 if channel is None else channel
+                return max(0, min(255, round(value * 255)))
+
+            values["light_color"] = [_byte(color_r), _byte(color_g), _byte(color_b), 255]
         if temperature is not None:
-            property_map.append(("Temperature", temperature))
+            values["temperature"] = temperature
         if use_temperature is not None:
-            property_map.append(("bUseTemperature", use_temperature))
+            values["use_temperature"] = use_temperature
         if attenuation_radius is not None:
-            property_map.append(("AttenuationRadius", attenuation_radius))
+            values["attenuation_radius"] = attenuation_radius
         if cast_shadows is not None:
-            property_map.append(("CastShadows", cast_shadows))
+            values["cast_shadows"] = cast_shadows
 
-        for prop_name, prop_value in property_map:
-            body: Dict[str, Any] = {
-                "objectPath": actor_path,
-                "propertyName": prop_name,
-                "propertyValue": prop_value,
-                "access": "WRITE_TRANSACTION_ACCESS",
-            }
-            await self._http_put("/remote/object/property", body)
-            params_set += 1
+        if not values:
+            return {"actor_path": actor_path, "params_set": 0}
 
-        return {
-            "actor_path": actor_path,
-            "params_set": params_set,
-        }
+        args = {"actor_path": actor_path, "values": values}
+        result = await self._execute_json_script(f"args = {args!r}\n" + SET_LIGHT_PARAMS)
+        return {"actor_path": actor_path, **result}
 
     async def set_render_settings(
         self,
@@ -3613,12 +3664,18 @@ if component.is_simulating_physics() != {target!r}:
             "else:\n"
             "    mesh = actor.dynamic_mesh_component"
             ".get_dynamic_mesh()\n"
-            "    tris = gs_q.get_num_triangle_i_ds(mesh)\n"
-            "    verts = gs_q.get_vertex_count(mesh)\n"
-            "    open_edges = gs_q.get_num_open_border_edges(mesh)\n"
-            "    open_loops = gs_q.get_num_open_border_loops(mesh)\n"
-            "    components = gs_q.get_num_connected_components("
-            "mesh)\n"
+            # UFUNCTIONs with out-params (e.g. GetNumOpenBorderLoops'
+            # bAmbiguousTopologyFound) come back as (count, *outs) tuples.
+            "    def _count(r):\n"
+            "        return r[0] if isinstance(r, tuple) else r\n"
+            "    tris = _count(gs_q.get_num_triangle_i_ds(mesh))\n"
+            "    verts = _count(gs_q.get_vertex_count(mesh))\n"
+            "    open_edges = _count("
+            "gs_q.get_num_open_border_edges(mesh))\n"
+            "    open_loops = _count("
+            "gs_q.get_num_open_border_loops(mesh))\n"
+            "    components = _count("
+            "gs_q.get_num_connected_components(mesh))\n"
             "    has_normals = gs_q.get_has_triangle_normals(mesh)\n"
             "    has_gaps = gs_q.get_has_triangle_id_gaps(mesh)\n"
             "    is_watertight = (open_edges == 0)\n"
@@ -3903,13 +3960,6 @@ if component.is_simulating_physics() != {target!r}:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    async def _describe_actor_brief(self, actor_path: str) -> Dict[str, Any]:
-        """Read actual actor state rather than property-description metadata."""
-        result = await self.get_actor_info(actor_path)
-        if result.get("error"):
-            raise RuntimeError(result["error"])
-        return result
 
     async def _get_actor_transform(self, actor_path: str) -> Dict[str, Any]:
         """Return the world transform, failing when the actor cannot be read."""

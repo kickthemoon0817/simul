@@ -1,23 +1,13 @@
 """Runtime diagnostics tools for Isaac Sim."""
 
-import json
 import textwrap
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from ....adapters import IsaacSocketClient, ScriptResult
 from ...schemas.common import ErrorResponse
 from ._shared import (
     PROTECTED_EXTENSIONS,
-    BULK_GEOMETRY_ATTRIBUTES,
     LOG_SCAN_WINDOW_BYTES,
-    MAX_CAPTURE_DIMENSION,
-    MAX_INLINE_CAPTURE_BYTES,
-    MAX_RETAINED_CAPTURES,
-    MAX_SCRIPT_BYTES,
-    PRIM_DETAIL_ASPECTS,
-    FloatList,
     _pyval,
-    logger,
 )
 from .._meta import tool_meta
 
@@ -272,20 +262,7 @@ class DiagnosticsMixin:
                 ),
                 error_type=type(exc).__name__,
             ).model_dump()
-        if response.get("status") == "ok":
-            payload = response.get("payload", {})
-            if not isinstance(payload, dict):
-                return ErrorResponse(
-                    error="Bridge response payload must be an object.",
-                    error_type="BridgeProtocolError",
-                ).model_dump()
-            payload.setdefault("success", True)
-            return payload
-        error = response.get("error", {})
-        return ErrorResponse(
-            error=str(error.get("message", "Bridge request failed")),
-            error_type=str(error.get("name", "BridgeError")),
-        ).model_dump()
+        return self._bridge_response_envelope(response)
 
     def _client_state(self) -> Dict[str, Any]:
         """Describe this client's transport state for diagnostics payloads."""
@@ -534,7 +511,7 @@ class DiagnosticsMixin:
                 extension_id=extension_id,
                 protected_extensions=sorted(PROTECTED_EXTENSIONS),
             )
-        _ext_id = repr(extension_id)
+        _ext_id = _pyval(extension_id)
         script = textwrap.dedent(f"""\
             import json
             import omni.kit.app
