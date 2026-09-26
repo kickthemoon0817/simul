@@ -126,6 +126,14 @@ context, not at the virtual pointer as if it were a physical mouse.
 
 ### Capture feedback
 
+`capture_blender_viewport` returns two content blocks: the JPEG as an MCP image
+content block (`mimeType: image/jpeg`), then a JSON text block with `success`,
+`width`, `height`, `engine`, `capture_method`, `format` and
+`image_attached: true`. The JSON carries no `image_base64`; a client that only
+logs text or structured results has to read the image block to get the pixels.
+`capture_blender_viewport_sequence` is different: its frames stay inline in the
+JSON as `frames: [{frame, image_base64}, ...]`, with no image blocks.
+
 In attached mode, a successful `capture_blender_viewport` or
 `capture_blender_viewport_sequence` briefly pulses the captured editor's border
 and shows an eye badge labeled **agent · Viewing scene**. The cue fades after

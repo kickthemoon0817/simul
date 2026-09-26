@@ -300,14 +300,16 @@ class CameraMixin:
         Args:
             width: Output image width in pixels (1–MAX_CAPTURE_DIMENSION).
             height: Output image height in pixels (1–MAX_CAPTURE_DIMENSION).
-            inline: Also return the image as base64 in the response. Only
+            inline: Also return the image as an image content block. Only
                     honoured for files up to MAX_INLINE_CAPTURE_BYTES; above
                     that the path is returned alone, since a larger payload
                     overruns a client's per-result budget.
 
         Returns:
             Dict with the capture path, dimensions, and byte size. With
-            ``inline`` and a small enough file, also ``image_base64``.
+            ``inline`` and a small enough file, also ``image_base64``, which
+            the MCP server lifts into an image content block (the JSON then
+            carries ``image_attached: true`` instead).
         """
         width = max(1, min(width, MAX_CAPTURE_DIMENSION))
         height = max(1, min(height, MAX_CAPTURE_DIMENSION))

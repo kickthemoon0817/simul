@@ -419,7 +419,9 @@ def register_blender_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="capture_blender_viewport",
         description=(
-            "Capture the Blender viewport as a base64-encoded JPEG image. "
+            "Capture the Blender viewport as a JPEG. The image arrives as an MCP "
+            "image content block, followed by a JSON block with success, width, "
+            "height, engine, capture_method, format and image_attached=true. "
             "In attached mode, briefly show an agent eye badge and border pulse after success. "
             "Agent annotations are excluded from the captured image."
         ),
