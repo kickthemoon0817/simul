@@ -19,9 +19,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult
-from simul_mcp.config import Settings
-from simul_mcp.mcp.tools.isaac_tools import PRIM_DETAIL_ASPECTS, IsaacTools
+from simul.adapters.isaac_socket_client import ScriptResult
+from simul.config import Settings
+from simul.mcp.tools.isaac_tools import PRIM_DETAIL_ASPECTS, IsaacTools
 
 
 def _tools(payload: Dict[str, Any] | None = None) -> IsaacTools:

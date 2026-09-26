@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 
-from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle
+from khemoo.simul.lifecycle import BridgeServerLifecycle
 
 repo_root = Path(__file__).resolve().parents[2]
 
@@ -44,7 +44,7 @@ def test_wildcard_bind_advertises_a_connectable_address(
 
     lifecycle.write_discovery_file(str(tmp_path), pid=4242, vscode_port=8226)
 
-    written = json.loads((tmp_path / "simul-mcp-4242.json").read_text())
+    written = json.loads((tmp_path / "simul-4242.json").read_text())
     assert written["host"] == "127.0.0.1", (
         f"bind {bind_host!r} advertised as {written['host']!r}, which discovery drops"
     )
@@ -61,7 +61,7 @@ def test_explicit_host_is_advertised_unchanged(tmp_path: Path) -> None:
 
     lifecycle.write_discovery_file(str(tmp_path), pid=99)
 
-    written = json.loads((tmp_path / "simul-mcp-99.json").read_text())
+    written = json.loads((tmp_path / "simul-99.json").read_text())
     assert written["host"] == "192.168.1.50"
 
 

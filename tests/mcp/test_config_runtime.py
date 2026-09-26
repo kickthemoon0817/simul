@@ -11,22 +11,22 @@ import pytest
 from typer.testing import CliRunner
 
 
-from simul_mcp.cli.main import app
-from simul_mcp.config import Settings, get_settings, load_settings
-from simul_mcp.logging import setup_logging
-from simul_mcp.resources import resource_filesystem_path
+from simul.cli.main import app
+from simul.config import Settings, get_settings, load_settings
+from simul.logging import setup_logging
+from simul.resources import resource_filesystem_path
 
 
 def test_usd_package_import_requires_pxr() -> None:
     """The USD package should reflect whether pxr is installed."""
-    sys.modules.pop("simul_mcp.usd", None)
+    sys.modules.pop("simul.usd", None)
     try:
         import pxr  # noqa: F401
     except ImportError:
         with pytest.raises(ImportError, match="pxr"):
-            importlib.import_module("simul_mcp.usd")
+            importlib.import_module("simul.usd")
     else:
-        usd_module = importlib.import_module("simul_mcp.usd")
+        usd_module = importlib.import_module("simul.usd")
         assert hasattr(usd_module, "extract_mesh_data")
         assert hasattr(usd_module, "BBoxCache")
 
@@ -41,7 +41,7 @@ def test_load_settings_supports_nested_repo_config_without_isaac_env(
 
     assert settings.isaac_sim.path is None
     assert settings.logging.file_enabled is True
-    assert settings.logging.file_path == "~/.simul/logs/simul_mcp.log"
+    assert settings.logging.file_path == "~/.simul/logs/simul.log"
     assert settings.logging.retention_days == 14
     assert settings.logging.console_colored is True
     assert settings.usd.cache_enabled is True

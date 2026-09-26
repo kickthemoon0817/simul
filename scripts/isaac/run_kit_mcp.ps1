@@ -175,7 +175,7 @@ if ($Config) {
 }
 
 # Build full command
-$ModuleCmd = "-m simul_mcp.cli.main server"
+$ModuleCmd = "-m simul.cli.main server"
 $FullCmd = "& `"$PythonBat`" $ModuleCmd $($CmdArgs -join ' ')"
 
 # Show configuration

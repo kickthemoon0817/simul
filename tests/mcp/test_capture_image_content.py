@@ -19,14 +19,14 @@ from fastmcp import Client
 from mcp.types import ImageContent, TextContent
 
 
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
-from simul_mcp.mcp.schemas.blender import (
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
+from simul.mcp.schemas.blender import (
     BlenderCaptureViewportRequest,
     BlenderCaptureViewportResponse,
 )
-from simul_mcp.mcp.schemas.unreal import UnrealCaptureViewportResponse
+from simul.mcp.schemas.unreal import UnrealCaptureViewportResponse
 from tests.fakes import FakeFastMCP
 
 # A 1x1 PNG.
@@ -51,7 +51,7 @@ def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServe
 def _capture_payload(image: str = PNG_B64, **extra: Any) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "success": True,
-        "path": "/tmp/simul_mcp/captures/viewport_1.png",
+        "path": "/tmp/simul-work/captures/viewport_1.png",
         "width": 640,
         "height": 360,
         "format": "png",

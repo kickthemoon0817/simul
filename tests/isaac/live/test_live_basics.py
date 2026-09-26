@@ -1,7 +1,7 @@
 """Live Isaac Sim tier: the launch-free basics against a running instance.
 
 These tests talk to whatever Isaac Sim answers on the configured socket (the
-same probe ``simul-mcp isaac ping`` runs) and skip when nothing does, so the
+same probe ``simul isaac ping`` runs) and skip when nothing does, so the
 default ``pytest tests/`` run stays clean on a machine without the engine.
 They never start or stop Isaac Sim themselves.
 
@@ -10,7 +10,7 @@ To run only this tier::
     pytest tests/isaac/live -m isaac
 
 Each test cleans up what it creates. The bridge toggle test disables and
-re-enables the ``khemoo.simul.mcp`` extension through the stock Python
+re-enables the ``khemoo.simul`` extension through the stock Python
 socket, since ``disable_isaac_extension`` rightly refuses to switch off the
 transport it speaks through.
 """
@@ -26,13 +26,13 @@ from typing import Any, Dict, Tuple
 
 import pytest
 
-from simul_mcp.adapters import IsaacRuntimeAdapter
-from simul_mcp.config import get_settings
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul.adapters import IsaacRuntimeAdapter
+from simul.config import get_settings
+from simul.mcp.tools.isaac_tools import IsaacTools
 
 pytestmark = pytest.mark.isaac
 
-BRIDGE_EXTENSION = "khemoo.simul.mcp"
+BRIDGE_EXTENSION = "khemoo.simul"
 
 
 def _run(coro: Any) -> Dict[str, Any]:
@@ -65,7 +65,7 @@ def live() -> Tuple[IsaacRuntimeAdapter, IsaacTools]:
     if not _run(adapter.client.ping()):
         pytest.skip(
             f"Isaac Sim is not reachable at {adapter.client.address}; "
-            "start it with `simul-mcp isaac launch` to run the live tier"
+            "start it with `simul isaac launch` to run the live tier"
         )
     return adapter, IsaacTools(adapter.client, settings)
 

@@ -1,4 +1,4 @@
-"""Tool surfaces, backend-scoped startup probes and ``simul-mcp tools``.
+"""Tool surfaces, backend-scoped startup probes and ``simul tools``.
 
 Covers issues #218 (thin Blender surface, one definition of each thin list),
 #219 (the server probes only the backends it was asked for) and #220 (the
@@ -13,12 +13,12 @@ from typing import Any, Dict, List
 import pytest
 from typer.testing import CliRunner
 
-from simul_mcp import tool_surfaces
-from simul_mcp.cli import main as cli_main
-from simul_mcp.cli.main import app
-from simul_mcp.config import BlenderConfig, Settings, UnrealConfig
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
+from simul import tool_surfaces
+from simul.cli import main as cli_main
+from simul.cli.main import app
+from simul.config import BlenderConfig, Settings, UnrealConfig
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
 from tests.fakes import AvailableAdapter
 
 runner = CliRunner()
@@ -155,7 +155,7 @@ class TestSharedOptions:
 # ---------------------------------------------------------------------------
 class TestScopedStartup:
     def test_usd_only_server_probes_nothing_else(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import simul_mcp.adapters as adapters
+        import simul.adapters as adapters
 
         def _forbidden(*args: Any, **kwargs: Any) -> Any:
             raise AssertionError("probed a backend that was not selected")
@@ -223,7 +223,7 @@ class TestScopedStartup:
 
 
 # ---------------------------------------------------------------------------
-# #220 — simul-mcp tools
+# #220 — simul tools
 # ---------------------------------------------------------------------------
 class TestToolsCommand:
     def test_json_lists_usd_tools_with_schemas(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -280,7 +280,7 @@ class TestToolsCommand:
         result = runner.invoke(app, ["commands"])
         assert result.exit_code == 0, result.output
         payload = json.loads(result.stdout)
-        assert "simul-mcp tools" in payload["mcp_tools"]
+        assert "simul tools" in payload["mcp_tools"]
         assert "tools" in {entry["command"] for entry in payload["commands"]}
 
 

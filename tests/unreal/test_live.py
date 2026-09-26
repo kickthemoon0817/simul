@@ -25,8 +25,8 @@ import json as _json
 
 import pytest
 
-from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
-from simul_mcp.config import Settings
+from simul.adapters.unreal_runtime import UnrealRuntimeSession
+from simul.config import Settings
 
 pytestmark = pytest.mark.unreal_live
 

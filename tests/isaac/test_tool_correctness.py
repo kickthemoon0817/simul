@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul.mcp.tools.isaac_tools import IsaacTools
 
 
 def _stage() -> Usd.Stage:
@@ -376,8 +376,8 @@ def test_step_script_reports_a_timeline_that_cannot_advance(
 def test_bridge_step_advances_exactly_n_and_pauses(
     monkeypatch: pytest.MonkeyPatch, initial: str
 ) -> None:
-    from khemoo.simul.mcp.protocol import BridgeRequest
-    from khemoo.simul.mcp.service import BridgeCommandService
+    from khemoo.simul.protocol import BridgeRequest
+    from khemoo.simul.service import BridgeCommandService
 
     timeline = FakeTimeline(initial)
     _install_kit(monkeypatch, timeline)
@@ -518,8 +518,8 @@ def test_referencing_an_existing_asset_composes(run_on_stage: Any, tmp_path: Any
 
 
 def _sandboxed_tools(sandbox: Any) -> Tuple[IsaacTools, List[str]]:
-    from simul_mcp.adapters.isaac_socket_client import ScriptResult
-    from simul_mcp.config import Settings
+    from simul.adapters.isaac_socket_client import ScriptResult
+    from simul.config import Settings
 
     captured: List[str] = []
 
@@ -629,7 +629,7 @@ def _read_aovs(
     names: List[str],
     annotators: Dict[str, Any],
 ) -> Dict[str, Any]:
-    from simul_mcp.mcp.registration._helpers import apply_success_from_error
+    from simul.mcp.registration._helpers import apply_success_from_error
 
     tools, captured = capturing_tools
     asyncio.run(tools.read_aovs(aov_names=names, num_frames=1))
@@ -678,7 +678,7 @@ def _run_enable(
     monkeypatch: pytest.MonkeyPatch,
     enabled_after: bool,
 ) -> Dict[str, Any]:
-    from simul_mcp.mcp.registration._helpers import apply_success_from_error
+    from simul.mcp.registration._helpers import apply_success_from_error
 
     tools, captured = capturing_tools
     asyncio.run(tools.enable_isaac_extension("worv.env.sun"))

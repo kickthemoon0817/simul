@@ -16,10 +16,10 @@ script_dir = Path(__file__).resolve().parent
 src_path = script_dir.parents[1] / "src"
 sys.path.insert(0, str(src_path))
 
-from simul_mcp.config import get_settings
-from simul_mcp.logging import setup_logging, get_logger
-from simul_mcp.adapters import HeadlessUSDAdapter, is_headless_available
-from simul_mcp.usd.summarize import generate_scene_digest, format_summary_for_llm
+from simul.config import get_settings
+from simul.logging import setup_logging, get_logger
+from simul.adapters import HeadlessUSDAdapter, is_headless_available
+from simul.usd.summarize import generate_scene_digest, format_summary_for_llm
 
 
 def analyze_usd_file(file_path: str, verbose: bool = False) -> bool:

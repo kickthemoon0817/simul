@@ -12,10 +12,10 @@ from typing import Any, Callable
 import pytest
 
 
-from simul_mcp.config import Settings
-from simul_mcp.adapters import isaac_runtime as isaac_runtime_module
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
+from simul.config import Settings
+from simul.adapters import isaac_runtime as isaac_runtime_module
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
 from tests.fakes import FakeFastMCP
 
 
@@ -213,7 +213,7 @@ async def test_discovery_file_uses_forwarded_vscode_port(
     )
     instance = _make_server(monkeypatch, settings)
 
-    discovery_file = tmp_path / "simul-mcp-123.json"
+    discovery_file = tmp_path / "simul-123.json"
     discovery_file.write_text(
         json.dumps(
             {

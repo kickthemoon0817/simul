@@ -24,9 +24,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult
-from simul_mcp.config import Settings
-from simul_mcp.mcp.tools.isaac_tools import MAX_INLINE_CAPTURE_BYTES, IsaacTools
+from simul.adapters.isaac_socket_client import ScriptResult
+from simul.config import Settings
+from simul.mcp.tools.isaac_tools import MAX_INLINE_CAPTURE_BYTES, IsaacTools
 
 
 def _tools(response: Dict[str, Any]) -> tuple[IsaacTools, List[str]]:
@@ -87,7 +87,7 @@ def test_successive_captures_do_not_overwrite_each_other() -> None:
     asyncio.run(tools.capture_isaac_viewport())
 
     script = captured[0]
-    assert "_simul_mcp_capture.png" not in script, "capture path is still a fixed name"
+    assert "_simul_capture.png" not in script, "capture path is still a fixed name"
     assert "uuid" in script
 
 

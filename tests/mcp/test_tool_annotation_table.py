@@ -15,9 +15,9 @@ from typing import Any, Dict
 import pytest
 
 
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
 from tests.fakes import AvailableAdapter, FakeFastMCP
 
 RO, RW, DESTRUCTIVE = "read_only", "additive", "destructive"

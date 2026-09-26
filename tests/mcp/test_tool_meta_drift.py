@@ -18,9 +18,9 @@ from typing import Any, Dict, List, Set, Type
 
 import pytest
 
-from simul_mcp.config import Settings
-from simul_mcp.mcp import server as server_module
-from simul_mcp.mcp.tools._meta import (
+from simul.config import Settings
+from simul.mcp import server as server_module
+from simul.mcp.tools._meta import (
     DeprecatedAlias,
     SandboxedPath,
     ToolMeta,
@@ -28,7 +28,7 @@ from simul_mcp.mcp.tools._meta import (
     iter_tool_methods,
     tool_meta,
 )
-from simul_mcp.mcp.tools.isaac_tools import PRIM_DETAIL_ASPECTS, IsaacTools
+from simul.mcp.tools.isaac_tools import PRIM_DETAIL_ASPECTS, IsaacTools
 from tests.fakes import FakeFastMCP
 
 # Registered on every server but implemented outside IsaacTools: the Isaac

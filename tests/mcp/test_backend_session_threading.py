@@ -15,10 +15,10 @@ from typing import Any, Dict, Iterator
 import pytest
 from pydantic import BaseModel
 
-from simul_mcp.adapters.blender_runtime import BlenderRuntimeAdapter
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
+from simul.adapters.blender_runtime import BlenderRuntimeAdapter
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
 from tests.fakes import FakeFastMCP
 
 

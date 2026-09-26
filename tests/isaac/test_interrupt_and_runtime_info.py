@@ -10,11 +10,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul.adapters.isaac_socket_client import ScriptResult
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
+from simul.mcp.tools.isaac_tools import IsaacTools
 from tests.fakes import FakeFastMCP
 
 

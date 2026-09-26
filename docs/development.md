@@ -21,7 +21,7 @@ wheels exist for Python 3.11 and 3.13 only.
 
 ```
 .
-├── src/simul_mcp/
+├── src/simul/
 │   ├── cli/                 # Typer CLI: main.py plus isaac, unreal, blender, usd subcommands
 │   ├── config.py            # Pydantic settings: YAML + SECTION__KEY environment
 │   ├── logging.py           # Log handlers, audit stream
@@ -33,7 +33,7 @@ wheels exist for Python 3.11 and 3.13 only.
 │   ├── adapters/            # BackendAdapter implementations and transport clients
 │   ├── usd/                 # pxr-based reader, bounding boxes, mesh ops, summaries
 │   ├── blender_bridge/      # Add-on built by `simul blender install-bridge`
-│   ├── bridge_ext/khemoo.simul.mcp/   # Isaac Sim Kit extension, shipped in the wheel
+│   ├── bridge_ext/khemoo.simul/   # Isaac Sim Kit extension, shipped in the wheel
 │   ├── resources/           # skills.md, docs/api/*.md, config/default.yaml, Unreal overlay plugin
 │   └── utils/
 ├── tests/                   # Unit tests and live tiers (see below)
@@ -53,7 +53,7 @@ wheels exist for Python 3.11 and 3.13 only.
 - **Backend registry** (`mcp/backends.py`): each backend is one `BackendSpec`
   naming its adapter, availability probe and registration module. The server
   iterates the registry for adapters, tool registration, the capability report
-  (`get_capabilities`, `simul-mcp info`) and the routing instructions it sends
+  (`get_capabilities`, `simul info`) and the routing instructions it sends
   to clients.
 - **Adapters** (`adapters/`): implement `BackendAdapter` from
   `adapters/base.py`. Isaac Sim uses a TCP client with bridge-then-socket
@@ -70,11 +70,11 @@ wheels exist for Python 3.11 and 3.13 only.
 
 ### Adding a backend
 
-1. Implement `BackendAdapter` in `src/simul_mcp/adapters/`.
-2. Write its registration module in `src/simul_mcp/mcp/registration/`.
-3. Add one `BackendSpec` to `src/simul_mcp/mcp/backends.py`.
+1. Implement `BackendAdapter` in `src/simul/adapters/`.
+2. Write its registration module in `src/simul/mcp/registration/`.
+3. Add one `BackendSpec` to `src/simul/mcp/backends.py`.
 
-The server, `simul-mcp info`, `get_capabilities` and the routing
+The server, `simul info`, `get_capabilities` and the routing
 instructions pick it up from there.
 
 ### Python API
@@ -82,7 +82,7 @@ instructions pick it up from there.
 The headless USD adapter can be used directly:
 
 ```python
-from simul_mcp.adapters import HeadlessUSDAdapter
+from simul.adapters import HeadlessUSDAdapter
 
 adapter = HeadlessUSDAdapter()
 with adapter.create_session() as session:
@@ -99,7 +99,7 @@ with adapter.create_session() as session:
 `--transport http` (pass its URL with `--server`).
 
 The server can be embedded with
-`SimulMCPServer(settings, backends={"usd"})` from `simul_mcp.mcp.server` and
+`SimulMCPServer(settings, backends={"usd"})` from `simul.mcp.server` and
 started with `await server.run("stdio")`.
 
 ## Tests
@@ -120,7 +120,7 @@ skips wheel builds. The last `-m` on the command line wins.
 |---|---|---|
 | Unit | `pytest tests/ --no-cov` | Nothing; must be 100% green on `main` |
 | Packaging | `pytest tests/packaging -m packaging --no-cov` | `uv` on `PATH`; builds and inspects the wheel |
-| Isaac Sim live | `pytest tests/isaac/live -m isaac` | A running Isaac Sim (`simul-mcp isaac launch`); skips when the socket does not answer |
+| Isaac Sim live | `pytest tests/isaac/live -m isaac` | A running Isaac Sim (`simul isaac launch`); skips when the socket does not answer |
 | Unreal live | `pytest tests/ -m unreal_live` | A running editor set up with `simul unreal setup`; see [unreal-e2e-checklist.md](unreal-e2e-checklist.md) |
 | Blender live | `SIMUL_BLENDER_LIVE=1 pytest tests/blender/test_live_attach.py -m blender_live` | Launches and closes a disposable Blender GUI |
 
@@ -155,14 +155,14 @@ gates. `scripts/isaac/dev_isort_black.sh` runs the formatters in one go.
 
 An MCP server already running inside your agent session does not reload
 edited source. To check a change end to end, run the editable-installed CLI
-as a fresh process, for example `simul-mcp --json info` or
-`simul-mcp isaac scene`.
+as a fresh process, for example `simul --json info` or
+`simul isaac scene`.
 
 ## Versioning
 
 The version lives in four places that must change together:
 `pyproject.toml`, `.claude-plugin/plugin.json`,
-`src/simul_mcp/__init__.py` and
-`src/simul_mcp/bridge_ext/khemoo.simul.mcp/config/extension.toml`.
+`src/simul/__init__.py` and
+`src/simul/bridge_ext/khemoo.simul/config/extension.toml`.
 `tests/test_version_lockstep.py` enforces it. Releases are cut by
 maintainers.

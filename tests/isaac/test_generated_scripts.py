@@ -26,8 +26,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul.adapters.isaac_socket_client import ScriptResult
+from simul.mcp.tools.isaac_tools import IsaacTools
 
 # JSON spellings of Python's None/True/False. Bare in Python source they are
 # undefined names, so any load of one is an embed that used json.dumps where it

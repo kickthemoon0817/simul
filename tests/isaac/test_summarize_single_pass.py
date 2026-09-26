@@ -19,8 +19,8 @@ from typing import Any, Dict, List
 import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
 
-from simul_mcp.usd.reader import USDReader
-from simul_mcp.usd.summarize import MaterialSummary, SceneSummarizer
+from simul.usd.reader import USDReader
+from simul.usd.summarize import MaterialSummary, SceneSummarizer
 
 
 def _quad_mesh(stage: Usd.Stage, path: str, offset: float, *, normals: bool, uvs: bool, colors: bool) -> None:

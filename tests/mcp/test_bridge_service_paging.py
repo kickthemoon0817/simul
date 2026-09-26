@@ -18,13 +18,13 @@ import pytest
 extension_root = (
     Path(__file__).resolve().parents[2]
     / "src"
-    / "simul_mcp"
+    / "simul"
     / "bridge_ext"
-    / "khemoo.simul.mcp"
+    / "khemoo.simul"
 )
 
-from khemoo.simul.mcp.protocol import BridgeRequest  # noqa: E402
-from khemoo.simul.mcp.service import BridgeCommandService  # noqa: E402
+from khemoo.simul.protocol import BridgeRequest  # noqa: E402
+from khemoo.simul.service import BridgeCommandService  # noqa: E402
 from tests.isaac.fake_usd import FakePrim, FakeStage, usd_modules  # noqa: E402
 
 

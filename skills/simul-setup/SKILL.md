@@ -6,7 +6,7 @@ version: 0.1.0
 
 # Simul Setup Workflow
 
-Guide the user through installing simul-mcp with the right backends for their workflow. Ask what simulation engines they use, then provide the exact install and configuration steps.
+Guide the user through installing simul with the right backends for their workflow. Ask what simulation engines they use, then provide the exact install and configuration steps.
 
 ## Step 1: Identify the User's Backends
 
@@ -59,20 +59,20 @@ pip install -e ".[dev,blender]"     # Everything
 
 Isaac Sim provides its own `pxr` and `omni` Python modules — no extra pip packages needed.
 
-1. Install the `khemoo.simul.mcp` bridge extension into Isaac Sim:
-   - Run `simul-mcp isaac install-bridge` (uses bundled
-     `src/simul_mcp/bridge_ext/khemoo.simul.mcp/`, works from a pip
+1. Install the `khemoo.simul` bridge extension into Isaac Sim:
+   - Run `simul isaac install-bridge` (uses bundled
+     `src/simul/bridge_ext/khemoo.simul/`, works from a pip
      install or repo checkout). Add `--symlink` for editable workflows.
    - Or use Docker Compose: `docker compose -f compose.isaac-sim.yml up`
 
 2. Start Isaac Sim with the bridge enabled:
-   - `simul-mcp isaac launch` (any version; enables the Python socket and
+   - `simul isaac launch` (any version; enables the Python socket and
      the bridge, then waits for both ports), or
-   - `simul-mcp isaac bridge-up` when a 5.x editor is already running.
+   - `simul isaac bridge-up` when a 5.x editor is already running.
 
 3. Verify connectivity:
    ```bash
-   simul-mcp isaac ping
+   simul isaac ping
    ```
 
 Ports are fixed, not auto-allocated: bridge 8229, stock Python socket 8226.
@@ -94,7 +94,7 @@ Simul communicates with Unreal via the built-in Remote Control HTTP API. No extr
 
 2. Verify connectivity:
    ```bash
-   simul-mcp unreal health
+   simul unreal health
    ```
 
 ### Blender
@@ -114,9 +114,9 @@ Two modes:
 No runtime setup needed. USD tools work immediately after install:
 
 ```bash
-simul-mcp usd info /path/to/scene.usd
-simul-mcp usd validate /path/to/scene.usd
-simul-mcp usd summary /path/to/scene.usd
+simul usd info /path/to/scene.usd
+simul usd validate /path/to/scene.usd
+simul usd summary /path/to/scene.usd
 ```
 
 ## Step 5: Register with AI Agent
@@ -125,13 +125,13 @@ simul-mcp usd summary /path/to/scene.usd
 
 ```bash
 # All backends
-claude mcp add simul -- uv --directory /path/to/simul run simul-mcp server
+claude mcp add simul -- uv --directory /path/to/simul run simul server
 
 # Unreal only (minimal context)
-claude mcp add simul -- uv --directory /path/to/simul run simul-mcp server --backends unreal
+claude mcp add simul -- uv --directory /path/to/simul run simul server --backends unreal
 
 # Isaac Sim only
-claude mcp add simul -- uv --directory /path/to/simul run simul-mcp server --backends isaac
+claude mcp add simul -- uv --directory /path/to/simul run simul server --backends isaac
 ```
 
 ### Codex (OpenAI)
@@ -142,7 +142,7 @@ Add to `.codex/config.json`:
   "mcpServers": {
     "simul": {
       "command": "uv",
-      "args": ["--directory", "/path/to/simul", "run", "simul-mcp", "server"]
+      "args": ["--directory", "/path/to/simul", "run", "simul", "server"]
     }
   }
 }
@@ -154,19 +154,19 @@ Run a quick health check for each configured backend:
 
 ```bash
 # Isaac Sim
-simul-mcp isaac ping
+simul isaac ping
 
 # Unreal Engine
-simul-mcp unreal health
+simul unreal health
 
 # USD (always available)
-simul-mcp usd info /path/to/any/scene.usd
+simul usd info /path/to/any/scene.usd
 
 # Show all registered tools
-simul-mcp info
+simul info
 ```
 
 If any backend fails, re-check the setup steps above. Common issues:
-- **Isaac Sim**: Isaac Sim not running, or started without `simul-mcp isaac launch` (bridge not enabled)
+- **Isaac Sim**: Isaac Sim not running, or started without `simul isaac launch` (bridge not enabled)
 - **Unreal**: setup not run against this project; re-run `simul unreal setup <.uproject> --no-launch --yes`
 - **Blender**: embedded mode on the wrong Python version (need 3.11 or 3.13)

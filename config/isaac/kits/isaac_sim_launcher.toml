@@ -73,7 +73,7 @@ development = [
 
 # MCP specific extension
 mcp = [
-  "khemoo.simul.mcp",  # Our custom MCP extension
+  "khemoo.simul",  # Our custom MCP extension
 ]
 
 # Physics settings
@@ -140,12 +140,12 @@ mdl_search_paths = [
 search_paths = [
     "${ISAAC_SIM_PATH}/assets",
     "${PROJECT_ROOT}/assets",
-  "/tmp/simul_mcp_assets",
+  "/tmp/simul_assets",
 ]
 
 # Cache settings
 cache_enabled = true
-cache_path = "/tmp/simul_mcp_cache"
+cache_path = "/tmp/simul_cache"
 cache_size_mb = 1024
 
 # USD settings
@@ -244,5 +244,5 @@ script_timeout_seconds = 30
 restrict_file_access = true
 allowed_directories = [
     "${PROJECT_ROOT}",
-  "/tmp/simul_mcp",
+  "/tmp/simul-work",
 ]

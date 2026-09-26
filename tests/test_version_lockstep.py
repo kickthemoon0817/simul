@@ -37,15 +37,15 @@ def _read_plugin_json_version() -> str:
 
 
 def _read_init_version() -> str:
-    import simul_mcp
+    import simul
 
-    return simul_mcp.__version__
+    return simul.__version__
 
 
 def _read_bridge_ext_version() -> str:
     text = (
         _REPO
-        / "src/simul_mcp/bridge_ext/khemoo.simul.mcp/config/extension.toml"
+        / "src/simul/bridge_ext/khemoo.simul/config/extension.toml"
     ).read_text(encoding="utf-8")
     m = re.search(
         r'^\[package\]\s*\nversion\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"',
@@ -53,7 +53,7 @@ def _read_bridge_ext_version() -> str:
         flags=re.MULTILINE,
     )
     assert m, (
-        "src/simul_mcp/bridge_ext/khemoo.simul.mcp/config/extension.toml "
+        "src/simul/bridge_ext/khemoo.simul/config/extension.toml "
         "[package] version not found"
     )
     return m.group(1)
@@ -63,8 +63,8 @@ def test_all_four_version_constants_agree() -> None:
     versions = {
         "pyproject.toml": _read_pyproject_version(),
         ".claude-plugin/plugin.json": _read_plugin_json_version(),
-        "src/simul_mcp/__init__.py": _read_init_version(),
-        "src/simul_mcp/bridge_ext/khemoo.simul.mcp/config/extension.toml": _read_bridge_ext_version(),
+        "src/simul/__init__.py": _read_init_version(),
+        "src/simul/bridge_ext/khemoo.simul/config/extension.toml": _read_bridge_ext_version(),
     }
     distinct = set(versions.values())
     assert len(distinct) == 1, (
@@ -77,13 +77,13 @@ def test_license_metadata_agrees_with_license_file() -> None:
     """pyproject, plugin.json and ``__license__`` all name the LICENSE file's license."""
     import tomllib
 
-    import simul_mcp
+    import simul
 
     assert (_REPO / "LICENSE").read_text(encoding="utf-8").lstrip().startswith("Apache License")
     pyproject = tomllib.loads((_REPO / "pyproject.toml").read_text(encoding="utf-8"))
     licenses = {
         "pyproject.toml": pyproject["project"]["license"],
         ".claude-plugin/plugin.json": json.loads((_REPO / ".claude-plugin/plugin.json").read_text())["license"],
-        "src/simul_mcp/__init__.py": simul_mcp.__license__,
+        "src/simul/__init__.py": simul.__license__,
     }
     assert set(licenses.values()) == {"Apache-2.0"}, f"License metadata drift: {licenses}"

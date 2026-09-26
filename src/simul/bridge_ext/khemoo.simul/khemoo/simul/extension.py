@@ -1,0 +1,406 @@
+"""Isaac Sim extension entrypoint for the Simul bridge transport."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import threading
+import traceback
+from typing import Any, Callable
+
+from .executor import ScriptExecutor
+from .lifecycle import BridgeServerLifecycle
+from .protocol import DEFAULT_REQUEST_TIMEOUT_SECONDS, BridgeRequest, BridgeResponse
+from .service import BridgeCommandService, LOCK_FREE_ACTIONS
+from .ui_builder import BridgeUIBuilder
+
+try:
+    import carb
+    import omni.ext
+
+    OMNI_AVAILABLE = True
+except Exception:  # pragma: no cover - exercised by import smoke tests
+    carb = None
+    omni = None
+    OMNI_AVAILABLE = False
+
+
+def _extension_base() -> type[Any]:
+    """Return the Kit extension base class, or ``object`` outside Kit.
+
+    Kit starts every module attribute that is an ``IExt`` subclass, so the base
+    class must not be bound to a module-level name: a bare ``IExt`` alias gets
+    instantiated too, and its shutdown raises before this extension's own
+    ``on_shutdown`` runs, leaving the bridge listener alive.
+    """
+    if OMNI_AVAILABLE:
+        return omni.ext.IExt
+    return object
+
+
+#: Carb settings that hold the stock Python socket port, newest flavour first:
+#: Isaac Sim 6.0 serves it from isaacsim.code_editor.python_server, 5.x from
+#: isaacsim.code_editor.vscode. Only the flavour present in this install is set.
+PYTHON_SOCKET_PORT_SETTINGS: tuple[str, ...] = (
+    "/exts/isaacsim.code_editor.python_server/port",
+    "/exts/isaacsim.code_editor.vscode/port",
+)
+DEFAULT_PYTHON_SOCKET_PORT = 8226
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_python_socket_port(get_setting: Callable[[str], Any]) -> int:
+    """Return the port of the stock Python socket server this Isaac Sim ships.
+
+    Args:
+        get_setting: Reader for Carb settings, typically ``carb.settings.get_settings().get``.
+
+    Returns:
+        The first configured port among the known flavours, else 8226.
+    """
+    for key in PYTHON_SOCKET_PORT_SETTINGS:
+        value = get_setting(key)
+        if value:
+            return int(value)
+    return DEFAULT_PYTHON_SOCKET_PORT
+
+
+class IsaacMCPServerExtension(_extension_base()):
+    """Typed bridge transport for Simul running inside Isaac Sim."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._ext_id = ""
+        self._globals: dict[str, Any] = {}
+        self._server: BridgeServerLifecycle | None = None
+        self._executor: ScriptExecutor | None = None
+        self._service: BridgeCommandService | None = None
+        self._allow_unsafe_execution = True
+        self._max_request_bytes = 1024 * 1024
+        self._max_response_bytes = 10 * 1024 * 1024
+        self._request_lock: asyncio.Lock | None = None
+        self._host = "127.0.0.1"
+        self._port = 8229
+        self._vscode_port = 8226
+        self._max_port_retries = 10
+        self._discovery_dir = "/tmp/simul"
+        self._socket_path = ""
+        self._loop_thread_ident: int | None = None
+        self._ui_builder: BridgeUIBuilder | None = None
+
+    def on_startup(self, ext_id: str) -> None:
+        """Start the bridge server from Kit settings."""
+        if not OMNI_AVAILABLE or carb is None:
+            raise RuntimeError("IsaacMCPServerExtension requires Isaac Sim runtime.")
+
+        self._ext_id = ext_id
+        self._globals = {**globals()}
+        self._reload_settings_from_kit()
+        self._ui_builder = BridgeUIBuilder(
+            title="Simul Bridge",
+            get_state_fn=self.get_runtime_state,
+            apply_settings_fn=self.apply_runtime_settings,
+            start_fn=self.start_bridge,
+            stop_fn=self.stop_bridge,
+            restart_fn=self.restart_bridge,
+        )
+        self._ui_builder.startup()
+        self.start_bridge()
+
+    def on_shutdown(self) -> None:
+        """Stop the bridge server."""
+        if not OMNI_AVAILABLE:
+            return
+        self._sync_stop_bridge(timeout=5)
+        self._clear_runtime_state()
+        if self._ui_builder is not None:
+            self._ui_builder.shutdown()
+            self._ui_builder = None
+
+    def get_runtime_state(self) -> dict[str, Any]:
+        """Return the current bridge runtime settings and status."""
+        return {
+            "host": self._host,
+            "port": self._port,
+            "address": f"{self._host}:{self._port}",
+            "allow_unsafe_execution": self._allow_unsafe_execution,
+            "max_request_bytes": self._max_request_bytes,
+            "max_response_bytes": self._max_response_bytes,
+            "running": self._server is not None,
+        }
+
+    def apply_runtime_settings(
+        self,
+        host: str,
+        port: int,
+        allow_unsafe_execution: bool,
+        max_request_bytes: int,
+        max_response_bytes: int,
+    ) -> None:
+        """Persist updated Kit settings and restart the bridge."""
+        if not OMNI_AVAILABLE or carb is None:
+            return
+        settings = carb.settings.get_settings()
+        settings.set("/exts/khemoo.simul/host", host)
+        settings.set("/exts/khemoo.simul/port", int(port))
+        settings.set(
+            "/exts/khemoo.simul/allow_unsafe_execution",
+            bool(allow_unsafe_execution),
+        )
+        settings.set(
+            "/exts/khemoo.simul/max_request_bytes",
+            int(max_request_bytes),
+        )
+        settings.set(
+            "/exts/khemoo.simul/max_response_bytes",
+            int(max_response_bytes),
+        )
+        self._reload_settings_from_kit()
+        self.restart_bridge()
+
+    def start_bridge(self) -> None:
+        """Start the bridge server with current settings."""
+        self._schedule_task(self._start_bridge_async())
+
+    def stop_bridge(self) -> None:
+        """Stop the bridge server."""
+        self._schedule_task(self._stop_bridge_async())
+
+    def restart_bridge(self) -> None:
+        """Restart the bridge server."""
+        self._schedule_task(self._restart_bridge_async())
+
+    async def _handle_vscode_script(self, code: str) -> dict[str, Any]:
+        """Execute raw Python code via VS Code compat protocol."""
+        if self._executor is None:
+            return {"status": "error", "output": "Executor not initialized."}
+        if not self._allow_unsafe_execution:
+            return {"status": "error", "output": "Script execution is disabled (allow_unsafe_execution=false)."}
+        try:
+            output, exception, trace = await self._executor.execute(code)
+            if exception is not None:
+                return {
+                    "status": "error",
+                    "output": output,
+                    "ename": type(exception).__name__,
+                    "evalue": str(exception),
+                    "traceback": traceback.format_exception(type(exception), exception, exception.__traceback__),
+                }
+            return {"status": "ok", "output": output}
+        except Exception as exc:
+            return {
+                "status": "error",
+                "output": "",
+                "ename": type(exc).__name__,
+                "evalue": str(exc),
+                "traceback": traceback.format_exception(type(exc), exc, exc.__traceback__),
+            }
+
+    async def _handle_request(self, request: BridgeRequest) -> BridgeResponse:
+        """Dispatch a typed bridge request."""
+        if self._service is None or self._request_lock is None:
+            return BridgeResponse.failure(
+                request.request_id,
+                "ExtensionNotReady",
+                "Bridge service is not initialized.",
+            )
+        # Reads skip the lock. Kit is single-threaded, so they cannot interleave
+        # mid-operation with a mutation, and queueing them behind step — which
+        # holds the lock across up to 1000 frame awaits — is what made a ping
+        # during a long step report the instance as unreachable. interrupt
+        # skips it too: its whole purpose is to reach the script holding it.
+        if request.action in LOCK_FREE_ACTIONS:
+            return await self._service.dispatch(request)
+
+        # Serialize bridge requests on Kit's event loop so stage/runtime state
+        # mutations do not interleave across independent client connections.
+        async with self._request_lock:
+            return await self._service.dispatch(request)
+
+    @staticmethod
+    def _get_event_loop() -> asyncio.AbstractEventLoop:
+        """Backward-compatible event loop getter for Kit runtimes."""
+        try:
+            return asyncio.get_event_loop()
+        except RuntimeError:
+            return asyncio.get_event_loop_policy().get_event_loop()
+
+    def _reload_settings_from_kit(self) -> None:
+        """Read current bridge settings from carb.settings."""
+        settings = carb.settings.get_settings()
+        self._host = str(settings.get("/exts/khemoo.simul/host"))
+        self._port = int(settings.get("/exts/khemoo.simul/port"))
+        self._allow_unsafe_execution = bool(
+            settings.get("/exts/khemoo.simul/allow_unsafe_execution")
+        )
+        self._max_request_bytes = int(
+            settings.get("/exts/khemoo.simul/max_request_bytes")
+        )
+        self._max_response_bytes = int(
+            settings.get("/exts/khemoo.simul/max_response_bytes")
+        )
+        self._max_port_retries = int(
+            settings.get("/exts/khemoo.simul/max_port_retries") or 10
+        )
+        self._vscode_port = resolve_python_socket_port(settings.get)
+        self._discovery_dir = str(
+            settings.get("/exts/khemoo.simul/discovery_dir") or "/tmp/simul"
+        )
+        # Empty string disables the Unix socket; TCP always serves. On the
+        # shared discovery volume the socket reaches the host with no
+        # published port at all.
+        self._socket_path = str(
+            settings.get("/exts/khemoo.simul/socket_path") or ""
+        )
+
+    def _schedule_task(self, coro: asyncio.Future) -> None:
+        """Schedule a bridge lifecycle task on Kit's event loop."""
+        loop = self._get_event_loop()
+        loop.create_task(coro)
+
+    def _sync_stop_bridge(self, timeout: float = 5.0) -> None:
+        """Stop the bridge server without returning control to the event loop.
+
+        Kit calls ``on_shutdown`` on the thread that drives its asyncio loop.
+        Blocking that thread on a future scheduled onto the same loop can never
+        complete: the loop only advances once this call returns. So on the loop
+        thread the listener is closed synchronously and only the drain of
+        already-accepted connections is left as a task. Blocking on the loop is
+        reserved for callers on another thread, where the loop keeps running.
+
+        Args:
+            timeout: Seconds to wait for the loop to run the stop when called
+                from a thread other than the loop's own.
+        """
+        server = self._server
+        if server is None:
+            return
+        loop = self._get_event_loop()
+        if self._on_loop_thread():
+            server.close()
+            try:
+                loop.create_task(server.wait_closed())
+            except RuntimeError as exc:
+                self._log_warn(f"Bridge listener closed but its connections cannot be drained: {exc}")
+            self._clear_runtime_state()
+            self._refresh_ui()
+            return
+        future = asyncio.run_coroutine_threadsafe(self._stop_bridge_async(), loop)
+        try:
+            future.result(timeout=timeout)
+        except Exception as exc:
+            self._log_warn(
+                f"Bridge stop did not complete within {timeout}s ({exc!r}); "
+                f"closing the listener on {server.address} directly."
+            )
+            server.close()
+            self._clear_runtime_state()
+
+    def _on_loop_thread(self) -> bool:
+        """Return whether the current thread drives an event loop.
+
+        Kit steps its loop from the main thread, so between frames the loop
+        reports not running even though this thread is its only driver; the
+        thread ident recorded when the bridge started covers that window.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return threading.get_ident() == self._loop_thread_ident
+        return True
+
+    def _clear_runtime_state(self) -> None:
+        """Forget the server, executor, service and lock of a stopped bridge."""
+        self._server = None
+        self._executor = None
+        self._service = None
+        self._request_lock = None
+
+    async def _start_bridge_async(self) -> None:
+        """Create and start the bridge service if it is not already running."""
+        if self._server is not None:
+            self._refresh_ui()
+            return
+        self._executor = ScriptExecutor(self._globals, self._globals)
+        self._service = BridgeCommandService(
+            executor=self._executor,
+            allow_unsafe_execution=self._allow_unsafe_execution,
+            request_timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        )
+        self._request_lock = asyncio.Lock()
+        self._loop_thread_ident = threading.get_ident()
+        self._server = BridgeServerLifecycle(
+            host=self._host,
+            port=self._port,
+            request_handler=self._handle_request,
+            max_request_bytes=self._max_request_bytes,
+            max_response_bytes=self._max_response_bytes,
+            max_port_retries=self._max_port_retries,
+            vscode_handler=self._handle_vscode_script,
+            socket_path=self._socket_path or None,
+            request_timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        )
+        await self._server.start()
+        # Write actual bound port back to Carb settings
+        actual_port = self._server.actual_port
+        if actual_port != self._port:
+            # Clients dial the configured port, so whatever holds it is what
+            # they will reach; this must never pass unnoticed in the log.
+            self._log_warn(
+                f"Simul bridge configured for port {self._port} but it was in use; "
+                f"bound to {actual_port} instead."
+            )
+            settings = carb.settings.get_settings()
+            settings.set("/exts/khemoo.simul/port", actual_port)
+            self._port = actual_port
+        # Write discovery file
+        self._server.write_discovery_file(
+            self._discovery_dir,
+            os.getpid(),
+            vscode_port=self._vscode_port,
+        )
+        if self._socket_path and self._server._unix_server is not None:
+            carb.log_info(
+                f"Simul bridge also serving on unix socket {self._server.actual_socket_path}"
+            )
+        elif self._socket_path:
+            # Configured but not serving — sun_path too long, unwritable dir,
+            # or the volume missing. Without this line a bridge degraded to
+            # TCP-only is indistinguishable from one never configured for the
+            # socket.
+            carb.log_warn(
+                f"Simul bridge unix socket {self._socket_path} is NOT serving; "
+                "continuing on TCP only. Check the path exists inside the "
+                "container and is on the shared volume."
+            )
+        carb.log_info(f"Simul bridge serving at {self._server.address}")
+        self._refresh_ui()
+
+    async def _stop_bridge_async(self) -> None:
+        """Stop the active bridge server and clear runtime state."""
+        if self._server is None:
+            self._refresh_ui()
+            return
+        await self._server.stop()
+        self._clear_runtime_state()
+        self._refresh_ui()
+
+    async def _restart_bridge_async(self) -> None:
+        """Restart the bridge server with current settings."""
+        await self._stop_bridge_async()
+        await self._start_bridge_async()
+
+    def _refresh_ui(self) -> None:
+        """Refresh the UI models if the settings window is available."""
+        if self._ui_builder is not None:
+            self._ui_builder.refresh()
+
+    @staticmethod
+    def _log_warn(message: str) -> None:
+        """Emit a warning through Kit's log when it is loaded, else stdlib logging."""
+        if carb is not None:
+            carb.log_warn(message)
+        else:
+            logger.warning(message)

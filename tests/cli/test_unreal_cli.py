@@ -9,8 +9,8 @@ from typing import Any, Dict
 import pytest
 from typer.testing import CliRunner
 
-from simul_mcp.cli import unreal_cli
-from simul_mcp.cli.main import app
+from simul.cli import unreal_cli
+from simul.cli.main import app
 
 runner = CliRunner()
 
@@ -427,7 +427,7 @@ def _stub_session_factory(monkeypatch, raw_result):
 def test_exec_refuses_when_script_execution_disabled(monkeypatch):
     from unittest.mock import AsyncMock
 
-    from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
+    from simul.adapters.unreal_runtime import UnrealRuntimeSession
 
     base = unreal_cli.get_settings()
     settings = base.model_copy(
@@ -748,7 +748,7 @@ def test_exec_long_inline_script_is_not_treated_as_path(monkeypatch) -> None:
 
 
 def test_read_script_arg_file_vs_inline(tmp_path: Path) -> None:
-    from simul_mcp.cli.output import read_script_arg
+    from simul.cli.output import read_script_arg
 
     script = tmp_path / "s.py"
     script.write_text("print(1)\n")

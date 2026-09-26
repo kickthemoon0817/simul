@@ -19,11 +19,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
-from khemoo.simul.mcp.protocol import BridgeRequest
-from khemoo.simul.mcp.service import BridgeCommandService
-from simul_mcp.adapters.isaac_socket_client import ScriptResult
-from simul_mcp.config import Settings
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from khemoo.simul.protocol import BridgeRequest
+from khemoo.simul.service import BridgeCommandService
+from simul.adapters.isaac_socket_client import ScriptResult
+from simul.config import Settings
+from simul.mcp.tools.isaac_tools import IsaacTools
 
 
 def _cube(stage: Usd.Stage, path: str, position: Tuple[float, float, float]) -> UsdGeom.Cube:

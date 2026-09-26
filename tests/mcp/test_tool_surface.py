@@ -19,8 +19,8 @@ from typing import Set
 import pytest
 
 
-from simul_mcp.config import Settings
-from simul_mcp.mcp import server as server_module
+from simul.config import Settings
+from simul.mcp import server as server_module
 from tests.fakes import FakeFastMCP
 
 _REPO = Path(__file__).resolve().parents[2]

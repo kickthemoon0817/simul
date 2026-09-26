@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
-from simul_mcp.config import Settings
+from simul.adapters.unreal_runtime import UnrealRuntimeSession
+from simul.config import Settings
 
 pytestmark = pytest.mark.unreal_live
 
@@ -165,7 +165,7 @@ def test_usd_roundtrip_and_selection_restoration():
         imported = []
         suffix = uuid.uuid4().hex
         destination = f"/Game/SimulReview_{suffix}"
-        target = Path("/tmp/simul_mcp") / f"review-{suffix}" / "export.usda"
+        target = Path("/tmp/simul-work") / f"review-{suffix}" / "export.usda"
         try:
             info = await client.get_interchange_info()
             if not info.get("usd_import_available") or not info.get(

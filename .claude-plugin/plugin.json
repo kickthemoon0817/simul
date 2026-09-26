@@ -1,7 +1,7 @@
 {
   "name": "simul",
   "version": "0.1.2",
-  "description": "3D simulation and DCC skills — scene setup, physics, materials, camera, scripting, and headless workflows for Isaac Sim, Unreal Engine, Blender, and USD",
+  "description": "Agent toolkit for 3D simulation — an MCP server, engine setup CLI and in-editor bridges plus skills for scene setup, physics, materials, camera, scripting and headless workflows in Isaac Sim, Unreal Engine, Blender and USD",
   "author": {
     "name": "khemoo",
     "url": "https://github.com/kickthemoon0817"

@@ -6,7 +6,7 @@ description: Bootstrap the simul MCP server (clone source + global install) and 
 # /simul:setup
 
 End-to-end bootstrap for the simul plugin. Clones the source, installs the
-`simul-mcp` Python package globally, registers it under
+`simul` Python package globally, registers it under
 `~/.claude.json → mcpServers.simul`, and walks the user through backend
 selection.
 
@@ -14,10 +14,10 @@ selection.
 
 The simul plugin ships skills and commands only; the backend adapters
 (Isaac Sim sockets, Unreal Remote Control, Blender, headless USD) live in
-the `simul-mcp` Python package. The plugin ships no `.mcp.json`, so
+the `simul` Python package. The plugin ships no `.mcp.json`, so
 nothing registers the MCP server until this command writes the entry into
 `~/.claude.json`. That avoids "failed to spawn simul" warnings before
-`simul-mcp` is on `PATH`, and pins the exact binary Claude Code talks to.
+`simul` is on `PATH`, and pins the exact binary Claude Code talks to.
 
 This is the only manual bootstrap step. Everything else (per-backend
 config, project-specific `.uproject` patching for Unreal, etc.) is
@@ -29,13 +29,13 @@ Follow these steps in order. Each step has explicit shell commands and
 clear pass/fail criteria so a fresh Claude session can execute it
 autonomously.
 
-### Step 1 — Is `simul-mcp` already installed?
+### Step 1 — Is `simul` already installed?
 
 ```bash
-which simul-mcp || echo "not installed"
+which simul || echo "not installed"
 ```
 
-If a path prints (e.g. `~/.local/bin/simul-mcp`), skip to Step 5.
+If a path prints (e.g. `~/.local/bin/simul`), skip to Step 5.
 
 ### Step 2 — Pick a source location
 
@@ -56,22 +56,22 @@ hacking on simul before installing the plugin), ask if they want to
 use that path instead — `uv tool install` accepts any local source
 tree.
 
-### Step 4 — Install `simul-mcp` globally
+### Step 4 — Install the `simul` CLI globally
 
 Try installers in this order; stop at the first one that succeeds:
 
 ```bash
 # Preferred — uv (fastest, isolated)
-uv tool install ~/.simul/source && which simul-mcp
+uv tool install ~/.simul/source && which simul
 
 # Fallback 1 — pipx
-pipx install ~/.simul/source && which simul-mcp
+pipx install ~/.simul/source && which simul
 
 # Fallback 2 — pip --user
-python3 -m pip install --user ~/.simul/source && which simul-mcp
+python3 -m pip install --user ~/.simul/source && which simul
 ```
 
-If `which simul-mcp` doesn't print after install, the install
+If `which simul` doesn't print after install, the install
 location's `bin/` directory isn't on `PATH`. Common cases:
 - `~/.local/bin` (pip --user / pipx default) → user needs to add it
   to `PATH` (echo the right shell-rc append for their shell).
@@ -82,7 +82,7 @@ Surface the actual missing-path issue rather than silently retrying.
 ### Step 5 — Verify the binary works
 
 ```bash
-simul-mcp --version || simul-mcp --help | head -5
+simul --version || simul --help | head -5
 ```
 
 Anything other than a clean exit means the install is broken; do not
@@ -92,7 +92,7 @@ proceed past this step.
 
 Edit the user's Claude Code config so the next session spawns the
 just-installed binary. Resolve the absolute path first
-(`which simul-mcp` from Step 4) and write it explicitly — relying on
+(`which simul` from Step 4) and write it explicitly — relying on
 `PATH` at MCP-spawn time is fragile because Claude Code's spawn
 environment may not include shell rc additions.
 
@@ -105,8 +105,8 @@ import shutil
 from pathlib import Path
 
 cfg_path = Path.home() / ".claude.json"
-binary = shutil.which("simul-mcp")
-assert binary, "simul-mcp not on PATH after Step 4"
+binary = shutil.which("simul")
+assert binary, "simul not on PATH after Step 4"
 
 cfg = json.loads(cfg_path.read_text())
 servers = cfg.setdefault("mcpServers", {})
@@ -232,13 +232,13 @@ with NVIDIA RTX GPU).
 6. Publish the bridge extension once per Isaac install, then start
    Isaac through simul so both transports are enabled:
    ```bash
-   simul-mcp isaac install-bridge          # add --symlink for a repo checkout
-   simul-mcp isaac launch                  # every launch; enables socket + bridge
+   simul isaac install-bridge          # add --symlink for a repo checkout
+   simul isaac launch                  # every launch; enables socket + bridge
    ```
    The bridge listens on `localhost:8229`; the stock Python socket on
    `localhost:8226` is the fallback. To change ports, set
    `ISAAC_SIM__BRIDGE_PORT` / `ISAAC_SIM__SOCKET_PORT` (the environment
-   overrides the packaged `src/simul_mcp/resources/config/default.yaml`).
+   overrides the packaged `src/simul/resources/config/default.yaml`).
 
 #### Unreal Engine (selected)
 
@@ -366,13 +366,13 @@ After restart, sanity-check:
 - **Never skip Step 5.** If verification fails, surface the underlying
   install error rather than writing a broken entry into
   `~/.claude.json`.
-- **Don't use `pip install simul-mcp`** as a global step. The package
+- **Don't use `pip install simul-toolkit`** as a global step. The package
   is not on PyPI yet; that command will pull a name-squatted package
   if anything resolves at all.
-- **Write the absolute path** of the resolved `simul-mcp` binary into
+- **Write the absolute path** of the resolved `simul` binary into
   `~/.claude.json`, not the bare name. Claude Code's MCP spawn
   environment may not include the user's shell rc, so a `PATH`-
-  relative `command: "simul-mcp"` can fail at spawn time even when
+  relative `command: "simul"` can fail at spawn time even when
   the binary works in their terminal.
 
 ## When to use this command
@@ -380,7 +380,7 @@ After restart, sanity-check:
 - Right after `/plugin install simul@khemoo`.
 - After deleting `~/.simul/source/` to force a clean reinstall.
 - When `mcp__simul__*` tools stop appearing — usually means the
-  global `simul-mcp` was uninstalled or moved.
+  global `simul` was uninstalled or moved.
 
 ## When NOT to use this command
 

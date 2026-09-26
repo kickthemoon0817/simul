@@ -10,9 +10,9 @@ from unittest.mock import AsyncMock
 from typer.testing import CliRunner
 
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult
-from simul_mcp.cli import isaac as isaac_cli
-from simul_mcp.cli.main import app
+from simul.adapters.isaac_socket_client import ScriptResult
+from simul.cli import isaac as isaac_cli
+from simul.cli.main import app
 
 
 runner = CliRunner()
@@ -119,7 +119,7 @@ def _make_bridge_up_tools() -> SimpleNamespace:
 
 
 def test_interrupt_json(monkeypatch) -> None:
-    """simul-mcp isaac interrupt forwards the bridge's answer."""
+    """simul isaac interrupt forwards the bridge's answer."""
     tools = _make_tools()
     tools.interrupt_script = AsyncMock(
         return_value={
@@ -200,7 +200,7 @@ def test_bridge_up_extension_enable_fails(monkeypatch) -> None:
     )
     tools.enable_isaac_extension.return_value = {
         "success": False,
-        "error": "Extension not found: khemoo.simul.mcp",
+        "error": "Extension not found: khemoo.simul",
     }
     monkeypatch.setattr(isaac_cli, "_tools", lambda *args, **kwargs: tools)
 
@@ -231,7 +231,7 @@ def test_bridge_up_auto_enables_then_reachable(monkeypatch) -> None:
     tools.enable_isaac_extension.return_value = {
         "success": True,
         "enabled": True,
-        "extension_id": "khemoo.simul.mcp-0.0.31",
+        "extension_id": "khemoo.simul-0.0.31",
     }
     monkeypatch.setattr(isaac_cli, "_tools", lambda *args, **kwargs: tools)
     # Strip retry sleep for fast test — actual prod delay is 0.5 s.
@@ -248,13 +248,13 @@ def test_bridge_up_auto_enables_then_reachable(monkeypatch) -> None:
     assert payload["extension_enabled"] is True
     assert payload["success"] is True
     tools.enable_isaac_extension.assert_awaited_once_with(
-        extension_id="khemoo.simul.mcp"
+        extension_id="khemoo.simul"
     )
 
 
 def _write_bridge_source(root: Path, version: str) -> Path:
     """Build a minimal bridge-ext source dir for install-bridge tests."""
-    source = root / "exts" / "khemoo.simul.mcp"
+    source = root / "exts" / "khemoo.simul"
     (source / "config").mkdir(parents=True, exist_ok=True)
     (source / "config" / "extension.toml").write_text(
         f'[package]\nversion = "{version}"\n', encoding="utf-8"
@@ -332,7 +332,7 @@ def test_install_bridge_copies_into_extsUser(tmp_path: Path) -> None:
     assert payload["previous_version"] is None
     assert payload["success"] is True
     # File system: dest exists with correct version.
-    dest = isaac_root / "extsUser" / "khemoo.simul.mcp"
+    dest = isaac_root / "extsUser" / "khemoo.simul"
     assert (dest / "config" / "extension.toml").is_file()
     assert (dest / "khemoo" / "__init__.py").is_file()
 
@@ -349,7 +349,7 @@ def test_install_bridge_already_current_no_op(tmp_path: Path) -> None:
         "--isaac-root", str(isaac_root),
         "--source", str(source),
     ])
-    dest_toml = isaac_root / "extsUser" / "khemoo.simul.mcp" / "config" / "extension.toml"
+    dest_toml = isaac_root / "extsUser" / "khemoo.simul" / "config" / "extension.toml"
     mtime_before = dest_toml.stat().st_mtime
 
     # Re-run
@@ -373,7 +373,7 @@ def test_install_bridge_replaces_stale_dest(tmp_path: Path) -> None:
     new version verified."""
     isaac_root = _make_isaac_root(tmp_path)
     # Pre-populate stale dest at 0.0.13.
-    stale_dest = isaac_root / "extsUser" / "khemoo.simul.mcp"
+    stale_dest = isaac_root / "extsUser" / "khemoo.simul"
     (stale_dest / "config").mkdir(parents=True)
     (stale_dest / "config" / "extension.toml").write_text(
         '[package]\nversion = "0.0.13"\n', encoding="utf-8"
@@ -412,7 +412,7 @@ def test_install_bridge_symlink_mode(tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["action"] == "symlinked"
     assert payload["version"] == "0.0.33"
-    dest = isaac_root / "extsUser" / "khemoo.simul.mcp"
+    dest = isaac_root / "extsUser" / "khemoo.simul"
     assert dest.is_symlink()
     assert dest.resolve() == source
 
@@ -422,13 +422,13 @@ def test_install_bridge_auto_discovers_source_via_walking_parents(
 ) -> None:
     """Legacy fallback path: when the bundled bridge_ext/ sibling is
     absent (very old editable checkouts), the command walks parents
-    from the simul_mcp package's __file__ looking for
-    exts/khemoo.simul.mcp/. iter14 made this the second-choice path
+    from the simul package's __file__ looking for
+    exts/khemoo.simul/. iter14 made this the second-choice path
     after the bundled location; this test exercises it by pointing
     __file__ at a fake package with no bridge_ext sibling."""
     # Build a fake "repo" layout with the bridge source under exts/.
     fake_repo = tmp_path / "fake_repo"
-    fake_pkg = fake_repo / "src" / "simul_mcp"
+    fake_pkg = fake_repo / "src" / "simul"
     fake_pkg.mkdir(parents=True)
     (fake_pkg / "__init__.py").write_text("", encoding="utf-8")
     # NOTE: deliberately no bridge_ext/ sibling — forces the bundled
@@ -436,9 +436,9 @@ def test_install_bridge_auto_discovers_source_via_walking_parents(
     _write_bridge_source(fake_repo, "0.0.33")
     isaac_root = _make_isaac_root(tmp_path)
 
-    # Point simul_mcp.__file__ at the fake package so the walk finds the
+    # Point simul.__file__ at the fake package so the walk finds the
     # fake repo's exts dir instead of the real one.
-    import simul_mcp as _sm
+    import simul as _sm
     monkeypatch.setattr(_sm, "__file__", str(fake_pkg / "__init__.py"))
 
     result = runner.invoke(app, [
@@ -459,28 +459,28 @@ def test_install_bridge_prefers_bundled_source_over_legacy_walk(
     tmp_path: Path, monkeypatch
 ) -> None:
     """iter14 contract: the bundled copy at
-    ``simul_mcp/bridge_ext/khemoo.simul.mcp/`` is the primary source.
+    ``simul/bridge_ext/khemoo.simul/`` is the primary source.
     A pip-installed user has no ``exts/`` dir anywhere on disk; the
     bundled copy must resolve without any repo layout present.
 
-    This test points ``simul_mcp.__file__`` at a fake package that has
-    a ``bridge_ext/khemoo.simul.mcp/`` sibling but NO ``exts/`` parent
+    This test points ``simul.__file__`` at a fake package that has
+    a ``bridge_ext/khemoo.simul/`` sibling but NO ``exts/`` parent
     chain — exactly the wheel-install topology — and verifies the
     install succeeds from the bundled source.
     """
-    # Fake wheel-install layout: simul_mcp/__init__.py with
-    # bridge_ext/khemoo.simul.mcp/ as a sibling, no exts/ anywhere.
-    fake_pkg = tmp_path / "wheel_pkg" / "simul_mcp"
+    # Fake wheel-install layout: simul/__init__.py with
+    # bridge_ext/khemoo.simul/ as a sibling, no exts/ anywhere.
+    fake_pkg = tmp_path / "wheel_pkg" / "simul"
     fake_pkg.mkdir(parents=True)
     (fake_pkg / "__init__.py").write_text("", encoding="utf-8")
-    bundled = fake_pkg / "bridge_ext" / "khemoo.simul.mcp"
+    bundled = fake_pkg / "bridge_ext" / "khemoo.simul"
     (bundled / "config").mkdir(parents=True)
     (bundled / "config" / "extension.toml").write_text(
         '[package]\nversion = "0.0.99"\n', encoding="utf-8"
     )
     isaac_root = _make_isaac_root(tmp_path)
 
-    import simul_mcp as _sm
+    import simul as _sm
     monkeypatch.setattr(_sm, "__file__", str(fake_pkg / "__init__.py"))
 
     result = runner.invoke(app, [
@@ -505,17 +505,17 @@ def test_install_bridge_bundled_source_with_symlink_flag(
     resolve and the dest.symlink_to call would only show up when both
     code paths run together — neither single-mode test catches it.
     """
-    fake_pkg = tmp_path / "wheel_pkg" / "simul_mcp"
+    fake_pkg = tmp_path / "wheel_pkg" / "simul"
     fake_pkg.mkdir(parents=True)
     (fake_pkg / "__init__.py").write_text("", encoding="utf-8")
-    bundled = fake_pkg / "bridge_ext" / "khemoo.simul.mcp"
+    bundled = fake_pkg / "bridge_ext" / "khemoo.simul"
     (bundled / "config").mkdir(parents=True)
     (bundled / "config" / "extension.toml").write_text(
         '[package]\nversion = "0.0.99"\n', encoding="utf-8"
     )
     isaac_root = _make_isaac_root(tmp_path)
 
-    import simul_mcp as _sm
+    import simul as _sm
     monkeypatch.setattr(_sm, "__file__", str(fake_pkg / "__init__.py"))
 
     result = runner.invoke(app, [
@@ -527,7 +527,7 @@ def test_install_bridge_bundled_source_with_symlink_flag(
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["action"] == "symlinked"
-    dest = isaac_root / "extsUser" / "khemoo.simul.mcp"
+    dest = isaac_root / "extsUser" / "khemoo.simul"
     assert dest.is_symlink()
     # The symlink target must be the exact bundled path that the
     # resolver picked — not something silently mutated mid-flow.
@@ -543,15 +543,15 @@ def test_install_bridge_bundled_toml_missing_falls_through(
     and either find a legacy fallback or exit cleanly with
     SourceNotFound — never crash on the missing file.
     """
-    fake_pkg = tmp_path / "wheel_pkg" / "simul_mcp"
+    fake_pkg = tmp_path / "wheel_pkg" / "simul"
     fake_pkg.mkdir(parents=True)
     (fake_pkg / "__init__.py").write_text("", encoding="utf-8")
     # Bundled dir exists but the toml is absent → must not be picked.
-    bundled_dir = fake_pkg / "bridge_ext" / "khemoo.simul.mcp" / "config"
+    bundled_dir = fake_pkg / "bridge_ext" / "khemoo.simul" / "config"
     bundled_dir.mkdir(parents=True)
     isaac_root = _make_isaac_root(tmp_path)
 
-    import simul_mcp as _sm
+    import simul as _sm
     monkeypatch.setattr(_sm, "__file__", str(fake_pkg / "__init__.py"))
 
     result = runner.invoke(app, [
@@ -597,7 +597,7 @@ def test_install_bridge_unreadable_dest_toml_falls_through_cleanly(
     isaac_root = _make_isaac_root(tmp_path)
     # Simulate a partial extraction: dest exists but the toml is
     # unreadable garbage bytes (definitely not valid UTF-8).
-    bad_dest = isaac_root / "extsUser" / "khemoo.simul.mcp"
+    bad_dest = isaac_root / "extsUser" / "khemoo.simul"
     (bad_dest / "config").mkdir(parents=True)
     (bad_dest / "config" / "extension.toml").write_bytes(b"\xff\xfe\x00\x00\x80\x81")
 
@@ -638,7 +638,7 @@ def test_install_bridge_force_replaces_matching_version(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["action"] == "symlinked"
-    dest = isaac_root / "extsUser" / "khemoo.simul.mcp"
+    dest = isaac_root / "extsUser" / "khemoo.simul"
     assert dest.is_symlink()
 
 
@@ -769,8 +769,8 @@ def _write_isaac_root(tmp_path: Path, version: str, *, with_bridge: bool) -> Pat
     exts_user = root / "extsUser"
     exts_user.mkdir()
     if with_bridge:
-        (exts_user / "khemoo.simul.mcp" / "config").mkdir(parents=True)
-        (exts_user / "khemoo.simul.mcp" / "config" / "extension.toml").write_text(
+        (exts_user / "khemoo.simul" / "config").mkdir(parents=True)
+        (exts_user / "khemoo.simul" / "config" / "extension.toml").write_text(
             '[package]\nversion = "0.1.0"\n'
         )
     return root
@@ -790,8 +790,8 @@ def test_launch_dry_run_isaac_six_enables_python_server(tmp_path: Path) -> None:
     assert command[0] == str(root / "isaac-sim.sh")
     assert command[1:3] == ["--enable", "isaacsim.code_editor.python_server"]
     assert "--/exts/isaacsim.code_editor.python_server/port=8226" in command
-    assert "khemoo.simul.mcp" in command
-    assert "--/exts/khemoo.simul.mcp/port=8229" in command
+    assert "khemoo.simul" in command
+    assert "--/exts/khemoo.simul/port=8229" in command
     assert "--no-window" in command
 
 
@@ -811,7 +811,7 @@ def test_launch_dry_run_isaac_five_enables_vscode(tmp_path: Path, monkeypatch) -
     assert "install-bridge" in payload["hint"]
     command = payload["command"]
     assert "--/exts/isaacsim.code_editor.vscode/port=8300" in command
-    assert "khemoo.simul.mcp" not in command
+    assert "khemoo.simul" not in command
     assert "--no-window" not in command
     assert command[-1] == "--verbose"
 
@@ -997,7 +997,7 @@ def _launch_with_generated_token(tmp_path: Path, monkeypatch, *extra: str):
     import stat
     import subprocess
 
-    from simul_mcp.config import Settings
+    from simul.config import Settings
 
     root = _write_isaac_root(tmp_path, "6.0.1", with_bridge=True)
     discovery_dir = tmp_path / "disc"
@@ -1041,7 +1041,7 @@ def test_launch_print_token_includes_token_once(tmp_path: Path, monkeypatch) -> 
 
 
 def test_launch_generated_token_is_picked_up_by_settings(tmp_path: Path, monkeypatch) -> None:
-    from simul_mcp.config import Settings
+    from simul.config import Settings
 
     _, discovery_dir = _launch_with_generated_token(tmp_path, monkeypatch)
 
@@ -1060,7 +1060,7 @@ def _flaky_bridge_client_class(refusals: int) -> type:
     Models Kit binding port 8229 a few frames after the extension is enabled.
     The stock socket always answers, so only the bridge probe decides readiness.
     """
-    from simul_mcp.adapters.isaac_socket_client import IsaacSocketClient
+    from simul.adapters.isaac_socket_client import IsaacSocketClient
 
     class _FlakyBridgeClient(IsaacSocketClient):
         dials = 0
@@ -1087,10 +1087,10 @@ def test_bridge_up_reprobe_loop_is_not_cut_short_by_the_circuit_breaker(monkeypa
     client_cls = _flaky_bridge_client_class(refusals=4)
     enable = AsyncMock(return_value={"success": True, "enabled": True})
     # bridge-up's clients come from IsaacRuntimeAdapter.build_client.
-    monkeypatch.setattr("simul_mcp.adapters.isaac_runtime.IsaacSocketClient", client_cls)
+    monkeypatch.setattr("simul.adapters.isaac_runtime.IsaacSocketClient", client_cls)
     # _tools imports IsaacTools lazily, so patch it where it is defined.
     monkeypatch.setattr(
-        "simul_mcp.mcp.tools.isaac_tools.IsaacTools",
+        "simul.mcp.tools.isaac_tools.IsaacTools",
         lambda client, settings: SimpleNamespace(_client=client, enable_isaac_extension=enable),
     )
 
@@ -1108,7 +1108,7 @@ def test_launch_polls_the_bridge_every_interval_despite_refusals(tmp_path: Path,
     """Launch polling must keep dialling a refusing bridge, not once per 30 s cooldown."""
     import subprocess
 
-    from simul_mcp.config import Settings
+    from simul.config import Settings
 
     root = _write_isaac_root(tmp_path, "6.0.1", with_bridge=True)
     client_cls = _flaky_bridge_client_class(refusals=5)

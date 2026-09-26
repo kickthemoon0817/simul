@@ -18,12 +18,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade
 
-from khemoo.simul.mcp import prim_detail as bridge_prim_detail
-from khemoo.simul.mcp.protocol import BridgeRequest, BridgeResponse
-from khemoo.simul.mcp.service import READ_ONLY_ACTIONS, BridgeCommandService
-from simul_mcp.adapters.isaac_socket_client import ScriptResult
-from simul_mcp.config import Settings
-from simul_mcp.mcp.tools.isaac_tools import PRIM_DETAIL_ASPECTS, IsaacTools
+from khemoo.simul import prim_detail as bridge_prim_detail
+from khemoo.simul.protocol import BridgeRequest, BridgeResponse
+from khemoo.simul.service import READ_ONLY_ACTIONS, BridgeCommandService
+from simul.adapters.isaac_socket_client import ScriptResult
+from simul.config import Settings
+from simul.mcp.tools.isaac_tools import PRIM_DETAIL_ASPECTS, IsaacTools
 
 ALL_ASPECTS: List[str] = list(PRIM_DETAIL_ASPECTS)
 

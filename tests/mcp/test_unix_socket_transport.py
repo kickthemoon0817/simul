@@ -32,13 +32,13 @@ from typing import Any, Dict, Iterator
 
 import pytest
 
-from khemoo.simul.mcp.lifecycle import BridgeServerLifecycle
-from khemoo.simul.mcp.protocol import BridgeResponse
+from khemoo.simul.lifecycle import BridgeServerLifecycle
+from khemoo.simul.protocol import BridgeResponse
 
-from simul_mcp.adapters.isaac_socket_client import IsaacSocketClient
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
+from simul.adapters.isaac_socket_client import IsaacSocketClient
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
 from tests.fakes import FakeFastMCP
 
 
@@ -187,7 +187,7 @@ def test_discovery_file_advertises_the_socket_path(sock_dir: Path) -> None:
         await lifecycle.start()
         try:
             lifecycle.write_discovery_file(str(sock_dir), pid=7, vscode_port=8226)
-            return json.loads((sock_dir / "simul-mcp-7.json").read_text())
+            return json.loads((sock_dir / "simul-7.json").read_text())
         finally:
             await lifecycle.stop()
 
@@ -272,7 +272,7 @@ def _server(monkeypatch: pytest.MonkeyPatch, discovery_dir: Path) -> Any:
 
 
 def _write_entry(discovery_dir: Path, socket_path: str, port: int = 8229) -> None:
-    (discovery_dir / "simul-mcp-7.json").write_text(
+    (discovery_dir / "simul-7.json").write_text(
         json.dumps(
             {
                 "pid": os.getpid(),  # alive, so the stale-pid sweep keeps it
@@ -341,8 +341,8 @@ def test_discovery_translates_a_container_side_socket_path(
 ) -> None:
     """The container advertises its own mount point, not the host's.
 
-    The volume is ``$SIMUL_DISCOVERY_DIR:/tmp/simul-mcp``, so the file says
-    ``/tmp/simul-mcp/bridge.sock`` while the host sees the same socket at
+    The volume is ``$SIMUL_DISCOVERY_DIR:/tmp/simul``, so the file says
+    ``/tmp/simul/bridge.sock`` while the host sees the same socket at
     ``$SIMUL_DISCOVERY_DIR/bridge.sock``. When the literal path is not inside
     the local discovery dir, the reader must try the basename inside it —
     which stays within the trust boundary by construction.
@@ -358,7 +358,7 @@ def test_discovery_translates_a_container_side_socket_path(
         await lifecycle.start()
         try:
             # Advertise the path as a container would see it.
-            _write_entry(sock_dir, "/tmp/simul-mcp/bridge.sock")
+            _write_entry(sock_dir, "/tmp/simul/bridge.sock")
             srv = _server(monkeypatch, sock_dir)
             found = await srv._discover_from_files()
             assert found, "discovery returned nothing"
@@ -388,7 +388,7 @@ def test_discovery_falls_back_to_tcp_when_the_socket_path_is_too_long(
         )
         await lifecycle.start()
         try:
-            _write_entry(deep, "/tmp/simul-mcp/bridge.sock", port=lifecycle.actual_port)
+            _write_entry(deep, "/tmp/simul/bridge.sock", port=lifecycle.actual_port)
             srv = _server(monkeypatch, deep)
             found = await srv._discover_from_files()
             assert found, "discovery dropped the entry instead of falling back to TCP"
@@ -488,7 +488,7 @@ def test_discovery_file_advertises_the_actual_socket(sock_dir: Path) -> None:
         await b.start()
         try:
             b.write_discovery_file(str(sock_dir), pid=99)
-            written = json.loads((sock_dir / "simul-mcp-99.json").read_text())
+            written = json.loads((sock_dir / "simul-99.json").read_text())
             return written["socket_path"], b.actual_socket_path
         finally:
             await a.stop()
@@ -512,7 +512,7 @@ def test_two_discovered_instances_resolve_to_distinct_backends(
         await b.start()
         try:
             for i, lc in enumerate((a, b)):
-                (sock_dir / f"simul-mcp-{100 + i}.json").write_text(
+                (sock_dir / f"simul-{100 + i}.json").write_text(
                     json.dumps(
                         {
                             "pid": os.getpid(),

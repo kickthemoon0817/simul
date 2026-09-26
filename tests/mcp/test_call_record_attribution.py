@@ -17,10 +17,10 @@ from typing import Any, Dict
 import pytest
 
 
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
-from simul_mcp.mcp.usage_tracker import CallRecord, ToolUsageTracker
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
+from simul.mcp.usage_tracker import CallRecord, ToolUsageTracker
 from tests.fakes import FakeFastMCP
 
 CODE = "print('hello')"

@@ -20,13 +20,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult
-from simul_mcp.config import Settings
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul.adapters.isaac_socket_client import ScriptResult
+from simul.config import Settings
+from simul.mcp.tools.isaac_tools import IsaacTools
 
-# Outside every default allowed root (examples, tests/data, /tmp/simul_mcp).
+# Outside every default allowed root (examples, tests/data, /tmp/simul-work).
 OUTSIDE_SANDBOX = "/etc/shadow"
-INSIDE_SANDBOX = "/tmp/simul_mcp/scene.usd"
+INSIDE_SANDBOX = "/tmp/simul-work/scene.usd"
 
 
 def _tools() -> tuple[IsaacTools, MagicMock]:
@@ -143,7 +143,7 @@ def test_denial_names_the_allowed_roots_and_a_hint() -> None:
     details = result["details"]
     assert details["file_path"] == OUTSIDE_SANDBOX
     assert details["access"] == "read"
-    assert any(root.endswith("/tmp/simul_mcp") for root in details["allowed_roots"])
+    assert any(root.endswith("/tmp/simul-work") for root in details["allowed_roots"])
     assert details["allowed_url_schemes"] == ["omniverse"]
     assert "allowed_paths" in details["hint"]
 
@@ -206,8 +206,8 @@ def test_sandbox_disabled_allows_any_path() -> None:
 
 def test_sandbox_error_matches_the_error_response_schema() -> None:
     """The one SandboxError builder stays byte-compatible with ErrorResponse."""
-    from simul_mcp.mcp.schemas.common import ErrorResponse
-    from simul_mcp.utils.paths import SANDBOX_DENIED_MESSAGE, sandbox_error
+    from simul.mcp.schemas.common import ErrorResponse
+    from simul.utils.paths import SANDBOX_DENIED_MESSAGE, sandbox_error
 
     details = {"file_path": OUTSIDE_SANDBOX}
     assert sandbox_error(details) == ErrorResponse(
@@ -216,7 +216,7 @@ def test_sandbox_error_matches_the_error_response_schema() -> None:
 
 
 def test_policy_denial_is_none_for_allowed_or_absent_paths() -> None:
-    from simul_mcp.utils.paths import PathPolicy
+    from simul.utils.paths import PathPolicy
 
     policy = PathPolicy.from_settings(Settings())
     assert policy.denial(None) is None

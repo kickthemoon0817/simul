@@ -10,10 +10,10 @@ import os
 
 import pytest
 
-from simul_mcp.adapters.unreal_connection import UnrealAttachments
-from simul_mcp.adapters.unreal_runtime import UnrealRuntimeSession
-from simul_mcp.config import Settings
-from simul_mcp.mcp.server import SimulMCPServer
+from simul.adapters.unreal_connection import UnrealAttachments
+from simul.adapters.unreal_runtime import UnrealRuntimeSession
+from simul.config import Settings
+from simul.mcp.server import SimulMCPServer
 
 pytestmark = pytest.mark.unreal_live
 

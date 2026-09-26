@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 
-from simul_mcp.adapters.isaac_socket_client import (
+from simul.adapters.isaac_socket_client import (
     BRIDGE_SCRIPT_REPLY_MARGIN_SECONDS,
     BridgeCircuitOpenError,
     BridgeRequestDeliveredError,
@@ -435,7 +435,7 @@ def test_circuit_closes_again_after_cooldown_and_a_successful_probe(
     client = _breaker_client()
     now = [1000.0]
     monkeypatch.setattr(
-        "simul_mcp.adapters.isaac_socket_client.time.monotonic", lambda: now[0]
+        "simul.adapters.isaac_socket_client.time.monotonic", lambda: now[0]
     )
     client._dial_bridge = AsyncMock(  # type: ignore[attr-defined]
         side_effect=[
@@ -469,7 +469,7 @@ def test_failed_probe_after_cooldown_reopens_the_circuit(
     client = _breaker_client()
     now = [1000.0]
     monkeypatch.setattr(
-        "simul_mcp.adapters.isaac_socket_client.time.monotonic", lambda: now[0]
+        "simul.adapters.isaac_socket_client.time.monotonic", lambda: now[0]
     )
     client._dial_bridge = AsyncMock(  # type: ignore[attr-defined]
         side_effect=TimeoutError("still silent")
@@ -664,7 +664,7 @@ def test_delivered_script_is_not_rerun_on_the_stock_socket_after_a_read_timeout(
 ) -> None:
     """The bridge got the script and went quiet: surface the timeout, do not re-send."""
     monkeypatch.setattr(
-        "simul_mcp.adapters.isaac_socket_client.BRIDGE_SCRIPT_REPLY_MARGIN_SECONDS", 0.1
+        "simul.adapters.isaac_socket_client.BRIDGE_SCRIPT_REPLY_MARGIN_SECONDS", 0.1
     )
     bridge, stock, outcome = _fallback_scenario("hang")
 
@@ -703,7 +703,7 @@ def test_bridge_waits_for_the_script_budget_not_just_the_bridge_timeout(
     while the bridge was still honouring the 0.6 s script budget it was sent.
     """
     monkeypatch.setattr(
-        "simul_mcp.adapters.isaac_socket_client.BRIDGE_SCRIPT_REPLY_MARGIN_SECONDS", 0.5
+        "simul.adapters.isaac_socket_client.BRIDGE_SCRIPT_REPLY_MARGIN_SECONDS", 0.5
     )
     bridge, stock, outcome = _fallback_scenario(
         "reply",

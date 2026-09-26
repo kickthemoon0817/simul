@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 
 
-from simul_mcp.adapters import blender_runtime
-from simul_mcp.config import Settings
+from simul.adapters import blender_runtime
+from simul.config import Settings
 
 OUTSIDE = "/etc/shadow"
 
@@ -64,7 +64,7 @@ def test_in_sandbox_path_passes_the_policy(
 ) -> None:
     """A path under an allowed root reaches the runtime layer; with the
     MagicMock bpy the call completes, proving the policy stepped aside."""
-    session.save_blend_file("/tmp/simul_mcp/out.blend")
+    session.save_blend_file("/tmp/simul-work/out.blend")
 
 
 def test_checked_path_is_the_used_path(
@@ -72,11 +72,11 @@ def test_checked_path_is_the_used_path(
 ) -> None:
     """A divergent-prefix path must reach Blender in its resolved form.
 
-    ``~/../../tmp/simul_mcp/...`` resolves inside the sandbox, so the policy
+    ``~/../../tmp/simul-work/...`` resolves inside the sandbox, so the policy
     admits it — but to bpy the ``~`` is a literal path component anchored at
     the server cwd. Whatever the policy checked is what must be used."""
-    result = session.save_blend_file("~/../../tmp/simul_mcp/out.blend")
-    assert result["file_path"] == str(Path("/tmp/simul_mcp/out.blend").resolve())
+    result = session.save_blend_file("~/../../tmp/simul-work/out.blend")
+    assert result["file_path"] == str(Path("/tmp/simul-work/out.blend").resolve())
 
 
 def test_disabled_sandbox_passes_raw_paths_through(

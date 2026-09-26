@@ -21,18 +21,18 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
-from simul_mcp.mcp.tools.isaac._shared import (
+from simul.adapters.isaac_socket_client import ScriptResult
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
+from simul.mcp.tools.isaac._shared import (
     PROTECTED_CARB_SETTING_PREFIXES,
     PROTECTED_EXTENSIONS,
 )
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul.mcp.tools.isaac_tools import IsaacTools
 from tests.fakes import FakeFastMCP
 
-SANDBOX_USD = "/tmp/simul_mcp/scene.usd"
+SANDBOX_USD = "/tmp/simul-work/scene.usd"
 
 
 def _tools(output: Dict[str, Any] | None = None) -> tuple[IsaacTools, AsyncMock]:
@@ -110,7 +110,7 @@ def test_disable_refuses_each_transport_extension(extension_id: str) -> None:
 
 def test_disable_refuses_the_version_suffixed_form_too() -> None:
     tools, execute = _tools()
-    payload = asyncio.run(tools.disable_isaac_extension("khemoo.simul.mcp-0.1.0"))
+    payload = asyncio.run(tools.disable_isaac_extension("khemoo.simul-0.1.0"))
     _assert_refused(payload, execute)
 
 
@@ -137,7 +137,7 @@ def test_carb_write_under_a_transport_prefix_is_refused_whole(prefix: str) -> No
 def test_carb_prefix_check_tolerates_a_missing_leading_slash() -> None:
     tools, execute = _tools()
     payload = asyncio.run(
-        tools.set_carb_settings({"exts/khemoo.simul.mcp/allow_unsafe_execution": False})
+        tools.set_carb_settings({"exts/khemoo.simul/allow_unsafe_execution": False})
     )
     _assert_refused(payload, execute)
 
@@ -236,5 +236,5 @@ def test_overrides_are_in_the_mcp_schema_and_description(
 
 def test_refusing_tools_say_so_in_their_descriptions(monkeypatch: pytest.MonkeyPatch) -> None:
     tools = _registered(monkeypatch)
-    assert "khemoo.simul.mcp" in tools["disable_isaac_extension"].kwargs["description"]
-    assert "/exts/khemoo.simul.mcp/" in tools["set_isaac_carb_settings"].kwargs["description"]
+    assert "khemoo.simul" in tools["disable_isaac_extension"].kwargs["description"]
+    assert "/exts/khemoo.simul/" in tools["set_isaac_carb_settings"].kwargs["description"]

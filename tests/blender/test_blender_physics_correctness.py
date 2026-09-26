@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import pytest
 
-from simul_mcp.adapters import blender_runtime
+from simul.adapters import blender_runtime
 
 
 class _Matrix:
@@ -197,7 +197,7 @@ def test_simready_export_validates_meshes_and_forwards_embed_metadata(
     fake = _fake_bpy(_default_scene())
     session = install(fake)
 
-    result = session.export_simready_usd("/tmp/simul_mcp/asset.usda", embed_metadata=embed)
+    result = session.export_simready_usd("/tmp/simul-work/asset.usda", embed_metadata=embed)
 
     assert {i["object_name"] for i in result["issues"]} <= {"box"}
     assert not [i for i in result["issues"] if i["message"] == "No material assigned"]
@@ -225,6 +225,6 @@ def test_export_drops_options_the_operator_does_not_define(install: Any) -> None
     )
     session = install(fake)
 
-    session.export_simready_usd("/tmp/simul_mcp/asset.usda", validate_before_export=False)
+    session.export_simready_usd("/tmp/simul-work/asset.usda", validate_before_export=False)
 
     assert "export_custom_properties" not in fake.calls["ops"][-1][1]

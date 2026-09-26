@@ -16,7 +16,7 @@ import pytest
 from pxr import Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade
 
 
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul.mcp.tools.isaac_tools import IsaacTools
 
 
 @pytest.fixture

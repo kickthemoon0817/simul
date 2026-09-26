@@ -22,10 +22,10 @@ import pytest
 from pydantic import BaseModel, Field
 
 
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
-from simul_mcp.mcp.result_budget import DEFAULT_RESULT_BUDGET_BYTES
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
+from simul.mcp.result_budget import DEFAULT_RESULT_BUDGET_BYTES
 from tests.fakes import FakeFastMCP
 
 
@@ -314,7 +314,7 @@ def test_registered_tool_checks_the_rate_limit_exactly_once(
 
     # MCP mode registers the thin Unreal set; the converted tools live in
     # the full set, so register it the way the CLI surface does.
-    from simul_mcp.mcp.registration import register_unreal_tools
+    from simul.mcp.registration import register_unreal_tools
 
     register_unreal_tools(instance, thin=False)
 

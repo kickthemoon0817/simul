@@ -15,7 +15,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from simul_mcp.blender_bridge.protocol import PROTOCOL_VERSION, BridgeWire
+from simul.blender_bridge.protocol import PROTOCOL_VERSION, BridgeWire
 
 
 @pytest.fixture
@@ -47,19 +47,19 @@ def bridge_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     observations = Mock()
     monkeypatch.setitem(
         sys.modules,
-        "simul_mcp.blender_bridge.agent_cursor",
+        "simul.blender_bridge.agent_cursor",
         SimpleNamespace(
             cursors=Mock(), observations=observations, hide_annotations=nullcontext
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "simul_mcp.blender_bridge.agent_control",
+        "simul.blender_bridge.agent_control",
         SimpleNamespace(reset_ui=Mock()),
     )
-    path = Path(__file__).parents[2] / "src/simul_mcp/blender_bridge/bridge.py"
+    path = Path(__file__).parents[2] / "src/simul/blender_bridge/bridge.py"
     spec = importlib.util.spec_from_file_location(
-        "simul_mcp.blender_bridge.bridge_under_test", path
+        "simul.blender_bridge.bridge_under_test", path
     )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

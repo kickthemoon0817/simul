@@ -211,7 +211,7 @@ fi
 
 # Build full command
 PYTHON_CMD="$ISAAC_SIM_PATH/python.sh"
-MODULE_CMD="-m simul_mcp.cli.main server"
+MODULE_CMD="-m simul.cli.main server"
 FULL_CMD="$PYTHON_CMD $MODULE_CMD ${CMD_ARGS[*]}"
 
 # Show configuration

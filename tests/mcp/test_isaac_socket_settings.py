@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 
-from simul_mcp.config import IsaacSimConfig, Settings
+from simul.config import IsaacSimConfig, Settings
 
 
 def test_defaults_probe_and_send_no_token() -> None:
@@ -36,8 +36,8 @@ def test_socket_protocol_env_override_survives_the_shipped_config(
     The YAML source ranks below the environment, so a key present in the
     shipped config must not disable its own env var.
     """
-    import simul_mcp.config as config_module
-    from simul_mcp.resources import resource_filesystem_path
+    import simul.config as config_module
+    from simul.resources import resource_filesystem_path
 
     monkeypatch.setenv("CONFIG_FILE", str(resource_filesystem_path("config", "default.yaml")))
     monkeypatch.setenv("ISAAC_SIM__SOCKET_PROTOCOL", "vscode")

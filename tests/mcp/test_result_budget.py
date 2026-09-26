@@ -21,18 +21,18 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-from simul_mcp.adapters.isaac_socket_client import ScriptResult
-from simul_mcp.config import Settings
-from simul_mcp.mcp import backends as backends_module
-from simul_mcp.mcp import server as server_module
-from simul_mcp.mcp.result_budget import (
+from simul.adapters.isaac_socket_client import ScriptResult
+from simul.config import Settings
+from simul.mcp import backends as backends_module
+from simul.mcp import server as server_module
+from simul.mcp.result_budget import (
     DEFAULT_RESULT_BUDGET_BYTES,
     HARD_RESULT_LIMIT_BYTES,
     _list_size,
     apply_result_budget,
     encode_result_budget,
 )
-from simul_mcp.mcp.tools.isaac_tools import IsaacTools
+from simul.mcp.tools.isaac_tools import IsaacTools
 from tests.fakes import FakeFastMCP
 
 
