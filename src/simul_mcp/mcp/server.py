@@ -6,6 +6,8 @@ connection management, and 3D simulation/DCC integration based on FastMCP.
 """
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import inspect
 import json
@@ -114,6 +116,37 @@ _GLOBAL_RATE_BUCKET: str = "*"
 # current MCP network transport; ``sse`` is kept for clients that still speak it.
 NETWORK_TRANSPORTS: Tuple[str, ...] = ("http", "sse")
 TRANSPORTS: Tuple[str, ...] = ("stdio", *NETWORK_TRANSPORTS)
+
+# Leading bytes that identify an encoded image, whatever the payload claims.
+_IMAGE_SIGNATURES: Tuple[Tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"GIF8", "gif"),
+)
+
+
+def _sniff_image_format(image_base64: str) -> Optional[str]:
+    """Identify a base64 image from its magic bytes.
+
+    A capture's bytes are authoritative: a payload without a ``format`` key
+    (or with a stale one) must not be labelled with the wrong MIME type.
+
+    Args:
+        image_base64: Base64-encoded image data.
+
+    Returns:
+        ``png``, ``jpeg``, ``gif`` or ``webp``, or None when unrecognised.
+    """
+    try:
+        head = base64.b64decode(image_base64[:24], validate=False)
+    except (ValueError, binascii.Error):
+        return None
+    for signature, name in _IMAGE_SIGNATURES:
+        if head.startswith(signature):
+            return name
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    return None
 
 
 @dataclass
@@ -985,7 +1018,9 @@ class SimulMCPServer(LoggerMixin):
                 if key not in ("image_base64", "encoding")
             }
             payload["image_attached"] = True
-            image_format = str(payload.get("format", "png")).lower()
+            image_format = _sniff_image_format(image) or str(
+                payload.get("format", "png")
+            ).lower()
             mime_type = (
                 "image/jpeg" if image_format in ("jpg", "jpeg") else f"image/{image_format}"
             )
