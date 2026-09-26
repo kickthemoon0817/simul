@@ -28,7 +28,9 @@ from simul_mcp.mcp import server as server_module
 from simul_mcp.mcp.result_budget import (
     DEFAULT_RESULT_BUDGET_BYTES,
     HARD_RESULT_LIMIT_BYTES,
+    _list_size,
     apply_result_budget,
+    encode_result_budget,
 )
 from simul_mcp.mcp.tools.isaac_tools import IsaacTools
 from tests.fakes import FakeFastMCP
@@ -282,3 +284,35 @@ def test_oversize_payload_it_cannot_trim_says_so() -> None:
     result = apply_result_budget({"success": True, "info": bulk})
 
     assert result["oversized_bytes"] > DEFAULT_RESULT_BUDGET_BYTES
+
+
+# ---------------------------------------------------------------------------
+# encode_result_budget: the encoding the budget measured is the one sent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"success": True, "prims": _prims(10)},
+        {"success": True, "prims": _prims(5000), "meta": {"root": "/World"}},
+        {"success": True, "a": _prims(3000), "b": _prims(2000), "note": "x" * 100},
+        {"success": True, "info": {f"attr_{i}": "x" * 200 for i in range(300)}},
+        {"success": True, "output": "y" * (HARD_RESULT_LIMIT_BYTES + 10), "items": [1, 2]},
+        {"success": True, "items": [object(), {"nested": [1.5, None, True]}, "é"] * 4000},
+        [1, 2, 3],
+        "not a dict",
+    ],
+)
+def test_encode_result_budget_is_byte_identical_to_encoding_the_budgeted_payload(payload: Any) -> None:
+    """``_as_text_result`` sends encode_result_budget's text instead of encoding twice."""
+    frozen = json.loads(json.dumps(payload, default=lambda o: "OBJ"))
+    assert encode_result_budget(frozen) == json.dumps(apply_result_budget(frozen), default=str)
+
+
+def test_list_prefix_size_matches_a_real_encoding() -> None:
+    """The trim loop sizes prefixes from per-item sizes; they must equal json.dumps."""
+    items: List[Any] = [{"a": 1}, "é", 2.5, None, [1, [2]], "x" * 50, object()]
+    sizes = [_encoded_size(item) for item in items]
+    for count in range(len(items) + 1):
+        assert _list_size(sizes, count) == _encoded_size(items[:count])

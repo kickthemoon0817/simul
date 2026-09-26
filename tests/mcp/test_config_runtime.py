@@ -43,15 +43,15 @@ def test_load_settings_supports_nested_repo_config_without_isaac_env(
     assert settings.isaac_sim.headless is False
     assert settings.logging.file_enabled is True
     assert settings.logging.file_path == "~/.simul/logs/simul_mcp.log"
-    assert settings.logging.file_backup_count == 5
+    assert settings.logging.retention_days == 14
     assert settings.logging.console_colored is True
     assert settings.usd.cache_enabled is True
     assert settings.isaac_sim.bridge_enabled is True
     assert settings.isaac_sim.bridge_port == 8229
     assert settings.isaac_sim.bridge_fallback_to_vscode is True
-    assert settings.usd.max_concurrent_operations == 10
+    assert settings.usd.max_file_size_mb == 500
     assert settings.viewport.fov == 45.0
-    assert settings.viewport.max_bounces == 4
+    assert settings.viewport.max_size == 2048
     assert settings.security.rate_limiting_enabled is True
     assert settings.security.requests_per_minute == 60
     assert settings.security.global_requests_per_minute == 600

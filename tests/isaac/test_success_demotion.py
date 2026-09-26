@@ -129,3 +129,61 @@ def test_ping_success_tracks_reachability(monkeypatch: pytest.MonkeyPatch) -> No
     assert up["success"] is True
     assert up["reachable"] is True
     assert "error" not in up
+
+
+# ---------------------------------------------------------------------------
+# Raw script path and interrupt share the same envelope rule
+# ---------------------------------------------------------------------------
+
+
+def test_raw_script_demotes_success_on_a_suffixed_error_key() -> None:
+    """execute_script used ``setdefault("success", "error" not in parsed)``.
+
+    That let ``timeline_error`` beside a result report green; it now uses the
+    same ``apply_success_from_error`` rule as the granular tools.
+    """
+    tools = _tools_with_output({"frames": 3, "timeline_error": "no timeline"})
+    result = asyncio.run(tools.execute_script("print('x')"))
+    assert result["success"] is False
+    assert result["frames"] == 3
+
+
+def test_raw_script_keeps_success_for_a_clean_object() -> None:
+    tools = _tools_with_output({"frames": 3})
+    assert asyncio.run(tools.execute_script("print('x')"))["success"] is True
+
+
+def test_interrupt_demotes_success_on_a_suffixed_error_key() -> None:
+    client = MagicMock()
+    client.bridge_enabled = True
+    client.interrupt_bridge_script = AsyncMock(
+        return_value={"status": "ok", "payload": {"interrupted": False, "cancel_error": "gone"}}
+    )
+    result = asyncio.run(IsaacTools(client, settings=Settings()).interrupt_script())
+    assert result["success"] is False
+    assert result["cancel_error"] == "gone"
+
+
+def test_interrupt_error_frame_keeps_the_remote_traceback() -> None:
+    client = MagicMock()
+    client.bridge_enabled = True
+    client.interrupt_bridge_script = AsyncMock(
+        return_value={
+            "status": "error",
+            "error": {"name": "RuntimeError", "message": "boom", "traceback": "tb"},
+        }
+    )
+    result = asyncio.run(IsaacTools(client, settings=Settings()).interrupt_script())
+    assert result["success"] is False
+    assert result["error_type"] == "RuntimeError"
+    assert result["details"] == {"traceback": "tb"}
+
+
+def test_bridge_unknown_action_still_defers_to_the_script_path() -> None:
+    client = MagicMock()
+    client.bridge_enabled = True
+    client.bridge_request = AsyncMock(
+        return_value={"status": "error", "error": {"name": "UnknownAction", "message": "?"}}
+    )
+    tools = IsaacTools(client, settings=Settings())
+    assert asyncio.run(tools._execute_bridge_action("nope")) is None

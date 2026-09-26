@@ -1,23 +1,11 @@
 """Extension management tools for Isaac Sim."""
 
-import json
 import textwrap
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from ....adapters import IsaacSocketClient, ScriptResult
-from ...schemas.common import ErrorResponse
 from ._shared import (
     PROTECTED_CARB_SETTING_PREFIXES,
-    BULK_GEOMETRY_ATTRIBUTES,
-    LOG_SCAN_WINDOW_BYTES,
-    MAX_CAPTURE_DIMENSION,
-    MAX_INLINE_CAPTURE_BYTES,
-    MAX_RETAINED_CAPTURES,
-    MAX_SCRIPT_BYTES,
-    PRIM_DETAIL_ASPECTS,
-    FloatList,
     _pyval,
-    logger,
 )
 from .._meta import tool_meta
 
@@ -61,8 +49,8 @@ class SystemMixin:
             Dict with a page of extensions (id, enabled, version string),
             sorted by id, plus the total number of matches.
         """
-        _enabled_only = repr(enabled_only)
-        _search = repr(search)
+        _enabled_only = _pyval(enabled_only)
+        _search = _pyval(search)
         limit = max(1, min(limit, 1000))
         offset = max(0, offset)
         script = textwrap.dedent(f"""\
@@ -147,7 +135,7 @@ class SystemMixin:
         Returns:
             Dict with success status and extension info after enabling.
         """
-        _ext_id = repr(extension_id)
+        _ext_id = _pyval(extension_id)
         script = textwrap.dedent(f"""\
             import json
             import omni.kit.app
@@ -166,12 +154,23 @@ class SystemMixin:
                 ename = ext.get("name", "")
                 if ext_id in (eid, ename) or bare_query == ename:
                     found = True
-                    print(json.dumps({{
+                    enabled = bool(ext.get("enabled", False))
+                    payload = {{
                         "extension_id": eid or ename,
                         "name": ename,
-                        "enabled": ext.get("enabled", False),
+                        "enabled": enabled,
                         "version": ext.get("version", ""),
-                    }}))
+                    }}
+                    if not enabled:
+                        # The manager refuses silently (unresolved dependency,
+                        # startup exception); without an explicit failure the
+                        # envelope would report success for a no-op.
+                        payload["success"] = False
+                        payload["error"] = (
+                            "Extension did not enable: " + (eid or ename)
+                            + " (check the Kit log for dependency or startup errors)"
+                        )
+                    print(json.dumps(payload))
                     break
 
             if not found:

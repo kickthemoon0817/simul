@@ -13,12 +13,10 @@ It also wires four observability features that compose with the YAML config:
       tool-call boundary into ``settings.logging.audit_path``.
 """
 
-import asyncio
 import atexit
+import contextlib
 import contextvars
-import functools
 import importlib.util
-import inspect
 import json
 import logging
 import logging.config
@@ -30,7 +28,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, TypeVar, Union
+from typing import Any, Dict, Iterator, Optional, Union
 
 import yaml
 
@@ -57,16 +55,6 @@ _AUDIT_LOGGER_NAME = "simul_mcp.audit"
 def _utc_now_iso() -> str:
     """Return the current UTC time as an ISO-8601 string with microseconds."""
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
-
-
-def current_request_id() -> str:
-    """Return the active correlation id, or ``-`` outside an MCP call."""
-    return _REQUEST_ID_VAR.get()
-
-
-def current_tool_name() -> str:
-    """Return the name of the active MCP tool, or ``-`` if none."""
-    return _TOOL_NAME_VAR.get()
 
 
 def setup_logging(
@@ -129,7 +117,7 @@ def setup_logging(
 
         except Exception as e:
             # Fallback to basic configuration
-            print(f"Warning: Failed to load logging config from {config_file}: {e}")
+            print(f"Warning: Failed to load logging config from {config_file}: {e}", file=sys.stderr)
             _setup_fallback_logging(settings, log_level)
     else:
         # Use fallback configuration
@@ -161,7 +149,7 @@ def _ensure_log_directories(config: Dict[str, Any]) -> None:
             try:
                 log_dir.mkdir(parents=True, exist_ok=True)
             except Exception as e:
-                print(f"Warning: Could not create log directory {log_dir}: {e}")
+                print(f"Warning: Could not create log directory {log_dir}: {e}", file=sys.stderr)
 
 
 def _resolve_logging_config_path(config_file: Union[str, Path]) -> Path:
@@ -447,73 +435,6 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-def configure_isaac_logging(verbose: bool = False) -> None:
-    """
-    Configure logging for Isaac Sim components.
-
-    Args:
-        verbose: Enable verbose logging for Isaac Sim components
-    """
-    isaac_loggers = [
-        "omni",
-        "carb",
-        "pxr",
-        "omniverse",
-        "isaac",
-    ]
-
-    level = logging.DEBUG if verbose else logging.WARNING
-
-    for logger_name in isaac_loggers:
-        logger = logging.getLogger(logger_name)
-        logger.setLevel(level)
-
-
-def set_log_level(logger_name: str, level: Union[str, int]) -> None:
-    """
-    Set log level for a specific logger.
-
-    Args:
-        logger_name: Name of the logger
-        level: Log level (string or logging constant)
-    """
-    logger = logging.getLogger(logger_name)
-
-    if isinstance(level, str):
-        level = getattr(logging, level.upper())
-
-    logger.setLevel(level)
-
-
-def enable_debug_logging() -> None:
-    """Enable debug logging for all simul_mcp loggers."""
-    worv_loggers = [
-        "simul_mcp",
-        "simul_mcp.server",
-        "simul_mcp.usd",
-        "simul_mcp.mesh",
-        "simul_mcp.adapters",
-        "simul_mcp.mcp",
-        "simul_mcp.cli",
-    ]
-
-    for logger_name in worv_loggers:
-        set_log_level(logger_name, "DEBUG")
-
-
-def disable_external_logging() -> None:
-    """Disable or reduce logging from external libraries."""
-    external_loggers = [
-        "urllib3",
-        "asyncio",
-        "websockets",
-        "aiohttp",
-    ]
-
-    for logger_name in external_loggers:
-        set_log_level(logger_name, "WARNING")
-
-
 class LoggerMixin:
     """Mixin class to add logging capabilities to any class."""
 
@@ -521,107 +442,6 @@ class LoggerMixin:
     def logger(self) -> logging.Logger:
         """Get logger for this class."""
         return get_logger(f"{self.__class__.__module__}.{self.__class__.__name__}")
-
-
-class ContextLogger:
-    """Context manager for temporary log level changes."""
-
-    def __init__(self, logger_name: str, level: Union[str, int]):
-        self.logger_name = logger_name
-        self.new_level = (
-            level if isinstance(level, int) else getattr(logging, level.upper())
-        )
-        self.original_level = None
-
-    def __enter__(self):
-        logger = logging.getLogger(self.logger_name)
-        self.original_level = logger.level
-        logger.setLevel(self.new_level)
-        return logger
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.original_level is not None:
-            logger = logging.getLogger(self.logger_name)
-            logger.setLevel(self.original_level)
-
-
-def log_function_call(logger: logging.Logger, level: int = logging.DEBUG):
-    """Decorator to log function calls."""
-
-    def decorator(func):
-        def wrapper(*args, **kwargs):
-            logger.log(
-                level, f"Calling {func.__name__} with args={args}, kwargs={kwargs}"
-            )
-            try:
-                result = func(*args, **kwargs)
-                logger.log(level, f"{func.__name__} completed successfully")
-                return result
-            except Exception as e:
-                logger.error(f"{func.__name__} failed with error: {e}")
-                raise
-
-        return wrapper
-
-    return decorator
-
-
-def log_performance(logger: logging.Logger, level: int = logging.INFO):
-    """Decorator to log function performance."""
-    import time
-
-    def decorator(func):
-        def wrapper(*args, **kwargs):
-            start_time = time.time()
-            try:
-                result = func(*args, **kwargs)
-                duration = time.time() - start_time
-                logger.log(level, f"{func.__name__} completed in {duration:.3f}s")
-                return result
-            except Exception as e:
-                duration = time.time() - start_time
-                logger.error(
-                    f"{func.__name__} failed after {duration:.3f}s with error: {e}"
-                )
-                raise
-
-        return wrapper
-
-    return decorator
-
-
-# Convenience functions for common logging patterns
-def log_isaac_startup(logger: logging.Logger) -> None:
-    """Log Isaac Sim startup information."""
-    logger.info("Starting Isaac Sim MCP Server")
-    logger.info(f"Python version: {sys.version}")
-    logger.info(f"Working directory: {os.getcwd()}")
-
-    # Log Isaac Sim path if available
-    isaac_path = os.getenv("ISAAC_SIM_PATH")
-    if isaac_path:
-        logger.info(f"Isaac Sim path: {isaac_path}")
-    else:
-        logger.warning("ISAAC_SIM_PATH not set")
-
-
-def log_usd_operation(logger: logging.Logger, operation: str, file_path: str) -> None:
-    """Log USD operation."""
-    logger.info(f"USD {operation}: {file_path}")
-
-
-def log_mesh_operation(
-    logger: logging.Logger, operation: str, mesh_info: Dict[str, Any]
-) -> None:
-    """Log mesh operation with details."""
-    logger.info(f"Mesh {operation}: {mesh_info}")
-
-
-def log_viewport_capture(
-    logger: logging.Logger, width: int, height: int, format: str
-) -> None:
-    """Log viewport capture operation."""
-    logger.info(f"Viewport capture: {width}x{height} {format}")
 
 
 # ---------------------------------------------------------------------------
@@ -737,87 +557,39 @@ def emit_audit(
     audit_logger.info("", extra={"audit": payload})
 
 
-_F = TypeVar("_F", bound=Callable[..., Any])
+@contextlib.contextmanager
+def _tool_call_context(tool_name: str) -> Iterator[str]:
+    """Scope one tool call: fresh request id, ContextVars, timing and audit row.
 
-
-def wrap_tool_with_context(fn: _F, tool_name: str) -> _F:
-    """Wrap an MCP tool callable so each invocation gets a fresh request id.
-
-    The wrapper:
-        * generates a 12-char hex correlation id
-        * sets ``request_id`` and ``tool_name`` ContextVars for the duration
-        * measures wall-time
-        * emits one audit record on completion (success or failure)
-
-    Both async and sync callables are supported. ``functools.wraps`` is used
-    so FastMCP's signature introspection still resolves the original
-    annotations through ``__wrapped__``. Async-generator tools are explicitly
-    rejected with ``TypeError`` so callers cannot silently lose audit rows on
-    a streaming path.
+    Generates a 12-char hex correlation id, sets the ``request_id`` and
+    ``tool_name`` ContextVars for the duration of the block, measures
+    wall-time and emits one audit record on exit (success or failure). The
+    ContextVars are reset on every path, including ``BaseException``, so a
+    stale id never leaks into later log records.
     """
-    if inspect.isasyncgenfunction(fn):
-        raise TypeError(
-            f"wrap_tool_with_context does not support async-generator tools "
-            f"(got {tool_name!r}); use a streaming-aware wrapper instead."
-        )
-
-    if asyncio.iscoroutinefunction(fn):
-
-        @functools.wraps(fn)
-        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            request_id = uuid.uuid4().hex[:12]
-            rid_token = _REQUEST_ID_VAR.set(request_id)
-            tn_token = _TOOL_NAME_VAR.set(tool_name)
-            start = time.monotonic()
-            error_class: Optional[str] = None
-            try:
-                return await fn(*args, **kwargs)
-            except BaseException as exc:
-                error_class = type(exc).__name__
-                raise
-            finally:
-                duration_ms = (time.monotonic() - start) * 1000.0
-                try:
-                    emit_audit(
-                        tool=tool_name,
-                        request_id=request_id,
-                        duration_ms=duration_ms,
-                        status="error" if error_class else "ok",
-                        error_class=error_class,
-                    )
-                finally:
-                    _REQUEST_ID_VAR.reset(rid_token)
-                    _TOOL_NAME_VAR.reset(tn_token)
-
-        return async_wrapper  # type: ignore[return-value]
-
-    @functools.wraps(fn)
-    def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-        request_id = uuid.uuid4().hex[:12]
-        rid_token = _REQUEST_ID_VAR.set(request_id)
-        tn_token = _TOOL_NAME_VAR.set(tool_name)
-        start = time.monotonic()
-        error_class: Optional[str] = None
+    request_id = uuid.uuid4().hex[:12]
+    rid_token = _REQUEST_ID_VAR.set(request_id)
+    tn_token = _TOOL_NAME_VAR.set(tool_name)
+    start = time.monotonic()
+    error_class: Optional[str] = None
+    try:
+        yield request_id
+    except BaseException as exc:
+        error_class = type(exc).__name__
+        raise
+    finally:
+        duration_ms = (time.monotonic() - start) * 1000.0
         try:
-            return fn(*args, **kwargs)
-        except BaseException as exc:
-            error_class = type(exc).__name__
-            raise
+            emit_audit(
+                tool=tool_name,
+                request_id=request_id,
+                duration_ms=duration_ms,
+                status="error" if error_class else "ok",
+                error_class=error_class,
+            )
         finally:
-            duration_ms = (time.monotonic() - start) * 1000.0
-            try:
-                emit_audit(
-                    tool=tool_name,
-                    request_id=request_id,
-                    duration_ms=duration_ms,
-                    status="error" if error_class else "ok",
-                    error_class=error_class,
-                )
-            finally:
-                _REQUEST_ID_VAR.reset(rid_token)
-                _TOOL_NAME_VAR.reset(tn_token)
-
-    return sync_wrapper  # type: ignore[return-value]
+            _REQUEST_ID_VAR.reset(rid_token)
+            _TOOL_NAME_VAR.reset(tn_token)
 
 
 def build_request_context_middleware() -> Any:
@@ -827,10 +599,9 @@ def build_request_context_middleware() -> Any:
     ``fastmcp`` stays optional: this function is only called from the MCP
     server bootstrap, where ``fastmcp`` is guaranteed to be importable.
 
-    The middleware mirrors ``wrap_tool_with_context`` semantics but lives at
-    the FastMCP dispatch boundary, which means:
-        * every ``@server.mcp.tool(...)`` decorator pattern works (including
-          the bare-fn overload that decorator-monkey-patching missed)
+    The middleware wraps every ``CallTool`` request in ``_tool_call_context``
+    at the FastMCP dispatch boundary, which means:
+        * every ``@server.mcp.tool(...)`` decorator pattern is covered
         * audit emission happens once per ``CallTool`` request, not once per
           internal tool invocation
         * sync and async tools both flow through ``call_next`` uniformly
@@ -842,29 +613,8 @@ def build_request_context_middleware() -> Any:
 
         async def on_call_tool(self, context: Any, call_next: Any) -> Any:
             tool_name = getattr(context.message, "name", "tool")
-            request_id = uuid.uuid4().hex[:12]
-            rid_token = _REQUEST_ID_VAR.set(request_id)
-            tn_token = _TOOL_NAME_VAR.set(tool_name)
-            start = time.monotonic()
-            error_class: Optional[str] = None
-            try:
+            with _tool_call_context(tool_name):
                 return await call_next(context)
-            except BaseException as exc:
-                error_class = type(exc).__name__
-                raise
-            finally:
-                duration_ms = (time.monotonic() - start) * 1000.0
-                try:
-                    emit_audit(
-                        tool=tool_name,
-                        request_id=request_id,
-                        duration_ms=duration_ms,
-                        status="error" if error_class else "ok",
-                        error_class=error_class,
-                    )
-                finally:
-                    _REQUEST_ID_VAR.reset(rid_token)
-                    _TOOL_NAME_VAR.reset(tn_token)
 
     return RequestContextMiddleware()
 

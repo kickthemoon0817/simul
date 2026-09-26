@@ -3,20 +3,36 @@ Tool registration modules for Simul MCP Server.
 
 Each module registers tool closures on the FastMCP server instance
 for a specific backend (USD, Isaac Sim, Blender, Unreal Engine).
+
+The ``register_*`` functions are resolved on first access (PEP 562). The
+modules import fastmcp, and ``_helpers`` — which the Isaac tool classes use at
+import time — lives in this package, so eager imports here made importing
+``IsaacTools`` load fastmcp and every registration module, and formed an
+import cycle (``tools.isaac`` -> ``registration`` -> ``_reg_isaac`` ->
+``tools.isaac_tools``) that only resolved when the server happened to be
+imported first.
 """
 
-from ._reg_blender import register_blender_tools
-from ._reg_instance import register_instance_tools
-from ._reg_isaac import register_isaac_tools
-from ._reg_stats import register_stats_tools
-from ._reg_unreal import register_unreal_tools
-from ._reg_usd import register_usd_tools
+import importlib
+from typing import Any
 
-__all__ = [
-    "register_instance_tools",
-    "register_usd_tools",
-    "register_isaac_tools",
-    "register_blender_tools",
-    "register_unreal_tools",
-    "register_stats_tools",
-]
+_EXPORTS = {
+    "register_instance_tools": "_reg_instance",
+    "register_usd_tools": "_reg_usd",
+    "register_isaac_tools": "_reg_isaac",
+    "register_blender_tools": "_reg_blender",
+    "register_unreal_tools": "_reg_unreal",
+    "register_stats_tools": "_reg_stats",
+}
+
+
+def __getattr__(name: str) -> Any:
+    module_name = _EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(f"{__name__}.{module_name}"), name)
+    globals()[name] = value
+    return value
+
+
+__all__ = list(_EXPORTS)

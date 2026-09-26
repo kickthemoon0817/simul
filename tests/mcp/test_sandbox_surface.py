@@ -35,6 +35,7 @@ FILE_TAKING_TOOLS = (
     "save_isaac_stage",
     "import_isaac_asset",
     "add_isaac_reference",
+    "create_isaac_light",
     "capture_isaac_viewport",
     "load_usd_file",
     "validate_usd_file",

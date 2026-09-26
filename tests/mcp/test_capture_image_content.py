@@ -22,6 +22,10 @@ from mcp.types import ImageContent, TextContent
 from simul_mcp.config import Settings
 from simul_mcp.mcp import backends as backends_module
 from simul_mcp.mcp import server as server_module
+from simul_mcp.mcp.schemas.blender import (
+    BlenderCaptureViewportRequest,
+    BlenderCaptureViewportResponse,
+)
 from simul_mcp.mcp.schemas.unreal import UnrealCaptureViewportResponse
 from tests.fakes import FakeFastMCP
 
@@ -30,6 +34,9 @@ PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 )
 PNG_B64 = base64.b64encode(PNG_BYTES).decode("ascii")
+# The start of a JFIF JPEG: SOI marker then the APP0 segment.
+JPEG_BYTES = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+JPEG_B64 = base64.b64encode(JPEG_BYTES).decode("ascii")
 
 
 def _make_server(monkeypatch: pytest.MonkeyPatch) -> server_module.SimulMCPServer:
@@ -127,7 +134,7 @@ class _CaptureSession:
             "resolution_x": kwargs["resolution_x"],
             "resolution_y": kwargs["resolution_y"],
             "format": kwargs["format"],
-            "image_base64": PNG_B64,
+            "image_base64": JPEG_B64,
             "encoding": "base64",
         }
 
@@ -164,6 +171,76 @@ def test_unreal_capture_carries_the_declared_image_format(
     assert record["success"] is True
     assert record["resolution_x"] == 320
     assert "image_base64" not in record
+
+
+class _BlenderCaptureSession:
+    def capture_viewport(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        # An add-on built before the fix returns JPEG bytes with no ``format`` key.
+        return {
+            "image_base64": JPEG_B64,
+            "width": 64,
+            "height": 64,
+            "engine": "BLENDER_EEVEE_NEXT",
+            "capture_method": "gpu_offscreen",
+        }
+
+
+class _BlenderCaptureAdapter:
+    def is_available(self) -> bool:
+        return True
+
+    @contextmanager
+    def create_session(self) -> Iterator[_BlenderCaptureSession]:
+        yield _BlenderCaptureSession()
+
+
+def test_blender_jpeg_capture_is_labelled_jpeg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Blender encodes JPEG; the image block must not claim image/png."""
+    instance = _make_server(monkeypatch)
+
+    result = asyncio.run(
+        instance._exec_backend(
+            "capture_blender_viewport",
+            _BlenderCaptureAdapter(),
+            "Blender",
+            BlenderCaptureViewportResponse,
+            lambda session: session.capture_viewport(64, 64, 85, False, agent_id="agent"),
+        )
+    )
+
+    images, record = _split(result)
+    assert images[0].mimeType == "image/jpeg"
+    assert record["format"] == "jpeg"
+
+
+@pytest.mark.parametrize(
+    ("image", "declared", "expected"),
+    [
+        (JPEG_B64, None, "image/jpeg"),
+        (JPEG_B64, "png", "image/jpeg"),  # the bytes beat a stale label
+        (PNG_B64, "jpeg", "image/png"),
+        (base64.b64encode(b"\x00" * 32).decode("ascii"), "webp", "image/webp"),
+    ],
+)
+def test_image_mime_type_follows_the_bytes(
+    monkeypatch: pytest.MonkeyPatch, image: str, declared: Any, expected: str
+) -> None:
+    instance = _make_server(monkeypatch)
+    payload = _capture_payload(image=image)
+    payload.pop("format")
+    if declared is not None:
+        payload["format"] = declared
+
+    images, _record = _split(instance._as_text_result(payload))
+
+    assert images[0].mimeType == expected
+
+
+@pytest.mark.parametrize("label", ["   ", "agent\x00", "tab\there", "x" * 65, ""])
+def test_blender_capture_rejects_labels_the_overlay_cannot_draw(label: str) -> None:
+    """Checked in the request model, so attached and embedded modes agree."""
+    with pytest.raises(ValueError):
+        BlenderCaptureViewportRequest(agent_id=label)
 
 
 def test_real_fastmcp_delivers_the_image_block_to_the_client() -> None:

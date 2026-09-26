@@ -1,22 +1,12 @@
 """Asset & Stage Operations tools for Isaac Sim."""
 
-import json
 import textwrap
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from ....adapters import IsaacSocketClient, ScriptResult
-from ...schemas.common import ErrorResponse
 from ._shared import (
-    BULK_GEOMETRY_ATTRIBUTES,
-    LOG_SCAN_WINDOW_BYTES,
-    MAX_CAPTURE_DIMENSION,
-    MAX_INLINE_CAPTURE_BYTES,
-    MAX_RETAINED_CAPTURES,
-    MAX_SCRIPT_BYTES,
-    PRIM_DETAIL_ASPECTS,
-    FloatList,
+    OPEN_ASSET_CORE,
+    _compose_script,
     _pyval,
-    logger,
 )
 from .._meta import SandboxedPath, tool_meta
 
@@ -249,14 +239,20 @@ class StageAssetMixin:
             return denial
         _asset_path = _pyval(self._path_policy.authorize(asset_path))
         _target_path = _pyval(target_path)
-        script = textwrap.dedent(f"""\
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import Sdf, UsdGeom
-
+            """,
+            OPEN_ASSET_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
+            asset_error = _open_asset({_asset_path}) if stage is not None else None
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
+            elif asset_error is not None:
+                print(json.dumps({{"error": asset_error}}))
             else:
                 prim = stage.DefinePrim({_target_path})
                 if not prim.IsValid():
@@ -268,7 +264,8 @@ class StageAssetMixin:
                         "target_path": {_target_path},
                         "imported": True,
                     }}))
-        """)
+            """,
+        )
         return await self._execute_json_script(script)
 
     @tool_meta(
@@ -302,14 +299,20 @@ class StageAssetMixin:
             return denial
         _prim_path = _pyval(prim_path)
         _ref_path = _pyval(self._path_policy.authorize(reference_path))
-        script = textwrap.dedent(f"""\
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import Sdf
-
+            """,
+            OPEN_ASSET_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
+            asset_error = _open_asset({_ref_path}) if stage is not None else None
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
+            elif asset_error is not None:
+                print(json.dumps({{"error": asset_error}}))
             else:
                 prim = stage.GetPrimAtPath({_prim_path})
                 if not prim.IsValid():
@@ -326,6 +329,7 @@ class StageAssetMixin:
                         "added": True,
                         "total_references": ref_count,
                     }}))
-        """)
+            """,
+        )
         return await self._execute_json_script(script)
 

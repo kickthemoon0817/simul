@@ -83,7 +83,7 @@ def test_a_refusal_spends_nothing_and_the_retry_hint_is_honest(
 ) -> None:
     """Waiting exactly retry_after_seconds must yield the token that was promised."""
     clock = {"now": 1_000_000.0}
-    monkeypatch.setattr(timing_module.time, "time", lambda: clock["now"])
+    monkeypatch.setattr(timing_module.time, "monotonic", lambda: clock["now"])
     instance = _make_server(monkeypatch)
 
     _call_n(instance, "list_isaac_prims", "agent-a", BURST)
@@ -208,3 +208,23 @@ def test_global_ceiling_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None
     assert instance._global_rate_limit_rate == pytest.approx(2.0)
     # Never below the per-tool burst, or a single tool's burst could never run.
     assert instance._global_rate_limit_burst == max(BURST, 120 // 6)
+
+
+def test_a_backward_wall_clock_step_does_not_lock_callers_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bucket refills on the monotonic clock, so an NTP step back is harmless."""
+    wall = {"now": 1_000_000.0}
+    mono = {"now": 500.0}
+    monkeypatch.setattr(timing_module.time, "time", lambda: wall["now"])
+    monkeypatch.setattr(timing_module.time, "monotonic", lambda: mono["now"])
+    limiter = timing_module.RateLimiter(rate=1.0, burst=2)
+
+    assert limiter.acquire() and limiter.acquire()
+    assert not limiter.acquire()
+
+    wall["now"] -= 3600.0  # the wall clock jumps an hour into the past
+    mono["now"] += 1.0  # while one real second passes
+
+    assert limiter.acquire(), "one second earns one token regardless of the wall clock"
+    assert limiter.seconds_until_available() == pytest.approx(1.0)

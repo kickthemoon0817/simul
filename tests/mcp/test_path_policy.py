@@ -108,6 +108,14 @@ class TestFileUrls:
         target = tmp_path / "sandbox" / "my scene.usd"
         assert policy.authorize(target.as_uri()) == str(target.resolve())
 
+    def test_file_url_is_percent_decoded_exactly_once(self, tmp_path: Path) -> None:
+        """``%2520`` is an escaped literal ``%20``, not a space."""
+        policy = _policy(tmp_path)
+        target = tmp_path / "sandbox" / "take%20two.usd"
+        url = target.as_uri()
+        assert "%2520" in url
+        assert policy.authorize(url) == str(target.resolve())
+
     def test_file_url_naming_a_remote_host_is_refused(self, tmp_path: Path) -> None:
         policy = _policy(tmp_path)
         assert not policy.is_allowed("file://fileserver/share/scene.usd")

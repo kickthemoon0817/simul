@@ -6,12 +6,14 @@ connection management, and 3D simulation/DCC integration based on FastMCP.
 """
 
 import asyncio
+import base64
+import binascii
+import hashlib
 import inspect
 import json
 import os
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import (
     Any,
     Awaitable,
@@ -41,12 +43,12 @@ from ..adapters.base import BackendAdapter
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
 from ..resources import find_checkout_root, resource
-from ..utils.paths import PathPolicy, SandboxDenied
+from ..utils.paths import PathPolicy, SandboxDenied, sandbox_error
 from ..utils.timing import RateLimiter
 from .backends import ALL_BACKEND_NAMES, BACKENDS
 from .registration import register_stats_tools
 from .registration._helpers import apply_success_from_error
-from .result_budget import apply_result_budget
+from .result_budget import encode_result_budget
 from .schemas.common import ErrorResponse
 from .session_manager import CLAIM_TTL_SECONDS, SessionManager
 from ..utils.discovery import DiscoveryDir
@@ -114,6 +116,37 @@ _GLOBAL_RATE_BUCKET: str = "*"
 NETWORK_TRANSPORTS: Tuple[str, ...] = ("http", "sse")
 TRANSPORTS: Tuple[str, ...] = ("stdio", *NETWORK_TRANSPORTS)
 
+# Leading bytes that identify an encoded image, whatever the payload claims.
+_IMAGE_SIGNATURES: Tuple[Tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"GIF8", "gif"),
+)
+
+
+def _sniff_image_format(image_base64: str) -> Optional[str]:
+    """Identify a base64 image from its magic bytes.
+
+    A capture's bytes are authoritative: a payload without a ``format`` key
+    (or with a stale one) must not be labelled with the wrong MIME type.
+
+    Args:
+        image_base64: Base64-encoded image data.
+
+    Returns:
+        ``png``, ``jpeg``, ``gif`` or ``webp``, or None when unrecognised.
+    """
+    try:
+        head = base64.b64decode(image_base64[:24], validate=False)
+    except (ValueError, binascii.Error):
+        return None
+    for signature, name in _IMAGE_SIGNATURES:
+        if head.startswith(signature):
+            return name
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    return None
+
 
 @dataclass
 class IsaacSessionBinding:
@@ -170,7 +203,6 @@ class SimulMCPServer(LoggerMixin):
         self._path_policy = PathPolicy.from_settings(
             self.settings, project_root=find_checkout_root()
         )
-        self._allowed_paths = self._resolve_allowed_paths()
 
         self.usage_tracker = ToolUsageTracker()
         self.session_manager = SessionManager()
@@ -191,7 +223,6 @@ class SimulMCPServer(LoggerMixin):
         self._global_rate_limit_burst = max(
             self._rate_limit_burst, global_per_minute // 6
         )
-        self._tool_timeout = self.settings.server.timeout
         # How long a call waits for an instance already in use. Generous enough
         # for ordinary contention, short enough that a caller is not left
         # guessing through a 1000-frame step.
@@ -528,6 +559,19 @@ class SimulMCPServer(LoggerMixin):
             return binding.agent_id
         return self._resolve_agent_id(None)
 
+    def _claim_owner(self) -> str:
+        """Return the opaque owner token for claims made by the current request.
+
+        A claim is bound to the MCP session that made it, because ``agent_id``
+        is chosen by the caller and shown to every agent by
+        ``list_isaac_instances``. The token is a digest of the transport's
+        session id, so publishing it in session records reveals nothing, or of
+        this server process when the request carries no session.
+        """
+        session_id = self._get_request_session_id()
+        source = f"session:{session_id}" if session_id else f"process:{os.getpid()}:{id(self):x}"
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
+
     def _foreign_claim(
         self, instance_name: str, caller_agent_id: str
     ) -> Optional[Dict[str, Any]]:
@@ -540,29 +584,47 @@ class SimulMCPServer(LoggerMixin):
         Returns:
             The holder's session record when ``isaac_sim.enforce_claims`` is on
             and a live claim by a different agent exists, otherwise ``None``.
-            Expired claims are pruned by the session manager, so a stale holder
-            never blocks.
+            A claim is foreign when its ``agent_id`` differs from the caller's
+            or when a different MCP session made it (its ``owner`` token
+            differs), so passing another agent's ``agent_id`` does not inherit
+            that agent's claim. Expired claims are pruned by the session
+            manager, so a stale holder never blocks.
         """
         if not self.settings.isaac_sim.enforce_claims:
             return None
         client = self._isaac_clients.get(instance_name)
         if client is None:
             return None
+        owner = self._claim_owner()
         sessions = self.session_manager.get_instance_session(client._port).get_status()["sessions"]
         for session in sessions:
             if session.get("agent_id") != caller_agent_id:
                 return session
+            holder_owner = session.get("owner")
+            if holder_owner is not None and holder_owner != owner:
+                return session
         return None
 
-    def _claimed_error(self, instance_name: str, holder: Dict[str, Any]) -> Dict[str, Any]:
+    def _claimed_error(
+        self,
+        instance_name: str,
+        holder: Dict[str, Any],
+        caller_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Build the InstanceClaimed payload naming the holder and the way forward."""
         expires_in = max(0.0, CLAIM_TTL_SECONDS - (time.time() - float(holder.get("last_active", 0.0))))
+        impersonation = (
+            f" The agent_id {caller_agent_id!r} is bound to a different MCP session;"
+            " pick a unique agent_id or omit it."
+            if caller_agent_id is not None and holder.get("agent_id") == caller_agent_id
+            else ""
+        )
         return ErrorResponse(
             error=(
                 f"Isaac instance {instance_name!r} is claimed by agent "
                 f"{holder.get('agent_id')!r} for {holder.get('purpose', '')!r}; "
                 "isaac_sim.enforce_claims refuses mutating tools from other agents while "
-                "that claim is live."
+                "that claim is live." + impersonation
             ),
             error_type="InstanceClaimed",
             details={
@@ -718,9 +780,6 @@ class SimulMCPServer(LoggerMixin):
         finally:
             lock.release()
 
-    def _resolve_allowed_paths(self) -> List[Path]:
-        return self._path_policy.allowed_roots
-
     def _sandbox_denial(
         self, path_str: Optional[str], *, write: bool = False
     ) -> Optional[Dict[str, Any]]:
@@ -737,13 +796,7 @@ class SimulMCPServer(LoggerMixin):
         Returns:
             The error envelope naming the allowed roots and URL schemes, or None.
         """
-        if path_str is None or self._path_policy.is_allowed(path_str, write=write):
-            return None
-        return ErrorResponse(
-            error="File path is not allowed by sandbox policy",
-            error_type="SandboxError",
-            details=self._path_policy.denial_details(path_str, write=write),
-        ).model_dump()
+        return self._path_policy.denial(path_str, write=write)
 
     def _validate_input(
         self, model: Type[BaseModel], **kwargs
@@ -886,9 +939,9 @@ class SimulMCPServer(LoggerMixin):
             with adapter.create_session() as session:
                 # Unreal sessions are async, Blender sessions are sync; accept
                 # both so one envelope serves every backend.
-                if adapter_label == "Blender" and self.settings.blender.mode == "attached":
-                    # Only socket I/O runs here, never bpy. Keep other MCP
-                    # requests responsive while the editor executes its work.
+                if getattr(adapter, "session_blocks_io", False):
+                    # The adapter declares its session only waits on I/O (never
+                    # bpy), so keep other MCP requests responsive meanwhile.
                     payload = await asyncio.to_thread(call, session)
                 else:
                     payload = call(session)
@@ -901,19 +954,12 @@ class SimulMCPServer(LoggerMixin):
                     # it through the success schema would only replace the
                     # message with a pydantic complaint.
                     return self._validate_output(payload, models, tool_name)
-                return self._validate_output(
-                    response_model(**payload).model_dump(), models, tool_name
-                )
+                # Constructing the model is the validation; its dump already
+                # conforms, so it is returned as is rather than re-validated
+                # through _validate_output (a second full pydantic pass).
+                return response_model(**payload).model_dump()
         except SandboxDenied as exc:
-            return self._validate_output(
-                ErrorResponse(
-                    error="File path is not allowed by sandbox policy",
-                    error_type="SandboxError",
-                    details=exc.details,
-                ).model_dump(),
-                models,
-                tool_name,
-            )
+            return self._validate_output(sandbox_error(exc.details), models, tool_name)
         except Exception as exc:
             self.logger.error("Error in %s: %s", tool_name, exc)
             return self._validate_output(
@@ -953,12 +999,14 @@ class SimulMCPServer(LoggerMixin):
                 if key not in ("image_base64", "encoding")
             }
             payload["image_attached"] = True
-            image_format = str(payload.get("format", "png")).lower()
+            image_format = _sniff_image_format(image) or str(
+                payload.get("format", "png")
+            ).lower()
             mime_type = (
                 "image/jpeg" if image_format in ("jpg", "jpeg") else f"image/{image_format}"
             )
             content.append(ImageContent(type="image", data=image, mimeType=mime_type))
-        text = json.dumps(apply_result_budget(payload), default=str)
+        text = encode_result_budget(payload)
         content.append(TextContent(type="text", text=text))
         return ToolResult(content=content)
 
@@ -1255,19 +1303,13 @@ class SimulMCPServer(LoggerMixin):
             if vscode_port is not None and not isinstance(vscode_port, int):
                 continue
 
-            # Check if PID is still alive
-            if isinstance(pid, int):
+            if isinstance(pid, int) and not DiscoveryDir.pid_alive(pid):
+                # Process is dead -- clean up stale file
                 try:
-                    os.kill(pid, 0)  # signal 0 = check existence
-                except ProcessLookupError:
-                    # Process is dead -- clean up stale file
-                    try:
-                        os.remove(filepath)
-                    except OSError:
-                        pass
-                    continue
-                except PermissionError:
-                    pass  # Process exists but we can't signal it -- that's fine
+                    os.remove(filepath)
+                except OSError:
+                    pass
+                continue
 
             client = self._build_isaac_client(
                 socket_host=host,

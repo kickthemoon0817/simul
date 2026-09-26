@@ -109,20 +109,22 @@ class SceneSummarizer(LoggerMixin):
             SceneSummary object
         """
         try:
+            # One traversal fills every per-prim accumulator (type counts,
+            # materials, mesh statistics, hierarchy depth); the prim count is
+            # handed to get_stage_info so it doesn't walk the stage again.
+            scan = self._scan_stage(
+                stage,
+                include_meshes=include_meshes,
+                include_materials=include_materials,
+            )
+            total_prims = scan["total_prims"]
+            prim_type_counts = scan["prim_type_counts"]
+
             # Get basic stage information
-            stage_info = self.usd_reader.get_stage_info(stage)
+            stage_info = self.usd_reader.get_stage_info(stage, prim_count=total_prims)
             
             # Initialize bbox cache
             bbox_cache = BBoxCache(stage)
-            
-            # Count prims by type
-            prim_type_counts = {}
-            total_prims = 0
-            
-            for prim in stage.Traverse():
-                total_prims += 1
-                prim_type = prim.GetTypeName()
-                prim_type_counts[prim_type] = prim_type_counts.get(prim_type, 0) + 1
             
             # Compute scene bounding box
             scene_bbox = bbox_cache.get_stage_bbox()
@@ -149,18 +151,9 @@ class SceneSummarizer(LoggerMixin):
                 )
                 root_prims.append(prim_summary)
             
-            # Get materials
-            materials = []
-            if include_materials:
-                materials = self._get_stage_materials(stage)
-            
-            # Get mesh statistics
-            mesh_statistics = {}
-            if include_meshes:
-                mesh_statistics = self._get_mesh_statistics(stage)
-            
-            # Calculate hierarchy depth
-            hierarchy_depth = self._calculate_hierarchy_depth(stage)
+            materials = scan["materials"]
+            mesh_statistics = scan["mesh_statistics"]
+            hierarchy_depth = scan["hierarchy_depth"]
             
             # Get animation info
             animation_info = self._get_animation_info(stage_info)
@@ -301,29 +294,9 @@ class SceneSummarizer(LoggerMixin):
             self.logger.error(f"Error summarizing prim {prim.GetPath()}: {e}")
             raise
     
-    def _get_stage_materials(self, stage: Usd.Stage) -> List[MaterialSummary]:
-        """Get all materials in the stage."""
-        materials = []
-        
-        try:
-            for prim in stage.Traverse():
-                if prim.GetTypeName() == "Material":
-                    material_summary = MaterialSummary(
-                        path=str(prim.GetPath()),
-                        name=prim.GetName(),
-                        shader_type="Unknown",  # Would need shader analysis
-                        parameters={},
-                        textures=[]
-                    )
-                    materials.append(material_summary)
-        except Exception as e:
-            self.logger.debug(f"Error getting stage materials: {e}")
-        
-        return materials
-    
-    def _get_mesh_statistics(self, stage: Usd.Stage) -> Dict[str, Any]:
-        """Get overall mesh statistics for the stage."""
-        stats = {
+    @staticmethod
+    def _empty_mesh_statistics() -> Dict[str, Any]:
+        return {
             'total_meshes': 0,
             'total_vertices': 0,
             'total_faces': 0,
@@ -334,44 +307,74 @@ class SceneSummarizer(LoggerMixin):
             'total_surface_area': 0.0,
             'total_volume': 0.0
         }
-        
+
+    def _scan_stage(
+        self,
+        stage: Usd.Stage,
+        include_meshes: bool = True,
+        include_materials: bool = True,
+    ) -> Dict[str, Any]:
+        """Walk ``stage.Traverse()`` once and fill every per-prim accumulator.
+
+        Returns ``total_prims``, ``prim_type_counts``, ``materials`` (empty
+        unless ``include_materials``), ``mesh_statistics`` (empty dict unless
+        ``include_meshes``) and ``hierarchy_depth``.
+        """
+        prim_type_counts: Dict[str, int] = {}
+        total_prims = 0
+        materials: List[MaterialSummary] = []
+        mesh_stats = self._empty_mesh_statistics() if include_meshes else {}
+        hierarchy_depth = 0
+
+        for prim in stage.Traverse():
+            total_prims += 1
+            prim_type = prim.GetTypeName()
+            prim_type_counts[prim_type] = prim_type_counts.get(prim_type, 0) + 1
+
+            path_str = str(prim.GetPath())
+            path_depth = path_str.count('/')
+            if path_depth > hierarchy_depth:
+                hierarchy_depth = path_depth
+
+            if include_materials and prim_type == "Material":
+                materials.append(MaterialSummary(
+                    path=path_str,
+                    name=prim.GetName(),
+                    shader_type="Unknown",  # Would need shader analysis
+                    parameters={},
+                    textures=[]
+                ))
+
+            if include_meshes and prim.IsA(UsdGeom.Mesh):
+                self._accumulate_mesh_statistics(mesh_stats, prim)
+
+        return {
+            'total_prims': total_prims,
+            'prim_type_counts': prim_type_counts,
+            'materials': materials,
+            'mesh_statistics': mesh_stats,
+            'hierarchy_depth': hierarchy_depth,
+        }
+
+    def _accumulate_mesh_statistics(self, stats: Dict[str, Any], prim: Usd.Prim) -> None:
+        """Fold one mesh prim's statistics into ``stats``."""
         try:
-            for prim in stage.Traverse():
-                if prim.IsA(UsdGeom.Mesh):
-                    try:
-                        mesh_info = self.mesh_ops.get_mesh_statistics(prim)
-                        stats['total_meshes'] += 1
-                        stats['total_vertices'] += mesh_info.vertex_count
-                        stats['total_faces'] += mesh_info.face_count
-                        if mesh_info.has_normals:
-                            stats['meshes_with_normals'] += 1
-                        if mesh_info.has_uvs:
-                            stats['meshes_with_uvs'] += 1
-                        if mesh_info.has_colors:
-                            stats['meshes_with_colors'] += 1
-                        if mesh_info.is_closed:
-                            stats['closed_meshes'] += 1
-                        stats['total_surface_area'] += mesh_info.surface_area
-                        stats['total_volume'] += mesh_info.volume
-                    except Exception as e:
-                        self.logger.debug(f"Error getting mesh stats for {prim.GetPath()}: {e}")
+            mesh_info = self.mesh_ops.get_mesh_statistics(prim)
+            stats['total_meshes'] += 1
+            stats['total_vertices'] += mesh_info.vertex_count
+            stats['total_faces'] += mesh_info.face_count
+            if mesh_info.has_normals:
+                stats['meshes_with_normals'] += 1
+            if mesh_info.has_uvs:
+                stats['meshes_with_uvs'] += 1
+            if mesh_info.has_colors:
+                stats['meshes_with_colors'] += 1
+            if mesh_info.is_closed:
+                stats['closed_meshes'] += 1
+            stats['total_surface_area'] += mesh_info.surface_area
+            stats['total_volume'] += mesh_info.volume
         except Exception as e:
-            self.logger.debug(f"Error calculating mesh statistics: {e}")
-        
-        return stats
-    
-    def _calculate_hierarchy_depth(self, stage: Usd.Stage) -> int:
-        """Calculate the maximum hierarchy depth in the stage."""
-        max_depth = 0
-        
-        try:
-            for prim in stage.Traverse():
-                path_depth = str(prim.GetPath()).count('/')
-                max_depth = max(max_depth, path_depth)
-        except Exception:
-            pass
-        
-        return max_depth
+            self.logger.debug(f"Error getting mesh stats for {prim.GetPath()}: {e}")
     
     def _get_animation_info(self, stage_info: USDStageInfo) -> Dict[str, Any]:
         """Get animation information from stage info."""

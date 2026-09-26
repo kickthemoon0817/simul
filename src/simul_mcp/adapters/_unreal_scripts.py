@@ -184,3 +184,67 @@ print(json.dumps({
     "actor_class_counts": counts,
 }))
 """
+
+# Expects ``args`` = {"parent", "name", "folder"}.
+CREATE_MATERIAL_INSTANCE = """
+import json, unreal
+parent = unreal.EditorAssetLibrary.load_asset(args["parent"])
+destination = args["folder"] + "/" + args["name"]
+if parent is None or not isinstance(parent, unreal.MaterialInterface):
+    print(json.dumps({"success": False, "error": "Parent material not found: " + args["parent"]}))
+elif unreal.EditorAssetLibrary.does_asset_exist(destination):
+    print(json.dumps({"success": False, "error": "Asset already exists: " + destination}))
+else:
+    # The factory's InitialParent is not exposed to Python; parent it after.
+    instance = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+        args["name"], args["folder"], unreal.MaterialInstanceConstant,
+        unreal.MaterialInstanceConstantFactoryNew(),
+    )
+    if instance is None:
+        print(json.dumps({"success": False, "error": "Could not create material instance: " + destination}))
+    else:
+        unreal.MaterialEditingLibrary.set_material_instance_parent(instance, parent)
+        unreal.EditorAssetLibrary.save_loaded_asset(instance)
+        print(json.dumps({
+            "instance_path": instance.get_path_name(),
+            "parent_path": parent.get_path_name(),
+            "class_name": instance.get_class().get_name(),
+        }))
+"""
+
+# Expects ``args`` = {"actor_path", "values": {editor_property: value}}, with
+# ``light_color`` as [r, g, b, a] bytes. Writes through set_editor_property
+# (the edit path the Details panel uses): Remote Control property writes and
+# the Set* functions silently no-op on a Stationary light's attenuation radius.
+# Reads every value back so a write the engine refused is reported.
+SET_LIGHT_PARAMS = ACTOR_HELPERS + """
+component = actor_component(actor_at(args["actor_path"]), unreal.LightComponent)
+
+def read(name):
+    value = component.get_editor_property(name)
+    if isinstance(value, unreal.Color):
+        return [value.r, value.g, value.b, value.a]
+    return value
+
+# Fail on a property this light type lacks before anything is written.
+for name in args["values"]:
+    read(name)
+
+with unreal.ScopedEditorTransaction("simul: set light params"):
+    for name, value in args["values"].items():
+        if name == "light_color":
+            value = unreal.Color(r=value[0], g=value[1], b=value[2], a=value[3])
+        component.set_editor_property(name, value)
+
+applied = {name: read(name) for name in args["values"]}
+rejected = sorted(
+    name for name, wanted in args["values"].items()
+    if (abs(applied[name] - wanted) > 1e-3 * max(1.0, abs(wanted))
+        if isinstance(wanted, float) else applied[name] != wanted)
+)
+result = {"component_path": component.get_path_name(), "applied": applied,
+          "params_set": len(args["values"]) - len(rejected)}
+if rejected:
+    result.update(success=False, error="Unreal did not apply: " + ", ".join(rejected))
+print(json.dumps(result))
+"""
