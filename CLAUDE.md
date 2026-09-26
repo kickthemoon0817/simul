@@ -172,14 +172,17 @@ manifest live in this same repo.
 
 ## Versioning and releases
 
-The version lives in four constants that move together (`pyproject.toml`,
-`.claude-plugin/plugin.json`, `src/simul_mcp/__init__.py`, the bridge ext's
-`config/extension.toml`). The release sequence and the marketplace notes are
-in `docs/releasing.md`. Hard rules:
+Policy and procedure: `AGENTS.md` § Versioning and `docs/releasing.md`.
+Hard rules for Claude:
 
-- Never tag a commit whose four version constants don't match the tag.
-- Never reuse a version number whose tag is already on the remote.
-- Never force-move or delete a published tag.
+- Bump the **patch** version (all four constants, one `chore/bump-version-X.Y.Z`
+  PR) whenever changes land on `main`. Patch versions are never tagged and
+  get no GitHub Release.
+- Never bump the **minor** version without an explicit yes from a developer
+  for that version. A minor bump is tagged on the bump commit and published
+  as a GitHub Release with release notes.
+- Never reuse a version number whose tag is already on the remote, and never
+  force-move or delete a published tag.
 - Pushes to `main` are effectively releases: the marketplace has no
   version pin.
 
