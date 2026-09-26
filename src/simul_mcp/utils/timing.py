@@ -9,7 +9,7 @@ import time
 import asyncio
 import inspect
 import functools
-from typing import Any, Callable, Optional, Dict, cast
+from typing import Any, Callable, Optional, Dict
 from contextlib import contextmanager
 from collections import defaultdict, deque
 
@@ -70,73 +70,6 @@ class Timer:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
-
-
-def measure_time(func: Optional[Callable] = None, *, name: Optional[str] = None):
-    """
-    Decorator to measure function execution time.
-
-    Args:
-        func: Function to decorate (when used without parentheses)
-        name: Custom name for the timer (defaults to function name)
-
-    Usage:
-        @measure_time
-        def my_function():
-            pass
-
-        @measure_time(name="Custom Timer")
-        def my_function():
-            pass
-    """
-
-    def decorator(f: Callable) -> Callable:
-        timer_name = name or f.__name__
-
-        if inspect.iscoroutinefunction(f):
-
-            @functools.wraps(f)
-            async def async_wrapper(*args, **kwargs):
-                with Timer(timer_name):
-                    return await f(*args, **kwargs)
-
-            return async_wrapper
-        else:
-
-            @functools.wraps(f)
-            def sync_wrapper(*args, **kwargs):
-                with Timer(timer_name):
-                    return f(*args, **kwargs)
-
-            return sync_wrapper
-
-    if func is None:
-        # Called with parentheses: @measure_time(name="...")
-        return decorator
-    else:
-        # Called without parentheses: @measure_time
-        return decorator(func)
-
-
-async def timeout_after(seconds: float, coro):
-    """
-    Run a coroutine with a timeout.
-
-    Args:
-        seconds: Timeout in seconds
-        coro: Coroutine to run
-
-    Returns:
-        Coroutine result
-
-    Raises:
-        asyncio.TimeoutError: If timeout is exceeded
-    """
-    try:
-        return await asyncio.wait_for(coro, timeout=seconds)
-    except asyncio.TimeoutError:
-        logger.warning(f"Operation timed out after {seconds}s")
-        raise
 
 
 class RateLimiter:
@@ -210,132 +143,6 @@ class RateLimiter:
             # Calculate wait time
             wait_time = (tokens - self.tokens) / self.rate
             await asyncio.sleep(min(wait_time, 0.1))  # Cap wait time
-
-
-def rate_limiter(rate: float, burst: int = 1):
-    """
-    Decorator to apply rate limiting to a function.
-
-    Args:
-        rate: Requests per second
-        burst: Maximum burst size
-    """
-    limiter = RateLimiter(rate, burst)
-
-    def decorator(func: Callable) -> Callable:
-        if inspect.iscoroutinefunction(func):
-
-            @functools.wraps(func)
-            async def async_wrapper(*args, **kwargs):
-                await limiter.wait_for_token()
-                return await func(*args, **kwargs)
-
-            return async_wrapper
-        else:
-
-            @functools.wraps(func)
-            def sync_wrapper(*args, **kwargs):
-                while not limiter.acquire():
-                    time.sleep(0.01)  # Small sleep to avoid busy waiting
-                return func(*args, **kwargs)
-
-            return sync_wrapper
-
-    return decorator
-
-
-class Debouncer:
-    """
-    Debouncer to prevent rapid successive calls to a function.
-    """
-
-    def __init__(self, delay: float):
-        """
-        Initialize debouncer.
-
-        Args:
-            delay: Delay in seconds before function is called
-        """
-        self.delay = delay
-        self.last_call_time = 0
-        self.timer_handle: Optional[asyncio.Handle] = None
-
-    def __call__(self, func: Callable) -> Callable:
-        """Make the debouncer callable as a decorator."""
-        if inspect.iscoroutinefunction(func):
-
-            @functools.wraps(func)
-            async def async_wrapper(*args, **kwargs):
-                return await self.debounce_async(func, *args, **kwargs)
-
-            return async_wrapper
-        else:
-
-            @functools.wraps(func)
-            def sync_wrapper(*args, **kwargs):
-                return self.debounce_sync(func, *args, **kwargs)
-
-            return sync_wrapper
-
-    def debounce_sync(self, func: Callable, *args, **kwargs):
-        """Debounce a synchronous function."""
-        current_time = time.time()
-
-        if current_time - self.last_call_time >= self.delay:
-            self.last_call_time = current_time
-            return func(*args, **kwargs)
-        else:
-            logger.debug(f"Debounced call to {func.__name__}")
-            return None
-
-    async def debounce_async(self, func: Callable, *args, **kwargs):
-        """Debounce an asynchronous function."""
-        # Cancel previous timer if it exists
-        if self.timer_handle:
-            self.timer_handle.cancel()
-
-        # Create new timer
-        loop = asyncio.get_event_loop()
-        future = loop.create_future()
-
-        def call_func():
-            if not future.cancelled():
-                try:
-                    result = func(*args, **kwargs)
-                    if asyncio.iscoroutine(result):
-                        # Schedule the coroutine
-                        task = loop.create_task(result)
-
-                        def _complete_task(task_result: asyncio.Task) -> None:
-                            exception: BaseException | None = task_result.exception()
-                            if exception is None:
-                                future.set_result(task_result.result())
-                            else:
-                                future.set_exception(cast(BaseException, exception))
-
-                        task.add_done_callback(_complete_task)
-                    else:
-                        future.set_result(result)
-                except Exception as e:
-                    future.set_exception(e)
-
-        self.timer_handle = loop.call_later(self.delay, call_func)
-
-        try:
-            return await future
-        except asyncio.CancelledError:
-            logger.debug(f"Debounced async call to {func.__name__} was cancelled")
-            return None
-
-
-def debounce(delay: float):
-    """
-    Decorator to debounce function calls.
-
-    Args:
-        delay: Delay in seconds before function is called
-    """
-    return Debouncer(delay)
 
 
 class PerformanceMonitor:

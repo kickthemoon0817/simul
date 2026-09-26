@@ -1,10 +1,9 @@
 """Transport and policy machinery every Isaac tool mixin builds on."""
 
 import json
-import textwrap
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
-from ....adapters import IsaacSocketClient, ScriptResult
+from ....adapters import IsaacSocketClient
 from ....adapters.isaac_socket_client import BridgeRequestDeliveredError
 from ....config import Settings, get_settings
 from ....logging import LoggerMixin
@@ -12,15 +11,6 @@ from ....utils.paths import PathPolicy
 from ...registration._helpers import apply_success_from_error
 from ...schemas.common import ErrorResponse
 from ._shared import (
-    BULK_GEOMETRY_ATTRIBUTES,
-    LOG_SCAN_WINDOW_BYTES,
-    MAX_CAPTURE_DIMENSION,
-    MAX_INLINE_CAPTURE_BYTES,
-    MAX_RETAINED_CAPTURES,
-    MAX_SCRIPT_BYTES,
-    PRIM_DETAIL_ASPECTS,
-    FloatList,
-    _pyval,
     logger,
 )
 

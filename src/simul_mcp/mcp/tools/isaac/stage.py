@@ -1,24 +1,12 @@
 """Asset & Stage Operations tools for Isaac Sim."""
 
-import json
 import textwrap
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from ....adapters import IsaacSocketClient, ScriptResult
-from ...schemas.common import ErrorResponse
 from ._shared import (
-    BULK_GEOMETRY_ATTRIBUTES,
-    LOG_SCAN_WINDOW_BYTES,
-    MAX_CAPTURE_DIMENSION,
-    MAX_INLINE_CAPTURE_BYTES,
-    MAX_RETAINED_CAPTURES,
-    MAX_SCRIPT_BYTES,
     OPEN_ASSET_CORE,
-    PRIM_DETAIL_ASPECTS,
-    FloatList,
     _compose_script,
     _pyval,
-    logger,
 )
 from .._meta import SandboxedPath, tool_meta
 
