@@ -79,6 +79,65 @@ def test_interrupt_stops_a_pure_python_loop_from_another_thread() -> None:
     }
 
 
+_TRACED_INTERRUPT_SCRIPT = """
+import asyncio, sys, threading, time
+
+sys.path.insert(0, {ext_root!r})
+from khemoo.simul.mcp.executor import ScriptExecutor, ScriptInterrupted
+
+
+def tracer(frame, event, arg):
+    return tracer
+
+
+threading.settrace(tracer)
+sys.settrace(tracer)
+executor = ScriptExecutor({{}}, {{}})
+outcome = []
+worker = threading.Thread(
+    target=lambda: outcome.append(asyncio.run(executor.execute("while True:\\n    pass"))),
+    daemon=True,
+)
+worker.start()
+while not executor.is_running:
+    time.sleep(0.005)
+executor.interrupt("stop")
+worker.join(10)
+assert not worker.is_alive(), "worker still running"
+assert isinstance(outcome[0][1], ScriptInterrupted), outcome
+print("interrupted-cleanly", file=sys.stderr)
+"""
+
+
+def test_interrupt_under_an_active_tracer_does_not_wedge_the_interpreter() -> None:
+    """A debugger, profiler or coverage tracer must not turn an interrupt into a hang.
+
+    Withdrawing a delivered async exception with ``PyThreadState_SetAsyncExc(tid,
+    NULL)`` leaves CPython 3.11's async-exception flag raised with nothing
+    attached; under ``sys.settrace`` every thread then spins at its next
+    function entry. Runs in a subprocess so a regression fails on the timeout
+    instead of hanging the suite.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import khemoo.simul.mcp.executor as executor_module
+
+    ext_root = str(Path(executor_module.__file__).resolve().parents[3])
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", _TRACED_INTERRUPT_SCRIPT.format(ext_root=ext_root)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("interrupting a traced script wedged the interpreter")
+    assert completed.returncode == 0, completed.stderr
+    assert "interrupted-cleanly" in completed.stderr
+
+
 def test_timeout_interrupts_a_runaway_sync_script() -> None:
     executor = _executor()
     started = time.monotonic()
