@@ -3,37 +3,26 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
-import stat
-import tempfile
 from pathlib import Path
 from typing import Any
 
 from ..config import Settings
+from ..utils.private_files import BridgeFiles
 from ._unreal_attach_scripts import EDITOR_STATE
+
+# An attachment record is a few hundred bytes; refuse anything that is not.
+MAX_ATTACHMENT_BYTES = 64 * 1024
 
 
 def read_attachment(path: Path) -> dict[str, Any]:
     """Read a private attachment record, refusing missing or malformed targets."""
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        data = BridgeFiles.read(path, max_bytes=MAX_ATTACHMENT_BYTES)
     except FileNotFoundError as exc:
         raise RuntimeError(
             "No Unreal editor attached; run simul unreal instances, then simul unreal attach"
         ) from exc
-    with os.fdopen(fd) as stream:
-        meta = os.fstat(stream.fileno())
-        if not stat.S_ISREG(meta.st_mode):
-            raise ValueError("Unreal attachment must be a regular file")
-        if hasattr(os, "getuid") and (
-            meta.st_uid != os.getuid() or meta.st_mode & 0o077
-        ):
-            raise PermissionError(
-                "Unreal attachment must be owned by this user and mode 0600"
-            )
-        data = json.loads(stream.read(65537))
-    if not isinstance(data, dict) or data.get("version") != 1:
+    if data.get("version") != 1:
         raise ValueError("Invalid Unreal attachment record")
     if not isinstance(data.get("host"), str) or not data["host"]:
         raise ValueError("Invalid Unreal attachment host")
@@ -138,14 +127,7 @@ class UnrealAttachments:
             "port": info["port"],
             "target": target,
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, temporary = tempfile.mkstemp(prefix=".simul-", dir=self.path.parent)
-        try:
-            with os.fdopen(fd, "w") as stream:
-                json.dump(record, stream)
-            os.replace(temporary, self.path)
-        finally:
-            Path(temporary).unlink(missing_ok=True)
+        BridgeFiles.write(self.path, record)
         return {
             **info,
             "viewport": viewport,

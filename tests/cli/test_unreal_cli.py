@@ -723,3 +723,214 @@ def test_exec_no_output_treated_as_success(monkeypatch) -> None:
     payload = json.loads(result.stdout)
     assert payload["success"] is True
     assert payload["output"] == ""
+
+
+def test_exec_long_inline_script_is_not_treated_as_path(monkeypatch) -> None:
+    """A script longer than NAME_MAX used to crash in Path.is_file with
+    OSError (File name too long) on Python 3.11-3.13."""
+    captured: Dict[str, Any] = {}
+
+    class _StubSession:
+        settings = unreal_cli.get_settings()
+
+        async def _execute_python(self, code, mode):
+            del mode
+            captured["code"] = code
+            return {"ReturnValue": True, "LogOutput": [], "CommandResult": ""}
+
+    monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: _StubSession())
+    script = "x = 1  # " + "a" * 5000
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", script])
+
+    assert result.exit_code == 0, result.stdout
+    assert captured["code"] == script
+
+
+def test_read_script_arg_file_vs_inline(tmp_path: Path) -> None:
+    from simul_mcp.cli.output import read_script_arg
+
+    script = tmp_path / "s.py"
+    script.write_text("print(1)\n")
+    assert read_script_arg(str(script)) == "print(1)\n"
+    missing = str(tmp_path / "missing.py")
+    assert read_script_arg(missing) == missing
+    assert read_script_arg("print('a')") == "print('a')"
+    long_inline = "a" * 5000 + ".py"
+    assert read_script_arg(long_inline) == long_inline
+
+
+# ---------------------------------------------------------------------------
+# setup: a plain re-run clears a public bind; launch failures fail fast;
+# a dead editor stops the poll; a specific --bind is where the poll goes.
+# ---------------------------------------------------------------------------
+
+
+async def _not_connected(session, timeout, interval, **kwargs):
+    del session, timeout, interval, kwargs
+    return {"connected": False}
+
+
+def test_setup_rerun_without_bind_clears_public_bind(tmp_path: Path, monkeypatch) -> None:
+    uproject = _write_uproject(tmp_path)
+    monkeypatch.setattr(unreal_cli, "_poll_health", _not_connected)
+    base = ["--json", "unreal", "setup", str(uproject), "--no-launch", "--yes"]
+    runner.invoke(app, base + ["--bind", "0.0.0.0", "--allow-public"])
+
+    result = runner.invoke(app, base)
+
+    payload = json.loads(result.stdout)
+    assert payload["bind"] is None
+    assert payload["patched"]["engine_ini"]["removed"] == ["DefaultBindAddress"]
+    assert "RemoteControlWebsocketServerBindAddress" in payload["patched"]["ini"]["updated"]
+    assert "0.0.0.0" not in (tmp_path / "Config" / "DefaultEngine.ini").read_text()
+    assert "0.0.0.0" not in (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
+
+
+def test_setup_rerun_with_allow_public_keeps_public_bind(tmp_path: Path, monkeypatch) -> None:
+    uproject = _write_uproject(tmp_path)
+    monkeypatch.setattr(unreal_cli, "_poll_health", _not_connected)
+    base = ["--json", "unreal", "setup", str(uproject), "--no-launch", "--yes"]
+    runner.invoke(app, base + ["--bind", "0.0.0.0", "--allow-public"])
+
+    runner.invoke(app, base + ["--allow-public"])
+
+    assert "DefaultBindAddress=0.0.0.0" in (tmp_path / "Config" / "DefaultEngine.ini").read_text()
+
+
+@pytest.mark.parametrize("json_mode", [True, False])
+def test_setup_launcher_not_found_fails_fast(tmp_path: Path, monkeypatch, json_mode: bool) -> None:
+    """With --yes the plan panel is skipped, so the launcher error used to be
+    invisible while setup polled the full --wait-timeout."""
+    uproject = _write_uproject(tmp_path)
+
+    def _no_launcher(*args, **kwargs):
+        raise unreal_cli.LauncherNotFound("Could not find UnrealEditor on macOS.")
+
+    async def _must_not_poll(*args, **kwargs):
+        raise AssertionError("setup polled after a launcher failure")
+
+    monkeypatch.setattr(unreal_cli, "resolve_launch_argv", _no_launcher)
+    monkeypatch.setattr(unreal_cli, "_poll_health", _must_not_poll)
+    argv = ["unreal", "setup", str(uproject), "--yes"]
+
+    result = runner.invoke(app, (["--json"] if json_mode else []) + argv)
+
+    assert result.exit_code != 0
+    assert "Could not find UnrealEditor on macOS." in result.stdout
+    assert not (tmp_path / "Config" / "DefaultRemoteControl.ini").exists()
+
+
+class _FakeProc:
+    pid = 4242
+
+    def __init__(self, code):
+        self._code = code
+
+    def poll(self):
+        return self._code
+
+
+def test_poll_health_stops_when_editor_exits() -> None:
+    import asyncio
+
+    calls = []
+
+    class _Session:
+        async def health_check(self):
+            calls.append(1)
+            return {"connected": False}
+
+    health = asyncio.run(unreal_cli._poll_health(_Session(), 60.0, 0.01, proc=_FakeProc(3)))
+
+    assert health["editor_exited"] is True
+    assert health["exit_code"] == 3
+    assert "4242" in health["error"]
+    assert len(calls) == 1
+
+
+def test_poll_health_keeps_polling_while_editor_runs() -> None:
+    import asyncio
+
+    class _Session:
+        def __init__(self):
+            self.n = 0
+
+        async def health_check(self):
+            self.n += 1
+            return {"connected": self.n >= 3}
+
+    health = asyncio.run(unreal_cli._poll_health(_Session(), 60.0, 0.0, proc=_FakeProc(None)))
+
+    assert health == {"connected": True}
+
+
+def _stub_launch(monkeypatch, argv0: str, captured: Dict[str, Any]) -> None:
+    monkeypatch.setattr(unreal_cli, "resolve_launch_argv", lambda *a, **k: [argv0, "x.uproject"])
+    monkeypatch.setattr(unreal_cli, "launch_editor", lambda *a, **k: _FakeProc(1))
+
+    async def _fake_poll(session, timeout, interval, **kwargs):
+        del timeout, interval
+        captured["host"] = session.host
+        captured["proc"] = kwargs.get("proc")
+        return unreal_cli._editor_exit(kwargs.get("proc")) or {"connected": False}
+
+    monkeypatch.setattr(unreal_cli, "_poll_health", _fake_poll)
+
+
+def test_setup_reports_editor_crash(tmp_path: Path, monkeypatch) -> None:
+    uproject = _write_uproject(tmp_path)
+    captured: Dict[str, Any] = {}
+    _stub_launch(monkeypatch, "/opt/UE/UnrealEditor", captured)
+
+    result = runner.invoke(app, ["unreal", "setup", str(uproject), "--yes"])
+
+    assert result.exit_code == 1
+    assert captured["proc"] is not None
+    assert "exited with code 1" in result.stdout
+
+
+def test_setup_does_not_watch_open_launcher(tmp_path: Path, monkeypatch) -> None:
+    """`open -a` exits as soon as LaunchServices has the app; that exit is not a crash."""
+    uproject = _write_uproject(tmp_path)
+    captured: Dict[str, Any] = {}
+    _stub_launch(monkeypatch, "open", captured)
+
+    runner.invoke(app, ["--json", "unreal", "setup", str(uproject), "--yes", "--no-headless"])
+
+    assert captured["proc"] is None
+
+
+@pytest.mark.parametrize(
+    "bind, expected",
+    [
+        (None, None),
+        ("0.0.0.0", None),
+        ("::", None),
+        ("any", None),
+        ("192.168.1.10", "192.168.1.10"),
+        ("127.0.0.1", "127.0.0.1"),
+        ("fe80::1", "[fe80::1]"),
+    ],
+)
+def test_poll_host(bind, expected) -> None:
+    assert unreal_cli._poll_host(bind) == expected
+
+
+def test_setup_polls_specific_bind_address(tmp_path: Path, monkeypatch) -> None:
+    uproject = _write_uproject(tmp_path)
+    captured: Dict[str, Any] = {}
+
+    async def _fake_poll(session, timeout, interval, **kwargs):
+        del timeout, interval, kwargs
+        captured["host"] = session.host
+        return {"connected": False}
+
+    monkeypatch.setattr(unreal_cli, "_poll_health", _fake_poll)
+    argv = ["--json", "unreal", "setup", str(uproject), "--no-launch", "--yes"]
+
+    runner.invoke(app, argv + ["--bind", "192.168.1.10", "--allow-public"])
+    assert captured["host"] == "192.168.1.10"
+
+    runner.invoke(app, argv + ["--bind", "0.0.0.0", "--allow-public"])
+    assert captured["host"] == unreal_cli.get_settings().unreal.host

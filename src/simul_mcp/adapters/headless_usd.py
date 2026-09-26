@@ -47,6 +47,9 @@ class HeadlessUSDSession(LoggerMixin):
         
         self._active_stages: Dict[str, Usd.Stage] = {}
         self._bbox_caches: Dict[str, BBoxCache] = {}
+        # Resolved file path each stage was opened from, so unload can evict
+        # the matching USDReader cache entry.
+        self._stage_paths: Dict[str, str] = {}
         
         self.logger.info("Headless USD session initialized")
     
@@ -73,6 +76,7 @@ class HeadlessUSDSession(LoggerMixin):
                 stage_id = self._generate_stage_id(file_path)
                 self._active_stages[stage_id] = stage
                 self._bbox_caches[stage_id] = BBoxCache(stage)
+                self._stage_paths[stage_id] = file_path
                 
                 self.logger.info(f"Loaded USD stage: {file_path} -> {stage_id}")
                 return stage_id
@@ -99,6 +103,12 @@ class HeadlessUSDSession(LoggerMixin):
                 del self._active_stages[stage_id]
                 if stage_id in self._bbox_caches:
                     del self._bbox_caches[stage_id]
+                # Evict the reader's cached Usd.Stage too; otherwise the next
+                # load_stage of the same file hands back this in-memory stage,
+                # unsaved edits included, instead of re-reading the file.
+                file_path = self._stage_paths.pop(stage_id, None)
+                if file_path is not None:
+                    self.usd_reader.close_stage(file_path)
                 
                 self.logger.info(f"Unloaded USD stage: {stage_id}")
                 return True
@@ -268,6 +278,12 @@ class HeadlessUSDSession(LoggerMixin):
             self.logger.error(f"Failed to set attribute {name} on {prim.GetPath()}: {e}")
             return False
 
+    def _invalidate_bbox_cache(self, stage_id: str) -> None:
+        """Drop cached bounds for a stage after its scene description changed."""
+        bbox_cache = self._bbox_caches.get(stage_id)
+        if bbox_cache is not None:
+            bbox_cache.clear_cache()
+
     def create_prim(
         self,
         stage_id: str,
@@ -281,15 +297,18 @@ class HeadlessUSDSession(LoggerMixin):
         if not prim_path or not prim_type:
             return False
 
-        prim = stage.DefinePrim(prim_path, prim_type)
-        if not prim or not prim.IsValid():
-            return False
+        try:
+            prim = stage.DefinePrim(prim_path, prim_type)
+            if not prim or not prim.IsValid():
+                return False
 
-        if attributes:
-            for name, value in attributes.items():
-                if not self._set_attribute(prim, name, value):
-                    return False
-        return True
+            if attributes:
+                for name, value in attributes.items():
+                    if not self._set_attribute(prim, name, value):
+                        return False
+            return True
+        finally:
+            self._invalidate_bbox_cache(stage_id)
 
     def update_prim_attributes(
         self,
@@ -305,10 +324,13 @@ class HeadlessUSDSession(LoggerMixin):
             return False
         if not attributes:
             return True
-        for name, value in attributes.items():
-            if not self._set_attribute(prim, name, value):
-                return False
-        return True
+        try:
+            for name, value in attributes.items():
+                if not self._set_attribute(prim, name, value):
+                    return False
+            return True
+        finally:
+            self._invalidate_bbox_cache(stage_id)
 
     def delete_prim(self, stage_id: str, prim_path: str) -> bool:
         stage = self.get_stage(stage_id)
@@ -316,7 +338,10 @@ class HeadlessUSDSession(LoggerMixin):
             return False
         if not prim_path:
             return False
-        stage.RemovePrim(prim_path)
+        try:
+            stage.RemovePrim(prim_path)
+        finally:
+            self._invalidate_bbox_cache(stage_id)
         prim = stage.GetPrimAtPath(prim_path)
         return not prim or not prim.IsValid()
  
@@ -507,6 +532,7 @@ class HeadlessUSDSession(LoggerMixin):
         try:
             self._active_stages.clear()
             self._bbox_caches.clear()
+            self._stage_paths.clear()
             self.usd_reader.clear_cache()
             self.logger.info("Headless USD session cleaned up")
         except Exception as e:

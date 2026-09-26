@@ -1,27 +1,8 @@
 """Common MCP schemas shared across backends."""
 
-from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
-
-
-class PrimType(str, Enum):
-    """Common USD prim types."""
-
-    UNKNOWN = "unknown"
-    XFORM = "Xform"
-    MESH = "Mesh"
-    SPHERE = "Sphere"
-    CUBE = "Cube"
-    CYLINDER = "Cylinder"
-    CONE = "Cone"
-    PLANE = "Plane"
-    CAMERA = "Camera"
-    LIGHT = "Light"
-    MATERIAL = "Material"
-    SHADER = "Shader"
-    SCOPE = "Scope"
 
 
 class BoundingBox(BaseModel):
@@ -67,7 +48,6 @@ class ErrorResponse(BaseModel):
     )
 
 __all__ = [
-    "PrimType",
     "BoundingBox",
     "Transform",
     "ErrorResponse",

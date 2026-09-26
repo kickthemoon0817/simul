@@ -16,11 +16,10 @@ import re
 import sys
 import textwrap
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Coroutine, Dict, List, Optional
 
 import typer
-from rich.console import Console
-from rich.panel import Panel
+from rich.markup import escape as rich_escape
 from rich.syntax import Syntax
 from rich.table import Table
 
@@ -31,7 +30,16 @@ from simul_mcp.adapters.isaac_install import (
     IsaacVersion,
     read_isaac_version,
 )
-from simul_mcp.cli.output import emit, emit_error, is_json_mode
+from simul_mcp.adapters.isaac_runtime import IsaacRuntimeAdapter
+from simul_mcp.cli.output import (
+    console,
+    emit,
+    exit_if_failed,
+    fail,
+    is_json_mode,
+    read_script_arg,
+    run_or_exit,
+)
 from simul_mcp.config import get_settings
 from simul_mcp.utils.discovery import DiscoveryDir
 
@@ -45,58 +53,48 @@ app = typer.Typer(
     help="Isaac Sim commands -- interact with a running Isaac Sim instance.",
     add_completion=False,
 )
-console = Console(stderr=True)
 
 
 def _tools(
     host: Optional[str] = None,
     port: Optional[int] = None,
     timeout: Optional[float] = None,
+    *,
+    bridge_circuit_breaker: bool = True,
 ) -> "IsaacTools":
-    """Build an IsaacTools instance from settings with optional overrides."""
+    """Build an IsaacTools instance from settings with optional overrides.
+
+    ``bridge_circuit_breaker=False`` is for readiness polling: a bridge that
+    is still binding its port must be dialled on every poll, not skipped for
+    the breaker's cooldown after the first few refusals.
+    """
     from simul_mcp.mcp.tools.isaac_tools import IsaacTools
 
     settings = get_settings()
-    client = IsaacSocketClient(
-        host=host if host is not None else settings.isaac_sim.socket_host,
-        port=port if port is not None else settings.isaac_sim.socket_port,
-        bridge_host=settings.isaac_sim.bridge_host,
-        bridge_port=settings.isaac_sim.bridge_port,
-        bridge_timeout_seconds=settings.isaac_sim.bridge_timeout,
-        prefer_bridge=settings.isaac_sim.bridge_enabled,
-        fallback_to_vscode=settings.isaac_sim.bridge_fallback_to_vscode,
-        timeout_seconds=timeout if timeout is not None else settings.isaac_sim.socket_timeout,
-        socket_protocol=settings.isaac_sim.socket_protocol,
-        auth_token=settings.isaac_sim.socket_auth_token,
-        bridge_failure_threshold=settings.isaac_sim.bridge_failure_threshold,
-        bridge_cooldown_seconds=settings.isaac_sim.bridge_cooldown_seconds,
+    isaac = settings.isaac_sim
+    # The bridge endpoint stays pinned to settings: --host/--port address the
+    # stock socket only, as they always have.
+    client = IsaacRuntimeAdapter(settings).build_client(
+        socket_host=host if host is not None else isaac.socket_host,
+        socket_port=port if port is not None else isaac.socket_port,
+        socket_timeout=timeout if timeout is not None else isaac.socket_timeout,
+        bridge_enabled=isaac.bridge_enabled,
+        bridge_host=isaac.bridge_host,
+        bridge_port=isaac.bridge_port,
+        bridge_circuit_breaker=bridge_circuit_breaker,
     )
     return IsaacTools(client, settings)
 
 
-def _run(coro: Any) -> Dict[str, Any]:
-    """
-    Run an async IsaacTools method and handle errors uniformly.
+def _run(
+    coro: Coroutine[Any, Any, Dict[str, Any]], *, allow_partial: bool = False
+) -> Dict[str, Any]:
+    """Run an async IsaacTools method; exit non-zero when its payload failed.
 
-    In JSON mode: emits the full result dict to stdout.
-    In Rich mode: prints errors with Rich formatting.
-    Always returns the result dict for further processing.
+    ``allow_partial`` returns a payload that failed only through ``*_error``
+    keys so the command can render what worked; it must ``exit_if_failed``.
     """
-    result = asyncio.run(coro)
-    if result.get("error"):
-        if is_json_mode():
-            emit_error(
-                result["error"],
-                result.get("error_type", "Error"),
-                result.get("details"),
-            )
-            return result  # unreachable (emit_error raises), but documents intent
-        console.print(f"[red]{result.get('error_type', 'Error')}: {result['error']}[/red]")
-        details = result.get("details")
-        if details and details.get("traceback"):
-            console.print(Panel(details["traceback"], title="Traceback", border_style="red"))
-        raise typer.Exit(1)
-    return result
+    return run_or_exit(coro, show_traceback=True, allow_partial=allow_partial)
 
 
 def _parse_script_result(result: Any) -> Dict[str, Any]:
@@ -201,7 +199,9 @@ def bridge_up(
     ``simul-mcp isaac enable-extension khemoo.simul.mcp``; this command
     bundles that into a single transparent step.
     """
-    tools = _tools(host, port, timeout)
+    # The re-probe loop below expects refusals while Kit binds the port; with
+    # the breaker on, three of them would skip every later probe for 30 s.
+    tools = _tools(host, port, timeout, bridge_circuit_breaker=False)
     client = tools._client
     bridge_addr = client.bridge_address
     vscode_addr = client.vscode_address
@@ -245,11 +245,7 @@ def bridge_up(
             f"or pass `--enable {PYTHON_SERVER_EXTENSION} --enable {BRIDGE_EXTENSION}` "
             "to isaac-sim.sh."
         )
-        if is_json_mode():
-            emit_error(msg, "NotRunning")
-            return
-        console.print(f"[red]{msg}[/red]")
-        raise typer.Exit(1)
+        fail(msg, "NotRunning")
 
     enable_result = asyncio.run(
         tools.enable_isaac_extension(extension_id="khemoo.simul.mcp")
@@ -260,11 +256,7 @@ def bridge_up(
             f"failed: {enable_result.get('error', 'unknown error')}. "
             "Is the extension registered with Isaac Sim?"
         )
-        if is_json_mode():
-            emit_error(msg, "ExtensionNotRegistered")
-            return
-        console.print(f"[red]{msg}[/red]")
-        raise typer.Exit(1)
+        fail(msg, "ExtensionNotRegistered")
 
     # Code-reviewer HIGH from iter10: the bridge needs a frame or two
     # to bind its TCP socket after the extension is enabled. A single
@@ -395,44 +387,39 @@ def launch(
         Path(os.environ["ISAAC_SIM_PATH"]) if os.environ.get("ISAAC_SIM_PATH") else None
     )
     if root is None:
-        _fail(
+        fail(
             "Isaac install root not set. Pass --isaac-root <path> or export ISAAC_SIM_PATH=<path>.",
             "InvalidArgument",
-            2,
+            exit_code=2,
         )
-        return
     root = root.expanduser().resolve()
     if not root.is_dir():
-        _fail(
+        fail(
             f"Isaac install root {root} does not exist. Update ISAAC_SIM_PATH or pass --isaac-root.",
             "InvalidArgument",
-            2,
+            exit_code=2,
         )
-        return
     launcher = root / ("isaac-sim.bat" if sys.platform == "win32" else "isaac-sim.sh")
     if not launcher.is_file():
-        _fail(
+        fail(
             f"{launcher.name} not found under {root} — is this an Isaac Sim install root?",
             "InvalidArgument",
-            2,
+            exit_code=2,
         )
-        return
     version: Optional[IsaacVersion] = read_isaac_version(root)
     if version is None:
-        _fail(
+        fail(
             f"Cannot read {root / 'VERSION'}; expected an Isaac Sim 5.x or 6.x install.",
             "UnsupportedInstall",
-            2,
+            exit_code=2,
         )
-        return
     if version.support_level == "unsupported":
-        _fail(
+        fail(
             f"Isaac Sim {version} is not supported; releases older than 5.x, including the "
             "year-scheme 20xx.x series, ship neither transport extension simul knows.",
             "UnsupportedInstall",
-            2,
+            exit_code=2,
         )
-        return
     version_warning: Optional[str] = None
     if version.support_level == "assumed":
         version_warning = (
@@ -443,27 +430,24 @@ def launch(
         if not is_json_mode():
             console.print(f"[yellow]{version_warning}[/yellow]")
     if (auth_token or generate_auth_token) and version.major < 6:
-        _fail(
+        fail(
             f"--auth-token / --generate-auth-token need Isaac Sim 6.0+ ({PYTHON_SERVER_EXTENSION}); "
             f"found {version}.",
             "InvalidArgument",
-            2,
+            exit_code=2,
         )
-        return
     if auth_token and generate_auth_token:
-        _fail(
+        fail(
             "--auth-token and --generate-auth-token are exclusive; pass one or the other.",
             "InvalidArgument",
-            2,
+            exit_code=2,
         )
-        return
     if print_token and not generate_auth_token:
-        _fail(
+        fail(
             "--print-token only applies with --generate-auth-token.",
             "InvalidArgument",
-            2,
+            exit_code=2,
         )
-        return
 
     transport_ext = version.python_transport_extension
     bridge_present = (root / "extsUser" / BRIDGE_EXTENSION / "config" / "extension.toml").is_file()
@@ -569,6 +553,9 @@ def launch(
             bridge_timeout_seconds=5.0,
             socket_protocol=settings.isaac_sim.socket_protocol,
             auth_token=token,
+            # Polling must dial the bridge every interval while Kit starts,
+            # not once per breaker cooldown.
+            bridge_circuit_breaker=False,
         )
 
     client = _probe_client(auth_token or settings.isaac_sim.socket_auth_token)
@@ -625,13 +612,11 @@ def launch(
                 socket_reachable=False,
                 bridge_reachable=False,
             )
-            _fail(
+            fail(
                 f"Isaac Sim exited with code {process.returncode} before answering; see {resolved_log}",
                 "LaunchFailed",
-                1,
                 result,
             )
-            return
         _collect_generated_token()
         bridge_ok, socket_ok = asyncio.run(_probe())
         if socket_ok and (bridge_ok or not bridge_present):
@@ -668,15 +653,6 @@ def launch(
         f"bridge={'up' if bridge_ok else 'down'}; see {resolved_log}"
     )
     raise typer.Exit(1)
-
-
-def _fail(message: str, error_type: str, exit_code: int, details: Optional[Dict[str, Any]] = None) -> None:
-    """Report a CLI failure in JSON or Rich mode and exit."""
-    if is_json_mode():
-        emit_error(message, error_type, details)
-        return
-    console.print(f"[red]{message}[/red]")
-    raise typer.Exit(exit_code)
 
 
 @app.command("install-bridge")
@@ -755,20 +731,12 @@ def install_bridge(
             "Isaac install root not set. Pass --isaac-root <path> or "
             "export ISAAC_SIM_PATH=<path>."
         )
-        if is_json_mode():
-            emit_error(msg, "InvalidArgument")
-            return
-        console.print(f"[red]{msg}[/red]")
-        raise typer.Exit(2)
+        fail(msg, "InvalidArgument", exit_code=2)
     isaac_root_p = isaac_root_p.expanduser().resolve()
     exts_user = isaac_root_p / "extsUser"
     if not exts_user.is_dir():
         msg = f"extsUser/ not found under {isaac_root_p} — is this an Isaac Sim install root?"
-        if is_json_mode():
-            emit_error(msg, "InvalidArgument")
-            return
-        console.print(f"[red]{msg}[/red]")
-        raise typer.Exit(2)
+        fail(msg, "InvalidArgument", exit_code=2)
 
     # 2. Resolve source — bundled copy ships inside the package so this
     # works in both editable installs and pip wheels. The legacy repo
@@ -798,11 +766,7 @@ def install_bridge(
             "package-data; reinstall with `pip install -e .` from a "
             "repo checkout, or `pip install --force-reinstall simul-mcp`."
         )
-        if is_json_mode():
-            emit_error(msg, "SourceNotFound")
-            return
-        console.print(f"[red]{msg}[/red]")
-        raise typer.Exit(2)
+        fail(msg, "SourceNotFound", exit_code=2)
 
     def _read_version(toml_path: Path) -> Optional[str]:
         # Read errors (PermissionError, broken symlink, partial extract,
@@ -893,19 +857,13 @@ def bridge_capabilities(
     try:
         response = asyncio.run(tools._client.bridge_request("capabilities", {}))
     except (ConnectionRefusedError, TimeoutError, ValueError) as exc:
-        if is_json_mode():
-            emit_error(str(exc), type(exc).__name__)
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1)
+        fail(str(exc), type(exc).__name__)
 
     if response.get("status") != "ok":
         error = response.get("error", {})
         message = str(error.get("message", "Bridge request failed"))
         error_name = str(error.get("name", "BridgeError"))
-        if is_json_mode():
-            emit_error(message, error_name)
-        console.print(f"[red]{error_name}: {message}[/red]")
-        raise typer.Exit(1)
+        fail(message, error_name)
 
     payload = response.get("payload", {})
     result = {
@@ -962,10 +920,7 @@ def bridge_config(
         result = asyncio.run(tools._client.execute_vscode_only(script))
         parsed = _parse_script_result(result)
     except (ConnectionRefusedError, TimeoutError, RuntimeError, ValueError) as exc:
-        if is_json_mode():
-            emit_error(str(exc), type(exc).__name__)
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1)
+        fail(str(exc), type(exc).__name__)
 
     if is_json_mode():
         emit(parsed)
@@ -1038,10 +993,7 @@ def bridge_set_unsafe(
         result = asyncio.run(tools._client.execute_vscode_only(script))
         parsed = _parse_script_result(result)
     except (ConnectionRefusedError, TimeoutError, RuntimeError, ValueError) as exc:
-        if is_json_mode():
-            emit_error(str(exc), type(exc).__name__)
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1)
+        fail(str(exc), type(exc).__name__)
 
     if is_json_mode():
         emit(parsed)
@@ -1074,10 +1026,7 @@ def status(
     stage, sim = asyncio.run(_fetch())
     for r in (stage, sim):
         if isinstance(r, dict) and r.get("error"):
-            if is_json_mode():
-                emit_error(r["error"], r.get("error_type", "Error"), r.get("details"))
-            console.print(f"[red]{r.get('error_type', 'Error')}: {r['error']}[/red]")
-            raise typer.Exit(1)
+            fail(r["error"], r.get("error_type", "Error"), r.get("details"))
 
     if is_json_mode():
         emit({"stage": stage, "simulation": sim})
@@ -1120,10 +1069,7 @@ def scene(
     summary, stats, cameras, lights, physics = asyncio.run(_fetch())
     for r in (summary, stats, cameras, lights, physics):
         if isinstance(r, dict) and r.get("error"):
-            if is_json_mode():
-                emit_error(r["error"], r.get("error_type", "Error"), r.get("details"))
-            console.print(f"[red]{r.get('error_type', 'Error')}: {r['error']}[/red]")
-            raise typer.Exit(1)
+            fail(r["error"], r.get("error_type", "Error"), r.get("details"))
 
     if is_json_mode():
         emit({
@@ -1183,28 +1129,14 @@ def exec_script(
     raw: bool = typer.Option(False, "--raw", "-r", help="Print raw output without formatting"),
 ) -> None:
     """Execute Python code inside Isaac Sim. Accepts a code string or .py file path."""
-    if script is None:
-        if not sys.stdin.isatty():
-            code = sys.stdin.read()
-        else:
-            if is_json_mode():
-                emit_error("Provide a script string, .py file path, or pipe code via stdin.", "InputError")
-            console.print("[red]Provide a script string, .py file path, or pipe code via stdin.[/red]")
-            raise typer.Exit(1)
-    elif Path(script).is_file() and script.endswith(".py"):
-        code = Path(script).read_text(encoding="utf-8")
-    else:
-        code = script
+    code = read_script_arg(script)
 
     tools = _tools(host, port, timeout)
     # Same path the MCP tool takes, rather than reaching through _client into
     # the adapter with a second copy of the transport rules.
     payload = asyncio.run(tools.execute_script(code, keep_raw_output=raw))
     if payload.get("error"):
-        if is_json_mode():
-            emit_error(payload["error"], payload.get("error_type", "Error"))
-        console.print(f"[red]{payload['error']}[/red]")
-        raise typer.Exit(1)
+        fail(payload["error"], payload.get("error_type", "Error"))
 
     # execute_script unwraps a JSON object when the script printed one. It only
     # carries stdout as well when asked, which --raw does — otherwise the whole
@@ -1247,10 +1179,7 @@ def capture(
             eye_list = [float(v) for v in (eye or "5,5,3").split(",")]
             target_list = [float(v) for v in (target or "0,0,0").split(",")]
         except ValueError as e:
-            if is_json_mode():
-                emit_error(f"Invalid numeric value in camera args: {e}", "ValueError")
-            console.print(f"[red]Invalid numeric value in camera args: {e}[/red]")
-            raise typer.Exit(1)
+            fail(f"Invalid numeric value in camera args: {e}", "ValueError")
         _run(tools.set_isaac_camera(position=eye_list, target=target_list))
 
     data = _run(tools.capture_isaac_viewport(width=width, height=height, inline=True))
@@ -1272,10 +1201,7 @@ def capture(
         message = "Viewport capture returned no image data"
         if detail:
             message = f"{message}: {detail}"
-        if is_json_mode():
-            emit_error(message, "CaptureError")
-        console.print(f"[red]{message}[/red]")
-        raise typer.Exit(1)
+        fail(message, "CaptureError")
 
     if is_json_mode():
         # Build output dict without bulky base64 — the file is on disk
@@ -1419,10 +1345,7 @@ def create_prim(
         try:
             attrs_dict = json.loads(attributes)
         except json.JSONDecodeError as e:
-            if is_json_mode():
-                emit_error(f"Invalid JSON for --attrs: {e}", "JSONDecodeError")
-            console.print(f"[red]Invalid JSON for --attrs: {e}[/red]")
-            raise typer.Exit(1)
+            fail(f"Invalid JSON for --attrs: {e}", "JSONDecodeError")
 
     result = _run(_tools(host, port).create_isaac_prim(
         prim_path=prim_path, prim_type=prim_type, attributes=attrs_dict,
@@ -1470,10 +1393,7 @@ def set_transform(
         rotate_list = [float(v) for v in rotate.split(",")] if rotate else None
         scale_list = [float(v) for v in scale.split(",")] if scale else None
     except ValueError as e:
-        if is_json_mode():
-            emit_error(f"Invalid numeric value in transform args: {e}", "ValueError")
-        console.print(f"[red]Invalid numeric value in transform args: {e}[/red]")
-        raise typer.Exit(1)
+        fail(f"Invalid numeric value in transform args: {e}", "ValueError")
 
     result = _run(_tools(host, port).set_isaac_prim_transform(
         prim_path=prim_path,
@@ -1581,10 +1501,7 @@ def create_physics_scene(
     try:
         grav_dir_list = [float(v) for v in gravity_dir.split(",")]
     except ValueError as e:
-        if is_json_mode():
-            emit_error(f"Invalid numeric value in --gravity-dir: {e}", "ValueError")
-        console.print(f"[red]Invalid numeric value in --gravity-dir: {e}[/red]")
-        raise typer.Exit(1)
+        fail(f"Invalid numeric value in --gravity-dir: {e}", "ValueError")
     result = _run(_tools(host, port).create_isaac_physics_scene(
         prim_path=prim_path,
         gravity_direction=grav_dir_list,
@@ -1624,10 +1541,7 @@ def create_light(
     try:
         color_list = [float(v) for v in color.split(",")] if color else None
     except ValueError as e:
-        if is_json_mode():
-            emit_error(f"Invalid numeric value in --color: {e}", "ValueError")
-        console.print(f"[red]Invalid numeric value in --color: {e}[/red]")
-        raise typer.Exit(1)
+        fail(f"Invalid numeric value in --color: {e}", "ValueError")
     result = _run(_tools(host, port).create_isaac_light(
         prim_path=prim_path,
         light_type=light_type,
@@ -1661,18 +1575,12 @@ def create_material(
     valid_shaders = ("UsdPreviewSurface", "OmniPBR")
     if shader_type not in valid_shaders:
         msg = f"Invalid shader_type '{shader_type}'. Must be one of: {valid_shaders}"
-        if is_json_mode():
-            emit_error(msg, "ValueError")
-        console.print(f"[red]{msg}[/red]")
-        raise typer.Exit(1)
+        fail(msg, "ValueError")
 
     try:
         color_list = [float(v) for v in color.split(",")]
     except ValueError as e:
-        if is_json_mode():
-            emit_error(f"Invalid numeric value in --color: {e}", "ValueError")
-        console.print(f"[red]Invalid numeric value in --color: {e}[/red]")
-        raise typer.Exit(1)
+        fail(f"Invalid numeric value in --color: {e}", "ValueError")
     result = _run(_tools(host, port).create_isaac_material(
         material_path=material_path,
         shader_type=shader_type,
@@ -1802,10 +1710,7 @@ def set_carb_settings(
     parsed: Dict[str, Any] = {}
     for a in assignments:
         if "=" not in a:
-            if is_json_mode():
-                emit_error(f"Invalid format: {a!r} — expected key=value")
-            console.print(f"[red]Invalid format: {a!r} — expected key=value[/red]")
-            raise typer.Exit(1)
+            fail(f"Invalid format: {a!r} — expected key=value")
         key, raw_val = a.split("=", 1)
         val: Any = raw_val
         if raw_val.lower() == "true":
@@ -1987,13 +1892,14 @@ def list_render_vars(
     port: Optional[int] = _port_opt,
 ) -> None:
     """List available render variable names from SyntheticData."""
-    result = _run(_tools(host, port).list_render_vars())
+    result = _run(_tools(host, port).list_render_vars(), allow_partial=True)
     if is_json_mode():
         emit(result)
+        exit_if_failed(result)
         return
     if result.get("syntheticdata_error"):
-        console.print(f"[red]Error:[/red] {result['syntheticdata_error']}")
-        return
+        console.print(f"[red]Error:[/red] {rich_escape(str(result['syntheticdata_error']))}")
+        raise typer.Exit(1)
     templates = result.get("render_var_templates", [])
     if templates:
         console.print(f"[bold]Render Var Templates ({result.get('render_var_count', len(templates))}):[/bold]")
@@ -2015,9 +1921,12 @@ def runtime_info(
     port: Optional[int] = _port_opt,
 ) -> None:
     """Get consolidated runtime diagnostics from Isaac Sim."""
-    result = _run(_tools(host, port).get_runtime_info())
+    # Sections fail independently (physics_error, viewport_error, ...); render
+    # the ones that worked, then exit non-zero if any failed.
+    result = _run(_tools(host, port).get_runtime_info(), allow_partial=True)
     if is_json_mode():
         emit(result)
+        exit_if_failed(result)
         return
 
     sections = [
@@ -2068,6 +1977,13 @@ def runtime_info(
             if val is not None:
                 table.add_row(k, str(val))
         console.print(table)
+
+    # Section errors the tables above don't show (physics_error, viewport_error).
+    shown = {f"{key}_error" for _, key, _ in sections}
+    for key, value in result.items():
+        if key.endswith("_error") and key not in shown and value is not None:
+            console.print(f"[red]{key}:[/red] {rich_escape(str(value))}")
+    exit_if_failed(result)
 
 
 # ---------------------------------------------------------------------------

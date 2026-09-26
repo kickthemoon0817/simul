@@ -3,16 +3,30 @@
 from __future__ import annotations
 
 import json
-import os
 import socket
-import stat
-import tempfile
 import time
-from pathlib import Path
 from typing import Any
 
-PROTOCOL_VERSION = 1
+# Re-exported: the Blender add-on and the CLI import BridgeFiles from here.
+from ..utils.private_files import BridgeFiles  # noqa: F401
+
+# Bump whenever the add-on and the server stop agreeing on a call shape. The
+# add-on is a separately installed ZIP that bundles its own copy of
+# BlenderRuntimeSession, so an upgraded server can otherwise send arguments
+# (e.g. capture ``agent_id``) that the stale add-on rejects with a bare
+# TypeError. Version 2: capture tools take ``agent_id``.
+PROTOCOL_VERSION = 2
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
+
+
+def protocol_mismatch_message(addon: Any, server: Any) -> str:
+    """Explain a server/add-on version skew with the fix, not just the symptom."""
+    return (
+        f"Blender bridge protocol mismatch: the Blender add-on speaks protocol {addon!r}, "
+        f"simul-mcp speaks protocol {server!r}. Rebuild the add-on with "
+        "`simul blender install-bridge`, reinstall and enable it in Blender, restart "
+        "Blender, then run `simul blender attach` again."
+    )
 
 
 class BridgeRemoteError(RuntimeError):
@@ -22,42 +36,6 @@ class BridgeRemoteError(RuntimeError):
         super().__init__(message)
         self.remote_type = remote_type
         self.details = details
-
-
-class BridgeFiles:
-    """Private discovery and attachment files shared by Blender and the CLI."""
-
-    @staticmethod
-    def write(path: Path, payload: dict[str, Any]) -> None:
-        """Atomically publish credentials readable only by their owner."""
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor, temporary = tempfile.mkstemp(prefix=".simul-", dir=path.parent)
-        try:
-            with os.fdopen(descriptor, "w") as stream:
-                json.dump(payload, stream)
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-
-    @staticmethod
-    def read(path: Path) -> dict[str, Any]:
-        """Read a regular, owner-only file without following symlinks."""
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        with os.fdopen(descriptor) as stream:
-            metadata = os.fstat(stream.fileno())
-            if not stat.S_ISREG(metadata.st_mode):
-                raise ValueError(f"Not a regular bridge file: {path}")
-            if hasattr(os, "getuid") and (
-                metadata.st_uid != os.getuid() or metadata.st_mode & 0o077
-            ):
-                raise PermissionError(
-                    f"Bridge file must be owned by this user and mode 0600: {path}"
-                )
-            data = json.loads(stream.read(MAX_MESSAGE_BYTES + 1))
-        if not isinstance(data, dict):
-            raise ValueError(f"Invalid bridge file: {path}")
-        return data
 
 
 class BridgeWire:
@@ -76,10 +54,11 @@ class BridgeWire:
         endpoint: dict[str, Any], payload: dict[str, Any], timeout: float
     ) -> dict[str, Any]:
         """Send exactly once; never retry an operation whose outcome is unknown."""
-        if (
-            endpoint.get("protocol") != PROTOCOL_VERSION
-            or endpoint.get("host") != "127.0.0.1"
-        ):
+        if endpoint.get("protocol") != PROTOCOL_VERSION:
+            raise ValueError(
+                protocol_mismatch_message(endpoint.get("protocol"), PROTOCOL_VERSION)
+            )
+        if endpoint.get("host") != "127.0.0.1":
             raise ValueError("Unsupported Blender bridge endpoint")
         if not isinstance(endpoint.get("token"), str) or not endpoint["token"]:
             raise ValueError("Missing Blender bridge authentication token")

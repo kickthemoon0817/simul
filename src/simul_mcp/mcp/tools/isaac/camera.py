@@ -1,23 +1,15 @@
 """Viewport & Camera tools for Isaac Sim."""
 
-import json
 import textwrap
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
-from ....adapters import IsaacSocketClient, ScriptResult
-from ...schemas.common import ErrorResponse
+from ....utils.paths import sandbox_error
 from ._shared import (
-    BULK_GEOMETRY_ATTRIBUTES,
-    DEFAULT_MAX_RESULTS,
-    LOG_SCAN_WINDOW_BYTES,
     MAX_CAPTURE_DIMENSION,
     MAX_INLINE_CAPTURE_BYTES,
     MAX_RETAINED_CAPTURES,
-    MAX_SCRIPT_BYTES,
-    PRIM_DETAIL_ASPECTS,
     FloatList,
     _pyval,
-    logger,
 )
 from .._meta import tool_meta
 
@@ -471,9 +463,7 @@ class CameraMixin:
                 "No allowed root is writable, so captures have nowhere to go. Set "
                 "viewport.capture_dir to a writable directory inside security.allowed_paths."
             )
-            return ErrorResponse(
-                error="No writable capture directory inside the sandbox",
-                error_type="SandboxError",
-                details=details,
-            ).model_dump()
+            return sandbox_error(
+                details, error="No writable capture directory inside the sandbox"
+            )
         return default_dir

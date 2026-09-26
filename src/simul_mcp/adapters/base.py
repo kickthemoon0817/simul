@@ -18,6 +18,11 @@ class BackendAdapter(Protocol):
     Attributes:
         name: The backend's registry name (``isaac``, ``usd``, ``blender``,
             ``unreal``); also the token the ROUTING instructions use.
+
+    An adapter may also expose an optional ``session_blocks_io`` attribute.
+    When it is true, the server runs each synchronous session call on a worker
+    thread so blocking socket I/O does not stall other MCP requests. It is not
+    a protocol member, so adapters that omit it still satisfy the protocol.
     """
 
     name: str

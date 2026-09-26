@@ -76,13 +76,18 @@ class InstanceSession:
         except OSError as exc:
             logger.debug("Failed to write session file for port %d: %s", self._port, exc)
 
-    def register(self, agent_id: str, purpose: str) -> dict[str, Any]:
+    def register(
+        self, agent_id: str, purpose: str, owner: Optional[str] = None
+    ) -> dict[str, Any]:
         """
         Register an agent session on this instance.
 
         Args:
             agent_id: Unique identifier for the agent/session.
             purpose: Free-text description of what the agent is doing.
+            owner: Opaque token for the MCP session holding the claim. Claim
+                   enforcement compares it as well as ``agent_id``, because
+                   ``agent_id`` is caller-chosen and listed to every agent.
 
         Returns:
             Dict with registration confirmation and compatibility info.
@@ -92,17 +97,22 @@ class InstanceSession:
         if existing:
             existing[0]["purpose"] = purpose
             existing[0]["last_active"] = time.time()
+            if owner is not None:
+                existing[0]["owner"] = owner
             self._write(sessions)
             return {"status": "updated", "agent_id": agent_id, "port": self._port}
 
         now = time.time()
-        sessions.append({
+        record: dict[str, Any] = {
             "agent_id": agent_id,
             "purpose": purpose,
             "tools_used": [],
             "started": now,
             "last_active": now,
-        })
+        }
+        if owner is not None:
+            record["owner"] = owner
+        sessions.append(record)
         self._write(sessions)
         return {"status": "registered", "agent_id": agent_id, "port": self._port}
 
