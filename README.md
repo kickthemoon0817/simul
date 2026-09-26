@@ -448,7 +448,6 @@ usd:
 viewport:
   capture:
     max_size: 2048
-    format: "png"
 
 isaac_sim:
   path: "${ISAAC_SIM_PATH}"
