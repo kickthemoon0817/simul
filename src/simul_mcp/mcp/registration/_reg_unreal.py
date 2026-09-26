@@ -11,7 +11,8 @@ from fastmcp.tools.tool import ToolResult
 
 from ..schemas.common import ErrorResponse
 from ..schemas.unreal import *
-from ._helpers import with_param_descriptions
+from ...tool_surfaces import THIN_UNREAL_TOOLS
+from ._helpers import surface_tool, with_param_descriptions
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -22,10 +23,8 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     Args:
         server: The MCP server instance.
-        thin: When True, only register the essential MCP tools:
-              ``unreal_health_check``, ``ping_unreal``,
-              ``list_unreal_instances``, ``control_unreal_ui``, ``capture_unreal_viewport`` and
-              ``execute_unreal_script``. Selected by
+        thin: When True, register only ``THIN_UNREAL_TOOLS`` from
+              ``simul_mcp.tool_surfaces``. Selected by
               ``unreal.tool_surface`` / ``simul-mcp server --unreal-tools``;
               the full set is also reachable via ``simul unreal --help``.
     """
@@ -33,7 +32,11 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     # and this module must import even where the Unreal backend is absent.
     from ...adapters.unreal_runtime import UNREAL_EXEC_MODES, UnrealRuntimeSession
 
-    @server.mcp.tool(
+    surface = THIN_UNREAL_TOOLS if thin else None
+    tool = surface_tool(server.mcp.tool, surface)
+    script_tool = surface_tool(server._script_tool, surface)
+
+    @tool(
         name="unreal_health_check",
         description="Check connectivity to the Unreal Engine Remote Control API.",
         annotations=server._tool_annotations(
@@ -63,7 +66,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     # Ping / multi-instance discovery
     # ------------------------------------------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="ping_unreal",
         description=(
             "Pre-flight check: verify that a running Unreal Engine instance is "
@@ -93,7 +96,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             lambda session: session.ping(),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="list_unreal_instances",
         description=(
             "Discover all running Unreal Engine instances by scanning the configured "
@@ -207,7 +210,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     # Viewport capture
     # ------------------------------------------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="capture_unreal_viewport",
         description=(
             "Capture a viewport screenshot via HighResScreenshot and return "
@@ -270,7 +273,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             },
         )
 
-    @server._script_tool(
+    @script_tool(
         name="execute_unreal_script",
         description=(
             "Execute arbitrary Python code inside the Unreal Engine editor. "
@@ -323,7 +326,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             params={"code_bytes": len(code), "mode": mode},
         )
 
-    @server.mcp.tool(
+    @tool(
         name="control_unreal_ui",
         description="Named controls in the explicitly attached Unreal editor: inspect, select actors, "
                     "edit transforms, pilot/eject actors, set game view, and show per-agent overlay cursors. "
@@ -381,14 +384,9 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             call,
         )
 
-    # -- Thin mode ends here: health check, ping, instance listing,
-    #    viewport capture and script execution are registered above.
-    if thin:
-        return
+    # -- Granular tools (full surface only) --------------------------------
 
-    # -- Full MCP tool set below -------------------------------------------
-
-    @server.mcp.tool(
+    @tool(
         name="get_unreal_engine_info",
         description="Get Unreal Engine runtime information.",
         annotations=server._tool_annotations(
@@ -414,7 +412,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             lambda session: session.get_engine_info(),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_unreal_loaded_map",
         description="Get the currently loaded persistent level path.",
         annotations=server._tool_annotations(
@@ -444,7 +442,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     # Phase 1: Scene Read Operations
     # ------------------------------------------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="list_unreal_actors",
         description="List actors in the current Unreal Engine level with optional class and tag filters.",
         annotations=server._tool_annotations(
@@ -484,7 +482,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_unreal_actor_info",
         description="Get detailed information about a specific actor including transform, components, and tags.",
         annotations=server._tool_annotations(
@@ -514,7 +512,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             lambda session: session.get_actor_info(actor_path),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="search_unreal_assets",
         description="Search the Unreal Asset Registry by name, class, or package path.",
         annotations=server._tool_annotations(
@@ -574,7 +572,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             _call,
         )
 
-    @server.mcp.tool(
+    @tool(
         name="describe_unreal_object",
         description="Get full property and function metadata for any UObject by path.",
         annotations=server._tool_annotations(
@@ -604,7 +602,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             lambda session: session.describe_object(object_path),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_unreal_actor_thumbnail",
         description=(
             "Get a thumbnail image for an Unreal asset. The image arrives as an "
@@ -647,7 +645,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="summarize_unreal_scene",
         description="Generate an LLM-friendly digest of the current Unreal scene.",
         annotations=server._tool_annotations(
@@ -675,7 +673,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     # -- Phase 2: Viewport & Visual Observation --
 
-    @server.mcp.tool(
+    @tool(
         name="get_unreal_viewport_info",
         description="Get active viewport camera and render information.",
         annotations=server._tool_annotations(
@@ -701,7 +699,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             lambda session: session.get_viewport_info(),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_unreal_camera_view",
         description="Set the editor viewport camera position and rotation.",
         annotations=server._tool_annotations(
@@ -763,7 +761,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="focus_unreal_on_actor",
         description="Focus the editor viewport camera on a specific actor.",
         annotations=server._tool_annotations(
@@ -801,7 +799,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     # -- Phase 3: Scene Manipulation --
 
-    @server.mcp.tool(
+    @tool(
         name="spawn_unreal_actor",
         description="Spawn an actor from a class or asset path.",
         annotations=server._tool_annotations(
@@ -848,7 +846,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="delete_unreal_actor",
         description="Delete an actor from the level. DESTRUCTIVE operation.",
         annotations=server._tool_annotations(
@@ -873,7 +871,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             lambda session: session.delete_actor(actor_path=actor_path),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_unreal_actor_transform",
         description="Set an actor's location, rotation, and scale.",
         annotations=server._tool_annotations(
@@ -925,7 +923,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_unreal_actor_property",
         description="Set a property on an Unreal actor by name and JSON value.",
         annotations=server._tool_annotations(
@@ -958,7 +956,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server._script_tool(
+    @script_tool(
         name="call_unreal_actor_function",
         description="Call a BlueprintCallable UFUNCTION on an actor.",
         annotations=server._tool_annotations(
@@ -989,7 +987,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_unreal_actor_parent",
         description="Attach an actor to a parent actor or detach it.",
         annotations=server._tool_annotations(
@@ -1018,7 +1016,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="add_unreal_component",
         description="Add a component to an Unreal actor.",
         annotations=server._tool_annotations(
@@ -1048,7 +1046,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_unreal_actor_visibility",
         description="Set actor visibility in the Unreal level.",
         annotations=server._tool_annotations(
@@ -1083,7 +1081,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     # Phase 4 — Materials, Lighting & Rendering
     # ---------------------------------------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="get_unreal_material_info",
         description="Get material instance parameters and metadata.",
         annotations=server._tool_annotations(
@@ -1109,7 +1107,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_unreal_material_params",
         description="Set scalar/vector/texture parameters on a Material Instance.",
         annotations=server._tool_annotations(
@@ -1169,7 +1167,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             _call,
         )
 
-    @server.mcp.tool(
+    @tool(
         name="create_unreal_material_instance",
         description="Create a Material Instance Constant from a parent material.",
         annotations=server._tool_annotations(
@@ -1199,7 +1197,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="assign_unreal_material",
         description="Assign a material to a mesh component's material slot.",
         annotations=server._tool_annotations(
@@ -1230,7 +1228,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_unreal_light_params",
         description="Set light component parameters (intensity, color, temperature, shadows).",
         annotations=server._tool_annotations(
@@ -1273,7 +1271,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_unreal_render_settings",
         description="Set rendering or post-process settings via console command.",
         annotations=server._tool_annotations(
@@ -1304,7 +1302,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     # ---- Phase 5: Physics & Simulation Control ----
 
-    @server.mcp.tool(
+    @tool(
         name="control_unreal_simulation",
         description="Control Play-In-Editor: start, stop, pause or resume. Exact frame stepping is unsupported.",
         annotations=server._tool_annotations(
@@ -1328,7 +1326,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             lambda session: session.control_simulation(action=action),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_unreal_simulation_status",
         description="Get current Play-In-Editor simulation status (playing, paused, stopped).",
         annotations=server._tool_annotations(
@@ -1349,7 +1347,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             lambda session: session.get_simulation_status(),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="enable_unreal_physics",
         description="Enable or disable physics simulation on an actor.",
         annotations=server._tool_annotations(
@@ -1380,7 +1378,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_unreal_collision",
         description="Set collision presets and enable/disable collision on an actor.",
         annotations=server._tool_annotations(
@@ -1411,7 +1409,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="apply_unreal_force",
         description="Apply a force or impulse to an actor's physics body.",
         annotations=server._tool_annotations(
@@ -1451,7 +1449,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="set_unreal_physics_params",
         description="Set physics body parameters (mass, damping, gravity) on an actor.",
         annotations=server._tool_annotations(
@@ -1490,7 +1488,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     # Phase 6: USD / SimReady Bridge
     # ----------------------------------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="import_unreal_usd",
         description="Import USD with Unreal's optional USDImporter plugin, enabled at editor startup.",
         annotations=server._tool_annotations(
@@ -1527,7 +1525,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="export_unreal_usd",
         description="Export selected Unreal actors with the optional USDImporter plugin's LevelExporterUSD.",
         annotations=server._tool_annotations(
@@ -1572,7 +1570,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             _call,
         )
 
-    @server.mcp.tool(
+    @tool(
         name="convert_to_simready",
         description="Unavailable in Unreal: SimReady conversion returns UnsupportedOperation without writing files.",
         annotations=server._tool_annotations(
@@ -1623,7 +1621,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="validate_simready_asset",
         description="Unavailable in Unreal: SimReady validation returns UnsupportedOperation.",
         annotations=server._tool_annotations(
@@ -1668,7 +1666,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             _call,
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_unreal_interchange_info",
         description="Query available Interchange pipelines and supported formats.",
         annotations=server._tool_annotations(
@@ -1693,7 +1691,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     # Phase 7: Advanced Agent Tools
     # ----------------------------------------------------------
 
-    @server._script_tool(
+    @script_tool(
         name="batch_unreal_operations",
         description="Execute multiple Remote Control operations in one HTTP call.",
         annotations=server._tool_annotations(
@@ -1728,7 +1726,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             _call,
         )
 
-    @server.mcp.tool(
+    @tool(
         name="query_unreal_scene_graph",
         description="Query the Unreal scene graph hierarchy.",
         annotations=server._tool_annotations(
@@ -1760,7 +1758,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="analyze_unreal_scene_for_robotics",
         description="Analyze the scene for robotics use-cases (traversability, graspability, collision).",
         annotations=server._tool_annotations(
@@ -1800,7 +1798,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             _call,
         )
 
-    @server.mcp.tool(
+    @tool(
         name="generate_unreal_procedural_scene",
         description="Generate a procedural scene (warehouse, outdoor, room, corridor).",
         annotations=server._tool_annotations(
@@ -1844,7 +1842,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             _call,
         )
 
-    @server.mcp.tool(
+    @tool(
         name="get_unreal_actor_by_semantic_label",
         description="Find actors by semantic tag or label.",
         annotations=server._tool_annotations(
@@ -1878,7 +1876,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     # Phase 8: Geometry & Modeling (GeometryScript)
     # ----------------------------------------------------------
 
-    @server.mcp.tool(
+    @tool(
         name="generate_unreal_mesh_primitive",
         description="Create a parametric mesh primitive (box, sphere, cylinder, cone, torus, capsule).",
         annotations=server._tool_annotations(
@@ -1923,7 +1921,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             _call,
         )
 
-    @server.mcp.tool(
+    @tool(
         name="apply_unreal_mesh_boolean",
         description="Apply boolean operation (union, subtract, intersect) between two meshes.",
         annotations=server._tool_annotations(
@@ -1954,7 +1952,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="compute_unreal_convex_hull",
         description="Compute convex hull envelope of a mesh.",
         annotations=server._tool_annotations(
@@ -1980,7 +1978,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="decompose_unreal_convex_hull",
         description="V-HACD convex decomposition for collision geometry.",
         annotations=server._tool_annotations(
@@ -2015,7 +2013,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="edit_unreal_mesh_topology",
         description="Edit mesh topology (extrude, bevel, inset, loop cut, scale_faces).",
         annotations=server._tool_annotations(
@@ -2064,7 +2062,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             _call,
         )
 
-    @server.mcp.tool(
+    @tool(
         name="subdivide_unreal_mesh",
         description="Catmull-Clark / Loop / bilinear subdivision.",
         annotations=server._tool_annotations(
@@ -2095,7 +2093,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="simplify_unreal_mesh",
         description="Simplify/decimate a mesh to reduce triangle count.",
         annotations=server._tool_annotations(
@@ -2128,7 +2126,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="cut_unreal_mesh_plane",
         description="Cut/slice a mesh along an arbitrary plane.",
         annotations=server._tool_annotations(
@@ -2172,7 +2170,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             _call,
         )
 
-    @server.mcp.tool(
+    @tool(
         name="validate_unreal_mesh",
         description="Validate mesh integrity (manifold, normals, degenerates, self-intersection).",
         annotations=server._tool_annotations(
@@ -2210,7 +2208,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             _call,
         )
 
-    @server.mcp.tool(
+    @tool(
         name="convert_unreal_mesh_format",
         description="Convert mesh between formats (static mesh, dynamic mesh, skeletal mesh).",
         annotations=server._tool_annotations(
@@ -2253,7 +2251,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             _call,
         )
 
-    @server.mcp.tool(
+    @tool(
         name="remesh_unreal_mesh",
         description="Remesh a mesh (uniform, adaptive) to improve triangle quality.",
         annotations=server._tool_annotations(
@@ -2288,7 +2286,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             ),
         )
 
-    @server.mcp.tool(
+    @tool(
         name="compute_unreal_mesh_uv",
         description="Generate or recompute UV coordinates for a mesh.",
         annotations=server._tool_annotations(

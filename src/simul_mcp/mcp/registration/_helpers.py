@@ -163,3 +163,33 @@ def resolve_deprecated_alias(
     if alias_value is not None and value == default:
         return alias_value
     return value
+
+
+def surface_tool(
+    register: Callable[..., Callable[[WrappedTool], WrappedTool]],
+    allowed: Optional[typing.Iterable[str]] = None,
+) -> Callable[..., Callable[[WrappedTool], WrappedTool]]:
+    """Wrap a tool-registration decorator factory so it registers only ``allowed`` names.
+
+    A backend with a thin tool surface decorates every tool through this
+    wrapper (around ``server.mcp.tool`` and ``server._script_tool`` alike); a
+    tool outside the surface is left an ordinary function, so the thin list in
+    ``simul_mcp.tool_surfaces`` is the only place that decides what registers.
+
+    Args:
+        register: The decorator factory to wrap, called with the tool's
+            registration arguments.
+        allowed: Tool names to register, or None to register every tool.
+
+    Returns:
+        A decorator factory taking the same arguments as ``register``.
+    """
+    names = None if allowed is None else frozenset(allowed)
+
+    def tool(*args: Any, **kwargs: Any) -> Callable[[WrappedTool], WrappedTool]:
+        name = kwargs.get("name", args[0] if args else None)
+        if names is not None and name not in names:
+            return lambda func: func
+        return register(*args, **kwargs)
+
+    return tool

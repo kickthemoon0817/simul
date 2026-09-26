@@ -9,6 +9,7 @@ from typing import Any, Dict
 import pytest
 
 
+from simul_mcp import tool_surfaces
 from simul_mcp.config import Settings
 from simul_mcp.mcp import backends as backends_module
 from simul_mcp.mcp import server as server_module
@@ -53,14 +54,7 @@ class FakeUnrealAdapter:
         yield session
 
 
-THIN_UNREAL_TOOLS: frozenset[str] = frozenset({
-    "unreal_health_check",
-    "ping_unreal",
-    "list_unreal_instances",
-    "control_unreal_ui",
-    "capture_unreal_viewport",
-    "execute_unreal_script",
-})
+THIN_UNREAL_TOOLS: frozenset[str] = frozenset(tool_surfaces.THIN_UNREAL_TOOLS)
 
 
 def _coro(value: Dict[str, Any]):

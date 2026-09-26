@@ -7,7 +7,8 @@ Top-level app ``simul`` with backend-specific sub-commands::
     simul info            # show capabilities
     simul version         # show version
     simul validate-config # validate YAML config
-    simul commands        # list all commands (JSON manifest)
+    simul commands        # list all CLI commands (JSON manifest)
+    simul tools           # list the MCP tools the server registers
     simul isaac ping      # check Isaac Sim connectivity
     simul isaac status    # instance status
     simul isaac scene     # scene overview
@@ -26,7 +27,7 @@ import json
 import socket
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, NoReturn, Optional, Set, Tuple
 
 import typer
 from rich.console import Console
@@ -34,7 +35,8 @@ from rich.panel import Panel
 from rich.table import Table
 
 from simul_mcp.cli.output import emit, emit_error, is_json_mode, set_json_mode
-from simul_mcp.config import get_settings, load_settings, validate_settings
+from simul_mcp.config import Settings, get_settings, load_settings, validate_settings
+from simul_mcp.tool_surfaces import THIN_BLENDER_TOOLS, THIN_UNREAL_TOOLS, TOOL_SURFACES
 from simul_mcp.logging import setup_logging, get_logger
 
 # Import sub-apps
@@ -266,6 +268,129 @@ def logs_tail(
 
 
 # ---------------------------------------------------------------------------
+# Backend / tool-surface options shared by server, info and tools
+# ---------------------------------------------------------------------------
+def _backends_option() -> Any:
+    return typer.Option(
+        None,
+        "--backends",
+        "-b",
+        help="Comma-separated backends to enable (isaac,unreal,usd,blender). Default: all available.",
+    )
+
+
+def _unreal_tools_option() -> Any:
+    return typer.Option(
+        None,
+        "--unreal-tools",
+        help=(
+            f"Unreal MCP tool surface: 'thin' (default: {', '.join(THIN_UNREAL_TOOLS)}) or 'full' "
+            "(every granular tool). Overrides unreal.tool_surface / UNREAL__TOOL_SURFACE."
+        ),
+    )
+
+
+def _blender_tools_option() -> Any:
+    return typer.Option(
+        None,
+        "--blender-tools",
+        help=(
+            "Blender MCP tool surface: 'full' (default: every Blender and SimReady tool) or 'thin' "
+            f"({', '.join(THIN_BLENDER_TOOLS)}). Overrides blender.tool_surface / BLENDER__TOOL_SURFACE."
+        ),
+    )
+
+
+def _unreal_mode_option() -> Any:
+    return typer.Option(
+        None, "--unreal-mode", help="Unreal connection: endpoint or attached (explicitly selected editor)"
+    )
+
+
+def _blender_mode_option() -> Any:
+    return typer.Option(
+        None,
+        "--blender-mode",
+        help="Blender connection: embedded (local bpy) or attached (selected existing window)",
+    )
+
+
+def _option_error(message: str) -> NoReturn:
+    """Report an invalid option value and exit 1 (a JSON envelope too in JSON mode)."""
+    console.print(f"[red]{message}[/red]")
+    if is_json_mode():
+        emit_error(message, "ValueError")
+    raise typer.Exit(1)
+
+
+def _with_section(settings: Settings, section: str, **update: Any) -> Settings:
+    """Return ``settings`` with fields of one frozen section replaced."""
+    return settings.model_copy(
+        update={section: getattr(settings, section).model_copy(update=update)}
+    )
+
+
+def _apply_backend_options(
+    settings: Settings,
+    backends: Optional[str] = None,
+    unreal_tools: Optional[str] = None,
+    blender_tools: Optional[str] = None,
+    unreal_mode: Optional[str] = None,
+    blender_mode: Optional[str] = None,
+) -> Tuple[Settings, Optional[Set[str]]]:
+    """Validate the backend options and fold them into the settings.
+
+    Args:
+        settings: Settings loaded from config and the environment.
+        backends: ``--backends`` value, comma-separated.
+        unreal_tools: ``--unreal-tools`` value.
+        blender_tools: ``--blender-tools`` value.
+        unreal_mode: ``--unreal-mode`` value.
+        blender_mode: ``--blender-mode`` value.
+
+    Returns:
+        The updated settings and the selected backend names (None for all).
+    """
+    choices = (
+        ("--unreal-mode", "unreal", "mode", unreal_mode, ("endpoint", "attached")),
+        ("--blender-mode", "blender", "mode", blender_mode, ("embedded", "attached")),
+        ("--unreal-tools", "unreal", "tool_surface", unreal_tools, TOOL_SURFACES),
+        ("--blender-tools", "blender", "tool_surface", blender_tools, TOOL_SURFACES),
+    )
+    for flag, section, field_name, raw, valid in choices:
+        if raw is None:
+            continue
+        value = raw.strip().lower()
+        if value not in valid:
+            _option_error(f"Unknown {flag} value: {raw!r}. Valid: {', '.join(valid)}")
+        settings = _with_section(settings, section, **{field_name: value})
+
+    backend_set: Optional[Set[str]] = None
+    if backends is not None:
+        from simul_mcp.mcp.backends import ALL_BACKEND_NAMES
+
+        backend_set = {b.strip().lower() for b in backends.split(",") if b.strip()}
+        if not backend_set:
+            # An empty selection must not silently mean "every backend".
+            _option_error(
+                f"--backends names no backend: {backends!r}. "
+                f"Valid: {', '.join(sorted(ALL_BACKEND_NAMES))}"
+            )
+        unknown = backend_set - ALL_BACKEND_NAMES
+        if unknown:
+            _option_error(
+                f"Unknown backends: {', '.join(sorted(unknown))}. "
+                f"Valid: {', '.join(sorted(ALL_BACKEND_NAMES))}"
+            )
+    return settings, backend_set
+
+
+def _is_enabled(backend_set: Optional[Set[str]], name: str) -> bool:
+    """Return True when ``name`` is selected (every backend is when none were named)."""
+    return backend_set is None or name in backend_set
+
+
+# ---------------------------------------------------------------------------
 # server
 # ---------------------------------------------------------------------------
 @app.command()
@@ -288,26 +413,11 @@ def server(
             "server.host:server.port) or sse (legacy network transport)."
         ),
     ),
-    backends: Optional[str] = typer.Option(
-        None,
-        "--backends",
-        "-b",
-        help="Comma-separated backends to enable (isaac,unreal,usd,blender). Default: all available.",
-    ),
-    unreal_tools: Optional[str] = typer.Option(
-        None,
-        "--unreal-tools",
-        help=(
-            "Unreal MCP tool surface: 'thin' (health, ping, instances, editor control, capture, "
-            "exec script) or 'full' (every granular tool). Overrides unreal.tool_surface."
-        ),
-    ),
-    unreal_mode: Optional[str] = typer.Option(
-        None, "--unreal-mode", help="Unreal connection: endpoint or attached (explicitly selected editor)"
-    ),
-    blender_mode: Optional[str] = typer.Option(
-        None, "--blender-mode", help="Blender connection: embedded (local bpy) or attached (selected existing window)"
-    ),
+    backends: Optional[str] = _backends_option(),
+    unreal_tools: Optional[str] = _unreal_tools_option(),
+    blender_tools: Optional[str] = _blender_tools_option(),
+    unreal_mode: Optional[str] = _unreal_mode_option(),
+    blender_mode: Optional[str] = _blender_mode_option(),
     log_level: Optional[str] = typer.Option(
         None, "--log-level", "-l", help="Log level (DEBUG, INFO, WARNING, ERROR)"
     ),
@@ -315,29 +425,22 @@ def server(
         False, "--verbose", "-v", help="Enable verbose logging"
     ),
 ) -> None:
-    """Start the Simul MCP Server."""
+    """Start the Simul MCP Server.
+
+    Only the backends named by --backends are probed at startup; the others
+    get no connection attempt and no banner line.
+    """
     try:
-        from simul_mcp.adapters import is_blender_available, is_headless_available
-        from simul_mcp.mcp.server import TRANSPORTS, SimulMCPServer
+        from simul_mcp.mcp.server import TRANSPORTS
 
         if config:
             settings = load_settings(config)
         else:
             settings = get_settings()
 
-        if unreal_mode is not None:
-            if unreal_mode not in {"endpoint", "attached"}:
-                emit_error("--unreal-mode must be endpoint or attached", "ValueError")
-            settings = settings.model_copy(update={
-                "unreal": settings.unreal.model_copy(update={"mode": unreal_mode})
-            })
-
-        if blender_mode is not None:
-            if blender_mode not in ("embedded", "attached"):
-                emit_error("--blender-mode must be embedded or attached", "ValueError")
-            settings = settings.model_copy(update={
-                "blender": settings.blender.model_copy(update={"mode": blender_mode})
-            })
+        settings, backend_set = _apply_backend_options(
+            settings, backends, unreal_tools, blender_tools, unreal_mode, blender_mode
+        )
 
         # LoggingConfig is frozen on purpose, so rebuild the section rather
         # than assigning into it — assignment raises ValidationError and took
@@ -346,29 +449,7 @@ def server(
             "DEBUG" if verbose else (log_level.upper() if log_level else None)
         )
         if resolved_level:
-            settings = settings.model_copy(
-                update={
-                    "logging": settings.logging.model_copy(
-                        update={"level": resolved_level}
-                    )
-                }
-            )
-
-        if unreal_tools is not None:
-            surface = unreal_tools.strip().lower()
-            if surface not in ("thin", "full"):
-                console.print(
-                    f"[red]Unknown --unreal-tools value: {unreal_tools!r}. "
-                    f"Valid: thin, full[/red]"
-                )
-                raise typer.Exit(1)
-            settings = settings.model_copy(
-                update={
-                    "unreal": settings.unreal.model_copy(
-                        update={"tool_surface": surface}
-                    )
-                }
-            )
+            settings = _with_section(settings, "logging", level=resolved_level)
 
         transport = transport.strip().lower()
         if transport not in TRANSPORTS:
@@ -378,50 +459,53 @@ def server(
             )
             raise typer.Exit(1)
 
-        # Parse --backends into a set
-        backend_set = None
-        if backends:
-            backend_set = {b.strip().lower() for b in backends.split(",")}
-            unknown = backend_set - SimulMCPServer.ALL_BACKENDS
-            if unknown:
-                console.print(
-                    f"[red]Unknown backends: {', '.join(sorted(unknown))}. "
-                    f"Valid: {', '.join(sorted(SimulMCPServer.ALL_BACKENDS))}[/red]"
-                )
-                raise typer.Exit(1)
-
         setup_logging(settings)
         logger = get_logger(__name__)
-
-        isaac_host = settings.isaac_sim.socket_host
-        isaac_port = settings.isaac_sim.socket_port
-        isaac_reachable = _is_isaac_reachable(isaac_host, isaac_port)
-        blender_available = settings.blender.mode == "attached" or is_blender_available()
-        usd_available = is_headless_available()
 
         backends_label = (
             ", ".join(sorted(backend_set)) if backend_set else "all available"
         )
-        console.print(
-            Panel.fit(
-                f"[bold blue]Simul -- 3D Simulation & DCC Tools[/bold blue]\n"
-                f"Transport: {transport}\n"
-                f"Backends: {backends_label}\n"
-                f"Unreal tools: {settings.unreal.tool_surface}\n"
-                f"Isaac Sim (TCP :{isaac_port}): {'reachable' if isaac_reachable else 'not reachable (tools will retry at call time)'}\n"
-                f"Blender: {'available' if blender_available else 'unavailable'}\n"
-                f"USD Headless: {'available' if usd_available else 'unavailable'}\n"
-                f"Config: {config or 'default'}\n"
-                f"Log Level: {settings.logging.level}",
-                title="Starting Server",
+        lines = [
+            "[bold blue]Simul -- 3D Simulation & DCC Tools[/bold blue]",
+            f"Transport: {transport}",
+            f"Backends: {backends_label}",
+        ]
+        # Probe only what was selected: each probe is a connection attempt or
+        # a runtime import that a per-session stdio spawn pays every time.
+        if _is_enabled(backend_set, "isaac"):
+            isaac_port = settings.isaac_sim.socket_port
+            isaac_reachable = _is_isaac_reachable(settings.isaac_sim.socket_host, isaac_port)
+            lines.append(
+                f"Isaac Sim (TCP :{isaac_port}): "
+                f"{'reachable' if isaac_reachable else 'not reachable (tools will retry at call time)'}"
             )
-        )
+        if _is_enabled(backend_set, "unreal"):
+            lines.append(f"Unreal tools: {settings.unreal.tool_surface}")
+        if _is_enabled(backend_set, "blender"):
+            from simul_mcp.adapters import is_blender_available
+
+            blender_available = settings.blender.mode == "attached" or is_blender_available()
+            lines.append(
+                f"Blender ({settings.blender.mode}): "
+                f"{'available' if blender_available else 'unavailable'}, "
+                f"tools: {settings.blender.tool_surface}"
+            )
+        if _is_enabled(backend_set, "usd"):
+            from simul_mcp.adapters import is_headless_available
+
+            lines.append(
+                f"USD Headless: {'available' if is_headless_available() else 'unavailable'}"
+            )
+        lines += [f"Config: {config or 'default'}", f"Log Level: {settings.logging.level}"]
+        console.print(Panel.fit("\n".join(lines), title="Starting Server"))
 
         logger.info(f"Starting Simul 3D MCP Server with {transport} transport")
         asyncio.run(start_mcp_server(settings, transport, backends=backend_set))
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Server stopped by user[/yellow]")
+    except typer.Exit:
+        raise
     except Exception as e:
         console.print(f"[red]Error starting server: {e}[/red]")
         raise typer.Exit(1)
@@ -441,8 +525,16 @@ def info(
         file_okay=True,
         dir_okay=False,
     ),
+    backends: Optional[str] = _backends_option(),
+    unreal_tools: Optional[str] = _unreal_tools_option(),
+    blender_tools: Optional[str] = _blender_tools_option(),
+    unreal_mode: Optional[str] = _unreal_mode_option(),
+    blender_mode: Optional[str] = _blender_mode_option(),
 ) -> None:
-    """Show server information and capabilities."""
+    """Show server information and capabilities.
+
+    Backends left out of --backends are not probed; they report null status.
+    """
     try:
         from simul_mcp.adapters import is_blender_available, is_headless_available
         from simul_mcp.mcp.server import SimulMCPServer
@@ -451,16 +543,27 @@ def info(
             settings = load_settings(config)
         else:
             settings = get_settings()
+        settings, backend_set = _apply_backend_options(
+            settings, backends, unreal_tools, blender_tools, unreal_mode, blender_mode
+        )
 
         isaac_host = settings.isaac_sim.socket_host
         isaac_port = settings.isaac_sim.socket_port
-        isaac_reachable = _is_isaac_reachable(isaac_host, isaac_port)
-        blender_available = settings.blender.mode == "attached" or is_blender_available()
-        usd_available = is_headless_available()
+        isaac_reachable: Optional[bool] = (
+            _is_isaac_reachable(isaac_host, isaac_port)
+            if _is_enabled(backend_set, "isaac") else None
+        )
+        blender_available: Optional[bool] = (
+            settings.blender.mode == "attached" or is_blender_available()
+            if _is_enabled(backend_set, "blender") else None
+        )
+        usd_available: Optional[bool] = (
+            is_headless_available() if _is_enabled(backend_set, "usd") else None
+        )
 
         # Instantiate the server so the listing is what actually registered,
         # grouped by the backend registry entry that registered each tool.
-        server_instance = SimulMCPServer(settings)
+        server_instance = SimulMCPServer(settings, backends=backend_set)
         categories: dict[str, list[str]] = server_instance.tools_by_backend()
         tool_names: list[str] = sorted(
             name for names in categories.values() for name in names
@@ -492,13 +595,18 @@ def info(
         system_table.add_column("Component", style="cyan")
         system_table.add_column("Status", style="green")
         system_table.add_column("Details")
+        skipped = ("Not Enabled", "Not probed: left out of --backends")
         system_table.add_row(
             f"Isaac Sim (TCP :{isaac_port})",
-            "Reachable" if isaac_reachable else "Not Reachable",
-            (
-                "Simulation & viewport via TCP socket"
-                if isaac_reachable
-                else "Isaac Sim tools will retry at call time"
+            *(
+                skipped if isaac_reachable is None else (
+                    "Reachable" if isaac_reachable else "Not Reachable",
+                    (
+                        "Simulation & viewport via TCP socket"
+                        if isaac_reachable
+                        else "Isaac Sim tools will retry at call time"
+                    ),
+                )
             ),
         )
         if isaac_install_path is not None:
@@ -509,23 +617,27 @@ def info(
             )
         system_table.add_row(
             "Blender Runtime",
-            "Available" if blender_available else "Not Available",
-            (
-                "Selected window bridge; use simul blender status to check liveness"
-                if settings.blender.mode == "attached"
-                else (
-                    "Blender scene tools through local bpy"
-                    if blender_available else "Install bpy or use attached mode"
+            *(
+                skipped if blender_available is None else (
+                    "Available" if blender_available else "Not Available",
+                    (
+                        "Selected window bridge; use simul blender status to check liveness"
+                        if settings.blender.mode == "attached"
+                        else (
+                            "Blender scene tools through local bpy"
+                            if blender_available else "Install bpy or use attached mode"
+                        )
+                    ),
                 )
             ),
         )
         system_table.add_row(
             "USD Headless",
-            "Available" if usd_available else "Not Available",
-            (
-                "pxr library for USD file operations"
-                if usd_available
-                else "No USD support"
+            *(
+                skipped if usd_available is None else (
+                    "Available" if usd_available else "Not Available",
+                    "pxr library for USD file operations" if usd_available else "No USD support",
+                )
             ),
         )
         console.print(system_table)
@@ -650,9 +762,135 @@ def _collect_commands(
 
 @app.command()
 def commands() -> None:
-    """List all available commands with parameters (always JSON)."""
+    """List all CLI commands with parameters (always JSON). For the MCP tools, see `tools`."""
     cmds = _collect_commands(app)
-    print(json.dumps({"commands": cmds, "count": len(cmds)}, indent=2))
+    print(
+        json.dumps(
+            {
+                "commands": cmds,
+                "count": len(cmds),
+                "mcp_tools": "These are CLI commands; `simul-mcp tools` lists the MCP tools the server registers.",
+            },
+            indent=2,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# tools  (the MCP tool surface, without a live session)
+# ---------------------------------------------------------------------------
+async def _list_mcp_tools(server_instance: Any) -> List[Dict[str, Any]]:
+    """Return each registered tool as the MCP ``tools/list`` response states it."""
+    listed = await server_instance.mcp.list_tools()
+    result: List[Dict[str, Any]] = []
+    for tool in listed:
+        mcp_tool = tool.to_mcp_tool() if hasattr(tool, "to_mcp_tool") else tool
+        dumped = mcp_tool.model_dump(exclude_none=True, by_alias=True)
+        entry: Dict[str, Any] = {
+            "name": dumped["name"],
+            "description": dumped.get("description", ""),
+            "input_schema": dumped.get("inputSchema", {}),
+        }
+        if dumped.get("annotations"):
+            entry["annotations"] = dumped["annotations"]
+        result.append(entry)
+    return result
+
+
+@app.command()
+def tools(
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help="Path to configuration file",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+    ),
+    backends: Optional[str] = _backends_option(),
+    unreal_tools: Optional[str] = _unreal_tools_option(),
+    blender_tools: Optional[str] = _blender_tools_option(),
+    unreal_mode: Optional[str] = _unreal_mode_option(),
+    blender_mode: Optional[str] = _blender_mode_option(),
+) -> None:
+    """List the MCP tools the server registers, grouped by backend.
+
+    JSON mode gives each tool's name, description, input schema and
+    annotations exactly as an MCP client's tools/list receives them, plus the
+    serialized size per backend. Each selected backend's tool surface is
+    listed whether or not its runtime is installed here ("available" says
+    which); nothing is probed or connected. `commands` lists CLI commands.
+    """
+    try:
+        from simul_mcp.mcp.backends import BACKENDS
+        from simul_mcp.mcp.server import SimulMCPServer
+
+        settings = load_settings(config) if config else get_settings()
+        settings, backend_set = _apply_backend_options(
+            settings, backends, unreal_tools, blender_tools, unreal_mode, blender_mode
+        )
+        server_instance = SimulMCPServer(
+            settings, backends=backend_set, require_available=False
+        )
+        listed = asyncio.run(_list_mcp_tools(server_instance))
+        capabilities = server_instance.get_capabilities()
+        owner = server_instance._tool_backends
+
+        groups: Dict[str, Dict[str, Any]] = {}
+        for spec in BACKENDS:
+            if not _is_enabled(backend_set, spec.name):
+                continue
+            section = getattr(settings, spec.settings_attribute)
+            group: Dict[str, Any] = {
+                "label": spec.label,
+                "available": capabilities[spec.name]["available"],
+                "tools": [t for t in listed if owner.get(t["name"]) == spec.name],
+            }
+            surface = getattr(section, "tool_surface", None)
+            if surface is not None:
+                group["tool_surface"] = surface
+            groups[spec.name] = group
+        groups["server"] = {
+            "label": "Server",
+            "available": True,
+            "tools": [t for t in listed if t["name"] not in owner],
+        }
+        for group in groups.values():
+            group["tool_count"] = len(group["tools"])
+            group["bytes"] = len(json.dumps(group["tools"]))
+
+        if is_json_mode():
+            emit(
+                {
+                    "tool_count": len(listed),
+                    "bytes": sum(g["bytes"] for g in groups.values()),
+                    "backends": groups,
+                }
+            )
+            return
+
+        table = Table(title=f"MCP Tools ({len(listed)})")
+        table.add_column("Backend", style="cyan")
+        table.add_column("Tool")
+        for group in groups.values():
+            heading = group["label"]
+            if "tool_surface" in group:
+                heading += f" ({group['tool_surface']})"
+            if not group["available"]:
+                heading += " [dim]runtime unavailable here[/dim]"
+            for index, name in enumerate(sorted(t["name"] for t in group["tools"])):
+                table.add_row(heading if index == 0 else "", name)
+            table.add_section()
+        console.print(table)
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        if is_json_mode():
+            emit_error(str(e), "ToolsError")
+        console.print(f"[red]Error listing MCP tools: {e}[/red]")
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------
