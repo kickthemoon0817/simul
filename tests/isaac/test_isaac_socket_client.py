@@ -10,7 +10,11 @@ import pytest
 
 
 from simul_mcp.adapters.isaac_socket_client import (
+    BRIDGE_SCRIPT_REPLY_MARGIN_SECONDS,
     BridgeCircuitOpenError,
+    BridgeRequestDeliveredError,
+    BridgeResponseConnectionError,
+    BridgeResponseTimeoutError,
     IsaacSocketClient,
     ScriptResult,
 )
@@ -229,7 +233,9 @@ def test_bridge_execute_script_carries_the_timeout() -> None:
 
     assert result.success and result.transport == "bridge"
     client._bridge_request.assert_awaited_once_with(  # type: ignore[attr-defined]
-        "execute_script", {"code": "print('hi')", "timeout": 9.0}
+        "execute_script",
+        {"code": "print('hi')", "timeout": 9.0},
+        read_timeout=14.0,
     )
 
 
@@ -539,7 +545,9 @@ def test_interrupt_bypasses_the_open_circuit_and_the_lock() -> None:
 
     response = asyncio.run(scenario())
     assert response["payload"] == {"interrupted": True}
-    client._dial_bridge.assert_awaited_once_with("interrupt", {})  # type: ignore[attr-defined]
+    client._dial_bridge.assert_awaited_once_with(  # type: ignore[attr-defined]
+        "interrupt", {}, read_timeout=None
+    )
 
 
 def test_breaker_settings_are_validated() -> None:
@@ -547,3 +555,210 @@ def test_breaker_settings_are_validated() -> None:
         IsaacSocketClient(bridge_failure_threshold=0)
     with pytest.raises(ValueError):
         IsaacSocketClient(bridge_cooldown_seconds=-1.0)
+
+
+# ---------------------------------------------------------------------------
+# Fallback safety: a script the bridge received must never be re-sent to 8226
+# ---------------------------------------------------------------------------
+
+
+class _FakeBridge:
+    """Length-prefixed bridge stand-in that reads the request frame, then misbehaves.
+
+    ``mode``: "hang" never replies, "close" drops the connection, "reply"
+    answers ``ok`` after ``reply_delay`` seconds.
+    """
+
+    def __init__(self, mode: str, reply_delay: float = 0.0) -> None:
+        self.mode = mode
+        self.reply_delay = reply_delay
+        self.requests: list[dict[str, object]] = []
+        self.port = 0
+        self._server: asyncio.AbstractServer | None = None
+        self._release = asyncio.Event()
+
+    async def start(self) -> None:
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.port = self._server.sockets[0].getsockname()[1]
+
+    async def stop(self) -> None:
+        assert self._server is not None
+        self._release.set()
+        self._server.close()
+        await asyncio.wait_for(self._server.wait_closed(), timeout=5)
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            size = int.from_bytes(await reader.readexactly(4), "big")
+            request = json.loads(await reader.readexactly(size))
+            self.requests.append(request)
+            if self.mode == "hang":
+                await self._release.wait()
+            elif self.mode == "reply":
+                await asyncio.sleep(self.reply_delay)
+                body = json.dumps(
+                    {
+                        "request_id": request["request_id"],
+                        "status": "ok",
+                        "payload": {"output": "bridge-done"},
+                    }
+                ).encode()
+                writer.write(len(body).to_bytes(4, "big") + body)
+                await writer.drain()
+        finally:
+            writer.close()
+
+
+def _fallback_scenario(
+    bridge_mode: str | None, reply_delay: float = 0.0, **client_kwargs: object
+) -> tuple[_FakeBridge | None, _FakeSocketServer, object]:
+    """Run ``execute`` against a fake bridge plus a fake stock socket.
+
+    ``bridge_mode=None`` points the client at a closed bridge port. Returns the
+    bridge, the stock socket, and either the ScriptResult or the raised error.
+    """
+
+    async def scenario() -> tuple[_FakeBridge | None, _FakeSocketServer, object]:
+        stock = _FakeSocketServer(flavor="vscode")
+        await stock.start()
+        bridge: _FakeBridge | None = None
+        if bridge_mode is None:
+            probe = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+            bridge_port = probe.sockets[0].getsockname()[1]
+            probe.close()
+            await probe.wait_closed()
+        else:
+            bridge = _FakeBridge(bridge_mode, reply_delay=reply_delay)
+            await bridge.start()
+            bridge_port = bridge.port
+        options: dict[str, object] = {
+            "host": "127.0.0.1",
+            "port": stock.port,
+            "bridge_host": "127.0.0.1",
+            "bridge_port": bridge_port,
+            "prefer_bridge": True,
+            "fallback_to_vscode": True,
+            "socket_protocol": "vscode",
+            "timeout_seconds": 5.0,
+            "bridge_timeout_seconds": 0.3,
+            "script_timeout_seconds": 0.2,
+        }
+        options.update(client_kwargs)
+        client = IsaacSocketClient(**options)  # type: ignore[arg-type]
+        outcome: object
+        try:
+            outcome = await client.execute("create_prim('/World/Box')")
+        except Exception as exc:  # noqa: BLE001 - the test inspects it
+            outcome = exc
+        finally:
+            if bridge is not None:
+                await bridge.stop()
+            await stock.stop()
+        return bridge, stock, outcome
+
+    return asyncio.run(scenario())
+
+
+def test_delivered_script_is_not_rerun_on_the_stock_socket_after_a_read_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bridge got the script and went quiet: surface the timeout, do not re-send."""
+    monkeypatch.setattr(
+        "simul_mcp.adapters.isaac_socket_client.BRIDGE_SCRIPT_REPLY_MARGIN_SECONDS", 0.1
+    )
+    bridge, stock, outcome = _fallback_scenario("hang")
+
+    assert bridge is not None and len(bridge.requests) == 1
+    assert stock.requests == []  # never executed a second time
+    assert isinstance(outcome, BridgeResponseTimeoutError)
+    assert isinstance(outcome, BridgeRequestDeliveredError)
+    assert isinstance(outcome, TimeoutError)  # existing handlers still match
+    assert "not retried" in str(outcome)
+
+
+def test_delivered_script_is_not_rerun_when_the_bridge_drops_the_connection() -> None:
+    bridge, stock, outcome = _fallback_scenario("close")
+
+    assert bridge is not None and len(bridge.requests) == 1
+    assert stock.requests == []
+    assert isinstance(outcome, BridgeResponseConnectionError)
+    assert isinstance(outcome, ConnectionError)
+
+
+def test_refused_bridge_still_falls_back_to_the_stock_socket() -> None:
+    """Nothing reached the bridge, so running the script on 8226 is safe."""
+    _, stock, outcome = _fallback_scenario(None)
+
+    assert isinstance(outcome, ScriptResult)
+    assert outcome.success and outcome.transport == "vscode"
+    assert stock.requests == ["create_prim('/World/Box')"]
+
+
+def test_bridge_waits_for_the_script_budget_not_just_the_bridge_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply that lands after bridge_timeout but inside script_timeout is accepted.
+
+    Before the fix the client gave up at ``bridge_timeout_seconds`` (0.2 s here)
+    while the bridge was still honouring the 0.6 s script budget it was sent.
+    """
+    monkeypatch.setattr(
+        "simul_mcp.adapters.isaac_socket_client.BRIDGE_SCRIPT_REPLY_MARGIN_SECONDS", 0.5
+    )
+    bridge, stock, outcome = _fallback_scenario(
+        "reply",
+        reply_delay=0.5,
+        bridge_timeout_seconds=0.2,
+        script_timeout_seconds=0.6,
+    )
+
+    assert isinstance(outcome, ScriptResult), outcome
+    assert outcome.success and outcome.transport == "bridge"
+    assert outcome.output == "bridge-done"
+    assert bridge is not None and bridge.requests[0]["payload"]["timeout"] == 0.6  # type: ignore[index]
+    assert stock.requests == []
+
+
+def test_bridge_read_timeout_is_at_least_the_script_timeout_plus_margin() -> None:
+    """``isaac exec --timeout 300`` with bridge_timeout=30 must wait past 299 s."""
+    client = IsaacSocketClient(
+        bridge_host="127.0.0.1",
+        bridge_port=8229,
+        prefer_bridge=True,
+        timeout_seconds=300.0,
+        bridge_timeout_seconds=30.0,
+    )
+    client._dial_bridge = AsyncMock(  # type: ignore[attr-defined]
+        return_value={"status": "ok", "payload": {"output": ""}}
+    )
+
+    asyncio.run(client.execute("pass"))
+
+    read_timeout = client._dial_bridge.await_args.kwargs["read_timeout"]  # type: ignore[attr-defined]
+    assert read_timeout >= 299.0 + BRIDGE_SCRIPT_REPLY_MARGIN_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# Readiness probes must not be throttled by the circuit breaker
+# ---------------------------------------------------------------------------
+
+
+def test_probe_client_without_breaker_dials_the_bridge_on_every_poll() -> None:
+    client = _breaker_client(bridge_circuit_breaker=False)
+    client._dial_bridge = AsyncMock(  # type: ignore[attr-defined]
+        side_effect=[ConnectionRefusedError("binding")] * 5 + [{"status": "ok", "payload": {}}]
+    )
+
+    async def scenario() -> list[bool]:
+        results = []
+        for _ in range(6):
+            try:
+                results.append((await client.bridge_request("ping", {}))["status"] == "ok")
+            except ConnectionRefusedError as exc:
+                assert not isinstance(exc, BridgeCircuitOpenError)
+                results.append(False)
+        return results
+
+    assert asyncio.run(scenario()) == [False] * 5 + [True]
+    assert client._dial_bridge.await_count == 6  # type: ignore[attr-defined]
+    assert client.bridge_circuit_open is False
