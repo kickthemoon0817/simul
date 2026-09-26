@@ -65,6 +65,22 @@ Run the suite with the checkout's source: `tests/conftest.py` puts `src`
 first on `sys.path`, so `pytest tests/` from the repo root exercises the
 files next to it whatever `simul-mcp` is installed in the interpreter.
 
+## Versioning
+
+The version lives in four constants that move together (`pyproject.toml`,
+`.claude-plugin/plugin.json`, `src/simul_mcp/__init__.py`, the bridge ext's
+`config/extension.toml`); `tests/test_version_lockstep.py` enforces it.
+
+- **Patch (`0.X.Y` → `0.X.Y+1`) — use actively.** Bump the patch version
+  whenever changes land on `main` (a merged fix or feature PR, or a batch of
+  them). No approval, no git tag and no GitHub Release: the bump PR alone.
+- **Minor (`0.X.Y` → `0.X+1.0`) — developer approval only.** Never bump the
+  minor version on your own initiative; propose it and wait for an explicit
+  yes from a developer. Only minor versions are tagged (`v0.X.0`), and each
+  one gets a GitHub Release with release notes.
+
+Procedure for both: `docs/releasing.md`.
+
 ## MCP Error Handling
 
 - Tools return JSON-serializable dicts.
