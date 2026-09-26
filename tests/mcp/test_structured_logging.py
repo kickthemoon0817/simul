@@ -93,19 +93,35 @@ class TestRequestContextMiddlewareContextVarReset:
 
         assert asyncio.run(run()) == ("-", "-")
 
-    def test_emits_one_audit_record_per_call(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_emits_one_audit_record_per_call(self) -> None:
         async def ok(context):  # type: ignore[no-untyped-def]
             return None
 
         async def boom(context):  # type: ignore[no-untyped-def]
             raise RuntimeError("x")
 
-        middleware = build_request_context_middleware()
-        with caplog.at_level(logging.INFO, logger="simul_mcp.audit"):
+        # Capture on the audit logger itself: an earlier setup_logging() call
+        # can turn off propagation, which would hide records from caplog.
+        records: list[logging.LogRecord] = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        audit_logger = logging.getLogger("simul_mcp.audit")
+        handler = _Collect(level=logging.INFO)
+        previous_level = audit_logger.level
+        audit_logger.addHandler(handler)
+        audit_logger.setLevel(logging.INFO)
+        try:
+            middleware = build_request_context_middleware()
             asyncio.run(middleware.on_call_tool(_FakeContext("ok_tool"), ok))
             with pytest.raises(RuntimeError):
                 asyncio.run(middleware.on_call_tool(_FakeContext("bad_tool"), boom))
-        audits = [r.audit for r in caplog.records if hasattr(r, "audit")]
+        finally:
+            audit_logger.removeHandler(handler)
+            audit_logger.setLevel(previous_level)
+        audits = [r.audit for r in records if hasattr(r, "audit")]
         assert [a["tool"] for a in audits] == ["ok_tool", "bad_tool"]
         assert audits[0]["status"] == "ok"
         assert audits[1]["status"] == "error"
