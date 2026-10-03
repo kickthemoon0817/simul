@@ -28,7 +28,9 @@ uv venv .venv && uv pip install -e ".[dev]"
 source .venv/bin/activate
 ```
 
-`uv sync --extra dev` installs the exact versions from `uv.lock`, as CI does.
+`uv sync --locked --extra dev` installs exactly the versions in `uv.lock`, as CI
+does. It refuses a stale lock: after changing dependencies, run `uv lock` and
+commit `uv.lock`.
 
 ## Before you open a pull request
 

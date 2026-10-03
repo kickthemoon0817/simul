@@ -180,8 +180,8 @@ manifest live in this same repo.
 Policy and procedure: `AGENTS.md` § Versioning and `docs/releasing.md`.
 Hard rules for Claude:
 
-- Bump the **patch** version (all four constants, one `chore/bump-version-X.Y.Z`
-  PR) whenever changes land on `main`. Patch versions are never tagged and
+- Bump the **patch** version (all four constants plus `uv lock`, one
+  `chore/bump-version-X.Y.Z` PR) whenever changes land on `main`. Patch versions are never tagged and
   get no GitHub Release.
 - Never bump the **minor** version without an explicit yes from a developer
   for that version. A minor bump is tagged on the bump commit and published

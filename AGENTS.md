@@ -70,7 +70,10 @@ files next to it whatever `simul` is installed in the interpreter.
 
 The version lives in four constants that move together (`pyproject.toml`,
 `.claude-plugin/plugin.json`, `src/simul/__init__.py`, the bridge ext's
-`config/extension.toml`); `tests/test_version_lockstep.py` enforces it.
+`config/extension.toml`), and `uv lock` records it in `uv.lock`, so a bump
+commit includes the regenerated lock; `tests/test_version_lockstep.py`
+enforces both. CI installs with `uv sync --locked`, so re-run `uv lock`
+whenever dependencies change too.
 
 - **Patch (`0.X.Y` → `0.X.Y+1`) — use actively.** Bump the patch version
   whenever changes land on `main` (a merged fix or feature PR, or a batch of

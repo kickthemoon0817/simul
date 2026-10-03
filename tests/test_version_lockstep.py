@@ -73,6 +73,22 @@ def test_all_four_version_constants_agree() -> None:
     )
 
 
+def test_uv_lock_records_the_current_version() -> None:
+    """``uv lock`` stores the project version; a bump without it leaves the lock stale.
+
+    CI installs with ``uv sync --locked``, which refuses a stale lock, so a
+    bump commit must include the regenerated ``uv.lock``.
+    """
+    import tomllib
+
+    lock = tomllib.loads((_REPO / "uv.lock").read_text(encoding="utf-8"))
+    locked = [p["version"] for p in lock["package"] if p["name"] == "simul-toolkit"]
+    assert locked == [_read_pyproject_version()], (
+        f"uv.lock records simul-toolkit {locked}, pyproject.toml says "
+        f"{_read_pyproject_version()}: run `uv lock` and commit uv.lock with the bump."
+    )
+
+
 def test_license_metadata_agrees_with_license_file() -> None:
     """pyproject, plugin.json and ``__license__`` all name the LICENSE file's license."""
     import tomllib
