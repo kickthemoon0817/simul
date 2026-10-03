@@ -48,12 +48,12 @@ jobs:
           enable-cache: true
 
       - name: Install project from uv.lock (with dev extras)
-        # uv sync respects uv.lock for reproducibility — the same
-        # transitive deps that local dev resolves are what CI runs.
-        # Without this, uv pip install would re-resolve from PyPI
-        # and a transitive break could flip CI red unrelated to
-        # the PR.
-        run: uv sync --extra dev
+        # --locked installs exactly what uv.lock pins and fails when
+        # the lock no longer matches pyproject.toml (a dependency or
+        # version change without `uv lock`). Plain `uv sync` would
+        # re-resolve a stale lock silently, so CI would stop testing
+        # the versions developers get from the lock.
+        run: uv sync --locked --extra dev
 
       - name: Run unit tests
         # The project's pyproject.toml addopts already bakes in
@@ -89,7 +89,7 @@ jobs:
           enable-cache: true
 
       - name: Install project from uv.lock (with dev extras)
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       - name: Run packaging-marker tests
         # Override the addopts default `-m "not packaging"` by
@@ -124,7 +124,7 @@ jobs:
           enable-cache: true
 
       - name: Install project from uv.lock (with dev extras)
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       - name: black --check (informational)
         continue-on-error: true

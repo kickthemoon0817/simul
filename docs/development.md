@@ -11,7 +11,7 @@ git clone https://github.com/kickthemoon0817/simul.git
 cd simul
 uv venv .venv && uv pip install -e ".[dev]"
 # or reproduce CI exactly from uv.lock:
-uv sync --extra dev
+uv sync --locked --extra dev
 ```
 
 Add `--extra blender` (or `".[dev,blender]"`) to test embedded Blender; `bpy`
@@ -163,6 +163,6 @@ as a fresh process, for example `simul --json info` or
 The version lives in four places that must change together:
 `pyproject.toml`, `.claude-plugin/plugin.json`,
 `src/simul/__init__.py` and
-`src/simul/bridge_ext/khemoo.simul/config/extension.toml`.
-`tests/test_version_lockstep.py` enforces it. Releases are cut by
+`src/simul/bridge_ext/khemoo.simul/config/extension.toml`; `uv lock` then
+records it in `uv.lock`. `tests/test_version_lockstep.py` enforces both. Releases are cut by
 maintainers.

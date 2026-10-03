@@ -12,6 +12,10 @@ The version lives in **four places that always move together**:
   the wheel; its version-suffixed Kit ID (`khemoo.simul-X.Y.Z`) must
   match the package so either side reports the same version.
 
+`uv.lock` records the version too (the `simul-toolkit` package entry), so a
+bump also runs `uv lock`. CI installs with `uv sync --locked` and fails while
+the lock is stale; `tests/test_version_lockstep.py` checks all five.
+
 ## Policy
 
 - **Patch** (`0.X.Y+1`): the routine bump. Do it whenever changes land on
@@ -21,7 +25,7 @@ The version lives in **four places that always move together**:
 
 ## Patch bump
 
-1. Bump all four constants in a single commit on a
+1. Bump all four constants and run `uv lock`, in a single commit on a
    `chore/bump-version-X.Y.Z` branch. Commit subject: `chore: bump version
    to X.Y.Z` — no parentheses, no body needed.
 2. Open a PR against `main` (branch protection rejects direct pushes) and
