@@ -21,8 +21,10 @@ conventions and runtime notes. `CLAUDE.md` holds Claude Code behavioral rules
   `src/simul/mcp/tools/_meta.py`). `src/simul/mcp/tools/isaac_tools.py`
   is the compatibility shim that re-exports the package.
 - Tool registration: `src/simul/mcp/registration/` (`_reg_isaac.py`
-  iterates the decorated methods; the USD, Blender and Unreal modules
-  register their wrappers by hand over the adapter sessions)
+  iterates the decorated methods; `_reg_blender.py` builds each Blender tool
+  from its `BLENDER_TOOLS` entry and the `BlenderRuntimeSession` operation it
+  names; the USD and Unreal modules register their wrappers by hand over the
+  adapter sessions)
 - USD tools: `src/simul/mcp/registration/_reg_usd.py` over
   `src/simul/adapters/headless_usd.py`
 - Tests: `tests/` (`tests/conftest.py` puts `src` first on `sys.path` and

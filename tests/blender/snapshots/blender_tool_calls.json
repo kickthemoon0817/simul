@@ -1280,7 +1280,7 @@
           "error_type": "ValidationError",
           "details": {"input": {"field_type": "WIND", "strength": 1.0, "location": null, "name": null}}
         },
-        "usage": []
+        "usage": [{"tool": "add_blender_force_field", "success": false}]
       },
       "full": {
         "arguments": {"field_type": "VORTEX", "strength": 3, "location": [1, 2, 3], "name": "Swirl"},

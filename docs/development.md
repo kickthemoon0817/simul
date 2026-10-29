@@ -64,9 +64,14 @@ wheels exist for Python 3.11 and 3.13 only.
   talks to the add-on bridge; headless USD calls `pxr` directly.
 - **Tools**: Isaac tools are methods on `IsaacTools` mixins carrying a
   `@tool_meta` decorator (name, description, hints); `_reg_isaac.py` builds
-  the MCP wrapper from each method's signature and docstring. The USD,
-  Blender and Unreal modules register their wrappers by hand over adapter
-  sessions. Every call goes through one shared envelope
+  the MCP wrapper from each method's signature and docstring. Each Blender
+  tool is one `BlenderTool` entry in `BLENDER_TOOLS` (`_reg_blender.py`):
+  name, description, hints, request and response models and the
+  `BlenderRuntimeSession` operation it calls, whose signature and docstring
+  supply the parameters. The table lives in the registration layer because
+  `blender_runtime.py` ships in the Blender add-on, which must not import
+  `simul.mcp`. The USD and Unreal modules register their wrappers by hand over
+  adapter sessions. Every call goes through one shared envelope
   (`SimulMCPServer._run_envelope`): the rate limit, the backend's admission
   hook (Isaac's claim enforcement and per-instance lock), request
   validation, the call, success normalisation, exactly one usage record and
@@ -141,7 +146,14 @@ be checked on both a 5.1 and a 6.0 install. Copy any project a test mutates
 The FastMCP test double lives in `tests/fakes.py` and is installed by the
 `fake_fastmcp` fixture. `tests/mcp/test_tool_meta_drift.py` fails when an
 Isaac tool method lacks `@tool_meta` or its wrapper drifts from the
-implementation. A session-wide fixture in `tests/conftest.py` makes
+implementation; `tests/blender/test_blender_tool_drift.py` fails when a
+`BLENDER_TOOLS` entry names a missing session operation or parameter, or its
+request model does not cover the advertised parameters.
+`tests/blender/test_blender_tool_snapshot.py` pins the Blender tools as a
+client lists them and what each one calls, against a `StrictBlenderSession`
+(`tests/fakes.py`) that refuses anything `BlenderRuntimeSession` lacks; after
+an intended change, rerun it with `SIMUL_UPDATE_SNAPSHOTS=1` and review the
+snapshot diff. A session-wide fixture in `tests/conftest.py` makes
 `simul.mcp.backends.is_isaac_platform_supported` report a supported platform,
 so the suite registers the Isaac tools on a macOS machine just as on Linux CI;
 `tests/mcp/test_isaac_platform_gate.py` pins the platform per test instead.

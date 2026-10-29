@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import socket
@@ -16,6 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from simul.adapters.blender_connection import BlenderAttachments, BlenderConnection
+from simul.adapters.blender_runtime import BlenderRuntimeSession
 from simul.blender_bridge.protocol import PROTOCOL_VERSION, BridgeFiles, BridgeWire
 from simul.cli import blender_cli
 from simul.cli.main import app
@@ -292,7 +294,17 @@ def test_mcp_transform_forwards_validated_values_over_attachment(
     def respond(endpoint: dict, payload: dict, timeout: float) -> dict:
         assert threading.current_thread() is not threading.main_thread()
         assert payload["method"] == "set_object_transform"
-        assert payload["args"] == ("Cube", [1.0, 2.0, 3.0], None, None)
+        # The add-on binds args and kwargs to the operation's signature, so the
+        # value each parameter receives is what reaches Blender.
+        bound = inspect.signature(BlenderRuntimeSession.set_object_transform).bind(
+            None, *payload["args"], **payload["kwargs"]
+        )
+        assert dict(list(bound.arguments.items())[1:]) == {
+            "object_name": "Cube",
+            "location": [1.0, 2.0, 3.0],
+            "rotation_euler": None,
+            "scale": None,
+        }
         return {
             "object_name": "Cube",
             "location": [1, 2, 3],

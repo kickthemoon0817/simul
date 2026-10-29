@@ -718,21 +718,30 @@ def test_only_attach_blender_window_depends_on_the_mode(
     assert differing == {"attach_blender_window"}
 
 
-def test_invalid_input_is_recorded_only_by_the_tools_validating_inside_the_envelope(
+def test_every_tool_validates_inside_the_envelope(
     recorded: Dict[str, Dict[str, Any]],
 ) -> None:
-    """Before the spec table, most tools validated outside the envelope and left no record."""
+    """Invalid input leaves one usage record, like any other failed call.
+
+    Before the spec table only list_blender_scene_objects and
+    get_blender_object_info validated inside the envelope; the others refused
+    invalid input before it, unrecorded and outside the rate limit.
+    get_blender_camera_info has no request model, so its argument reaches the
+    session as given.
+    """
     for mode, record in recorded.items():
-        rejected = {
-            name
+        invalid = {
+            name: outcomes["invalid"]
             for name, outcomes in record["outcomes"].items()
-            if "invalid" in outcomes and not outcomes["invalid"]["session_calls"]
+            if "invalid" in outcomes
         }
-        recording = {name for name in rejected if record["recorded_invalid"][name]}
-        assert recording == {
-            "list_blender_scene_objects",
-            "get_blender_object_info",
-        }, mode
+        reached = {
+            name for name, outcome in invalid.items() if outcome["session_calls"]
+        }
+        assert reached == {"get_blender_camera_info"}, mode
+        assert {
+            name: record["recorded_invalid"][name] for name in invalid
+        } == dict.fromkeys(invalid, 1), mode
 
 
 def test_no_tool_calls_an_operation_the_session_lacks(
