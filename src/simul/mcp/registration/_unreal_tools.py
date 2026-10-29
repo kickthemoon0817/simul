@@ -7,7 +7,9 @@ their types, defaults and descriptions, the response model, and the
 (``_reg_unreal.py``) builds the FastMCP wrapper, the request model the shared
 envelope validates and the session call from the entry. The table is in
 registration order, which is the order ``tools/list`` reports;
-``simul.tool_surfaces.THIN_UNREAL_TOOLS`` picks the thin surface out of it.
+``simul.tool_surfaces.THIN_UNREAL_TOOLS`` picks the thin surface out of it
+(``surface_tools``), and ``registered_tool_names`` is what a configuration
+registers, which ``UnrealRuntimeAdapter.get_capabilities`` reports.
 
 The metadata stays in the registration layer: the session implements the
 operations and reads nothing here. A parameter without a description of its
@@ -28,6 +30,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 from pydantic import BaseModel
 
 from ...config import Settings
+from ...tool_surfaces import THIN_UNREAL_TOOLS
 from ..schemas.unreal import (
     ColorRGB,
     UnrealAddComponentResponse,
@@ -156,6 +159,8 @@ class UnrealTool:
             own ``request`` model puts the rule in that model instead.
         usage: Picks what the usage log keeps from the arguments; None keeps
             nothing.
+        echo: Picks what a call refused by validation echoes back as
+            ``details.input``; None echoes every argument as given.
     """
 
     name: str
@@ -172,6 +177,7 @@ class UnrealTool:
     request: Optional[Type[BaseModel]] = None
     check: Optional[Callable[[Any], Optional[str]]] = None
     usage: Optional[Callable[[Mapping[str, Any]], Dict[str, Any]]] = None
+    echo: Optional[Callable[[Mapping[str, Any]], Dict[str, Any]]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +288,20 @@ def _script_usage(arguments: Mapping[str, Any]) -> Dict[str, Any]:
     return {"code_bytes": len(arguments["code"]), "mode": arguments["mode"]}
 
 
+#: Characters of a refused script echoed back in front of its size.
+SCRIPT_ECHO_CHARS = 200
+
+
+def _script_echo(arguments: Mapping[str, Any]) -> Dict[str, Any]:
+    """A refused script's opening characters, size and mode, not the whole source."""
+    code = str(arguments["code"])
+    return {
+        "code": code[:SCRIPT_ECHO_CHARS],
+        **_script_usage(arguments),
+        "code_truncated": len(code) > SCRIPT_ECHO_CHARS,
+    }
+
+
 # ---------------------------------------------------------------------------
 # The tools, in registration order
 # ---------------------------------------------------------------------------
@@ -382,6 +402,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
         check=_exec_mode,
         usage=_script_usage,
+        echo=_script_echo,
     ),
     UnrealTool(
         name="control_unreal_ui",
@@ -1042,27 +1063,81 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="analyze_unreal_scene_for_robotics",
-        description="Analyze the scene for robotics use-cases (traversability, graspability, collision).",
+        description=(
+            "Classify level actors for robotics from their collision setup: floor-like surfaces a "
+            "robot can stand on, small Movable objects it can grasp, and collision counts and "
+            "problems (static meshes with physics collision but no simple shapes). Uses the "
+            "bounding box of each actor's collision-enabled components; the thresholds come "
+            "back as criteria."
+        ),
         response=UnrealAnalyzeSceneForRoboticsResponse,
         read_only=True,
         idempotent=True,
         method="analyze_scene_for_robotics",
         params=(
-            ToolParam("analysis_types", str, "", convert=_name_list),
-            ToolParam("actor_filter", Optional[str], None),
+            ToolParam(
+                "analysis_types",
+                str,
+                "",
+                description=(
+                    "Comma-separated analyses: traversability, graspability, collision_complexity. "
+                    "Empty runs all three."
+                ),
+                convert=_name_list,
+            ),
+            ToolParam(
+                "actor_filter",
+                Optional[str],
+                None,
+                description=(
+                    "Only analyze actors whose label or object path contains this text, ignoring case; "
+                    "empty or null analyzes every actor."
+                ),
+            ),
         ),
     ),
     UnrealTool(
         name="generate_unreal_procedural_scene",
-        description="Generate a procedural scene (warehouse, outdoor, room, corridor).",
+        description=(
+            "Build a room, corridor, warehouse or outdoor test scene from Engine basic shapes inside "
+            "the bounds, in one undoable transaction; the same arguments give the same scene. Returns "
+            "the spawned actor paths and the tag and outliner folder that group them."
+        ),
         response=UnrealGenerateProceduralSceneResponse,
         read_only=False,
         method="generate_procedural_scene",
         params=(
-            ToolParam("scene_type", str),
-            ToolParam("parameters", str, "{}", convert=_optional_json),
-            ToolParam("bounds_min", str, "", convert=_optional_floats),
-            ToolParam("bounds_max", str, "", convert=_optional_floats),
+            ToolParam("scene_type", str, description="room, corridor, warehouse or outdoor."),
+            ToolParam(
+                "parameters",
+                str,
+                "{}",
+                description=(
+                    "JSON object; lengths in cm, counts 0 to 200. Any type: seed (integer, 42). "
+                    "room: wall_thickness (20), wall_height (bounds top), door_width (100, capped by the "
+                    "side walls; 0 for none), "
+                    "props (one per 16 m2 of floor). corridor: wall_thickness, wall_height, props (one "
+                    "per 3 m). warehouse: wall_thickness, wall_height, rows (as many as fit), "
+                    "shelf_depth (100), shelf_height (300, capped by the bounds), aisle_width (250), "
+                    "props (one per 16 m2 of free floor). outdoor: trees (one per 20 m2), rocks (one "
+                    "per 10 m2). Props are Movable boxes; everything else is Static."
+                ),
+                convert=_optional_json,
+            ),
+            ToolParam(
+                "bounds_min",
+                str,
+                "",
+                description="Minimum corner as comma-separated x,y,z in cm; empty is 0,0,0.",
+                convert=_optional_floats,
+            ),
+            ToolParam(
+                "bounds_max",
+                str,
+                "",
+                description="Maximum corner as comma-separated x,y,z in cm; empty is 1000,1000,500.",
+                convert=_optional_floats,
+            ),
         ),
     ),
     UnrealTool(
@@ -1244,3 +1319,37 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         ),
     ),
 )
+
+
+def surface_tools(thin: bool) -> Tuple[UnrealTool, ...]:
+    """The declarations a tool surface registers, in registration order.
+
+    Args:
+        thin: The thin surface, which keeps ``THIN_UNREAL_TOOLS``; otherwise
+            the full one, which keeps every declaration.
+
+    Returns:
+        The declarations, script tools included.
+    """
+    return tuple(spec for spec in UNREAL_TOOLS if not thin or spec.name in THIN_UNREAL_TOOLS)
+
+
+def registered_tool_names(settings: Settings) -> Tuple[str, ...]:
+    """The Unreal tools a server built with ``settings`` registers, in registration order.
+
+    ``unreal.tool_surface`` picks the surface (``surface_tools``). Script
+    tools register only with ``security.allow_script_execution`` on: the
+    server's ``_script_tool`` leaves them out otherwise.
+
+    Args:
+        settings: The server settings.
+
+    Returns:
+        The tool names.
+    """
+    allow_scripts = settings.security.allow_script_execution
+    return tuple(
+        spec.name
+        for spec in surface_tools(settings.unreal.tool_surface == "thin")
+        if allow_scripts or not spec.script
+    )

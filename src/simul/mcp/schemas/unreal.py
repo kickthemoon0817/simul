@@ -926,15 +926,30 @@ class UnrealAnalyzeSceneForRoboticsResponse(BaseModel):
         None, description="Error message when success is False"
     )
     traversable_surfaces: List[Dict[str, Any]] = Field(
-        default_factory=list, description="Surfaces a robot can traverse"
+        default_factory=list,
+        description=(
+            "Floor-like surfaces a robot can stand on: name, path, class_name, "
+            "size [x, y, z] cm, top_z cm, area_m2, tilt_degrees"
+        ),
     )
     graspable_objects: List[Dict[str, Any]] = Field(
-        default_factory=list, description="Objects suitable for grasping"
+        default_factory=list,
+        description=(
+            "Movable actors with physics collision small enough to grasp: name, "
+            "path, class_name, size [x, y, z] cm, simulate_physics, mass_kg"
+        ),
     )
     collision_summary: Dict[str, Any] = Field(
-        default_factory=dict, description="Collision complexity summary"
+        default_factory=dict,
+        description="Collision counts and static mesh collision setup; empty unless collision_complexity ran",
     )
     total_actors_analyzed: int = Field(0, description="Number of actors analyzed")
+    analysis_types: List[str] = Field(
+        default_factory=list, description="Analyses that ran"
+    )
+    criteria: Dict[str, float] = Field(
+        default_factory=dict, description="Thresholds the analyses applied"
+    )
 
 
 class UnrealGenerateProceduralSceneResponse(BaseModel):
@@ -948,6 +963,8 @@ class UnrealGenerateProceduralSceneResponse(BaseModel):
     total_spawned: int = Field(..., description="Number of actors spawned")
     scene_type: str = Field(..., description="Generated scene type")
     seed: int = Field(..., description="Random seed used")
+    tag: str = Field(..., description="Actor tag on every actor of this scene type and seed")
+    folder: str = Field(..., description="Outliner folder the actors are filed under")
 
 
 class UnrealGetActorBySemanticLabelResponse(BaseModel):

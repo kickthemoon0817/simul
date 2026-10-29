@@ -353,3 +353,143 @@ if rejected:
     result.update(success=False, error="Unreal did not apply: " + ", ".join(rejected))
 print(json.dumps(result))
 """
+
+# Expects ``args`` = {"pieces": [{"label", "mesh", "location", "scale",
+# "movable"}], "folder", "tags", "transaction"}. Spawns one StaticMeshActor per
+# piece, in order, inside one undoable transaction. When any piece fails, the
+# actors already spawned are destroyed and the transaction is cancelled, so the
+# level is left as it was, and the script prints a SpawnError.
+PLACE_BASIC_SHAPES = """
+import json, unreal
+subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+meshes, spawned, failure = {}, [], None
+with unreal.ScopedEditorTransaction(args["transaction"]) as transaction:
+    try:
+        for piece in args["pieces"]:
+            mesh = meshes.get(piece["mesh"])
+            if mesh is None:
+                mesh = unreal.load_asset(piece["mesh"])
+                if not isinstance(mesh, unreal.StaticMesh):
+                    raise ValueError("no static mesh at " + piece["mesh"])
+                meshes[piece["mesh"]] = mesh
+            actor = subsystem.spawn_actor_from_class(
+                unreal.StaticMeshActor, unreal.Vector(*piece["location"]), unreal.Rotator(0.0, 0.0, 0.0))
+            if actor is None:
+                raise RuntimeError("Unreal spawned no actor for " + piece["label"])
+            spawned.append(actor)
+            component = actor.static_mesh_component
+            component.set_mobility(unreal.ComponentMobility.MOVABLE if piece["movable"]
+                                   else unreal.ComponentMobility.STATIC)
+            component.set_static_mesh(mesh)
+            actor.set_actor_scale3d(unreal.Vector(*piece["scale"]))
+            actor.set_actor_label(piece["label"])
+            actor.set_folder_path(args["folder"])
+            actor.set_editor_property("tags", [unreal.Name(tag) for tag in args["tags"]])
+    except Exception as exc:
+        failure = str(exc)
+        for actor in spawned:
+            subsystem.destroy_actor(actor)
+        transaction.cancel()
+if failure is not None:
+    print(json.dumps({"success": False, "error_type": "SpawnError",
+                      "error": "Spawned nothing: " + failure}))
+else:
+    print(json.dumps({"actors_spawned": [actor.get_path_name() for actor in spawned]}))
+"""
+
+# Expects ``args`` = {"analyses", "actor_filter", "criteria", "listed_limit"}.
+# Reads every actor loaded in the editor world whose label or object path
+# contains actor_filter, ignoring case. Only primitive components with
+# collision enabled count, and an actor's size is the bounding box of those
+# components. Static mesh collision comes from the mesh asset
+# (StaticMeshEditorSubsystem): simple shapes, convex hulls and whether the
+# render triangles stand in for simple collision (CTF_USE_COMPLEX_AS_SIMPLE).
+# See UnrealRuntimeSession.analyze_scene_for_robotics for the classification.
+ROBOTICS_SCENE_ANALYSIS = """
+import json, math, unreal
+analyses = set(args["analyses"])
+criteria = args["criteria"]
+needle = (args["actor_filter"] or "").lower()
+mesh_tools = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+mesh_collision = {}
+
+def collision_of(mesh):
+    key = mesh.get_path_name()
+    if key not in mesh_collision:
+        mesh_collision[key] = (mesh_tools.get_simple_collision_count(mesh),
+                               mesh_tools.get_convex_collision_count(mesh),
+                               mesh_tools.get_collision_complexity(mesh).name)
+    return mesh_collision[key]
+
+def entry(actor, size, **extra):
+    return dict({"name": actor.get_actor_label(), "path": actor.get_path_name(),
+                 "class_name": actor.get_class().get_name(),
+                 "size": [round(value, 2) for value in size]}, **extra)
+
+traversable, graspable = [], []
+summary = {"total_actors": 0, "with_collision": 0, "physics_collision": 0,
+           "static_mesh_components": 0, "simple_shapes": 0, "convex_hulls": 0,
+           "complex_collision": 0, "missing_simple_collision": 0, "heightfields": 0,
+           "by_profile": {}, "missing_simple_collision_actors": []}
+for actor in unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors():
+    if needle and needle not in actor.get_actor_label().lower() and needle not in actor.get_path_name().lower():
+        continue
+    summary["total_actors"] += 1
+    colliding = []
+    for component in actor.get_components_by_class(unreal.PrimitiveComponent):
+        state = component.get_collision_enabled().name
+        if state != "NO_COLLISION":
+            colliding.append((component, state in ("PHYSICS_ONLY", "QUERY_AND_PHYSICS")))
+    if not colliding:
+        continue
+    physical = [component for component, physics in colliding if physics]
+    summary["with_collision"] += 1
+    if physical:
+        summary["physics_collision"] += 1
+    missing = False
+    for component, physics in colliding:
+        if "collision_complexity" not in analyses:
+            break
+        profile = str(component.get_collision_profile_name())
+        summary["by_profile"][profile] = summary["by_profile"].get(profile, 0) + 1
+        if component.get_class().get_name() == "LandscapeHeightfieldCollisionComponent":
+            summary["heightfields"] += 1
+        elif isinstance(component, unreal.StaticMeshComponent):
+            mesh = component.get_editor_property("static_mesh")
+            if mesh is None:
+                continue
+            simple, convex, complexity = collision_of(mesh)
+            summary["static_mesh_components"] += 1
+            summary["simple_shapes"] += simple
+            summary["convex_hulls"] += convex
+            if complexity == "CTF_USE_COMPLEX_AS_SIMPLE":
+                summary["complex_collision"] += 1
+            elif physics and simple + convex == 0:
+                summary["missing_simple_collision"] += 1
+                missing = True
+    if missing and len(summary["missing_simple_collision_actors"]) < args["listed_limit"]:
+        summary["missing_simple_collision_actors"].append(actor.get_path_name())
+    if not physical:
+        continue
+    origin, extent = actor.get_actor_bounds(True)
+    size = [2 * extent.x, 2 * extent.y, 2 * extent.z]
+    if "traversability" in analyses:
+        tilt = math.degrees(math.acos(max(-1.0, min(1.0, actor.get_actor_up_vector().z))))
+        area = size[0] * size[1] / 10000.0
+        if (area >= criteria["surface_min_area_m2"]
+                and size[2] <= criteria["surface_max_thickness_ratio"] * min(size[0], size[1])
+                and tilt <= criteria["surface_max_tilt_degrees"]):
+            traversable.append(entry(actor, size, top_z=round(origin.z + extent.z, 2),
+                                     area_m2=round(area, 3), tilt_degrees=round(tilt, 2)))
+    root = actor.root_component
+    if ("graspability" in analyses and root is not None and root.mobility.name == "MOVABLE"
+            and 0 < max(size) <= criteria["grasp_max_size_cm"]):
+        mass = sum(component.get_mass() for component in physical)
+        simulated = any(component.get_editor_property("body_instance").get_editor_property("simulate_physics")
+                        for component in physical)
+        graspable.append(entry(actor, size, simulate_physics=bool(simulated),
+                               mass_kg=round(mass, 3) if mass > 0 else None))
+print(json.dumps({"traversable_surfaces": traversable, "graspable_objects": graspable,
+                  "collision_summary": summary if "collision_complexity" in analyses else {},
+                  "total_actors_analyzed": summary["total_actors"]}))
+"""

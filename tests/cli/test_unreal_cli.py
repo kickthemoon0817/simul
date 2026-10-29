@@ -878,6 +878,167 @@ def test_poll_health_keeps_polling_while_editor_runs() -> None:
     assert health == {"connected": True}
 
 
+# What health_check returns when Remote Control answers HTTP 401.
+REFUSED = {
+    "reachable": True,
+    "connected": False,
+    "status": 401,
+    "error": "Remote Control refused the request (HTTP 401): set UNREAL__PASSPHRASE to the editor's passphrase",
+    "error_type": "AuthenticationError",
+}
+
+
+def test_poll_health_stops_at_a_passphrase_refusal() -> None:
+    """A 401 is an answer: waiting cannot make the editor accept the passphrase."""
+    import asyncio
+
+    calls = []
+
+    class _Session:
+        async def health_check(self):
+            calls.append(1)
+            return dict(REFUSED)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        health = await unreal_cli._poll_health(_Session(), 60.0, 5.0, proc=_FakeProc(None))
+        return health, loop.time() - started
+
+    health, elapsed = asyncio.run(run())
+
+    assert health == REFUSED
+    assert len(calls) == 1
+    assert elapsed < 1.0
+
+
+def _refused_setup(monkeypatch, tmp_path: Path, *extra: str, json_mode: bool = True):
+    """Run setup against an editor that refuses the passphrase.
+
+    Returns:
+        The result, the health checks made and, in human mode, the console text.
+    """
+    calls = []
+    printed: list[str] = []
+
+    class _Session:
+        host = "localhost"
+
+        async def health_check(self):
+            calls.append(1)
+            return dict(REFUSED)
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: _Session())
+    if not json_mode:
+        monkeypatch.setattr(unreal_cli, "is_json_mode", lambda: False)
+        monkeypatch.setattr(
+            unreal_cli.console, "print", lambda *args, **kwargs: printed.append(" ".join(map(str, args)))
+        )
+    argv = ["unreal", "setup", str(_write_uproject(tmp_path)), "--no-launch", "--yes", *extra]
+    result = runner.invoke(app, (["--json"] if json_mode else []) + argv)
+    return result, calls, " ".join(" ".join(printed).split())
+
+
+def test_setup_fails_fast_with_the_passphrase_hint_in_json(tmp_path: Path, monkeypatch) -> None:
+    result, calls, _ = _refused_setup(monkeypatch, tmp_path, "--wait-timeout", "600", "--poll-interval", "30")
+
+    assert result.exit_code == 1
+    assert len(calls) == 1
+    payload = json.loads(result.stdout)
+    assert payload["connected"] is False
+    assert payload["success"] is False
+    assert payload["error_type"] == "AuthenticationError"
+    assert "UNREAL__PASSPHRASE" in payload["error"]
+    assert payload["health"] == REFUSED
+
+
+def test_setup_fails_fast_with_the_passphrase_hint_for_humans(tmp_path: Path, monkeypatch) -> None:
+    result, calls, output = _refused_setup(
+        monkeypatch, tmp_path, "--wait-timeout", "600", "--poll-interval", "30", json_mode=False
+    )
+
+    assert result.exit_code == 1
+    assert len(calls) == 1
+    assert "AuthenticationError: Remote Control refused the request (HTTP 401)" in output
+    assert "Set UNREAL__PASSPHRASE" in output
+    assert "--no-launch" in output
+    assert "did not respond in time" not in output
+
+
+def test_setup_refused_with_its_own_passphrase_says_a_running_editor_keeps_its_settings(
+    tmp_path: Path, monkeypatch
+) -> None:
+    result, _, output = _refused_setup(
+        monkeypatch,
+        tmp_path,
+        "--bind",
+        "192.168.1.10",
+        "--allow-public",
+        "--passphrase",
+        "s3cret",
+        json_mode=False,
+    )
+
+    assert result.exit_code == 1
+    assert "The editor refused --passphrase" in output
+    assert "until it restarts" in output
+
+
+@pytest.mark.parametrize(
+    "health, error_type, error",
+    [
+        (dict(REFUSED), "AuthenticationError", REFUSED["error"]),
+        (
+            {"connected": False, "editor_exited": True, "exit_code": 3, "error": "Unreal Editor (pid 7) exited"},
+            "EditorExited",
+            "Unreal Editor (pid 7) exited",
+        ),
+        (
+            {"reachable": False, "connected": False, "error": "Cannot connect"},
+            "TimeoutError",
+            "Remote Control did not respond within 90s: Cannot connect",
+        ),
+        ({}, "TimeoutError", "Remote Control did not respond within 90s"),
+    ],
+)
+def test_setup_json_reports_why_it_did_not_connect(
+    tmp_path: Path, monkeypatch, health, error_type, error
+) -> None:
+    """``success`` used to be filled in as true for an editor that never connected."""
+
+    async def _poll(session, timeout, interval, **kwargs):
+        return health
+
+    monkeypatch.setattr(unreal_cli, "_poll_health", _poll)
+
+    result = runner.invoke(
+        app, ["--json", "unreal", "setup", str(_write_uproject(tmp_path)), "--no-launch", "--yes"]
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 1
+    assert (payload["success"], payload["error_type"], payload["error"]) == (False, error_type, error)
+
+
+def test_setup_json_reports_success_when_connected(tmp_path: Path, monkeypatch) -> None:
+    async def _poll(session, timeout, interval, **kwargs):
+        return {"reachable": True, "connected": True}
+
+    monkeypatch.setattr(unreal_cli, "_poll_health", _poll)
+
+    result = runner.invoke(
+        app, ["--json", "unreal", "setup", str(_write_uproject(tmp_path)), "--no-launch", "--yes"]
+    )
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0
+    assert payload["success"] is True
+    assert "error" not in payload
+
+
 def _stub_launch(monkeypatch, argv0: str, captured: Dict[str, Any]) -> None:
     monkeypatch.setattr(unreal_cli, "resolve_launch_argv", lambda *a, **k: [argv0, "x.uproject"])
     monkeypatch.setattr(unreal_cli, "launch_editor", lambda *a, **k: _FakeProc(1))

@@ -839,22 +839,53 @@ async def _poll_health(
 ) -> Dict[str, Any]:
     """Call health_check repeatedly until connected or timeout elapses.
 
-    When ``proc`` (the editor this command spawned) exits first, stop
-    polling and return a payload with ``editor_exited: True`` instead of
-    waiting out the full timeout.
+    Stop early, without waiting out the full timeout, when:
+
+    * Remote Control refuses the request (HTTP 401, ``error_type``
+      ``AuthenticationError``): it answered, so the editor is up, and no
+      amount of waiting makes it accept the passphrase this session sends
+      (``--passphrase`` or ``UNREAL__PASSPHRASE``). The refusal is returned.
+    * ``proc`` (the editor this command spawned) exits: a payload with
+      ``editor_exited: True`` is returned.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     last: Dict[str, Any] = {}
     while loop.time() < deadline:
         last = await session.health_check()
-        if last.get("connected"):
+        if last.get("connected") or last.get("error_type") == "AuthenticationError":
             return last
         exited = _editor_exit(proc)
         if exited is not None:
             return exited
         await asyncio.sleep(interval)
     return last
+
+
+def _poll_failure(health: Dict[str, Any], wait_timeout: float) -> Optional[Dict[str, str]]:
+    """The ``error`` and ``error_type`` setup reports for a poll that did not connect.
+
+    Args:
+        health: What ``_poll_health`` returned.
+        wait_timeout: The ``--wait-timeout`` the poll had.
+
+    Returns:
+        None when Remote Control is up. Otherwise the refusal
+        (``AuthenticationError``, with ``health_check``'s ``UNREAL__PASSPHRASE``
+        hint), the editor's exit (``EditorExited``) or the timeout
+        (``TimeoutError``, with the last health error).
+    """
+    if health.get("connected"):
+        return None
+    if health.get("error_type") == "AuthenticationError":
+        return {"error": str(health.get("error")), "error_type": "AuthenticationError"}
+    if health.get("editor_exited"):
+        return {"error": str(health.get("error")), "error_type": "EditorExited"}
+    last = health.get("error")
+    return {
+        "error": f"Remote Control did not respond within {wait_timeout:g}s" + (f": {last}" if last else ""),
+        "error_type": "TimeoutError",
+    }
 
 
 # Private alias used by the safety gate and its tests.
@@ -1218,6 +1249,9 @@ def setup(
         "health": health,
         "connected": bool(health.get("connected")),
     }
+    failure = _poll_failure(health, wait_timeout)
+    if failure is not None:
+        payload.update(success=False, **failure)
 
     if is_json_mode():
         emit(payload)
@@ -1230,6 +1264,16 @@ def setup(
             "[green]Remote Control is up[/green] — simul can now talk to this editor."
         )
         return
+    if health.get("error_type") == "AuthenticationError":
+        hint = (
+            "The editor refused --passphrase: an editor that was already running keeps its "
+            "earlier Remote Control settings until it restarts."
+            if passphrase is not None
+            else "The editor is up and enforces a Remote Control passphrase. Set UNREAL__PASSPHRASE "
+            "(the plaintext or its MD5 hex, in the environment or .env) and re-run with --no-launch."
+        )
+        console.print(f"[red]AuthenticationError: {rich_escape(str(health.get('error')))}.[/red] {hint}")
+        raise typer.Exit(1)
     if health.get("editor_exited"):
         console.print(
             f"[red]{rich_escape(str(health.get('error')))}.[/red] "

@@ -28,12 +28,15 @@ from ..utils.paths import PathPolicy
 from ..utils.regex_guard import (
     exponential_regex_construct as _exponential_regex_construct,
 )
+from ._unreal_procedural import plan_scene
 from ._unreal_scripts import (
     ACTOR_HELPERS,
     CREATE_MATERIAL_INSTANCE,
     ENGINE_METADATA,
     FIND_ACTORS_BY_TAG,
     INTERCHANGE_INFO,
+    PLACE_BASIC_SHAPES,
+    ROBOTICS_SCENE_ANALYSIS,
     SCENE_SUMMARY,
     SET_ACTOR_TRANSFORM,
     SET_LIGHT_PARAMS,
@@ -46,6 +49,25 @@ from ._unreal_scripts import (
 #: ``ExecutionMode`` values UE's ``PythonScriptLibrary.ExecutePythonCommandEx``
 #: accepts. Shared by the ``execute_unreal_script`` tool and ``simul unreal exec``.
 UNREAL_EXEC_MODES = frozenset({"ExecuteFile", "EvaluateStatement", "ExecuteStatement"})
+
+#: Analyses ``analyze_scene_for_robotics`` runs, all of them by default.
+ROBOTICS_ANALYSES: Tuple[str, ...] = ("traversability", "graspability", "collision_complexity")
+
+#: What ``analyze_scene_for_robotics`` classifies by, applied to the bounding
+#: box of an actor's collision-enabled components. A traversable surface is at
+#: least ``surface_min_area_m2`` in plan, no thicker than
+#: ``surface_max_thickness_ratio`` of its shorter side and tilted at most
+#: ``surface_max_tilt_degrees``; a graspable object fits in a cube
+#: ``grasp_max_size_cm`` on a side.
+ROBOTICS_CRITERIA: Dict[str, float] = {
+    "surface_min_area_m2": 1.0,
+    "surface_max_thickness_ratio": 0.25,
+    "surface_max_tilt_degrees": 15.0,
+    "grasp_max_size_cm": 60.0,
+}
+
+#: Most actor paths the collision summary lists; its counts cover every actor.
+ROBOTICS_LISTED_LIMIT = 50
 
 # UE's FMD5 hex output is lowercase. Accept either case from configured
 # input and normalize. Anything that isn't a clean 32-char hex digest is
@@ -1978,8 +2000,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Attach an actor to a parent actor or detach it.
 
-        Uses ``EditorLevelLibrary.SetActorSelectionState`` and the
-        ``AttachToActor`` UFUNCTION via Remote Control.
+        Calls the actor's ``K2_AttachToActor`` UFUNCTION, or without a parent
+        ``K2_DetachFromActor``, via Remote Control, keeping the world
+        transform either way.
 
         Args:
             actor_path: Child actor path.
@@ -2995,64 +3018,65 @@ if component.is_simulating_physics() != {target!r}:
         actor_filter: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Analyze the scene for robotics use-cases.
+        Classify level actors for robotics from their collision setup.
+
+        One editor script reads every actor loaded in the editor world. Only
+        primitive components with collision enabled count, an actor's size is
+        the bounding box of those components, and the thresholds are
+        ``ROBOTICS_CRITERIA``, returned as ``criteria``:
+
+        * traversability: floor-like surfaces a robot can stand on. Physics
+          collision, at least 1 m^2 in plan, no thicker than a quarter of the
+          shorter side and tilted at most 15 degrees. The bounding box decides,
+          so a landscape section counts whole, hills included.
+        * graspability: Movable actors with physics collision that fit in a
+          60 cm cube, with whether they simulate physics and their mass (null
+          while Unreal reports none).
+        * collision_complexity: actors with collision and with physics
+          collision, collision-enabled components by profile, landscape
+          heightfields, and for static meshes the simple shapes and convex
+          hulls of the mesh asset, how many use the render triangles as
+          simple collision (``complex_collision``) and how many have physics
+          collision but no simple shape (``missing_simple_collision``; physics
+          bodies pass through them). The first 50 actors with that last
+          problem are listed.
 
         Args:
-            analysis_types: Analyses to run (traversability, graspability,
-                collision_complexity).
-            actor_filter: Filter to specific actor subtree.
+            analysis_types: Any of traversability, graspability and
+                collision_complexity; None or empty runs all three.
+            actor_filter: Only analyze actors whose label or object path
+                contains this text, ignoring case; None or empty analyzes
+                every actor.
 
         Returns:
-            Dict with traversable_surfaces, graspable_objects,
-            collision_summary, total_actors_analyzed.
+            Dict with traversable_surfaces and graspable_objects (each entry
+            name, path, class_name and size [x, y, z] in cm; surfaces add
+            top_z, area_m2 and tilt_degrees), collision_summary (empty unless
+            collision_complexity ran), total_actors_analyzed, analysis_types
+            (those that ran) and criteria; or a ScriptError envelope when the
+            editor script failed.
+
+        Raises:
+            ValueError: An analysis type is not one of the three.
         """
-        if analysis_types is None:
-            analysis_types = ["traversability", "graspability", "collision_complexity"]
-
-        body: Dict[str, Any] = {
-            "objectPath": "/Script/UnrealEd.Default__EditorLevelLibrary",
-            "functionName": "GetAllLevelActors",
-            "parameters": {},
+        requested = [name.strip().lower() for name in analysis_types or [] if name.strip()]
+        unknown = [name for name in requested if name not in ROBOTICS_ANALYSES]
+        if unknown:
+            raise ValueError(
+                f"analysis_types: unknown {', '.join(map(repr, unknown))}; use "
+                f"{', '.join(ROBOTICS_ANALYSES)}"
+            )
+        analyses = [name for name in ROBOTICS_ANALYSES if name in requested or not requested]
+        args = {
+            "analyses": analyses,
+            "actor_filter": actor_filter or None,
+            "criteria": ROBOTICS_CRITERIA,
+            "listed_limit": ROBOTICS_LISTED_LIMIT,
         }
-        response = await self._http_put("/remote/object/call", body)
-        all_actors = response.get("ReturnValue", [])
-
-        traversable: List[Dict[str, Any]] = []
-        graspable: List[Dict[str, Any]] = []
-        collision_info: Dict[str, Any] = {
-            "total_actors": len(all_actors),
-            "with_collision": 0,
-            "complex_collision": 0,
-        }
-
-        for actor_path in all_actors:
-            if actor_filter and not str(actor_path).startswith(actor_filter):
-                continue
-            try:
-                desc_body: Dict[str, Any] = {"objectPath": str(actor_path)}
-                desc = await self._http_put("/remote/object/describe", desc_body)
-                class_name = desc.get("Class", "")
-
-                if "StaticMesh" in class_name or "Floor" in str(actor_path):
-                    traversable.append({
-                        "path": str(actor_path),
-                        "class": class_name,
-                    })
-                if "Physics" in str(desc.get("Properties", {})):
-                    collision_info["with_collision"] += 1
-                    graspable.append({
-                        "path": str(actor_path),
-                        "class": class_name,
-                    })
-            except Exception:
-                continue
-
-        return {
-            "traversable_surfaces": traversable,
-            "graspable_objects": graspable,
-            "collision_summary": collision_info,
-            "total_actors_analyzed": len(all_actors),
-        }
+        result = await self._execute_json_script(f"args = {args!r}\n" + ROBOTICS_SCENE_ANALYSIS)
+        if result.get("error"):
+            return result
+        return {**result, "analysis_types": analyses, "criteria": dict(ROBOTICS_CRITERIA)}
 
     async def generate_procedural_scene(
         self,
@@ -3062,50 +3086,58 @@ if component.is_simulating_physics() != {target!r}:
         bounds_max: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
         """
-        Generate a procedural scene via PCG or scripted spawning.
+        Build a test scene from Engine basic shapes inside an axis-aligned box.
+
+        The layout is planned here (``_unreal_procedural.plan_scene``, which
+        documents every scene type and parameter), so a layout that does not
+        fit fails before anything is spawned and the same arguments always
+        give the same scene. One editor script then spawns each piece as a
+        StaticMeshActor inside one undoable transaction, labelled
+        ``<Scene>_<Kind>_<n>``, filed in the outliner folder
+        ``Simul/<Scene>_<seed>`` and tagged ``simul_procedural`` and
+        ``simul_<scene_type>_<seed>``. When a spawn fails, the actors already
+        spawned are removed.
 
         Args:
-            scene_type: Scene type (warehouse, outdoor, room, corridor).
-            parameters: Generation params (size, density, seed, etc.).
-            bounds_min: Min bounds [x, y, z] in cm.
-            bounds_max: Max bounds [x, y, z] in cm.
+            scene_type: room, corridor, warehouse or outdoor.
+            parameters: The scene type's parameters, plus ``seed`` (default
+                42) for the random sizes and positions.
+            bounds_min: Minimum corner [x, y, z] in cm; default [0, 0, 0].
+            bounds_max: Maximum corner [x, y, z] in cm; default
+                [1000, 1000, 500].
 
         Returns:
-            Dict with actors_spawned, total_spawned, scene_type, seed.
-        """
-        if parameters is None:
-            parameters = {}
-        if bounds_min is None:
-            bounds_min = [0.0, 0.0, 0.0]
-        if bounds_max is None:
-            bounds_max = [1000.0, 1000.0, 500.0]
+            Dict with actors_spawned (actor paths in spawn order),
+            total_spawned, scene_type, seed, tag (the scene's own tag) and
+            folder; or a SpawnError envelope, with nothing left in the level,
+            when a spawn failed.
 
-        seed = parameters.get("seed", 42)
-        body: Dict[str, Any] = {
-            "objectPath": "/Script/UnrealEd.Default__EditorLevelLibrary",
-            "functionName": "GenerateProceduralScene",
-            "parameters": {
-                "SceneType": scene_type,
-                "Parameters": parameters,
-                "BoundsMin": {
-                    "X": bounds_min[0],
-                    "Y": bounds_min[1],
-                    "Z": bounds_min[2],
-                },
-                "BoundsMax": {
-                    "X": bounds_max[0],
-                    "Y": bounds_max[1],
-                    "Z": bounds_max[2],
-                },
-                "Seed": seed,
-            },
+        Raises:
+            ValueError: An unknown scene type or parameter, a value out of
+                range, or a layout that does not fit the bounds.
+        """
+        plan = plan_scene(scene_type, parameters, bounds_min, bounds_max)
+        args = {
+            "pieces": [piece.spawn_args() for piece in plan.pieces],
+            "folder": plan.folder,
+            "tags": ["simul_procedural", plan.tag],
+            "transaction": f"simul: generate {plan.scene_type} scene",
         }
-        response = await self._http_put("/remote/object/call", body)
+        result = await self._execute_json_script(f"args = {args!r}\n" + PLACE_BASIC_SHAPES)
+        if result.get("error"):
+            return result
+        spawned = result.get("actors_spawned")
+        if not isinstance(spawned, list) or len(spawned) != len(plan.pieces):
+            return self._script_error(
+                f"Unreal reported {spawned!r} for {len(plan.pieces)} planned actors"
+            )
         return {
-            "actors_spawned": response.get("ActorsSpawned", []),
-            "total_spawned": response.get("TotalSpawned", 0),
-            "scene_type": scene_type,
-            "seed": seed,
+            "actors_spawned": spawned,
+            "total_spawned": len(spawned),
+            "scene_type": plan.scene_type,
+            "seed": plan.seed,
+            "tag": plan.tag,
+            "folder": plan.folder,
         }
 
     async def get_actor_by_semantic_label(
@@ -4058,69 +4090,24 @@ class UnrealRuntimeAdapter(LoggerMixin):
 
     def get_capabilities(self) -> List[str]:
         """
-        Get list of Unreal runtime capabilities.
+        Name the Unreal tools a server with this adapter's settings registers.
+
+        Read from the tool declarations (``_unreal_tools.registered_tool_names``):
+        the thin or full surface ``unreal.tool_surface`` selects, without the
+        script tools while ``security.allow_script_execution`` is off, so a
+        newly declared tool is reported without a second list to update.
 
         Returns:
-            Capability list for the Unreal runtime adapter.
+            The tool names in registration order, or an empty list when the
+            adapter is not available.
         """
         if not self.is_available():
             return []
+        # The declarations live in the MCP registration layer, which imports
+        # this module lazily as well; neither needs the other at import time.
+        from ..mcp.registration._unreal_tools import registered_tool_names
 
-        return [
-            "unreal_health_check",
-            "get_unreal_engine_info",
-            "get_unreal_loaded_map",
-            "list_unreal_actors",
-            "get_unreal_actor_info",
-            "search_unreal_assets",
-            "describe_unreal_object",
-            "get_unreal_actor_thumbnail",
-            "summarize_unreal_scene",
-            "capture_unreal_viewport",
-            "get_unreal_viewport_info",
-            "set_unreal_camera_view",
-            "focus_unreal_on_actor",
-            "spawn_unreal_actor",
-            "delete_unreal_actor",
-            "set_unreal_actor_transform",
-            "set_unreal_actor_property",
-            "call_unreal_actor_function",
-            "set_unreal_actor_parent",
-            "add_unreal_component",
-            "set_unreal_actor_visibility",
-            "get_unreal_material_info",
-            "set_unreal_material_params",
-            "create_unreal_material_instance",
-            "assign_unreal_material",
-            "set_unreal_light_params",
-            "set_unreal_render_settings",
-            "control_unreal_simulation",
-            "get_unreal_simulation_status",
-            "enable_unreal_physics",
-            "set_unreal_collision",
-            "apply_unreal_force",
-            "set_unreal_physics_params",
-            "import_unreal_usd",
-            "export_unreal_usd",
-            "get_unreal_interchange_info",
-            "batch_unreal_operations",
-            "query_unreal_scene_graph",
-            "analyze_unreal_scene_for_robotics",
-            "generate_unreal_procedural_scene",
-            "get_unreal_actor_by_semantic_label",
-            "generate_unreal_mesh_primitive",
-            "apply_unreal_mesh_boolean",
-            "compute_unreal_convex_hull",
-            "decompose_unreal_convex_hull",
-            "edit_unreal_mesh_topology",
-            "subdivide_unreal_mesh",
-            "simplify_unreal_mesh",
-            "cut_unreal_mesh_plane",
-            "validate_unreal_mesh",
-            "convert_unreal_mesh_format",
-            "remesh_unreal_mesh",
-            "compute_unreal_mesh_uv",
-        ]
+        return list(registered_tool_names(self.settings))
 
 
 def create_unreal_session(

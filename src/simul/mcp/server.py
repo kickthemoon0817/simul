@@ -221,6 +221,11 @@ Admission = Callable[[str], AsyncContextManager[Optional[Refusal]]]
 # model; returns the payload, directly or as an awaitable.
 BackendCall = Callable[..., Union[Dict[str, Any], Awaitable[Dict[str, Any]]]]
 
+# Builds what a call refused by request validation echoes back as
+# ``details.input`` from the tool arguments, for a tool whose arguments are too
+# large to echo whole (a script).
+InputEcho = Callable[[Mapping[str, Any]], Dict[str, Any]]
+
 
 @asynccontextmanager
 async def _admit_every_call(tool_name: str) -> AsyncIterator[Optional[Refusal]]:
@@ -746,6 +751,7 @@ class SimulMCPServer(LoggerMixin):
         params: Optional[Dict[str, Any]] = None,
         script_sha256: Optional[str] = None,
         discard: Optional[Callable[[], None]] = None,
+        input_echo: Optional[InputEcho] = None,
     ) -> ToolResult:
         """Run one tool call through the envelope every backend shares.
 
@@ -785,6 +791,8 @@ class SimulMCPServer(LoggerMixin):
                 invalid input, a cancelled wait for admission, an exception
                 from the admission hook) to release what the caller prepared
                 for it.
+            input_echo: Builds the ``details.input`` of a ValidationError
+                from ``request_kwargs``; None echoes them as given.
 
         Returns:
             The payload as one JSON content block, plus an image block when it
@@ -822,7 +830,7 @@ class SimulMCPServer(LoggerMixin):
                     return refuse(refusal)
                 started = time.monotonic()
                 payload = await self._call_outcome(
-                    tool_name, run, request_model, request_kwargs, response_model
+                    tool_name, run, request_model, request_kwargs, response_model, input_echo
                 )
                 error = payload.get("error")
                 record(
@@ -846,6 +854,7 @@ class SimulMCPServer(LoggerMixin):
         request_model: Optional[Type[BaseModel]],
         request_kwargs: Optional[Mapping[str, Any]],
         response_model: Optional[Type[BaseModel]],
+        input_echo: Optional[InputEcho] = None,
     ) -> Dict[str, Any]:
         """Validate the request, run the call and normalise what it returns.
 
@@ -861,6 +870,8 @@ class SimulMCPServer(LoggerMixin):
         if request_model is not None:
             validated = self._validate_input(request_model, **(request_kwargs or {}))
             if isinstance(validated, dict):
+                if input_echo is not None:
+                    validated["details"] = {"input": input_echo(request_kwargs or {})}
                 return validated
             request = validated
         try:
@@ -1085,6 +1096,7 @@ class SimulMCPServer(LoggerMixin):
         *,
         request_model: Optional[Type[BaseModel]] = None,
         request_kwargs: Optional[Mapping[str, Any]] = None,
+        input_echo: Optional[InputEcho] = None,
     ) -> ToolResult:
         """
         Run a USD, Blender or Unreal tool through the shared envelope.
@@ -1111,6 +1123,8 @@ class SimulMCPServer(LoggerMixin):
                 recorded like any other failed call. Without it, parse tool
                 input inside ``call``, not before it.
             request_kwargs: The tool arguments to validate.
+            input_echo: Builds the ``details.input`` a ValidationError echoes
+                from ``request_kwargs``; None echoes them as given.
 
         Returns:
             The payload as one JSON content block, plus an image block when
@@ -1127,6 +1141,7 @@ class SimulMCPServer(LoggerMixin):
             request_kwargs=request_kwargs,
             response_model=response_model,
             params=params,
+            input_echo=input_echo,
         )
 
     async def _run_backend_call(

@@ -114,6 +114,24 @@ Behaviour worth knowing:
   booleans `export_actor_folders`, `export_sublayers`.
 - SimReady conversion and validation are not implemented for Unreal. Those
   tools return `UnsupportedOperation` without changing files.
+- `analyze_unreal_scene_for_robotics` classifies the actors loaded in the
+  editor world by the bounding box of their collision-enabled components:
+  traversable floor-like surfaces (physics collision, at least 1 m² in plan, no
+  thicker than a quarter of the shorter side, tilted at most 15°), graspable
+  objects (Movable, physics collision, fitting in a 60 cm cube) and the
+  collision setup of their static meshes (simple shapes, convex hulls, render
+  triangles used as simple collision, physics collision without any simple
+  shape). A landscape section counts whole, hills included. The thresholds
+  come back as `criteria`.
+- `generate_unreal_procedural_scene` builds a room, corridor, warehouse or
+  outdoor scene from Engine basic shapes inside the bounds. The layout is
+  planned before anything is spawned, so one that does not fit fails without
+  touching the level, and the same arguments give the same scene. The actors
+  are spawned in one undoable transaction; if one fails, those already spawned
+  are removed. They are labelled `<Scene>_<Kind>_<n>`, filed in the outliner
+  folder `Simul/<Scene>_<seed>` and tagged `simul_procedural` and
+  `simul_<scene>_<seed>`, which `list_unreal_actors` filters on. Props are
+  Movable boxes; everything else is Static.
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.
