@@ -432,7 +432,12 @@ def _compare_or_update(path: Path, document: Any) -> None:
 
 
 def _listing(settings: Settings) -> List[Dict[str, Any]]:
-    """The Blender tools a real MCP client lists, in order, as they cross the wire."""
+    """The Blender tools a real MCP client lists, in order, as they cross the wire.
+
+    ``execution`` (background task support) is left out: it appears only where
+    the optional docket runtime is installed, so the per-registration test
+    below pins ``task=`` instead.
+    """
     instance = server_module.SimulMCPServer(settings, backends={"blender"})
     names = set(_blender_tool_names(instance))
 
@@ -441,7 +446,9 @@ def _listing(settings: Settings) -> List[Dict[str, Any]]:
             return await client.list_tools()
 
     return [
-        tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+        tool.model_dump(
+            mode="json", by_alias=True, exclude_none=True, exclude={"execution"}
+        )
         for tool in asyncio.run(_run())
         if tool.name in names
     ]
