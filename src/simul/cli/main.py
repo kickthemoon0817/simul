@@ -31,6 +31,7 @@ from typing import Any, Dict, List, NoReturn, Optional, Set, Tuple
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -274,7 +275,10 @@ def _backends_option() -> Any:
         None,
         "--backends",
         "-b",
-        help="Comma-separated backends to enable (isaac,unreal,usd,blender). Default: all available.",
+        help=(
+            "Comma-separated backends to enable (isaac,unreal,usd,blender). Default: all available, "
+            "Isaac Sim only on Linux and Windows; naming isaac registers it on any OS."
+        ),
     )
 
 
@@ -427,9 +431,12 @@ def server(
     """Start the Simul MCP server.
 
     Only the backends named by --backends are probed at startup; the others
-    get no connection attempt and no banner line.
+    get no connection attempt and no banner line. Isaac Sim tools register
+    only on Linux and Windows unless --backends names isaac or
+    ISAAC_SIM__ENABLED=true; the banner says when they are skipped.
     """
     try:
+        from simul.mcp.backends import backend_skip_reason
         from simul.mcp.server import TRANSPORTS
 
         if config:
@@ -472,12 +479,18 @@ def server(
         # Probe only what was selected: each probe is a connection attempt or
         # a runtime import that a per-session stdio spawn pays every time.
         if _is_enabled(backend_set, "isaac"):
-            isaac_port = settings.isaac_sim.socket_port
-            isaac_reachable = _is_isaac_reachable(settings.isaac_sim.socket_host, isaac_port)
-            lines.append(
-                f"Isaac Sim (TCP :{isaac_port}): "
-                f"{'reachable' if isaac_reachable else 'not reachable (tools will retry at call time)'}"
-            )
+            isaac_skipped = backend_skip_reason("isaac", settings, backend_set)
+            if isaac_skipped is not None:
+                lines.append(f"Isaac Sim: skipped — {escape(isaac_skipped)}")
+            else:
+                isaac_port = settings.isaac_sim.socket_port
+                isaac_reachable = _is_isaac_reachable(
+                    settings.isaac_sim.socket_host, isaac_port
+                )
+                lines.append(
+                    f"Isaac Sim (TCP :{isaac_port}): "
+                    f"{'reachable' if isaac_reachable else 'not reachable (tools will retry at call time)'}"
+                )
         if _is_enabled(backend_set, "unreal"):
             lines.append(f"Unreal tools: {settings.unreal.tool_surface}")
         if _is_enabled(backend_set, "blender"):
@@ -533,9 +546,12 @@ def info(
     """Show server information and capabilities.
 
     Backends left out of --backends are not probed; they report null status.
+    Isaac Sim is not probed either where its tools are skipped (an OS it does
+    not run on, or ISAAC_SIM__ENABLED=false); the row says why.
     """
     try:
         from simul.adapters import is_blender_available, is_headless_available
+        from simul.mcp.backends import NOT_SELECTED, backend_skip_reason
         from simul.mcp.server import SimulMCPServer
 
         if config:
@@ -548,9 +564,11 @@ def info(
 
         isaac_host = settings.isaac_sim.socket_host
         isaac_port = settings.isaac_sim.socket_port
+        isaac_skipped = backend_skip_reason("isaac", settings, backend_set)
         isaac_reachable: Optional[bool] = (
             _is_isaac_reachable(isaac_host, isaac_port)
-            if _is_enabled(backend_set, "isaac") else None
+            if isaac_skipped is None
+            else None
         )
         blender_available: Optional[bool] = (
             settings.blender.mode == "attached" or is_blender_available()
@@ -579,6 +597,7 @@ def info(
                         "port": isaac_port,
                         "install_path": isaac_install_path,
                         "install_path_error": isaac_install_error,
+                        "skipped": isaac_skipped,
                     },
                     "blender": {"available": blender_available, "mode": settings.blender.mode},
                     "usd_headless": {"available": usd_available},
@@ -594,20 +613,16 @@ def info(
         system_table.add_column("Component", style="cyan")
         system_table.add_column("Status", style="green")
         system_table.add_column("Details")
-        skipped = ("Not Enabled", "Not probed: left out of --backends")
-        system_table.add_row(
-            f"Isaac Sim (TCP :{isaac_port})",
-            *(
-                skipped if isaac_reachable is None else (
-                    "Reachable" if isaac_reachable else "Not Reachable",
-                    (
-                        "Simulation & viewport via TCP socket"
-                        if isaac_reachable
-                        else "Isaac Sim tools will retry at call time"
-                    ),
-                )
-            ),
-        )
+        not_selected = ("Not Enabled", "Not probed: left out of --backends")
+        if isaac_skipped == NOT_SELECTED:
+            isaac_row: Tuple[str, str] = not_selected
+        elif isaac_skipped is not None:
+            isaac_row = ("[yellow]Skipped[/yellow]", escape(isaac_skipped))
+        elif isaac_reachable:
+            isaac_row = ("Reachable", "Simulation & viewport via TCP socket")
+        else:
+            isaac_row = ("Not Reachable", "Isaac Sim tools will retry at call time")
+        system_table.add_row(f"Isaac Sim (TCP :{isaac_port})", *isaac_row)
         if isaac_install_path is not None:
             system_table.add_row(
                 "Isaac Sim install",
@@ -617,7 +632,7 @@ def info(
         system_table.add_row(
             "Blender Runtime",
             *(
-                skipped if blender_available is None else (
+                not_selected if blender_available is None else (
                     "Available" if blender_available else "Not Available",
                     (
                         "Selected window bridge; use simul blender status to check liveness"
@@ -633,7 +648,7 @@ def info(
         system_table.add_row(
             "USD Headless",
             *(
-                skipped if usd_available is None else (
+                not_selected if usd_available is None else (
                     "Available" if usd_available else "Not Available",
                     "pxr library for USD file operations" if usd_available else "No USD support",
                 )
@@ -819,7 +834,9 @@ def tools(
     annotations exactly as an MCP client's tools/list receives them, plus the
     serialized size per backend. Each selected backend's tool surface is
     listed whether or not its runtime is installed here ("available" says
-    which); nothing is probed or connected. `commands` lists CLI commands.
+    which); nothing is probed or connected. A backend the server would skip
+    whatever its runtime (Isaac Sim on an OS it does not run on) lists no
+    tools and says why in "skipped". `commands` lists CLI commands.
     """
     try:
         from simul.mcp.backends import BACKENDS
@@ -844,6 +861,7 @@ def tools(
             group: Dict[str, Any] = {
                 "label": spec.label,
                 "available": capabilities[spec.name]["available"],
+                "skipped": capabilities[spec.name]["skipped"],
                 "tools": [t for t in listed if owner.get(t["name"]) == spec.name],
             }
             surface = getattr(section, "tool_surface", None)
@@ -853,6 +871,7 @@ def tools(
         groups["server"] = {
             "label": "Server",
             "available": True,
+            "skipped": None,
             "tools": [t for t in listed if t["name"] not in owner],
         }
         for group in groups.values():
@@ -876,6 +895,12 @@ def tools(
             heading = group["label"]
             if "tool_surface" in group:
                 heading += f" ({group['tool_surface']})"
+            if group["skipped"] is not None:
+                table.add_row(
+                    heading, f"[yellow]skipped:[/yellow] {escape(group['skipped'])}"
+                )
+                table.add_section()
+                continue
             if not group["available"]:
                 heading += " [dim]runtime unavailable here[/dim]"
             for index, name in enumerate(sorted(t["name"] for t in group["tools"])):

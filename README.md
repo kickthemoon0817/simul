@@ -58,10 +58,19 @@ tools. It ships as one Python package (`simul-toolkit`) with one command,
 
 | Backend | Versions | Transport | Needs running app? | Setup command |
 |---|---|---|---|---|
-| **NVIDIA Isaac Sim** | 5.1.0, 6.0.0, 6.0.1 | TCP: `khemoo.simul` bridge (8229), stock Python socket fallback (8226) | Yes | `simul isaac install-bridge` once, then `simul isaac launch` |
+| **NVIDIA Isaac Sim** | 5.1.0, 6.0.0, 6.0.1 (Linux and Windows) | TCP: `khemoo.simul` bridge (8229), stock Python socket fallback (8226) | Yes | `simul isaac install-bridge` once, then `simul isaac launch` |
 | **Unreal Engine 5** | 5.x | Remote Control HTTP API (30010) + `PythonScriptPlugin` | Yes (headless launch by default) | `simul unreal setup <project>.uproject --yes` |
 | **Blender** | 4.2+ and 5.x | Attached: local add-on bridge in the open window. Embedded: `bpy` in the server process | Attached: yes. Embedded: no | `simul blender install-bridge`, then `simul blender attach` |
 | **OpenUSD (headless)** | `usd-core` 26.3+ | In-process `pxr` | No | None |
+
+Isaac Sim runs only on Linux and Windows, so on any other OS (macOS) the MCP
+server leaves the Isaac Sim tools out: they could not reach an Isaac Sim on
+that machine and would cost every session tens of kilobytes of tool schemas.
+`simul server`, `simul info` and `simul tools` say when they are skipped. To
+register them anyway, for a setup simul does not support such as an SSH tunnel
+to an Isaac Sim host, set `ISAAC_SIM__ENABLED=true` or pass `--backends isaac`;
+`ISAAC_SIM__ENABLED=false` turns them off everywhere. See
+[docs/isaac-sim.md](docs/isaac-sim.md#platforms).
 
 ## Quickstart
 
@@ -193,7 +202,8 @@ args = ["server"]
 ```
 
 Keep agent context small by registering only what you use:
-`simul server --backends unreal` or `--backends isaac,usd`. Append
+`simul server --backends unreal` or `--backends isaac,usd` (the Isaac Sim
+tools already stay out on macOS). Append
 `--config /abs/path/config.yaml` to point at your own configuration.
 
 ## Tools

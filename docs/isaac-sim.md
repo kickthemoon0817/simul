@@ -9,6 +9,33 @@ interpreter lacks the server's dependencies.
 Set `ISAAC_SIM_PATH` to the install root (for example `~/isaac-sim-6.0.1`),
 ideally in your shell rc. The `isaac` commands also accept `--isaac-root`.
 
+## Platforms
+
+NVIDIA ships Isaac Sim for Linux and Windows only. On those platforms the MCP
+server registers the Isaac tools, the instance routing tools, the
+`simul://isaac-sim/*` resources and the Isaac part of its instructions. On any
+other OS (macOS) it skips all of them by default: no Isaac Sim can run on that
+machine, and the tool schemas would cost every agent session tens of
+kilobytes of context. `simul server`, `simul info` and `simul tools` report
+the skip and how to override it, and `get_capabilities` gives the reason under
+`isaac.skipped`.
+
+| `isaac_sim.enabled` (`ISAAC_SIM__ENABLED`) | Isaac tools are registered |
+|---|---|
+| unset or `auto` (default) | On Linux and Windows; elsewhere only when `--backends` names `isaac` |
+| `true` | On any OS |
+| `false` | Never, even with `--backends isaac` |
+
+The overrides exist for setups simul does not support, such as an SSH tunnel
+from a Mac to a Linux Isaac Sim host (see [Remote hosts](#remote-hosts)):
+
+```bash
+ISAAC_SIM__ENABLED=true simul server       # or: simul server --backends isaac,usd
+```
+
+The `simul isaac` commands (`launch`, `ping`, `exec`, ...) are not affected by
+any of this.
+
 ## Lifecycle
 
 ### 1. Publish the bridge extension (once per Isaac install)
@@ -149,6 +176,12 @@ Isaac Sim. Run `simul` on the same host as Isaac, or for a container,
 publish the ports to the host's loopback as the Compose file does. Unreal's
 `--bind` / `--allow-public` / `--passphrase` flow has no Isaac counterpart.
 
+A server on macOS skips the Isaac tools (see [Platforms](#platforms)). If you
+forward the ports from a Linux host anyway, for example over an SSH tunnel,
+you are outside what simul supports: register the tools with
+`ISAAC_SIM__ENABLED=true` or `--backends isaac` and keep the forwarded ports on
+loopback.
+
 ## Containerized Isaac Sim (Linux)
 
 [`compose.isaac-sim.yml`](../compose.isaac-sim.yml) runs the official
@@ -198,6 +231,7 @@ docker compose -f compose.isaac-sim.yml up -d
 
 | Symptom | Likely cause |
 |---|---|
+| The agent has no Isaac tools; `simul tools` lists Isaac Sim as skipped | The server runs on an OS Isaac Sim does not (macOS), or `ISAAC_SIM__ENABLED=false`; see [Platforms](#platforms) |
 | `ping` fails on 6.0 after a plain `isaac-sim.sh` start | Nothing is enabled; restart through `simul isaac launch` |
 | Bridge port 8229 never opens | Bridge not published (`install-bridge`) or not enabled (`launch` / `bridge-up`) |
 | Old behaviour after upgrading simul | Stale copy in `extsUser`; run `install-bridge --force` |

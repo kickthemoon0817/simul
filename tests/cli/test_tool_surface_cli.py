@@ -207,7 +207,12 @@ class TestScopedStartup:
         # Isaac's adapter is always built; it owns the default client.
         assert instance.client is instance.isaac_adapter.client
         report = instance.get_capabilities()
-        assert report["blender"] == {"enabled": False, "available": False, "capabilities": []}
+        assert report["blender"] == {
+            "enabled": False,
+            "available": False,
+            "capabilities": [],
+            "skipped": "left out of --backends",
+        }
 
     def test_info_skips_probes_for_unselected_backends(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _forbidden(*args: Any, **kwargs: Any) -> Any:

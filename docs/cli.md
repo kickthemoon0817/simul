@@ -48,7 +48,7 @@ simul server --config /abs/path/config.yaml --log-level DEBUG
 |---|---|
 | `-c, --config FILE` | YAML configuration file (default: the packaged `default.yaml`) |
 | `-t, --transport` | `stdio` (default; the client spawns the server), `http` (streamable HTTP) or `sse` (legacy) |
-| `-b, --backends` | Comma-separated subset of `isaac,unreal,usd,blender`. Default: every available backend |
+| `-b, --backends` | Comma-separated subset of `isaac,unreal,usd,blender`. Default: every available backend, Isaac Sim only on Linux and Windows; naming `isaac` registers it on any OS ([isaac-sim.md](isaac-sim.md#platforms)) |
 | `--unreal-tools` | `thin` (default, six tools) or `full` (every granular Unreal tool). Overrides `unreal.tool_surface` |
 | `--blender-tools` | `full` (default) or `thin` (the essentials in `THIN_BLENDER_TOOLS`). Overrides `blender.tool_surface` |
 | `--unreal-mode` | `endpoint` (default) or `attached` (the editor chosen with `simul unreal attach`) |
@@ -57,13 +57,16 @@ simul server --config /abs/path/config.yaml --log-level DEBUG
 | `-v, --verbose` | Verbose logging |
 
 `--backends` also limits the startup probes: backends you did not select are
-neither probed nor built.
+neither probed nor built. Isaac Sim is not probed either when its tools are
+skipped (on macOS, or with `ISAAC_SIM__ENABLED=false`); the banner says so.
 
 ### `simul tools`
 
 Lists the MCP tools the server would register, grouped by backend, without
 connecting to any engine. It takes the same `--backends`, `--unreal-tools`,
 `--blender-tools`, `--unreal-mode` and `--blender-mode` options as `server`.
+A backend the server would skip whatever is installed (Isaac Sim on macOS)
+lists no tools, and its `skipped` field gives the reason.
 
 ```bash
 simul tools                                    # names, grouped by backend
