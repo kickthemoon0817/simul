@@ -2166,22 +2166,22 @@
   {
    "name": "get_unreal_actor_by_semantic_label",
    "title": null,
-   "description": "Find actors by semantic tag or label.",
+   "description": "Find level actors whose actor tags match a label: exact, contains or regex, ignoring case.",
    "inputSchema": {
     "additionalProperties": false,
     "properties": {
      "label": {
-      "description": "Semantic label to search for.",
+      "description": "Semantic label (actor tag) to search for.",
       "type": "string"
      },
      "match_mode": {
       "default": "exact",
-      "description": "Match mode (exact, contains, regex).",
+      "description": "``exact`` (a tag equals label), ``contains`` (a tag contains label) or ``regex`` (label is a Python regular expression searched for in each tag); every mode ignores case.",
       "type": "string"
      },
      "max_results": {
       "default": 100,
-      "description": "Maximum results.",
+      "description": "Maximum number of actors to return, 1 to 5000.",
       "type": "integer"
      }
     },
