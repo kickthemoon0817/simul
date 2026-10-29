@@ -17,7 +17,7 @@ import textwrap
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
@@ -28,6 +28,7 @@ from ._unreal_scripts import (
     ENGINE_METADATA,
     INTERCHANGE_INFO,
     SCENE_SUMMARY,
+    SET_ACTOR_TRANSFORM,
     SET_LIGHT_PARAMS,
     SIMULATION_STATUS,
     USD_EXPORT,
@@ -103,6 +104,75 @@ LOADED_MAP_EXPRESSION = (
 
 class UnrealScriptFailure(RuntimeError):
     """Python run inside the editor raised; the message is UE's traceback."""
+
+
+# Close tasks scheduled by UnrealRuntimeSession.cleanup(). The event loop keeps
+# only weak references to tasks, so a task nothing else holds can be collected
+# before it finishes; each one is held here until it is done.
+_PENDING_CLOSES: Set["asyncio.Task[None]"] = set()
+
+# A transform component reads back as applied within these tolerances. Unreal
+# stores transforms as doubles, so the slack only absorbs conversion noise.
+_TRANSFORM_RELATIVE_TOLERANCE = 1e-3
+_ROTATION_TOLERANCE_DEGREES = 0.01
+
+
+def _vector3(name: str, value: Any, axes: str) -> List[float]:
+    """Return ``value`` as a list of three finite floats.
+
+    Args:
+        name: Parameter name, used in the error message.
+        value: The caller's list or tuple.
+        axes: What the three numbers are, e.g. ``"x, y, z"``.
+
+    Raises:
+        ValueError: ``value`` is not exactly three finite numbers.
+    """
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 3
+        and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            for v in value
+        )
+    ):
+        return [float(v) for v in value]
+    raise ValueError(f"{name} must be three finite numbers [{axes}], got {value!r}")
+
+
+def _rotator_quaternion(rotation: Sequence[float]) -> Tuple[float, float, float, float]:
+    """Quaternion (x, y, z, w) of a [pitch, yaw, roll] rotator in degrees.
+
+    The same composition as ``FRotator::Quaternion``.
+    """
+    pitch, yaw, roll = (math.radians(angle) / 2 for angle in rotation)
+    sp, cp = math.sin(pitch), math.cos(pitch)
+    sy, cy = math.sin(yaw), math.cos(yaw)
+    sr, cr = math.sin(roll), math.cos(roll)
+    return (
+        cr * sp * sy - sr * cp * cy,
+        -cr * sp * cy - sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    )
+
+
+def _transform_component_applied(
+    name: str, wanted: Sequence[float], got: Sequence[float]
+) -> bool:
+    """Whether a read-back transform component matches the value written.
+
+    Rotations are compared as orientations: Unreal reads a rotator back
+    normalised from a quaternion, so a yaw of 270 returns as -90 and a pitch
+    past 90 comes back with yaw and roll flipped.
+    """
+    if name == "rotation":
+        dot = sum(a * b for a, b in zip(_rotator_quaternion(wanted), _rotator_quaternion(got)))
+        return abs(dot) >= math.cos(math.radians(_ROTATION_TOLERANCE_DEGREES) / 2)
+    return all(
+        abs(w - g) <= _TRANSFORM_RELATIVE_TOLERANCE * max(1.0, abs(w))
+        for w, g in zip(wanted, got)
+    )
 
 
 class UnrealRuntimeSession(LoggerMixin):
@@ -1043,7 +1113,9 @@ class UnrealRuntimeSession(LoggerMixin):
         Retrieve Unreal Engine runtime information.
 
         Returns:
-            Dictionary with engine version, project name, loaded map, and
+            Dictionary with engine version, project name, absolute project
+            directory, loaded map, the platform the editor runs on
+            (``UGameplayStatics::GetPlatformName``: Mac, Windows, Linux) and
             editor state, or a ``ScriptError`` envelope when a probe raised.
         """
         info = await self._execute_json_script(ENGINE_METADATA)
@@ -1052,10 +1124,11 @@ class UnrealRuntimeSession(LoggerMixin):
         return {
             "engine_version": info["engine_version"],
             "project_name": info["project_name"],
+            "project_dir": info["project_dir"],
             "loaded_map": info["loaded_map"],
             "is_editor": True,
             "is_game": False,
-            "platform": info["project_dir"],
+            "platform": info["platform"],
         }
 
     async def get_loaded_map(self) -> Dict[str, Any]:
@@ -1646,8 +1719,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
     async def spawn_actor(
         self,
         asset_path: str,
-        location: tuple = (0.0, 0.0, 0.0),
-        rotation: tuple = (0.0, 0.0, 0.0),
+        location: Sequence[float] = (0.0, 0.0, 0.0),
+        rotation: Sequence[float] = (0.0, 0.0, 0.0),
         label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -1728,79 +1801,64 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
     async def set_actor_transform(
         self,
         actor_path: str,
-        location: Optional[tuple] = None,
-        rotation: Optional[tuple] = None,
-        scale: Optional[tuple] = None,
+        location: Optional[Sequence[float]] = None,
+        rotation: Optional[Sequence[float]] = None,
+        scale: Optional[Sequence[float]] = None,
     ) -> Dict[str, Any]:
         """
-        Set an actor's transform (location, rotation, scale).
+        Set an actor's world location, rotation and/or scale.
 
-        Uses direct function calls on the actor: ``K2_SetActorLocation``,
-        ``K2_SetActorRotation``, ``SetActorScale3D``.  Property writes on
-        ``RelativeLocation`` fail on the actor object — they must target
-        the component path, so function calls are the reliable approach.
+        Only the components given are written, in one undoable editor
+        transaction; a component left as None keeps its current value. The
+        whole transform is read back afterwards, in the same script.
 
         Args:
             actor_path: Full actor path.
-            location: New location (X, Y, Z) in cm.
-            rotation: New rotation (Pitch, Yaw, Roll) in degrees.
-            scale: New scale (X, Y, Z).
+            location: World position as [x, y, z] in cm; None keeps the
+                current location.
+            rotation: World rotation as [pitch, yaw, roll] in degrees; None
+                keeps the current rotation.
+            scale: Scale factors as [x, y, z]; None keeps the current scale.
 
         Returns:
-            Dictionary with actor_path, applied location, rotation, scale.
+            Dictionary with actor_path and the location, rotation and scale
+            read back after the write. A ``ScriptError`` envelope when the
+            actor cannot be found, and a ``TransformNotApplied`` error, with
+            the read-back values attached, naming each given component that
+            reads back different from what was written (an actor without a
+            root component has no transform to set).
+
+        Raises:
+            ValueError: A given component is not three finite numbers.
         """
-        applied_location = location or (0.0, 0.0, 0.0)
-        applied_rotation = rotation or (0.0, 0.0, 0.0)
-        applied_scale = scale or (1.0, 1.0, 1.0)
-
-        if location is not None:
-            await self._call_function(
-                actor_path,
-                "K2_SetActorLocation",
-                {
-                    "NewLocation": {
-                        "X": location[0],
-                        "Y": location[1],
-                        "Z": location[2],
-                    },
-                    "bSweep": False,
-                    "bTeleport": True,
-                },
+        values = {
+            name: _vector3(name, value, axes)
+            for name, value, axes in (
+                ("location", location, "x, y, z"),
+                ("rotation", rotation, "pitch, yaw, roll"),
+                ("scale", scale, "x, y, z"),
             )
-
-        if rotation is not None:
-            await self._call_function(
-                actor_path,
-                "K2_SetActorRotation",
-                {
-                    "NewRotation": {
-                        "Pitch": rotation[0],
-                        "Yaw": rotation[1],
-                        "Roll": rotation[2],
-                    },
-                    "bTeleportPhysics": True,
-                },
-            )
-
-        if scale is not None:
-            await self._call_function(
-                actor_path,
-                "SetActorScale3D",
-                {
-                    "NewScale3D": {
-                        "X": scale[0],
-                        "Y": scale[1],
-                        "Z": scale[2],
-                    },
-                },
-            )
-
-        return {
-            "actor_path": actor_path,
-            "location": applied_location,
-            "rotation": applied_rotation,
-            "scale": applied_scale,
+            if value is not None
         }
+        args = {"actor_path": actor_path, "values": values}
+        result = await self._execute_json_script(
+            f"args = {args!r}\n" + SET_ACTOR_TRANSFORM
+        )
+        if result.get("error"):
+            return result
+        rejected = [
+            name
+            for name, wanted in values.items()
+            if not _transform_component_applied(name, wanted, result[name])
+        ]
+        if rejected:
+            return {
+                **result,
+                "success": False,
+                "error": "Unreal did not apply: " + ", ".join(rejected),
+                "error_type": "TransformNotApplied",
+            }
+        return result
 
     async def set_actor_property(
         self,
@@ -2219,9 +2277,7 @@ component.set_material({slot_index!r}, material)
         self,
         actor_path: str,
         intensity: Optional[float] = None,
-        color_r: Optional[float] = None,
-        color_g: Optional[float] = None,
-        color_b: Optional[float] = None,
+        color: Optional[Sequence[float]] = None,
         temperature: Optional[float] = None,
         use_temperature: Optional[bool] = None,
         attenuation_radius: Optional[float] = None,
@@ -2231,14 +2287,14 @@ component.set_material({slot_index!r}, material)
         Set light component parameters on a light actor.
 
         Writes the actor's light component in one editor transaction and
-        reads every value back.
+        reads every value back. A parameter left as None keeps its current
+        value.
 
         Args:
             actor_path: Light actor path.
             intensity: Light intensity.
-            color_r: Color red component (0-1).
-            color_g: Color green component (0-1).
-            color_b: Color blue component (0-1).
+            color: Light color as [r, g, b], each channel 0-1; None keeps the
+                current color.
             temperature: Color temperature in Kelvin.
             use_temperature: Use color temperature instead of direct color.
             attenuation_radius: Light attenuation radius in cm (point and
@@ -2250,18 +2306,20 @@ component.set_material({slot_index!r}, material)
             read-back ``applied`` values, or a ``ScriptError`` envelope when
             the actor has no light component, a property does not exist on
             it, or Unreal did not apply a value.
+
+        Raises:
+            ValueError: ``color`` is not three numbers between 0 and 1.
         """
         # Python editor-property names on ULightComponent and subclasses.
         values: Dict[str, Any] = {}
         if intensity is not None:
             values["intensity"] = intensity
-        if color_r is not None or color_g is not None or color_b is not None:
+        if color is not None:
+            rgb = _vector3("color", color, "r, g, b")
+            if not all(0.0 <= channel <= 1.0 for channel in rgb):
+                raise ValueError(f"color channels must be between 0 and 1, got {list(color)!r}")
             # LightColor is an FColor: 0-255 channels.
-            def _byte(channel: Optional[float]) -> int:
-                value = 1.0 if channel is None else channel
-                return max(0, min(255, round(value * 255)))
-
-            values["light_color"] = [_byte(color_r), _byte(color_g), _byte(color_b), 255]
+            values["light_color"] = [round(channel * 255) for channel in rgb] + [255]
         if temperature is not None:
             values["temperature"] = temperature
         if use_temperature is not None:
@@ -2452,34 +2510,48 @@ if component.is_simulating_physics() != {target!r}:
         self,
         actor_path: str,
         collision_preset: str = "",
-        collision_enabled: bool = True,
+        collision_enabled: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Configure collision settings on an actor.
 
         Args:
             actor_path: Full actor object path.
-            collision_preset: Named collision preset (e.g. BlockAll, NoCollision).
-            collision_enabled: Whether collision is enabled.
+            collision_preset: Named collision preset (e.g. BlockAll,
+                OverlapAll, NoCollision); empty keeps the current preset.
+            collision_enabled: True for query and physics collision, False
+                for none. None keeps the collision mode the preset sets, or
+                the current one when no preset is given. Overriding a
+                preset's mode turns the preset into Custom.
 
         Returns:
-            Dict with actor_path, collision_preset, collision_enabled.
+            Dict with actor_path and the collision_preset and
+            collision_enabled read back from the component afterwards, or a
+            ``ScriptError`` envelope for an unknown preset or an actor
+            without one unambiguous primitive component.
         """
 
-        code = ""
+        lines = [
+            f"component = actor_component(actor_at({actor_path!r}), unreal.PrimitiveComponent)"
+        ]
         if collision_preset:
-            code += f"component.set_collision_profile_name({collision_preset!r})\n"
-        mode = "QUERY_AND_PHYSICS" if collision_enabled else "NO_COLLISION"
-        code += f"component.set_collision_enabled(unreal.CollisionEnabled.{mode})\n"
-        return await self._component_operation(
-            actor_path,
-            code,
-            {
-                "actor_path": actor_path,
-                "collision_preset": collision_preset or "Custom",
-                "collision_enabled": collision_enabled,
-            },
+            # Unreal renames an unknown preset to Custom instead of failing.
+            lines += [
+                f"component.set_collision_profile_name({collision_preset!r})",
+                "if str(component.get_collision_profile_name()).lower() != "
+                f"{collision_preset.lower()!r}:",
+                f"    raise ValueError('Unknown collision preset: ' + {collision_preset!r})",
+            ]
+        if collision_enabled is not None:
+            mode = "QUERY_AND_PHYSICS" if collision_enabled else "NO_COLLISION"
+            lines.append(f"component.set_collision_enabled(unreal.CollisionEnabled.{mode})")
+        lines.append(
+            f"print(json.dumps({{'actor_path': {actor_path!r}, "
+            "'collision_preset': str(component.get_collision_profile_name()), "
+            "'collision_enabled': "
+            "component.get_collision_enabled() != unreal.CollisionEnabled.NO_COLLISION}))"
         )
+        return await self._execute_json_script(ACTOR_HELPERS + "\n".join(lines) + "\n")
 
     async def apply_force(
         self,
@@ -3878,24 +3950,49 @@ if component.is_simulating_physics() != {target!r}:
         return {key: tuple(result[key]) for key in ("location", "rotation", "scale")}
 
     async def close(self) -> None:
-        """Close the underlying HTTP session if open."""
+        """Close the underlying HTTP session if open.
+
+        Await this on the event loop that made the session's requests,
+        before that loop ends: aiohttp cannot close the connection pool
+        afterwards and reports an unclosed client session and connector
+        when the session is garbage-collected.
+        """
         if self._session is not None and not self._session.closed:
             await self._session.close()
-            self._session = None
+        self._session = None
         self.logger.debug("Unreal runtime session closed")
+
+    async def __aenter__(self) -> "UnrealRuntimeSession":
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        await self.close()
 
     def cleanup(self) -> None:
         """
         Synchronous cleanup hook for context-manager teardown.
 
-        Schedules the async ``close()`` on the running event loop when
-        possible, otherwise creates a new loop to run it.
+        With an event loop running, schedules ``close()`` on it and holds the
+        task until it finishes. Without one, any HTTP session was opened on
+        a loop that has already ended; ``close()`` runs on a new loop, where
+        aiohttp can still mark the pool closed but not reach the old loop's
+        sockets, so async callers should ``await close()`` (or use
+        ``async with``) instead.
         """
+        if self._session is None or self._session.closed:
+            self._session = None
+            return
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self.close())
         except RuntimeError:
-            asyncio.run(self.close())
+            try:
+                asyncio.run(self.close())
+            except Exception as exc:
+                self.logger.debug("Closing the HTTP session off its loop failed: %s", exc)
+            return
+        task = loop.create_task(self.close())
+        _PENDING_CLOSES.add(task)
+        task.add_done_callback(_PENDING_CLOSES.discard)
 
 
 class UnrealRuntimeAdapter(LoggerMixin):

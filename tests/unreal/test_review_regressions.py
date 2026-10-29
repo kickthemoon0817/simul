@@ -205,11 +205,18 @@ class Vector:
         self.x, self.y, self.z = x, y, z
 
 
+# CollisionEnabled each preset applies, as Unreal's default collision profiles
+# define them (QueryAndPhysics=3, QueryOnly=1, NoCollision=0).
+PRESET_COLLISION_MODES = {"BlockAll": 3, "OverlapAll": 1, "NoCollision": 0}
+
+
 class PrimitiveComponent:
     def __init__(self):
         self.mobility = SimpleNamespace(name="MOVABLE")
         self.physics = False
         self.events = []
+        self.profile = "BlockAll"
+        self.collision = 3
 
     def get_name(self):
         return "Mesh"
@@ -225,9 +232,21 @@ class PrimitiveComponent:
 
     def set_collision_profile_name(self, name):
         self.events.append(("profile", name))
+        if name in PRESET_COLLISION_MODES:
+            self.profile, self.collision = name, PRESET_COLLISION_MODES[name]
+        else:  # Unreal renames an unknown preset to Custom instead of failing
+            self.profile = "Custom"
 
     def set_collision_enabled(self, mode):
         self.events.append(("collision", mode))
+        if mode != self.collision:  # overriding a preset's mode makes it Custom
+            self.profile, self.collision = "Custom", mode
+
+    def get_collision_profile_name(self):
+        return self.profile
+
+    def get_collision_enabled(self):
+        return self.collision
 
     def add_impulse_at_location(self, force, location):
         self.events.append(("impulse", force.z, location.x))
@@ -420,6 +439,52 @@ async def test_component_operations_and_missing_component(script_session):
     assert any(event[0] == "material" for event in component.events)
     actor.root_component = None
     assert (await session.enable_physics(actor.path))["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_collision_preset_alone_keeps_the_presets_collision_mode(script_session):
+    """collision_enabled used to default to True and override every preset:
+    OverlapAll became Custom with query-and-physics collision while the tool
+    reported OverlapAll (reproduced live on UE 5.7)."""
+    session, actor, _ = script_session
+    component = actor.root_component
+
+    result = await session.set_collision(actor.path, "OverlapAll")
+
+    assert result == {
+        "actor_path": actor.path,
+        "collision_preset": "OverlapAll",
+        "collision_enabled": True,
+    }
+    assert (component.profile, component.collision) == ("OverlapAll", 1)
+    assert not any(event[0] == "collision" for event in component.events)
+
+
+@pytest.mark.asyncio
+async def test_collision_reports_what_the_component_reads_back(script_session):
+    session, actor, _ = script_session
+
+    disabled = await session.set_collision(actor.path, collision_enabled=False)
+    assert disabled["collision_preset"] == "Custom"
+    assert disabled["collision_enabled"] is False
+
+    unchanged = await session.set_collision(actor.path)
+    assert unchanged["collision_preset"] == "Custom"
+    assert unchanged["collision_enabled"] is False
+
+    restored = await session.set_collision(actor.path, "BlockAll")
+    assert restored["collision_preset"] == "BlockAll"
+    assert restored["collision_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_unknown_collision_preset_is_an_error(script_session):
+    session, actor, _ = script_session
+
+    result = await session.set_collision(actor.path, "NotAPreset")
+
+    assert result["success"] is False
+    assert "Unknown collision preset: NotAPreset" in result["error"]
 
 
 @pytest.mark.asyncio

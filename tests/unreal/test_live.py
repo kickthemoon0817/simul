@@ -80,6 +80,25 @@ def test_c1_health_check_reports_connected_with_engine_and_project() -> None:
     _run(body())
 
 
+def test_c1b_engine_info_reports_the_platform_and_project_directory() -> None:
+    """``platform`` used to carry the project directory, relative to the
+    engine binaries; it is the platform name and the directory is its own,
+    absolute, field."""
+
+    async def body() -> None:
+        session = UnrealRuntimeSession(_settings())
+        try:
+            info = await session.get_engine_info()
+            assert info.get("platform") in {"Mac", "Windows", "Linux"}, info
+            project_dir = info.get("project_dir") or ""
+            assert project_dir.startswith("/") or project_dir[1:3] == ":/", info
+            assert ".." not in project_dir, info
+        finally:
+            await session.close()
+
+    _run(body())
+
+
 # ---------------------------------------------------------------------------
 # C2 — Multi-instance discovery
 # ---------------------------------------------------------------------------

@@ -1,9 +1,41 @@
 """Unreal Engine MCP schemas."""
 
-from typing import Any, Dict, List, Optional, Tuple
+import json
+from typing import Annotated, Any, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
+
+# ---------------------------------------------------------------------------
+# Tool input types
+# ---------------------------------------------------------------------------
+
+
+def _list_from_json_string(value: Any) -> Any:
+    """Accept ``'[1, 2, 3]'`` for a list: some MCP clients send lists as JSON text."""
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return value
+        if isinstance(parsed, list):
+            return parsed
+    return value
+
+
+#: Three finite numbers: [x, y, z] or [pitch, yaw, roll].
+Vector3 = Annotated[
+    List[Annotated[float, Field(allow_inf_nan=False)]],
+    BeforeValidator(_list_from_json_string),
+    Field(min_length=3, max_length=3),
+]
+
+#: An [r, g, b] color, each channel between 0 and 1.
+ColorRGB = Annotated[
+    List[Annotated[float, Field(ge=0.0, le=1.0)]],
+    BeforeValidator(_list_from_json_string),
+    Field(min_length=3, max_length=3),
+]
 
 # ---------------------------------------------------------------------------
 # Unreal Engine schemas -- Phase 0
@@ -99,10 +131,17 @@ class UnrealEngineInfoResponse(BaseModel):
     )
     engine_version: str = Field(..., description="Unreal Engine version string")
     project_name: str = Field(..., description="Active project name")
+    project_dir: str = Field(
+        ..., description="Absolute project directory on the editor host"
+    )
     loaded_map: str = Field(..., description="Currently loaded persistent level path")
     is_editor: bool = Field(..., description="Whether engine is running in editor mode")
     is_game: bool = Field(..., description="Whether engine is running in game mode")
-    platform: str = Field(..., description="Platform identifier")
+    platform: str = Field(
+        ...,
+        description="Platform the editor runs on, as UGameplayStatics::GetPlatformName "
+        "reports it (Mac, Windows, Linux)",
+    )
 
 
 class UnrealLoadedMapResponse(BaseModel):
@@ -426,9 +465,16 @@ class UnrealSetActorTransformResponse(BaseModel):
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor whose transform was set")
-    location: Tuple[float, float, float] = Field(..., description="Applied location")
-    rotation: Tuple[float, float, float] = Field(..., description="Applied rotation")
-    scale: Tuple[float, float, float] = Field(..., description="Applied scale")
+    location: Tuple[float, float, float] = Field(
+        ..., description="World location [x, y, z] in cm, read back after the write"
+    )
+    rotation: Tuple[float, float, float] = Field(
+        ...,
+        description="World rotation [pitch, yaw, roll] in degrees, read back after the write",
+    )
+    scale: Tuple[float, float, float] = Field(
+        ..., description="Scale [x, y, z], read back after the write"
+    )
 
 
 class UnrealSetActorPropertyResponse(BaseModel):
@@ -632,8 +678,12 @@ class UnrealSetCollisionResponse(BaseModel):
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor that was modified")
-    collision_preset: str = Field(..., description="Applied collision preset")
-    collision_enabled: bool = Field(..., description="Current collision state")
+    collision_preset: str = Field(
+        ..., description="Collision preset read back after the write (Custom once overridden)"
+    )
+    collision_enabled: bool = Field(
+        ..., description="Whether the component has any collision, read back after the write"
+    )
 
 
 class UnrealApplyForceResponse(BaseModel):
@@ -1005,6 +1055,8 @@ class UnrealComputeMeshUvResponse(BaseModel):
 
 
 __all__ = [
+    "Vector3",
+    "ColorRGB",
     "UnrealExecuteScriptResponse",
     "UnrealPingResponse",
     "UnrealInstanceInfo",

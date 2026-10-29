@@ -11,6 +11,7 @@ from fastmcp.tools.tool import ToolResult
 
 from ..schemas.common import ErrorResponse
 from ..schemas.unreal import *
+from ..schemas.unreal import ColorRGB, Vector3
 from ...tool_surfaces import THIN_UNREAL_TOOLS
 from ._helpers import surface_tool, with_param_descriptions
 
@@ -870,7 +871,10 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @tool(
         name="set_unreal_actor_transform",
-        description="Set an actor's location, rotation, and scale.",
+        description=(
+            "Set an actor's world location, rotation and/or scale. Each is optional; "
+            "one left out keeps its current value. Returns the transform read back."
+        ),
         annotations=server._tool_annotations(
             read_only=False,
             idempotent=True,
@@ -883,29 +887,20 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     @with_param_descriptions()
     async def set_unreal_actor_transform(
         actor_path: str,
-        location_x: float = 0.0,
-        location_y: float = 0.0,
-        location_z: float = 0.0,
-        rotation_pitch: float = 0.0,
-        rotation_yaw: float = 0.0,
-        rotation_roll: float = 0.0,
-        scale_x: float = 1.0,
-        scale_y: float = 1.0,
-        scale_z: float = 1.0,
+        location: Optional[Vector3] = None,
+        rotation: Optional[Vector3] = None,
+        scale: Optional[Vector3] = None,
     ) -> ToolResult:
-        """Set an actor's transform.
+        """Set an actor's world transform; a component left out is kept.
 
         Args:
             actor_path: Actor object path.
-            location_x: World X position in Unreal units (cm).
-            location_y: World Y position in Unreal units (cm).
-            location_z: World Z position in Unreal units (cm); Unreal is Z-up.
-            rotation_pitch: Pitch in degrees (rotation about Y).
-            rotation_yaw: Yaw in degrees (rotation about Z).
-            rotation_roll: Roll in degrees (rotation about X).
-            scale_x: Scale factor along X (1.0 is unscaled).
-            scale_y: Scale factor along Y (1.0 is unscaled).
-            scale_z: Scale factor along Z (1.0 is unscaled).
+            location: World position [x, y, z] in Unreal units (cm); Unreal is
+                Z-up. Omit to keep the current location.
+            rotation: World rotation [pitch, yaw, roll] in degrees: pitch about
+                Y, yaw about Z, roll about X. Omit to keep the current rotation.
+            scale: Scale factors [x, y, z]; 1.0 is unscaled. Omit to keep the
+                current scale.
         """
         return await server._exec_backend(
             "set_unreal_actor_transform",
@@ -914,9 +909,9 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             UnrealSetActorTransformResponse,
             lambda session: session.set_actor_transform(
                 actor_path=actor_path,
-                location=(location_x, location_y, location_z),
-                rotation=(rotation_pitch, rotation_yaw, rotation_roll),
-                scale=(scale_x, scale_y, scale_z),
+                location=location,
+                rotation=rotation,
+                scale=scale,
             ),
         )
 
@@ -1224,7 +1219,10 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @tool(
         name="set_unreal_light_params",
-        description="Set light component parameters (intensity, color, temperature, shadows).",
+        description=(
+            "Set light component parameters (intensity, color, temperature, shadows); "
+            "a parameter left out keeps its current value."
+        ),
         annotations=server._tool_annotations(
             read_only=False,
             idempotent=True,
@@ -1238,9 +1236,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     async def set_unreal_light_params(
         actor_path: str,
         intensity: Optional[float] = None,
-        color_r: Optional[float] = None,
-        color_g: Optional[float] = None,
-        color_b: Optional[float] = None,
+        color: Optional[ColorRGB] = None,
         temperature: Optional[float] = None,
         use_temperature: Optional[bool] = None,
         attenuation_radius: Optional[float] = None,
@@ -1255,9 +1251,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             lambda session: session.set_light_params(
                 actor_path=actor_path,
                 intensity=intensity,
-                color_r=color_r,
-                color_g=color_g,
-                color_b=color_b,
+                color=color,
                 temperature=temperature,
                 use_temperature=use_temperature,
                 attenuation_radius=attenuation_radius,
@@ -1374,7 +1368,10 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @tool(
         name="set_unreal_collision",
-        description="Set collision presets and enable/disable collision on an actor.",
+        description=(
+            "Set an actor's collision preset and/or enable or disable its collision; "
+            "what is left out is kept. Returns the state read back."
+        ),
         annotations=server._tool_annotations(
             read_only=False,
             idempotent=True,
@@ -1388,7 +1385,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     async def set_unreal_collision(
         actor_path: str,
         collision_preset: str = "",
-        collision_enabled: bool = True,
+        collision_enabled: Optional[bool] = None,
     ) -> ToolResult:
         """Set collision configuration."""
         return await server._exec_backend(

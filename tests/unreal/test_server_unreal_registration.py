@@ -46,7 +46,8 @@ class FakeUnrealAdapter:
                     "loaded_map": "/Game/Maps/Test",
                     "is_editor": True,
                     "is_game": False,
-                    "platform": "Win64",
+                    "platform": "Windows",
+                    "project_dir": "C:/Projects/Test/",
                 }
             ),
             get_loaded_map=_coro({"map_path": "/Game/Maps/Test"}),
