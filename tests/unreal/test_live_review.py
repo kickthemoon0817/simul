@@ -107,6 +107,72 @@ print(json.dumps({{'mass': c.get_mass(), 'gravity': c.is_gravity_enabled(),
     asyncio.run(run())
 
 
+def test_transform_light_and_collision_keep_what_is_not_given():
+    """A component or parameter left out keeps its value. The transform tool
+    used to reset omitted axes to 0 / 1, a lone color channel forced the
+    others to 255, and a preset alone was overridden to QueryAndPhysics."""
+
+    async def run():
+        client = session()
+        path = await spawn_cube(client)
+        light = None
+        try:
+            full = await client.set_actor_transform(
+                path, location=[10, 20, 30], rotation=[10, 20, 30], scale=[2, 3, 4]
+            )
+            assert not full.get("error"), full
+            moved = await client.set_actor_transform(path, location=[500, 20, 30])
+            assert moved["location"] == pytest.approx([500, 20, 30])
+            assert moved["rotation"] == pytest.approx([10, 20, 30])
+            assert moved["scale"] == pytest.approx([2, 3, 4])
+            turned = await client.set_actor_transform(path, rotation=[0, 270, 0])
+            assert not turned.get("error"), turned
+            assert turned["rotation"] == pytest.approx([0, -90, 0], abs=1e-6)
+            assert turned["location"] == pytest.approx([500, 20, 30])
+            # Unreal reads a pitch this close to the pole back snapped to 90.
+            near_pole = await client.set_actor_transform(path, rotation=[89.95, 0, 0])
+            assert not near_pole.get("error"), near_pole
+
+            overlap = await client.set_collision(path, "OverlapAll")
+            assert overlap["collision_preset"] == "OverlapAll", overlap
+            mode = await client._execute_json_script(f"""
+import unreal, json
+c = unreal.load_object(None, {path!r}).static_mesh_component
+print(json.dumps({{'mode': c.get_collision_enabled().name}}))
+""")
+            assert mode["mode"] == "QUERY_ONLY", mode
+            unknown = await client.set_collision(path, "NotAPreset")
+            assert unknown["success"] is False, unknown
+            untouched = await client._execute_json_script(f"""
+import unreal, json
+c = unreal.load_object(None, {path!r}).static_mesh_component
+print(json.dumps({{'profile': str(c.get_collision_profile_name()),
+                   'mode': c.get_collision_enabled().name}}))
+""")
+            assert untouched == {"profile": "OverlapAll", "mode": "QUERY_ONLY"}, untouched
+
+            spawned = await client.spawn_actor("/Script/Engine.PointLight")
+            light = spawned["actor_path"]
+            colored = await client.set_light_params(light, color=[0.2, 0.4, 0.6])
+            assert colored["applied"]["light_color"] == [51, 102, 153, 255], colored
+            brighter = await client.set_light_params(light, intensity=1234.0)
+            assert not brighter.get("error"), brighter
+            kept = await client._execute_json_script(f"""
+import unreal, json
+c = unreal.load_object(None, {light!r}).light_component
+color = c.get_editor_property('light_color')
+print(json.dumps({{'color': [color.r, color.g, color.b]}}))
+""")
+            assert kept["color"] == [51, 102, 153], kept
+        finally:
+            await destroy_actor(client, path)
+            if light:
+                await destroy_actor(client, light)
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_simulation_lifecycle():
     async def run():
         client = session()

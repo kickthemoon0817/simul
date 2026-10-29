@@ -14,18 +14,23 @@ def actor_at(path):
         raise ValueError("Actor not found: " + path)
     return actor
 
-def actor_info(actor):
+def actor_transform(actor):
     location = actor.get_actor_location()
     rotation = actor.get_actor_rotation()
     scale = actor.get_actor_scale3d()
+    return {
+        "location": [location.x, location.y, location.z],
+        "rotation": [rotation.pitch, rotation.yaw, rotation.roll],
+        "scale": [scale.x, scale.y, scale.z],
+    }
+
+def actor_info(actor):
     root = actor.root_component
     return {
         "name": actor.get_actor_label(),
         "path": actor.get_path_name(),
         "class_name": actor.get_class().get_name(),
-        "location": [location.x, location.y, location.z],
-        "rotation": [rotation.pitch, rotation.yaw, rotation.roll],
-        "scale": [scale.x, scale.y, scale.z],
+        **actor_transform(actor),
         "tags": [str(tag) for tag in actor.get_editor_property("tags")],
         "components": [
             {"name": c.get_name(), "class_name": c.get_class().get_name(),
@@ -162,8 +167,31 @@ print(json.dumps({
     "engine_version": unreal.SystemLibrary.get_engine_version(),
     "project_name": unreal.SystemLibrary.get_game_name(),
     "loaded_map": world.get_path_name() if world else "",
-    "project_dir": unreal.Paths.project_dir(),
+    "platform": unreal.GameplayStatics.get_platform_name(),
+    # project_dir() is relative to the engine binaries; report the real path.
+    "project_dir": unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_dir()),
 }))
+"""
+
+# Expects ``args`` = {"actor_path", "values"}, where ``values`` holds only the
+# components to write: "location" [x, y, z] cm, "rotation" [pitch, yaw, roll]
+# degrees, "scale" [x, y, z]. A component left out is not touched, so it keeps
+# its current value. Writes in one undoable transaction (Actor.modify also
+# records the root component), then reads the whole world transform back.
+SET_ACTOR_TRANSFORM = ACTOR_HELPERS + """
+actor = actor_at(args["actor_path"])
+values = args["values"]
+if values:
+    with unreal.ScopedEditorTransaction("simul: set actor transform"):
+        actor.modify()
+        if "location" in values:
+            actor.set_actor_location(unreal.Vector(*values["location"]), False, True)
+        if "rotation" in values:
+            pitch, yaw, roll = values["rotation"]
+            actor.set_actor_rotation(unreal.Rotator(pitch=pitch, yaw=yaw, roll=roll), True)
+        if "scale" in values:
+            actor.set_actor_scale3d(unreal.Vector(*values["scale"]))
+print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}))
 """
 
 # Scene digest in one round trip. Class keys are UClass path names

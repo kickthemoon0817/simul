@@ -273,3 +273,32 @@ def test_document_change_reply_names_the_new_document(
     assert reply["details"] == {"document_id": bridge.document_id, "attached_document_id": "old"}
     assert bridge.document_id in reply["error"]
     assert "attach_blender_window" in reply["error"]
+
+
+def test_failed_operation_reply_keeps_the_class_and_the_noted_context(
+    bridge_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bpy failure noted by the session reaches the server with its context."""
+
+    class Session:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def get_frame(self) -> Dict[str, Any]:
+            error = TypeError('enum "BOGUS" not found')
+            error.add_note("Failed to add rigid body to 'Cube'")
+            raise error
+
+    monkeypatch.setattr(bridge_module, "BlenderRuntimeSession", Session)
+    bridge = _bridge(bridge_module, tmp_path)
+    reply = bridge.dispatch(
+        _request(
+            bridge,
+            method="get_frame",
+            target={"document_id": bridge.document_id, "window_id": "4", "scene_id": "5"},
+            path_policy={"enabled": False, "allowed_paths": [], "project_root": str(tmp_path)},
+        )
+    )
+    assert reply["success"] is False
+    assert reply["error_type"] == "TypeError"
+    assert reply["error"] == "TypeError: Failed to add rigid body to 'Cube': enum \"BOGUS\" not found"

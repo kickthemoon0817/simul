@@ -70,7 +70,8 @@ ENGINE_METADATA_REPLY: Dict[str, Any] = {
     "engine_version": "5.4.0",
     "project_name": "TestProject",
     "loaded_map": "/Game/Maps/TestMap",
-    "project_dir": "Win64",
+    "platform": "Windows",
+    "project_dir": "C:/Projects/TestProject/",
 }
 
 
@@ -162,11 +163,13 @@ class TestUnrealRuntimeSession:
         """Engine info returns all expected fields."""
         session = self._make_session(monkeypatch)
         calls = []
+        scripts = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
             fn = (json or {}).get("functionName", "")
             calls.append(fn)
             if fn == "ExecutePythonCommandEx":
+                scripts.append(json["parameters"]["PythonCommand"])
                 return python_json_response(ENGINE_METADATA_REPLY)
             return FakeResponse({}, 404)
 
@@ -182,7 +185,12 @@ class TestUnrealRuntimeSession:
         assert result["loaded_map"] == "/Game/Maps/TestMap"
         assert result["is_editor"] is True
         assert result["is_game"] is False
-        assert result["platform"] == "Win64"
+        # platform is the platform name, not the project directory it used
+        # to carry; the directory has its own field, as an absolute path.
+        assert result["platform"] == "Windows"
+        assert result["project_dir"] == "C:/Projects/TestProject/"
+        assert "unreal.GameplayStatics.get_platform_name()" in scripts[0]
+        assert "convert_relative_path_to_full(unreal.Paths.project_dir())" in scripts[0]
 
     def test_get_engine_info_script_failure_is_an_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -944,30 +952,38 @@ class TestUnrealRuntimeSessionPhase3:
     # -- set_actor_transform --
 
     def test_set_actor_transform_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_actor_transform calls K2_SetActorLocation/Rotation and SetActorScale3D."""
+        """set_actor_transform sends one script carrying only the given components
+        and returns the transform the editor read back."""
         session = self._make_session(monkeypatch)
-        called_functions: list = []
+        scripts: list = []
+        actor = "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
+        read_back = {
+            "actor_path": actor,
+            "location": [100.0, 200.0, 50.0],
+            "rotation": [15.0, 30.0, 45.0],
+            "scale": [2.0, 2.0, 2.0],
+        }
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            called_functions.append(fn)
-            if fn in ("K2_SetActorLocation", "K2_SetActorRotation", "SetActorScale3D"):
-                return FakeResponse({"ReturnValue": True})
+            if (json or {}).get("functionName") == "ExecutePythonCommandEx":
+                scripts.append(json["parameters"]["PythonCommand"])
+                return python_json_response(read_back)
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
         result = asyncio.run(session.set_actor_transform(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Cube_0",
+            actor_path=actor,
             location=(100.0, 200.0, 50.0),
-            rotation=(10.0, 20.0, 30.0),
             scale=(2.0, 2.0, 2.0),
         ))
 
-        assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
-        assert "K2_SetActorLocation" in called_functions
-        assert "K2_SetActorRotation" in called_functions
-        assert "SetActorScale3D" in called_functions
+        assert result == read_back
+        assert len(scripts) == 1
+        assert scripts[0].startswith(
+            "args = {'actor_path': '%s', 'values': {'location': [100.0, 200.0, 50.0], "
+            "'scale': [2.0, 2.0, 2.0]}}\n" % actor
+        )
 
     # -- set_actor_property --
 
@@ -1281,9 +1297,7 @@ class TestUnrealRuntimeSessionPhase4:
         result = asyncio.run(session.set_light_params(
             actor_path="/Game/Maps/Test.Test:PersistentLevel.PointLight_0",
             intensity=5000.0,
-            color_r=1.0,
-            color_g=0.9,
-            color_b=0.8,
+            color=[1.0, 0.9, 0.8],
             cast_shadows=True,
         ))
 
@@ -1296,6 +1310,27 @@ class TestUnrealRuntimeSessionPhase4:
             "'values': {'intensity': 5000.0, 'light_color': [255, 230, 204, 255], 'cast_shadows': True}"
             in scripts[0]
         )
+
+    @pytest.mark.parametrize(
+        "color",
+        [[1.0, 0.5], [1.0, 0.5, 0.2, 1.0], [1.5, 0.0, 0.0], [-0.1, 0.0, 0.0], [float("nan"), 0, 0]],
+    )
+    def test_set_light_params_refuses_a_color_that_is_not_three_channels_in_0_1(
+        self, monkeypatch: pytest.MonkeyPatch, color: list
+    ) -> None:
+        """Color is one [r, g, b] vector: no channel is ever defaulted (a lone
+        color_r used to force green and blue to 255), and nothing is clamped."""
+        session = self._make_session(monkeypatch)
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            raise AssertionError("no request expected")
+
+        session._session = SmartFakeClientSession(put_fn=put_fn)
+
+        with pytest.raises(ValueError, match="color"):
+            asyncio.run(session.set_light_params(
+                actor_path="/Game/Maps/Test.Test:PersistentLevel.PointLight_0", color=color,
+            ))
 
     def test_set_light_params_reports_a_value_unreal_refused(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2071,37 +2106,6 @@ class TestPassphraseHeader:
             == "5f4dcc3b5aa765d61d8327deb882cf99"
         )
 
-    def test_probe_port_omits_passphrase_header_by_default(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Backward compat: probe_port() with no passphrase_md5 must NOT
-        inject the header — preserves discovery behavior for editors
-        without passphrase enforcement."""
-        monkeypatch.setattr(unreal_runtime, "AIOHTTP_AVAILABLE", True)
-        captured: Dict[str, Any] = {}
-
-        class _CaptureSession:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-
-            async def __aenter__(self):
-                raise RuntimeError("stop here — only the constructor matters")
-
-            async def __aexit__(self, *args):
-                pass
-
-        monkeypatch.setattr(
-            unreal_runtime.aiohttp, "ClientSession", _CaptureSession, raising=True
-        )
-
-        asyncio.run(
-            unreal_runtime.UnrealRuntimeSession.probe_port(
-                "127.0.0.1", 30010, timeout=1.0
-            )
-        )
-
-        assert "Passphrase" not in captured["headers"]
-
     def test_unreal_config_reads_passphrase_from_env_var(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2119,34 +2123,3 @@ class TestPassphraseHeader:
         from simul.config import Settings as _Settings
         settings = _Settings()
         assert settings.unreal.passphrase == "from-env"
-
-    def test_probe_port_injects_passphrase_when_supplied(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Closes the iter4 code-review HIGH: discovery against a
-        passphrase-enforcing editor must carry the header."""
-        monkeypatch.setattr(unreal_runtime, "AIOHTTP_AVAILABLE", True)
-        captured: Dict[str, Any] = {}
-        md5_hash = "5f4dcc3b5aa765d61d8327deb882cf99"
-
-        class _CaptureSession:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-
-            async def __aenter__(self):
-                raise RuntimeError("stop here — only the constructor matters")
-
-            async def __aexit__(self, *args):
-                pass
-
-        monkeypatch.setattr(
-            unreal_runtime.aiohttp, "ClientSession", _CaptureSession, raising=True
-        )
-
-        asyncio.run(
-            unreal_runtime.UnrealRuntimeSession.probe_port(
-                "127.0.0.1", 30010, timeout=1.0, passphrase_md5=md5_hash
-            )
-        )
-
-        assert captured["headers"]["Passphrase"] == md5_hash

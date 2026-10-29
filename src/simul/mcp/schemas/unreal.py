@@ -1,9 +1,41 @@
 """Unreal Engine MCP schemas."""
 
-from typing import Any, Dict, List, Optional, Tuple
+import json
+from typing import Annotated, Any, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
+
+# ---------------------------------------------------------------------------
+# Tool input types
+# ---------------------------------------------------------------------------
+
+
+def _list_from_json_string(value: Any) -> Any:
+    """Accept ``'[1, 2, 3]'`` for a list: some MCP clients send lists as JSON text."""
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return value
+        if isinstance(parsed, list):
+            return parsed
+    return value
+
+
+#: Three finite numbers: [x, y, z] or [pitch, yaw, roll].
+Vector3 = Annotated[
+    List[Annotated[float, Field(allow_inf_nan=False)]],
+    BeforeValidator(_list_from_json_string),
+    Field(min_length=3, max_length=3),
+]
+
+#: An [r, g, b] color, each channel between 0 and 1.
+ColorRGB = Annotated[
+    List[Annotated[float, Field(ge=0.0, le=1.0)]],
+    BeforeValidator(_list_from_json_string),
+    Field(min_length=3, max_length=3),
+]
 
 # ---------------------------------------------------------------------------
 # Unreal Engine schemas -- Phase 0
@@ -21,33 +53,88 @@ class UnrealPingResponse(BaseModel):
 
 
 class UnrealInstanceInfo(BaseModel):
-    """Information about a single discovered Unreal Engine instance."""
+    """One endpoint reported by Unreal discovery.
 
-    name: str = Field(..., description="Instance identifier")
+    ``list_unreal_instances`` and ``simul unreal instances`` return the same
+    records (``simul.adapters.unreal_connection.discover_instances``). The
+    identity fields are null, and the lists empty, when the editor's Python
+    did not answer; ``error`` says why.
+    """
+
+    name: str = Field(
+        ..., description="'default' for the active endpoint, otherwise 'unreal-<port>'"
+    )
     host: str = Field(..., description="Remote Control API host")
     port: int = Field(..., description="Remote Control API port")
-    reachable: bool = Field(..., description="Whether the instance responded to ping")
-    active: bool = Field(False, description="Whether this is the currently active instance")
+    reachable: bool = Field(
+        ..., description="Whether Remote Control answered GET /remote/info"
+    )
+    active: bool = Field(
+        False,
+        description=(
+            "Whether Unreal tools target this endpoint: the configured "
+            "host/port, or the attached editor in attached mode"
+        ),
+    )
+    attached: bool = Field(
+        False,
+        description=(
+            "Whether this editor, its loaded map and the selected viewport "
+            "match the saved simul unreal attach selection"
+        ),
+    )
+    latency_ms: Optional[float] = Field(
+        None, description="GET /remote/info round trip in milliseconds"
+    )
+    error: Optional[str] = Field(
+        None,
+        description="Why the endpoint is unreachable or its identity is unavailable",
+    )
+    instance_id: Optional[str] = Field(
+        None, description="Editor process identity; changes when the editor restarts"
+    )
+    document_id: Optional[str] = Field(
+        None, description="Loaded-map generation; changes when a map is opened or replaced"
+    )
+    pid: Optional[int] = Field(None, description="Editor process ID")
     engine_version: Optional[str] = Field(None, description="Unreal Engine version")
-    project_name: Optional[str] = Field(None, description="Active project name")
-    loaded_map: Optional[str] = Field(None, description="Currently loaded level path")
-    latency_ms: Optional[float] = Field(None, description="Ping latency in milliseconds")
+    project_name: Optional[str] = Field(None, description="Project name")
+    project_path: Optional[str] = Field(None, description="Absolute .uproject path")
+    map_path: Optional[str] = Field(None, description="Loaded editor world path")
+    active_viewport: Optional[str] = Field(
+        None, description="Config key of the active level viewport"
+    )
+    viewports: List[str] = Field(
+        default_factory=list,
+        description="Level viewport config keys, for simul unreal attach --viewport",
+    )
+    dirty_map_packages: List[str] = Field(
+        default_factory=list, description="Map packages with unsaved changes"
+    )
 
 
 class UnrealListInstancesResponse(BaseModel):
-    """Response listing all discovered Unreal Engine instances."""
+    """Response listing discovered Unreal editors."""
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     instances: List[UnrealInstanceInfo] = Field(
-        default_factory=list, description="Discovered instances"
+        default_factory=list,
+        description=(
+            "Discovered instances by port; a scan omits ports where nothing "
+            "answered, except the active endpoint"
+        ),
     )
     active_instance: Optional[str] = Field(
-        None, description="Name of the currently active instance"
+        None, description="Name of the instance Unreal tools target"
     )
-    total_discovered: int = Field(0, description="Total instances found via port scan")
+    total_discovered: int = Field(0, description="Instances whose Remote Control answered")
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Attached-mode problems: missing, invalid or stale attachment",
+    )
 
 
 class UnrealHealthCheckResponse(BaseModel):
@@ -99,10 +186,17 @@ class UnrealEngineInfoResponse(BaseModel):
     )
     engine_version: str = Field(..., description="Unreal Engine version string")
     project_name: str = Field(..., description="Active project name")
+    project_dir: str = Field(
+        ..., description="Absolute project directory on the editor host"
+    )
     loaded_map: str = Field(..., description="Currently loaded persistent level path")
     is_editor: bool = Field(..., description="Whether engine is running in editor mode")
     is_game: bool = Field(..., description="Whether engine is running in game mode")
-    platform: str = Field(..., description="Platform identifier")
+    platform: str = Field(
+        ...,
+        description="Platform the editor runs on, as UGameplayStatics::GetPlatformName "
+        "reports it (Mac, Windows, Linux)",
+    )
 
 
 class UnrealLoadedMapResponse(BaseModel):
@@ -426,9 +520,16 @@ class UnrealSetActorTransformResponse(BaseModel):
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor whose transform was set")
-    location: Tuple[float, float, float] = Field(..., description="Applied location")
-    rotation: Tuple[float, float, float] = Field(..., description="Applied rotation")
-    scale: Tuple[float, float, float] = Field(..., description="Applied scale")
+    location: Tuple[float, float, float] = Field(
+        ..., description="World location [x, y, z] in cm, read back after the write"
+    )
+    rotation: Tuple[float, float, float] = Field(
+        ...,
+        description="World rotation [pitch, yaw, roll] in degrees, read back after the write",
+    )
+    scale: Tuple[float, float, float] = Field(
+        ..., description="Scale [x, y, z], read back after the write"
+    )
 
 
 class UnrealSetActorPropertyResponse(BaseModel):
@@ -632,8 +733,12 @@ class UnrealSetCollisionResponse(BaseModel):
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor that was modified")
-    collision_preset: str = Field(..., description="Applied collision preset")
-    collision_enabled: bool = Field(..., description="Current collision state")
+    collision_preset: str = Field(
+        ..., description="Collision preset read back after the write (Custom once overridden)"
+    )
+    collision_enabled: bool = Field(
+        ..., description="Whether the component has any collision, read back after the write"
+    )
 
 
 class UnrealApplyForceResponse(BaseModel):
@@ -1005,6 +1110,8 @@ class UnrealComputeMeshUvResponse(BaseModel):
 
 
 __all__ = [
+    "Vector3",
+    "ColorRGB",
     "UnrealExecuteScriptResponse",
     "UnrealPingResponse",
     "UnrealInstanceInfo",

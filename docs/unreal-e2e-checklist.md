@@ -58,7 +58,7 @@ surface because that's what agents see by default.
 |---|---|---|
 | `mcp__simul__unreal_health_check` | `() → {connected, engine_version, project_name, is_editor}` | ~150 B |
 | `mcp__simul__ping_unreal` | `() → {reachable, latency_ms, ...}` | ~100 B |
-| `mcp__simul__list_unreal_instances` | `({scan: bool = true}) → [{port, project_name, ...}]` | ~200 B × N |
+| `mcp__simul__list_unreal_instances` | `({scan: bool = true}) → {instances: [{port, reachable, active, attached, pid, project_name, map_path, viewports, error, ...}], active_instance, total_discovered, warnings}`; same payload as `simul unreal instances` | ~700 B × N |
 | `mcp__simul__execute_unreal_script` | `({code, mode}) → {success, ...printed JSON}`; `{success, result}` for `EvaluateStatement`, `{success, output}` when nothing JSON was printed | depends on what the script prints |
 | `mcp__simul__capture_unreal_viewport` | `({resolution_x, resolution_y, format, inline}) → {path, size_bytes, ...}` plus an image content block when `inline` | ~200 B of JSON; the image travels as `ImageContent`, not as text |
 | `mcp__simul__control_unreal_ui` | `({agent_control, target?, ...}) → {success, ...}`; named editor controls, requires `simul unreal attach` | ~200 B |
@@ -85,9 +85,11 @@ pass when:
 tool: mcp__simul__list_unreal_instances
 args: {}
 pass when:
-  - response is a list with >= 1 entry
-  - an entry has port == 30010 (or the port you configured)
+  - instances has >= 1 entry
+  - the entry with active == true has port == 30010 (or the port you
+    configured), reachable == true, error == null and a pid
   - project_name in that entry matches C1's project_name
+  - `simul --json unreal instances` lists the same entries (latency_ms aside)
 ```
 
 ### C3 — `execute_unreal_script` contract
@@ -210,7 +212,9 @@ you enable full registration, reach for:
 
 ### Discovery hygiene
 
-- `list_unreal_instances` with default scan range (30010–30019) is cheap.
+- `list_unreal_instances` with default scan range (30010–30019) is cheap:
+  one `GET /remote/info` per port, plus one identity script per editor
+  that answers.
 - Widening the range to hundreds of ports multiplies the probe count
   linearly and may trip firewalls. Keep the default unless you know why.
 

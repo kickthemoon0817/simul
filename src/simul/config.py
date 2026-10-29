@@ -99,6 +99,15 @@ class IsaacSimConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    enabled: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Register the Isaac Sim MCP tools. Unset (or 'auto') registers them on "
+            "Linux and Windows, the platforms Isaac Sim runs on, and skips them "
+            "elsewhere (macOS) unless `--backends` names isaac; true registers them "
+            "on any OS; false never registers them. Env: ISAAC_SIM__ENABLED."
+        ),
+    )
     path: Optional[str] = Field(
         # Read from the environment so the field is the one source of truth.
         # It existed and was never populated, while callers reached past it to
@@ -211,6 +220,14 @@ class IsaacSimConfig(BaseModel):
             "with InstanceClaimed. Off means claims are advisory"
         ),
     )
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _auto_means_unset(cls, value: Any) -> Any:
+        """Read ``auto`` or an empty value as unset, the platform default."""
+        if isinstance(value, str) and value.strip().lower() in ("", "auto"):
+            return None
+        return value
 
     @model_validator(mode="after")
     def _pick_up_generated_auth_token(self) -> "IsaacSimConfig":
@@ -803,6 +820,7 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
             ),
             "isaac_sim": _compact_dict(
                 {
+                    "enabled": isaac.get("enabled"),
                     "path": _normalise_optional_path(isaac.get("path")),
                     "socket_host": isaac.get("socket_host"),
                     "socket_port": isaac.get("socket_port"),

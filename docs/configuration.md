@@ -40,6 +40,7 @@ used by `simul isaac launch` and `install-bridge`; the YAML default for
 | `LOGGING__LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `LOGGING__FILE_PATH` | `~/.simul/logs/simul.log` | Text log (rotated daily, 14 days kept) |
 | `LOGGING__AUDIT_PATH` | `~/.simul/logs/audit.jsonl` | One JSON line per tool call |
+| `ISAAC_SIM__ENABLED` | `auto` | Register the Isaac Sim tools: `auto` on Linux and Windows only (elsewhere when `--backends` names `isaac`), `true` on any OS, `false` never; see [isaac-sim.md](isaac-sim.md#platforms) |
 | `ISAAC_SIM__SOCKET_PORT` / `ISAAC_SIM__BRIDGE_PORT` | `8226` / `8229` | Isaac Sim transports |
 | `ISAAC_SIM__SOCKET_PROTOCOL` | `auto` | `python_server` (6.0+) or `vscode` (5.x) skips the one-time probe |
 | `ISAAC_SIM__SOCKET_AUTH_TOKEN` | unset | Token for a 6.0 python_server started with `--auth-token` |

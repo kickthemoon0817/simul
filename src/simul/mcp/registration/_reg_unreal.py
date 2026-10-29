@@ -4,13 +4,13 @@ Unreal Engine runtime tool registration for the Simul MCP server.
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from fastmcp.tools.tool import ToolResult
 
 from ..schemas.common import ErrorResponse
 from ..schemas.unreal import *
+from ..schemas.unreal import ColorRGB, Vector3
 from ...tool_surfaces import THIN_UNREAL_TOOLS
 from ._helpers import surface_tool, with_param_descriptions
 
@@ -30,6 +30,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     """
     # Imported here rather than at module level: the adapter needs aiohttp,
     # and this module must import even where the Unreal backend is absent.
+    from ...adapters import unreal_connection
     from ...adapters.unreal_runtime import UNREAL_EXEC_MODES, UnrealRuntimeSession
 
     surface = THIN_UNREAL_TOOLS if thin else None
@@ -99,9 +100,13 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     @tool(
         name="list_unreal_instances",
         description=(
-            "Discover all running Unreal Engine instances by scanning the configured "
-            "port range for Remote Control API endpoints. Returns each instance's "
-            "reachability, engine version, project name, and latency."
+            "Discover running Unreal editors (same payload as `simul unreal "
+            "instances`). Each instance: reachable, latency_ms, error, editor "
+            "identity (pid, instance_id, project_name, project_path, map_path, "
+            "viewports, dirty_map_packages; null when its Python does not "
+            "answer), active (Unreal tools target it) and attached (the saved "
+            "`simul unreal attach` selection). Ports that do not answer are "
+            "omitted, except the active one."
         ),
         annotations=server._tool_annotations(
             read_only=True,
@@ -116,93 +121,26 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         scan: bool = True,
     ) -> ToolResult:
         """
-        Scan configured port range for running Unreal Engine instances.
+        Discover running Unreal editors.
 
         Args:
-            scan: When True, probe ports in the configured range concurrently.
+            scan: When True, probe the configured port range plus the
+                configured and attached ports concurrently. When False, probe
+                only the active endpoint.
 
         Returns:
-            List of discovered instances or error response.
+            Discovered instances or error response.
         """
-
-        async def _list_instances(session: Any) -> Dict[str, Any]:
-            from ...adapters.unreal_runtime import (
-                UnrealRuntimeSession,
-                _passphrase_to_md5,
-            )
-
-            cfg = server.settings.unreal
-            host = cfg.host
-            active_port = cfg.port
-            if cfg.mode == "attached":
-                session._load_attachment()
-                host, active_port = session.host, session.port
-            instances: List[UnrealInstanceInfo] = []
-
-            if scan:
-                ports = list(range(cfg.scan_port_start, cfg.scan_port_end))
-                # Always include the active port even if outside scan range
-                if active_port not in ports:
-                    ports.insert(0, active_port)
-                # If a passphrase is configured, every probe must carry the
-                # header — otherwise a passphrase-enforcing editor returns
-                # 401 and discovery silently reports it as unreachable.
-                discovery_md5 = _passphrase_to_md5(cfg.passphrase)
-                results = await asyncio.gather(
-                    *(
-                        UnrealRuntimeSession.probe_port(
-                            host,
-                            port,
-                            timeout=cfg.ping_timeout,
-                            passphrase_md5=discovery_md5,
-                        )
-                        for port in ports
-                    ),
-                    return_exceptions=True,
-                )
-                for port, probe_result in zip(ports, results):
-                    if isinstance(probe_result, BaseException):
-                        continue
-                    instances.append(
-                        UnrealInstanceInfo(
-                            name="default" if port == active_port else f"unreal-{port}",
-                            host=host,
-                            port=port,
-                            reachable=probe_result.get("reachable", False),
-                            active=port == active_port,
-                            engine_version=probe_result.get("engine_version"),
-                            project_name=probe_result.get("project_name"),
-                            loaded_map=None,
-                            latency_ms=probe_result.get("latency_ms"),
-                        )
-                    )
-            else:
-                payload = await session.ping()
-                instances.append(
-                    UnrealInstanceInfo(
-                        name="default",
-                        host=host,
-                        port=active_port,
-                        reachable=payload.get("reachable", False),
-                        active=True,
-                        latency_ms=payload.get("latency_ms"),
-                    )
-                )
-
-            reachable = [i for i in instances if i.reachable]
-            return UnrealListInstancesResponse(
-                success=True,
-                instances=instances,
-                active_instance=next((i.name for i in instances if i.active), None),
-                total_discovered=len(reachable),
-            ).model_dump()
-
         return await server._exec_backend(
             "list_unreal_instances",
             server.unreal_adapter,
             "Unreal",
             UnrealListInstancesResponse,
-            _list_instances,
+            # Discovery opens its own session per probed port; the envelope's
+            # session is bound to one endpoint and goes unused.
+            lambda _session: unreal_connection.discover_instances(
+                server.settings, scan=scan
+            ),
             params={"scan": scan},
         )
 
@@ -870,7 +808,10 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @tool(
         name="set_unreal_actor_transform",
-        description="Set an actor's location, rotation, and scale.",
+        description=(
+            "Set an actor's world location, rotation and/or scale. Each is optional; "
+            "one left out keeps its current value. Returns the transform read back."
+        ),
         annotations=server._tool_annotations(
             read_only=False,
             idempotent=True,
@@ -883,29 +824,20 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     @with_param_descriptions()
     async def set_unreal_actor_transform(
         actor_path: str,
-        location_x: float = 0.0,
-        location_y: float = 0.0,
-        location_z: float = 0.0,
-        rotation_pitch: float = 0.0,
-        rotation_yaw: float = 0.0,
-        rotation_roll: float = 0.0,
-        scale_x: float = 1.0,
-        scale_y: float = 1.0,
-        scale_z: float = 1.0,
+        location: Optional[Vector3] = None,
+        rotation: Optional[Vector3] = None,
+        scale: Optional[Vector3] = None,
     ) -> ToolResult:
-        """Set an actor's transform.
+        """Set an actor's world transform; a component left out is kept.
 
         Args:
             actor_path: Actor object path.
-            location_x: World X position in Unreal units (cm).
-            location_y: World Y position in Unreal units (cm).
-            location_z: World Z position in Unreal units (cm); Unreal is Z-up.
-            rotation_pitch: Pitch in degrees (rotation about Y).
-            rotation_yaw: Yaw in degrees (rotation about Z).
-            rotation_roll: Roll in degrees (rotation about X).
-            scale_x: Scale factor along X (1.0 is unscaled).
-            scale_y: Scale factor along Y (1.0 is unscaled).
-            scale_z: Scale factor along Z (1.0 is unscaled).
+            location: World position [x, y, z] in Unreal units (cm); Unreal is
+                Z-up. Omit to keep the current location.
+            rotation: World rotation [pitch, yaw, roll] in degrees: pitch about
+                Y, yaw about Z, roll about X. Omit to keep the current rotation.
+            scale: Scale factors [x, y, z]; 1.0 is unscaled. Omit to keep the
+                current scale.
         """
         return await server._exec_backend(
             "set_unreal_actor_transform",
@@ -914,9 +846,9 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             UnrealSetActorTransformResponse,
             lambda session: session.set_actor_transform(
                 actor_path=actor_path,
-                location=(location_x, location_y, location_z),
-                rotation=(rotation_pitch, rotation_yaw, rotation_roll),
-                scale=(scale_x, scale_y, scale_z),
+                location=location,
+                rotation=rotation,
+                scale=scale,
             ),
         )
 
@@ -1224,7 +1156,10 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @tool(
         name="set_unreal_light_params",
-        description="Set light component parameters (intensity, color, temperature, shadows).",
+        description=(
+            "Set light component parameters (intensity, color, temperature, shadows); "
+            "a parameter left out keeps its current value."
+        ),
         annotations=server._tool_annotations(
             read_only=False,
             idempotent=True,
@@ -1238,9 +1173,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     async def set_unreal_light_params(
         actor_path: str,
         intensity: Optional[float] = None,
-        color_r: Optional[float] = None,
-        color_g: Optional[float] = None,
-        color_b: Optional[float] = None,
+        color: Optional[ColorRGB] = None,
         temperature: Optional[float] = None,
         use_temperature: Optional[bool] = None,
         attenuation_radius: Optional[float] = None,
@@ -1255,9 +1188,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
             lambda session: session.set_light_params(
                 actor_path=actor_path,
                 intensity=intensity,
-                color_r=color_r,
-                color_g=color_g,
-                color_b=color_b,
+                color=color,
                 temperature=temperature,
                 use_temperature=use_temperature,
                 attenuation_radius=attenuation_radius,
@@ -1374,7 +1305,10 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
 
     @tool(
         name="set_unreal_collision",
-        description="Set collision presets and enable/disable collision on an actor.",
+        description=(
+            "Set an actor's collision preset and/or enable or disable its collision; "
+            "what is left out is kept. Returns the state read back."
+        ),
         annotations=server._tool_annotations(
             read_only=False,
             idempotent=True,
@@ -1388,7 +1322,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     async def set_unreal_collision(
         actor_path: str,
         collision_preset: str = "",
-        collision_enabled: bool = True,
+        collision_enabled: Optional[bool] = None,
     ) -> ToolResult:
         """Set collision configuration."""
         return await server._exec_backend(

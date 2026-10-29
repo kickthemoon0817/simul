@@ -23,6 +23,7 @@ import bpy
 from bpy.app.handlers import persistent
 
 from ..adapters.blender_runtime import BlenderRuntimeSession
+from ..utils.errors import exception_message
 from ..utils.paths import PathPolicy
 from .agent_control import reset_ui
 from .agent_cursor import cursors, hide_annotations, observations
@@ -191,11 +192,14 @@ class BlenderBridge:
                 result = self._execute(request)
             return {"request_id": request_id, "success": True, "result": result}
         except Exception as exc:
-            logger.error("Blender bridge request %s failed: %s", request_id, exc)
+            message = exception_message(exc)
+            logger.error("Blender bridge request %s failed: %s", request_id, message)
             return {
                 "request_id": request_id,
                 "success": False,
-                "error": f"{type(exc).__name__}: {exc}",
+                # Notes carry context such as the object a bpy operator was
+                # adding a rigid body to; str(exc) alone would drop it.
+                "error": f"{type(exc).__name__}: {message}",
                 "error_type": type(exc).__name__,
                 "details": getattr(exc, "details", {}),
             }

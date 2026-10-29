@@ -38,6 +38,11 @@ class BridgeRemoteError(RuntimeError):
         self.remote_type = remote_type
         self.details = details
 
+    @property
+    def error_type(self) -> str:
+        """The class of the exception raised inside Blender, which error envelopes report."""
+        return self.remote_type
+
 
 class BridgeWire:
     """One newline-delimited JSON request and response per TCP connection."""
