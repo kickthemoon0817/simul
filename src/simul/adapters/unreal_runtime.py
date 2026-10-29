@@ -7,17 +7,20 @@ Remote Control API (HTTP on port 30010) or the embedded ``unreal`` Python module
 
 import asyncio
 import base64
+import errno
 import hashlib
 import importlib
 import json
+import logging
 import math
 import re
+import socket
 import tempfile
 import textwrap
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
@@ -26,10 +29,13 @@ from ._unreal_scripts import (
     ACTOR_HELPERS,
     CREATE_MATERIAL_INSTANCE,
     ENGINE_METADATA,
+    FIND_ACTORS_BY_TAG,
     INTERCHANGE_INFO,
     SCENE_SUMMARY,
+    SET_ACTOR_TRANSFORM,
     SET_LIGHT_PARAMS,
     SIMULATION_STATUS,
+    SPAWN_ACTOR,
     USD_EXPORT,
     USD_IMPORT,
 )
@@ -103,6 +109,184 @@ LOADED_MAP_EXPRESSION = (
 
 class UnrealScriptFailure(RuntimeError):
     """Python run inside the editor raised; the message is UE's traceback."""
+
+
+#: What ``ping``, ``health_check`` and discovery report when Remote Control
+#: answers HTTP 401: the editor enforces a passphrase and the request carried
+#: none or a wrong one (UE 5.7 checks loopback clients too). Remote Control
+#: answered, so the editor is reachable; this is an authentication error.
+PASSPHRASE_REFUSED_ERROR = (
+    "Remote Control refused the request (HTTP 401): set UNREAL__PASSPHRASE "
+    "to the editor's passphrase"
+)
+
+#: ``ping`` ``error_type`` for a request that never left this machine. Its
+#: endpoint was not tried, so the failure says nothing about an editor there.
+PROBE_NOT_SENT = "ProbeNotSent"
+
+# Socket errors this machine raises before a request leaves it: no free file
+# descriptor, buffer or local port, or local policy refused the connection.
+_LOCAL_SOCKET_ERRNOS = frozenset(
+    {
+        errno.EMFILE,
+        errno.ENFILE,
+        errno.ENOBUFS,
+        errno.ENOMEM,
+        errno.EADDRNOTAVAIL,
+        errno.EACCES,
+        errno.EPERM,
+    }
+)
+
+
+def _refusal(exc: BaseException) -> Optional[Dict[str, Any]]:
+    """The authentication-error fields when Remote Control answered 401, else None."""
+    if aiohttp is not None and isinstance(exc, aiohttp.ClientResponseError) and exc.status == 401:
+        return {
+            "status": 401,
+            "error": PASSPHRASE_REFUSED_ERROR,
+            "error_type": "AuthenticationError",
+        }
+    return None
+
+
+def _not_sent(exc: BaseException) -> Optional[str]:
+    """Why a request failed on this machine before reaching its endpoint, or None.
+
+    aiohttp keeps the socket error as ``ClientConnectorError.os_error``. A host
+    name that does not resolve, or a socket error from this machine's limits
+    or policy, means nothing was sent.
+    """
+    cause = getattr(exc, "os_error", None) or exc
+    if isinstance(cause, socket.gaierror) or (
+        isinstance(cause, OSError) and cause.errno in _LOCAL_SOCKET_ERRNOS
+    ):
+        return f"Probe not sent ({cause})"
+    return None
+
+
+# Close tasks scheduled by UnrealRuntimeSession.cleanup(). The event loop keeps
+# only weak references to tasks, so a task nothing else holds can be collected
+# before it finishes; each one is held here until it is done.
+_PENDING_CLOSES: Set["asyncio.Task[None]"] = set()
+
+# A transform component reads back as applied within these tolerances. Unreal
+# stores transforms as doubles, so the location and scale slack only absorbs
+# conversion noise. A rotation needs more: past |pitch| ~89.918 degrees
+# FQuat::Rotator crosses SINGULARITY_THRESHOLD and snaps the pitch to +-90,
+# which moves the orientation read back by up to ~0.115 degrees.
+_TRANSFORM_RELATIVE_TOLERANCE = 1e-3
+_ROTATION_TOLERANCE_DEGREES = 0.2
+
+
+def _vector3(name: str, value: Any, axes: str) -> List[float]:
+    """Return ``value`` as a list of three finite floats.
+
+    Args:
+        name: Parameter name, used in the error message.
+        value: The caller's list or tuple.
+        axes: What the three numbers are, e.g. ``"x, y, z"``.
+
+    Raises:
+        ValueError: ``value`` is not exactly three finite numbers.
+    """
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 3
+        and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            for v in value
+        )
+    ):
+        return [float(v) for v in value]
+    raise ValueError(f"{name} must be three finite numbers [{axes}], got {value!r}")
+
+
+def _exponential_regex_construct(pattern: str) -> Optional[str]:
+    """Name a construct that can make a search for ``pattern`` take exponential time.
+
+    Python's ``re`` backtracks, and a search inside the editor runs on its
+    game thread, where nothing can interrupt it. A repeated group that can
+    match the same text in more than one way, as ``(\\w+)+`` or ``(a|ab)*``
+    can, makes a failing search try every way of splitting the tag between
+    its repetitions: hours for a 40-character tag. Such a group is one that
+    repeats and holds a quantifier of variable length, or alternatives. A
+    fixed count inside it (``(ab{2})+``) cannot split, and an optional group
+    (``(_\\d+)?``) does not repeat, so both are allowed.
+
+    Args:
+        pattern: A valid regular expression.
+
+    Returns:
+        A description of the first such construct, or None.
+    """
+    # The stdlib's own parser, private since 3.11 (formerly sre_parse).
+    from re import _constants as sre, _parser  # type: ignore[attr-defined]
+
+    repeats = (sre.MAX_REPEAT, sre.MIN_REPEAT, sre.POSSESSIVE_REPEAT)
+
+    def walk(items: Any, repeated: bool) -> Optional[str]:
+        for op, av in items:
+            found: Optional[str] = None
+            if op in repeats:
+                low, high, body = av
+                if repeated and low != high:
+                    return "a quantifier inside a repeated group, as in (\\w+)+"
+                found = walk(body, repeated or high > 1)
+            elif op in (sre.BRANCH, sre.GROUPREF_EXISTS):
+                if repeated:
+                    return "alternatives inside a repeated group, as in (a|ab)*"
+                branches = av[1] if op == sre.BRANCH else [av[1], av[2] or []]
+                for branch in branches:
+                    found = found or walk(branch, repeated)
+            elif op == sre.SUBPATTERN:
+                found = walk(av[3], repeated)
+            elif op in (sre.ASSERT, sre.ASSERT_NOT):
+                found = walk(av[1], repeated)
+            elif op == sre.ATOMIC_GROUP:
+                found = walk(av, repeated)
+            if found:
+                return found
+        return None
+
+    return walk(_parser.parse(pattern), False)
+
+
+def _rotator_quaternion(rotation: Sequence[float]) -> Tuple[float, float, float, float]:
+    """Quaternion (x, y, z, w) of a [pitch, yaw, roll] rotator in degrees.
+
+    The same composition as ``FRotator::Quaternion``, which drops whole turns
+    first: converting a huge angle to radians directly loses its remainder.
+    """
+    pitch, yaw, roll = (math.radians(math.fmod(angle, 360.0)) / 2 for angle in rotation)
+    sp, cp = math.sin(pitch), math.cos(pitch)
+    sy, cy = math.sin(yaw), math.cos(yaw)
+    sr, cr = math.sin(roll), math.cos(roll)
+    return (
+        cr * sp * sy - sr * cp * cy,
+        -cr * sp * cy - sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    )
+
+
+def _transform_component_applied(
+    name: str, wanted: Sequence[float], got: Sequence[float]
+) -> bool:
+    """Whether a read-back transform component matches the value written.
+
+    Rotations are compared as orientations: Unreal reads a rotator back
+    normalised from a quaternion, so a yaw of 270 returns as -90, a pitch
+    past 90 comes back with yaw and roll flipped, and a pitch within ~0.08
+    degrees of +-90 comes back snapped to +-90.
+    """
+    if name == "rotation":
+        dot = sum(a * b for a, b in zip(_rotator_quaternion(wanted), _rotator_quaternion(got)))
+        return abs(dot) >= math.cos(math.radians(_ROTATION_TOLERANCE_DEGREES) / 2)
+    return all(
+        abs(w - g) <= _TRANSFORM_RELATIVE_TOLERANCE * max(1.0, abs(w))
+        for w, g in zip(wanted, got)
+    )
 
 
 class UnrealRuntimeSession(LoggerMixin):
@@ -461,6 +645,25 @@ class UnrealRuntimeSession(LoggerMixin):
             "viewport": target["viewport"],
         }
 
+    async def editor_identity(self) -> Dict[str, Any]:
+        """Read the editor's process, project, map and level-viewport identity.
+
+        Discovery and attachment use this. The first call installs a small
+        in-memory module and map-change listener in the editor; it changes no
+        scene data.
+
+        Returns:
+            ``instance_id``, ``document_id``, ``pid``, ``engine_version``,
+            ``project_name``, ``project_path``, ``map_path``, ``viewports``,
+            ``active_viewport`` and ``dirty_map_packages``, or a
+            ``ScriptError`` envelope when the editor's Python raised.
+        """
+        from ._unreal_attach_scripts import EDITOR_IDENTITY
+
+        # An editor without identity is normal while it starts up, and
+        # discovery reports the reason with the instance: not an error here.
+        return await self._execute_json_script(EDITOR_IDENTITY, failure_log_level=logging.DEBUG)
+
     async def control_ui(
         self,
         agent_control: str,
@@ -598,16 +801,26 @@ class UnrealRuntimeSession(LoggerMixin):
         )
 
     # ------------------------------------------------------------------
-    # Ping / discovery
+    # Ping (multi-editor discovery: unreal_connection.discover_instances)
     # ------------------------------------------------------------------
 
     async def ping(self) -> Dict[str, Any]:
         """
         Lightweight reachability probe — short timeout, no retries.
 
+        ``reachable`` means Remote Control answered ``GET /remote/info``. A
+        refusal is an answer: on HTTP 401 the editor is reachable and the
+        payload reports an authentication error. Discovery
+        (``unreal_connection.probe_instance``) takes reachability from here.
+
         Returns:
-            Dictionary with ``reachable``, ``address``, ``latency_ms``, and
-            optional ``error`` keys.
+            ``reachable``, ``address`` and ``latency_ms``, plus ``error``
+            when the probe failed or was refused; ``status`` when Remote
+            Control answered with an HTTP error; and ``error_type``
+            ``AuthenticationError`` (HTTP 401: ``UNREAL__PASSPHRASE`` is
+            missing or wrong) or ``ProbeNotSent`` (the request never left
+            this machine: out of file descriptors or local ports, or the host
+            name did not resolve).
         """
         address = f"{self.host}:{self.port}"
         t0 = time.monotonic()
@@ -620,123 +833,34 @@ class UnrealRuntimeSession(LoggerMixin):
                 timeout_override=self.ping_timeout,
                 max_retries=0,
             )
-            latency_ms = round((time.monotonic() - t0) * 1000, 1)
-            return {
-                "reachable": True,
-                "address": address,
-                "latency_ms": latency_ms,
-            }
         except Exception as exc:
-            return {
-                "reachable": False,
-                "address": address,
-                "latency_ms": None,
-                "error": str(exc),
-            }
-
-    @staticmethod
-    async def probe_port(
-        host: str,
-        port: int,
-        timeout: float = 3.0,
-        *,
-        passphrase_md5: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Probe a single host:port for a running Remote Control API.
-
-        Creates an ephemeral aiohttp session so the caller does not need
-        a fully configured ``UnrealRuntimeSession``.
-
-        Args:
-            host: Target hostname or IP.
-            port: Target port.
-            timeout: Connection timeout in seconds.
-            passphrase_md5: Optional MD5 hex; when set, injects
-                ``Passphrase: <md5>`` so discovery against a
-                passphrase-enforcing editor still succeeds. Pass
-                ``self._passphrase_md5`` from a configured session,
-                or compute via ``_passphrase_to_md5(plaintext)``.
-
-        Returns:
-            Dictionary with ``reachable``, ``host``, ``port``, ``latency_ms``,
-            and optional ``engine_version`` / ``project_name``.
-        """
-        if not AIOHTTP_AVAILABLE:
-            return {"reachable": False, "host": host, "port": port, "error": "aiohttp not available"}
-
-        headers = {"Content-Type": "application/json"}
-        if passphrase_md5:
-            headers["Passphrase"] = passphrase_md5
-
-        base_url = f"http://{host}:{port}"
-        t0 = time.monotonic()
-        try:
-            timeout_cfg = aiohttp.ClientTimeout(total=timeout)
-            async with aiohttp.ClientSession(
-                base_url=base_url,
-                timeout=timeout_cfg,
-                headers=headers,
-            ) as session:
-                async with session.get("/remote/info") as resp:
-                    resp.raise_for_status()
-                    latency_ms = round((time.monotonic() - t0) * 1000, 1)
-
-                engine_version: Optional[str] = None
-                project_name: Optional[str] = None
-                try:
-                    async with session.put(
-                        "/remote/object/call",
-                        json={
-                            "objectPath": "/Script/Engine.Default__KismetSystemLibrary",
-                            "functionName": "GetEngineVersion",
-                        },
-                    ) as ver_resp:
-                        if ver_resp.status == 200:
-                            ver_data = await ver_resp.json()
-                            engine_version = ver_data.get("ReturnValue")
-                except Exception:
-                    pass
-
-                try:
-                    async with session.put(
-                        "/remote/object/call",
-                        json={
-                            "objectPath": "/Script/PythonScriptPlugin.Default__PythonScriptLibrary",
-                            "functionName": "ExecutePythonCommandEx",
-                            "parameters": {
-                                "PythonCommand": "unreal.SystemLibrary.get_game_name()",
-                                "ExecutionMode": "EvaluateStatement",
-                                "FileExecutionScope": "Public",
-                            },
-                        },
-                    ) as proj_resp:
-                        if proj_resp.status == 200:
-                            proj_data = await proj_resp.json()
-                            # A traceback in CommandResult is not a name.
-                            if proj_data.get("ReturnValue"):
-                                project_name = str(
-                                    proj_data.get("CommandResult", "")
-                                ).strip("'\"")
-                except Exception:
-                    pass
-
+            refusal = _refusal(exc)
+            if refusal is not None:
                 return {
                     "reachable": True,
-                    "host": host,
-                    "port": port,
-                    "latency_ms": latency_ms,
-                    "engine_version": engine_version,
-                    "project_name": project_name,
+                    "address": address,
+                    "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+                    **refusal,
                 }
-        except Exception as exc:
-            return {
+            failure: Dict[str, Any] = {
                 "reachable": False,
-                "host": host,
-                "port": port,
+                "address": address,
                 "latency_ms": None,
-                "error": str(exc),
+                # A timeout's text is empty.
+                "error": str(exc) or f"No answer within {self.ping_timeout}s",
             }
+            if aiohttp is not None and isinstance(exc, aiohttp.ClientResponseError):
+                failure["status"] = exc.status
+            not_sent = _not_sent(exc)
+            if not_sent is not None:
+                failure["error"] = not_sent
+                failure["error_type"] = PROBE_NOT_SENT
+            return failure
+        return {
+            "reachable": True,
+            "address": address,
+            "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+        }
 
     # ------------------------------------------------------------------
     # Internal helpers — Remote Control wrappers
@@ -794,11 +918,19 @@ class UnrealRuntimeSession(LoggerMixin):
             },
         )
 
-    async def _execute_json_script(self, code: str) -> Dict[str, Any]:
-        """Run a fixed tool script and preserve failures as error envelopes."""
+    async def _execute_json_script(
+        self, code: str, *, failure_log_level: int = logging.ERROR
+    ) -> Dict[str, Any]:
+        """Run a fixed tool script and preserve failures as error envelopes.
+
+        Args:
+            code: The script.
+            failure_log_level: Level a failure is logged at; lower it where a
+                failure is expected. The envelope carries the reason either way.
+        """
         result = self._parse_python_json(await self._execute_python(code))
         if result.get("error"):
-            self.logger.error("Unreal tool script failed: %s", result["error"])
+            self.logger.log(failure_log_level, "Unreal tool script failed: %s", result["error"])
             return {"success": False, "error_type": "ScriptError", **result}
         return result
 
@@ -993,19 +1125,30 @@ class UnrealRuntimeSession(LoggerMixin):
 
         Returns:
             Dictionary with a ``reachable`` boolean — the field every backend
-            ping shares — and ``connected``, its older name, kept as an alias
-            for one release. When reachable, also includes best-effort
-            ``engine_version``, ``project_name``, ``is_editor``, and per-probe
-            ``warnings`` (any non-fatal metadata-fetch errors).
+            ping shares, decided as in ``ping`` — and ``connected``, its older
+            name, kept for one release. When reachable, also includes
+            best-effort ``engine_version``, ``project_name``, ``is_editor``,
+            and per-probe ``warnings`` (any non-fatal metadata-fetch errors).
+            When Remote Control refuses the request (HTTP 401) it is
+            ``reachable`` but not ``connected``, with ``ping``'s
+            authentication error.
         """
         try:
             await self._http_get("/remote/info")
         except Exception as exc:
-            self.logger.warning("Health check connectivity failed: %s", exc)
+            refusal = _refusal(exc)
+            if refusal is not None:
+                self.logger.warning("Health check: %s", refusal["error"])
+                # Remote Control answered, so the editor is reachable; callers
+                # still reading ``connected`` must not take it as usable.
+                return {"reachable": True, "connected": False, **refusal}
+            # A timeout's text is empty; say what happened, as ping does.
+            error = str(exc) or f"No answer within {self.timeout}s"
+            self.logger.warning("Health check connectivity failed: %s", error)
             return {
                 "reachable": False,
                 "connected": False,
-                "error": str(exc),
+                "error": error,
             }
 
         # One script for all metadata: a single Remote Control round trip
@@ -1043,7 +1186,9 @@ class UnrealRuntimeSession(LoggerMixin):
         Retrieve Unreal Engine runtime information.
 
         Returns:
-            Dictionary with engine version, project name, loaded map, and
+            Dictionary with engine version, project name, absolute project
+            directory, loaded map, the platform the editor runs on
+            (``UGameplayStatics::GetPlatformName``: Mac, Windows, Linux) and
             editor state, or a ``ScriptError`` envelope when a probe raised.
         """
         info = await self._execute_json_script(ENGINE_METADATA)
@@ -1052,10 +1197,11 @@ class UnrealRuntimeSession(LoggerMixin):
         return {
             "engine_version": info["engine_version"],
             "project_name": info["project_name"],
+            "project_dir": info["project_dir"],
             "loaded_map": info["loaded_map"],
             "is_editor": True,
             "is_game": False,
-            "platform": info["project_dir"],
+            "platform": info["platform"],
         }
 
     async def get_loaded_map(self) -> Dict[str, Any]:
@@ -1646,60 +1792,49 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
     async def spawn_actor(
         self,
         asset_path: str,
-        location: tuple = (0.0, 0.0, 0.0),
-        rotation: tuple = (0.0, 0.0, 0.0),
+        location: Sequence[float] = (0.0, 0.0, 0.0),
+        rotation: Sequence[float] = (0.0, 0.0, 0.0),
         label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Spawn an actor from a class or asset path.
+        Spawn an actor from an Actor class or from an asset.
 
-        Uses ``EditorActorSubsystem.SpawnActorFromClass`` via Remote Control.
+        A class path (``/Script/Engine.PointLight``, a Blueprint's
+        ``/Game/BP_Door.BP_Door_C``) spawns that class. Any other asset path
+        is placed the way the editor places an asset dropped into the level:
+        ``/Engine/BasicShapes/Cube.Cube`` becomes a StaticMeshActor showing
+        the cube, a Blueprint asset its actor. Spawn and label are one
+        undoable editor transaction, run as one editor script.
 
         Args:
-            asset_path: Asset or class path to spawn from.
+            asset_path: Actor class path or asset path to spawn from.
             location: Spawn location (X, Y, Z) in cm.
             rotation: Spawn rotation (Pitch, Yaw, Roll) in degrees.
             label: Optional actor label in the outliner.
 
         Returns:
-            Dictionary with actor_path, actor_class, location.
+            Dictionary with actor_path, actor_class (the spawned actor's
+            class), label, and the location and rotation read back from the
+            new actor. An error envelope, never an empty actor_path, when the
+            path loads nothing (``NotFoundError``) or names something Unreal
+            cannot place: a class that is not an Actor, an actor already in a
+            level, an asset no actor factory accepts (``SpawnError``).
+
+        Raises:
+            ValueError: location or rotation is not three finite numbers.
         """
-        data = await self._call_function(
-            "/Script/UnrealEd.Default__EditorActorSubsystem",
-            "SpawnActorFromClass",
-            {
-                "ActorClass": asset_path,
-                "Location": {
-                    "X": location[0],
-                    "Y": location[1],
-                    "Z": location[2],
-                },
-                "Rotation": {
-                    "Pitch": rotation[0],
-                    "Yaw": rotation[1],
-                    "Roll": rotation[2],
-                },
-            },
-        )
-        actor_path_result = data.get("ReturnValue", "")
-
-        if label and actor_path_result:
-            label_body: Dict[str, Any] = {
-                "objectPath": actor_path_result,
-                "propertyName": "ActorLabel",
-                "propertyValue": {"ActorLabel": label},
-                "access": "WRITE_TRANSACTION_ACCESS",
-            }
-            try:
-                await self._http_put("/remote/object/property", label_body)
-            except Exception:
-                pass  # Label is best-effort
-
-        return {
-            "actor_path": actor_path_result,
-            "actor_class": asset_path.split(".")[-1] if "." in asset_path else asset_path,
-            "location": location,
+        args = {
+            "path": asset_path,
+            "location": _vector3("location", location, "x, y, z"),
+            "rotation": _vector3("rotation", rotation, "pitch, yaw, roll"),
+            "label": label or None,
         }
+        result = await self._execute_json_script(f"args = {args!r}\n" + SPAWN_ACTOR)
+        if not result.get("error") and not result.get("actor_path"):
+            return self._script_error(
+                f"Unreal reported no spawned actor for {asset_path}"
+            )
+        return result
 
     async def delete_actor(self, actor_path: str) -> Dict[str, Any]:
         """
@@ -1728,79 +1863,65 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
     async def set_actor_transform(
         self,
         actor_path: str,
-        location: Optional[tuple] = None,
-        rotation: Optional[tuple] = None,
-        scale: Optional[tuple] = None,
+        location: Optional[Sequence[float]] = None,
+        rotation: Optional[Sequence[float]] = None,
+        scale: Optional[Sequence[float]] = None,
     ) -> Dict[str, Any]:
         """
-        Set an actor's transform (location, rotation, scale).
+        Set an actor's world location, rotation and/or scale.
 
-        Uses direct function calls on the actor: ``K2_SetActorLocation``,
-        ``K2_SetActorRotation``, ``SetActorScale3D``.  Property writes on
-        ``RelativeLocation`` fail on the actor object — they must target
-        the component path, so function calls are the reliable approach.
+        Only the components given are written, in one undoable editor
+        transaction; a component left as None keeps its current value. The
+        whole transform is read back afterwards, in the same script.
 
         Args:
             actor_path: Full actor path.
-            location: New location (X, Y, Z) in cm.
-            rotation: New rotation (Pitch, Yaw, Roll) in degrees.
-            scale: New scale (X, Y, Z).
+            location: World position as [x, y, z] in cm; None keeps the
+                current location.
+            rotation: World rotation as [pitch, yaw, roll] in degrees; None
+                keeps the current rotation.
+            scale: Scale factors as [x, y, z]; None keeps the current scale.
 
         Returns:
-            Dictionary with actor_path, applied location, rotation, scale.
+            Dictionary with actor_path and the location, rotation and scale
+            read back after the write. A ``ScriptError`` envelope when the
+            actor cannot be found, and a ``TransformNotApplied`` error, with
+            the read-back values attached, naming each given component that
+            reads back different from what was written (an actor without a
+            root component has no transform to set and reads back the
+            identity transform).
+
+        Raises:
+            ValueError: A given component is not three finite numbers.
         """
-        applied_location = location or (0.0, 0.0, 0.0)
-        applied_rotation = rotation or (0.0, 0.0, 0.0)
-        applied_scale = scale or (1.0, 1.0, 1.0)
-
-        if location is not None:
-            await self._call_function(
-                actor_path,
-                "K2_SetActorLocation",
-                {
-                    "NewLocation": {
-                        "X": location[0],
-                        "Y": location[1],
-                        "Z": location[2],
-                    },
-                    "bSweep": False,
-                    "bTeleport": True,
-                },
+        values = {
+            name: _vector3(name, value, axes)
+            for name, value, axes in (
+                ("location", location, "x, y, z"),
+                ("rotation", rotation, "pitch, yaw, roll"),
+                ("scale", scale, "x, y, z"),
             )
-
-        if rotation is not None:
-            await self._call_function(
-                actor_path,
-                "K2_SetActorRotation",
-                {
-                    "NewRotation": {
-                        "Pitch": rotation[0],
-                        "Yaw": rotation[1],
-                        "Roll": rotation[2],
-                    },
-                    "bTeleportPhysics": True,
-                },
-            )
-
-        if scale is not None:
-            await self._call_function(
-                actor_path,
-                "SetActorScale3D",
-                {
-                    "NewScale3D": {
-                        "X": scale[0],
-                        "Y": scale[1],
-                        "Z": scale[2],
-                    },
-                },
-            )
-
-        return {
-            "actor_path": actor_path,
-            "location": applied_location,
-            "rotation": applied_rotation,
-            "scale": applied_scale,
+            if value is not None
         }
+        args = {"actor_path": actor_path, "values": values}
+        result = await self._execute_json_script(
+            f"args = {args!r}\n" + SET_ACTOR_TRANSFORM
+        )
+        if result.get("error"):
+            return result
+        rejected = [
+            name
+            for name, wanted in values.items()
+            if not _transform_component_applied(name, wanted, result[name])
+        ]
+        if rejected:
+            return {
+                **result,
+                "success": False,
+                "error": "Unreal did not apply: " + ", ".join(rejected),
+                "error_type": "TransformNotApplied",
+            }
+        return result
 
     async def set_actor_property(
         self,
@@ -2219,9 +2340,7 @@ component.set_material({slot_index!r}, material)
         self,
         actor_path: str,
         intensity: Optional[float] = None,
-        color_r: Optional[float] = None,
-        color_g: Optional[float] = None,
-        color_b: Optional[float] = None,
+        color: Optional[Sequence[float]] = None,
         temperature: Optional[float] = None,
         use_temperature: Optional[bool] = None,
         attenuation_radius: Optional[float] = None,
@@ -2231,14 +2350,14 @@ component.set_material({slot_index!r}, material)
         Set light component parameters on a light actor.
 
         Writes the actor's light component in one editor transaction and
-        reads every value back.
+        reads every value back. A parameter left as None keeps its current
+        value.
 
         Args:
             actor_path: Light actor path.
             intensity: Light intensity.
-            color_r: Color red component (0-1).
-            color_g: Color green component (0-1).
-            color_b: Color blue component (0-1).
+            color: Light color as [r, g, b], each channel 0-1; None keeps the
+                current color.
             temperature: Color temperature in Kelvin.
             use_temperature: Use color temperature instead of direct color.
             attenuation_radius: Light attenuation radius in cm (point and
@@ -2250,18 +2369,20 @@ component.set_material({slot_index!r}, material)
             read-back ``applied`` values, or a ``ScriptError`` envelope when
             the actor has no light component, a property does not exist on
             it, or Unreal did not apply a value.
+
+        Raises:
+            ValueError: ``color`` is not three numbers between 0 and 1.
         """
         # Python editor-property names on ULightComponent and subclasses.
         values: Dict[str, Any] = {}
         if intensity is not None:
             values["intensity"] = intensity
-        if color_r is not None or color_g is not None or color_b is not None:
+        if color is not None:
+            rgb = _vector3("color", color, "r, g, b")
+            if not all(0.0 <= channel <= 1.0 for channel in rgb):
+                raise ValueError(f"color channels must be between 0 and 1, got {list(color)!r}")
             # LightColor is an FColor: 0-255 channels.
-            def _byte(channel: Optional[float]) -> int:
-                value = 1.0 if channel is None else channel
-                return max(0, min(255, round(value * 255)))
-
-            values["light_color"] = [_byte(color_r), _byte(color_g), _byte(color_b), 255]
+            values["light_color"] = [round(channel * 255) for channel in rgb] + [255]
         if temperature is not None:
             values["temperature"] = temperature
         if use_temperature is not None:
@@ -2452,34 +2573,51 @@ if component.is_simulating_physics() != {target!r}:
         self,
         actor_path: str,
         collision_preset: str = "",
-        collision_enabled: bool = True,
+        collision_enabled: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Configure collision settings on an actor.
 
         Args:
             actor_path: Full actor object path.
-            collision_preset: Named collision preset (e.g. BlockAll, NoCollision).
-            collision_enabled: Whether collision is enabled.
+            collision_preset: Named collision preset (e.g. BlockAll,
+                OverlapAll, NoCollision); empty keeps the current preset.
+            collision_enabled: True for query and physics collision, False
+                for none. None keeps the collision mode the preset sets, or
+                the current one when no preset is given. Overriding a
+                preset's mode turns the preset into Custom.
 
         Returns:
-            Dict with actor_path, collision_preset, collision_enabled.
+            Dict with actor_path and the collision_preset and
+            collision_enabled read back from the component afterwards, or a
+            ``ScriptError`` envelope for an unknown preset or an actor
+            without one unambiguous primitive component.
         """
 
-        code = ""
+        lines = [
+            f"component = actor_component(actor_at({actor_path!r}), unreal.PrimitiveComponent)"
+        ]
         if collision_preset:
-            code += f"component.set_collision_profile_name({collision_preset!r})\n"
-        mode = "QUERY_AND_PHYSICS" if collision_enabled else "NO_COLLISION"
-        code += f"component.set_collision_enabled(unreal.CollisionEnabled.{mode})\n"
-        return await self._component_operation(
-            actor_path,
-            code,
-            {
-                "actor_path": actor_path,
-                "collision_preset": collision_preset or "Custom",
-                "collision_enabled": collision_enabled,
-            },
+            # Unreal renames an unknown preset to Custom instead of failing;
+            # put the previous preset back so the error leaves nothing changed.
+            lines += [
+                "previous_preset = component.get_collision_profile_name()",
+                f"component.set_collision_profile_name({collision_preset!r})",
+                "if str(component.get_collision_profile_name()).lower() != "
+                f"{collision_preset.lower()!r}:",
+                "    component.set_collision_profile_name(previous_preset)",
+                f"    raise ValueError('Unknown collision preset: ' + {collision_preset!r})",
+            ]
+        if collision_enabled is not None:
+            mode = "QUERY_AND_PHYSICS" if collision_enabled else "NO_COLLISION"
+            lines.append(f"component.set_collision_enabled(unreal.CollisionEnabled.{mode})")
+        lines.append(
+            f"print(json.dumps({{'actor_path': {actor_path!r}, "
+            "'collision_preset': str(component.get_collision_profile_name()), "
+            "'collision_enabled': "
+            "component.get_collision_enabled() != unreal.CollisionEnabled.NO_COLLISION}))"
         )
+        return await self._execute_json_script(ACTOR_HELPERS + "\n".join(lines) + "\n")
 
     async def apply_force(
         self,
@@ -3024,59 +3162,60 @@ if component.is_simulating_physics() != {target!r}:
         max_results: int = 100,
     ) -> Dict[str, Any]:
         """
-        Find actors by semantic tag or label.
+        Find level actors whose actor tags match a semantic label.
+
+        Semantic labels are actor tags (Actor > Tags in the Details panel).
+        Matching ignores case, as Unreal's own tag comparison does. One editor
+        script reads every actor's tags.
 
         Args:
-            label: Semantic label to search for.
-            match_mode: Match mode (exact, contains, regex).
-            max_results: Maximum results.
+            label: Semantic label (actor tag) to search for.
+            match_mode: exact (a tag equals label), contains (a tag contains
+                label) or regex (label is a Python regular expression searched
+                for in each tag; a repeated group that holds a quantifier or
+                alternatives, as in (\\w+)+, is refused because it can run for
+                hours); every mode ignores case.
+            max_results: Maximum number of actors to return, 1 to 5000.
 
         Returns:
-            Dict with actors, total_matches, label_searched.
+            Dict with ``actors`` (each match as a ``list_unreal_actors``
+            entry, tags included), ``total_matches`` (every matching actor,
+            those past max_results too), ``truncated`` and ``label_searched``,
+            or a ``ScriptError`` envelope when the editor script failed.
+
+        Raises:
+            ValueError: match_mode is not exact, contains or regex; in regex
+                mode, label is not a valid regular expression or repeats a
+                group that holds a quantifier or alternatives (see
+                ``_exponential_regex_construct``); or max_results is out of
+                range.
         """
-        body: Dict[str, Any] = {
-            "objectPath": "/Script/UnrealEd.Default__EditorLevelLibrary",
-            "functionName": "GetAllLevelActors",
-            "parameters": {},
-        }
-        response = await self._http_put("/remote/object/call", body)
-        all_actors = response.get("ReturnValue", [])
-
-        matches: List[Dict[str, Any]] = []
-        for actor_path in all_actors:
-            if len(matches) >= max_results:
-                break
+        modes = ("exact", "contains", "regex")
+        if match_mode not in modes:
+            raise ValueError(
+                f"match_mode must be one of {', '.join(modes)}, got {match_mode!r}"
+            )
+        if not 1 <= max_results <= 5000:
+            raise ValueError("max_results must be between 1 and 5000")
+        if match_mode == "regex":
             try:
-                tag_body: Dict[str, Any] = {
-                    "objectPath": str(actor_path),
-                    "propertyName": "Tags",
-                }
-                tag_resp = await self._http_put(
-                    "/remote/object/property", tag_body
+                re.compile(label)
+            except re.error as exc:
+                raise ValueError(
+                    f"label is not a valid regular expression: {exc}"
+                ) from exc
+            construct = _exponential_regex_construct(label)
+            if construct is not None:
+                raise ValueError(
+                    f"label has {construct}: a failing search for it can freeze "
+                    "the editor for hours, since every way of splitting a tag "
+                    "between the repetitions is tried. Repeat a plain character "
+                    "class instead (\\w+ rather than (\\w+)+), or use contains mode"
                 )
-                tags = tag_resp.get("Tags", [])
-                tag_strings = [str(t) for t in tags]
-
-                matched = False
-                if match_mode == "exact":
-                    matched = label in tag_strings
-                elif match_mode == "contains":
-                    matched = any(label in t for t in tag_strings)
-
-                if matched:
-                    matches.append({
-                        "path": str(actor_path),
-                        "tags": tag_strings,
-                        "label": label,
-                    })
-            except Exception:
-                continue
-
-        return {
-            "actors": matches,
-            "total_matches": len(matches),
-            "label_searched": label,
-        }
+        args = {"label": label, "match_mode": match_mode, "max_results": max_results}
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + FIND_ACTORS_BY_TAG
+        )
 
     # ------------------------------------------------------------------
     # Phase 8: Geometry & Modeling (GeometryScript)
@@ -3878,24 +4017,49 @@ if component.is_simulating_physics() != {target!r}:
         return {key: tuple(result[key]) for key in ("location", "rotation", "scale")}
 
     async def close(self) -> None:
-        """Close the underlying HTTP session if open."""
+        """Close the underlying HTTP session if open.
+
+        Await this on the event loop that made the session's requests,
+        before that loop ends: aiohttp cannot close the connection pool
+        afterwards and reports an unclosed client session and connector
+        when the session is garbage-collected.
+        """
         if self._session is not None and not self._session.closed:
             await self._session.close()
-            self._session = None
+        self._session = None
         self.logger.debug("Unreal runtime session closed")
+
+    async def __aenter__(self) -> "UnrealRuntimeSession":
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        await self.close()
 
     def cleanup(self) -> None:
         """
         Synchronous cleanup hook for context-manager teardown.
 
-        Schedules the async ``close()`` on the running event loop when
-        possible, otherwise creates a new loop to run it.
+        With an event loop running, schedules ``close()`` on it and holds the
+        task until it finishes. Without one, any HTTP session was opened on
+        a loop that has already ended; ``close()`` runs on a new loop, where
+        aiohttp can still mark the pool closed but not reach the old loop's
+        sockets, so async callers should ``await close()`` (or use
+        ``async with``) instead.
         """
+        if self._session is None or self._session.closed:
+            self._session = None
+            return
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self.close())
         except RuntimeError:
-            asyncio.run(self.close())
+            try:
+                asyncio.run(self.close())
+            except Exception as exc:
+                self.logger.debug("Closing the HTTP session off its loop failed: %s", exc)
+            return
+        task = loop.create_task(self.close())
+        _PENDING_CLOSES.add(task)
+        task.add_done_callback(_PENDING_CLOSES.discard)
 
 
 class UnrealRuntimeAdapter(LoggerMixin):

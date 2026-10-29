@@ -163,7 +163,12 @@ a headless USD library and this Claude Code plugin. Backends:
   on 6.0), 8229 (optional bridge extension). Set `ISAAC_SIM_PATH` to the
   Isaac install root. 6.0 deprecates `isaacsim.core.{api,prims,utils}` in
   favour of `isaacsim.core.experimental.*` and drops the `omni.isaac.*`
-  shims — scripts must not rely on either.
+  shims — scripts must not rely on either. Isaac Sim runs only on Linux and
+  Windows, so the MCP server registers the Isaac tools only there by
+  default; on macOS it skips them and `simul server` / `info` / `tools` say
+  so. `ISAAC_SIM__ENABLED=true` or `--backends isaac` registers them anyway
+  (unsupported setups such as an SSH tunnel), `ISAAC_SIM__ENABLED=false`
+  never; the `simul isaac` commands are unaffected.
 - **Unreal Engine 5** — Remote Control HTTP/WebSocket plus
   `PythonScriptPlugin`; always set up via `simul unreal setup` (see above).
 - **Blender** — connected adapter when a Blender runtime is up.
@@ -212,7 +217,10 @@ Hard rules for Claude:
   Tests that want a runtime to look present or absent patch the probes on
   `simul.mcp.backends` (`is_headless_available`,
   `is_blender_available`, `is_unreal_available`, the adapter classes), which
-  is where the server reads them from.
+  is where the server reads them from. `is_isaac_platform_supported` (Isaac
+  Sim's OS gate) is patched to `True` for the whole session by
+  `tests/conftest.py`, so the suite registers the Isaac tools on macOS just
+  as on Linux CI; patch it back per test to exercise the macOS default.
 - Isaac tools are declared once: the `@tool_meta` decorator on the
   `IsaacTools` method carries the name, description and hints, and
   `_reg_isaac.py` builds the MCP wrapper from the method signature and
@@ -267,7 +275,9 @@ How to detect "the machine has it":
   enables the right transports per version and waits for the ports),
   then run `pytest tests/isaac/live -m isaac`. A transport change must be
   verified on both a 5.1 and a 6.0 install. Don't claim a fix works
-  without it.
+  without it. Isaac Sim does not run on macOS: there the live tier skips,
+  and a fresh `simul server` / `simul tools` leaves the Isaac tools out
+  unless you pass `--backends isaac` or `ISAAC_SIM__ENABLED=true`.
 - **Unreal Engine** — installed engines under `~/apps/unreal-*/` or
   `~/UnrealEngine/`, with `Engine/Binaries/<OS>/UnrealEditor`. For
   per-OS detection, also check `which UnrealEditor`. The live test

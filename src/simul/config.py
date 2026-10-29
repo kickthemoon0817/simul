@@ -9,6 +9,7 @@ import logging
 import os
 import re
 from functools import lru_cache
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union, cast
 
@@ -99,6 +100,15 @@ class IsaacSimConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    enabled: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Register the Isaac Sim MCP tools. Unset (or 'auto') registers them on "
+            "Linux and Windows, the platforms Isaac Sim runs on, and skips them "
+            "elsewhere (macOS) unless `--backends` names isaac; true registers them "
+            "on any OS; false never registers them. Env: ISAAC_SIM__ENABLED."
+        ),
+    )
     path: Optional[str] = Field(
         # Read from the environment so the field is the one source of truth.
         # It existed and was never populated, while callers reached past it to
@@ -211,6 +221,14 @@ class IsaacSimConfig(BaseModel):
             "with InstanceClaimed. Off means claims are advisory"
         ),
     )
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _auto_means_unset(cls, value: Any) -> Any:
+        """Read ``auto`` or an empty value as unset, the platform default."""
+        if isinstance(value, str) and value.strip().lower() in ("", "auto"):
+            return None
+        return value
 
     @model_validator(mode="after")
     def _pick_up_generated_auth_token(self) -> "IsaacSimConfig":
@@ -553,12 +571,13 @@ class NormalisedYamlSettingsSource(YamlConfigSettingsSource):
     environment.
     """
 
-    def _read_file(self, file_path: Path) -> Dict[str, Any]:
+    def _read_file(self, file_path: Union[Path, Traversable]) -> Dict[str, Any]:
         """Load one YAML file and return it in the Settings model shape.
 
         Args:
-            file_path: YAML file to read; pydantic-settings only calls this for
-                files that exist.
+            file_path: YAML file to read, a filesystem path or (from
+                pydantic-settings 2.15) a packaged resource; pydantic-settings
+                only calls this for files that exist.
 
         Returns:
             The normalised payload, or ``{}`` when the file is unreadable or
@@ -803,6 +822,7 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
             ),
             "isaac_sim": _compact_dict(
                 {
+                    "enabled": isaac.get("enabled"),
                     "path": _normalise_optional_path(isaac.get("path")),
                     "socket_host": isaac.get("socket_host"),
                     "socket_port": isaac.get("socket_port"),

@@ -1,0 +1,1848 @@
+{
+  "tools": {
+    "control_blender_ui": {
+      "minimal": {
+        "arguments": {"agent_control": "inspect"},
+        "session_calls": [
+          {
+            "method": "control_ui",
+            "arguments": {
+              "agent_control": "'inspect'",
+              "target": "None",
+              "area_id": "None",
+              "position": "None",
+              "value": "None",
+              "agent_id": "<session agent id>"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderUIResponse"},
+        "usage": [{"tool": "control_blender_ui", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "agent_control": "set_property",
+          "target": "location",
+          "area_id": "area-1",
+          "position": [0.25, 0.75],
+          "value": [1, 2, 3],
+          "agent_id": "snapshot-agent"
+        },
+        "session_calls": [
+          {
+            "method": "control_ui",
+            "arguments": {
+              "agent_control": "'set_property'",
+              "target": "'location'",
+              "area_id": "'area-1'",
+              "position": "[0.25, 0.75]",
+              "value": "[1.0, 2.0, 3.0]",
+              "agent_id": "'snapshot-agent'"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderUIResponse"},
+        "usage": [{"tool": "control_blender_ui", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"agent_control": {"bogus": 1}, "agent_id": "snapshot-agent"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderUIRequest\nagent_control\n  Input should be 'inspect', 'observe', 'move_cursor', 'clear_cursor', 'open_menu', 'select_object', 'set_tool', 'show_properties', 'set_property' or 'isolate_workspace' [type=literal_error, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "agent_control": {"bogus": 1},
+              "target": null,
+              "area_id": null,
+              "position": null,
+              "value": null,
+              "agent_id": "snapshot-agent"
+            }
+          }
+        }
+      }
+    },
+    "get_blender_info": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [{"method": "get_runtime_info", "arguments": {}}],
+        "response": {"checked_against": "BlenderInfoResponse"},
+        "usage": [{"tool": "get_blender_info", "success": false}]
+      }
+    },
+    "attach_blender_window": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [
+          {
+            "method": "BlenderAttachments.attach",
+            "arguments": {"instance_id": "None", "window_id": "None"}
+          }
+        ],
+        "response": {
+          "success": false,
+          "error": "Several Blender processes are running; pass instance_id",
+          "error_type": "ValueError",
+          "details": {"instances": []}
+        },
+        "usage": [{"tool": "attach_blender_window", "success": false}]
+      },
+      "full": {
+        "arguments": {"instance_id": "instance-1", "window_id": "window-1"},
+        "session_calls": [
+          {
+            "method": "BlenderAttachments.attach",
+            "arguments": {"instance_id": "'instance-1'", "window_id": "'window-1'"}
+          }
+        ],
+        "response": {"checked_against": "BlenderAttachWindowResponse"},
+        "usage": [{"tool": "attach_blender_window", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"instance_id": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderAttachWindowRequest\ninstance_id\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"instance_id": {"bogus": 1}, "window_id": null}}
+        }
+      }
+    },
+    "list_blender_scene_objects": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [
+          {
+            "method": "list_scene_objects",
+            "arguments": {"collection_name": "None", "include_hidden": "False", "max_items": "200"}
+          }
+        ],
+        "response": {"checked_against": "BlenderSceneObjectsResponse"},
+        "usage": [{"tool": "list_blender_scene_objects", "success": false}]
+      },
+      "full": {
+        "arguments": {"collection_name": "Props", "include_hidden": true, "max_items": 7},
+        "session_calls": [
+          {
+            "method": "list_scene_objects",
+            "arguments": {"collection_name": "'Props'", "include_hidden": "True", "max_items": "7"}
+          }
+        ],
+        "response": {"checked_against": "BlenderSceneObjectsResponse"},
+        "usage": [{"tool": "list_blender_scene_objects", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"collection_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSceneObjectsRequest\ncollection_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"collection_name": {"bogus": 1}, "include_hidden": false, "max_items": 200}}
+        }
+      }
+    },
+    "get_blender_object_info": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [{"method": "get_object_info", "arguments": {"object_name": "'Cube'"}}],
+        "response": {"checked_against": "BlenderObjectInfoResponse"},
+        "usage": [{"tool": "get_blender_object_info", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderObjectInfoRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}}}
+        }
+      }
+    },
+    "get_blender_mesh_info": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [{"method": "get_mesh_info", "arguments": {"object_name": "'Cube'"}}],
+        "response": {"checked_against": "BlenderMeshInfoResponse"},
+        "usage": [{"tool": "get_blender_mesh_info", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderMeshInfoRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}}}
+        }
+      }
+    },
+    "get_blender_bounding_box": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [
+          {
+            "method": "get_bounding_box",
+            "arguments": {"object_name": "'Cube'", "world_space": "True"}
+          }
+        ],
+        "response": {"checked_against": "BlenderBoundingBoxResponse"},
+        "usage": [{"tool": "get_blender_bounding_box", "success": false}]
+      },
+      "full": {
+        "arguments": {"object_name": "Cube", "world_space": false},
+        "session_calls": [
+          {
+            "method": "get_bounding_box",
+            "arguments": {"object_name": "'Cube'", "world_space": "False"}
+          }
+        ],
+        "response": {"checked_against": "BlenderBoundingBoxResponse"},
+        "usage": [{"tool": "get_blender_bounding_box", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderBoundingBoxRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}, "world_space": true}}
+        }
+      }
+    },
+    "search_blender_objects": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [
+          {
+            "method": "search_objects",
+            "arguments": {"name_pattern": "None", "object_type": "None", "max_results": "50"}
+          }
+        ],
+        "response": {"checked_against": "BlenderSearchObjectsResponse"},
+        "usage": [{"tool": "search_blender_objects", "success": false}]
+      },
+      "full": {
+        "arguments": {"name_pattern": "Cu*", "object_type": "MESH", "max_results": 3},
+        "session_calls": [
+          {
+            "method": "search_objects",
+            "arguments": {"name_pattern": "'Cu*'", "object_type": "'MESH'", "max_results": "3"}
+          }
+        ],
+        "response": {"checked_against": "BlenderSearchObjectsResponse"},
+        "usage": [{"tool": "search_blender_objects", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"name_pattern": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSearchObjectsRequest\nname_pattern\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"name_pattern": {"bogus": 1}, "object_type": null, "max_results": 50}}
+        }
+      }
+    },
+    "summarize_blender_scene": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [{"method": "summarize_scene", "arguments": {}}],
+        "response": {"checked_against": "BlenderSceneSummaryResponse"},
+        "usage": [{"tool": "summarize_blender_scene", "success": false}]
+      }
+    },
+    "get_blender_material_info": {
+      "minimal": {
+        "arguments": {"material_name": "Metal"},
+        "session_calls": [{"method": "get_material_info", "arguments": {"material_name": "'Metal'"}}],
+        "response": {"checked_against": "BlenderMaterialInfoResponse"},
+        "usage": [{"tool": "get_blender_material_info", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"material_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderMaterialInfoRequest\nmaterial_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"material_name": {"bogus": 1}}}
+        }
+      }
+    },
+    "get_blender_distance_between": {
+      "minimal": {
+        "arguments": {"object_name_a": "Cube", "object_name_b": "Sphere"},
+        "session_calls": [
+          {
+            "method": "get_distance_between",
+            "arguments": {"object_name_a": "'Cube'", "object_name_b": "'Sphere'"}
+          }
+        ],
+        "response": {"checked_against": "BlenderDistanceResponse"},
+        "usage": [{"tool": "get_blender_distance_between", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name_a": {"bogus": 1}, "object_name_b": "Sphere"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderDistanceRequest\nobject_name_a\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name_a": {"bogus": 1}, "object_name_b": "Sphere"}}
+        }
+      }
+    },
+    "check_blender_object_bounds": {
+      "minimal": {
+        "arguments": {"object_name": "Cube", "bounds_min": [-1, -2, -3], "bounds_max": [1, 2, 3]},
+        "session_calls": [
+          {
+            "method": "is_object_within_bounds",
+            "arguments": {
+              "object_name": "'Cube'",
+              "bounds_min": "[-1.0, -2.0, -3.0]",
+              "bounds_max": "[1.0, 2.0, 3.0]"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderBoundsCheckResponse"},
+        "usage": [{"tool": "check_blender_object_bounds", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}, "bounds_min": [-1, -2, -3], "bounds_max": [1, 2, 3]},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderBoundsCheckRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {"object_name": {"bogus": 1}, "bounds_min": [-1, -2, -3], "bounds_max": [1, 2, 3]}
+          }
+        }
+      }
+    },
+    "capture_blender_viewport": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [
+          {
+            "method": "capture_viewport",
+            "arguments": {
+              "width": "512",
+              "height": "512",
+              "jpeg_quality": "85",
+              "use_render_fallback": "False",
+              "agent_id": "<session agent id>",
+              "method": "'auto'"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderCaptureViewportResponse"},
+        "usage": [{"tool": "capture_blender_viewport", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "width": 640,
+          "height": 480,
+          "jpeg_quality": 70,
+          "method": "auto",
+          "use_render_fallback": true,
+          "agent_id": "snapshot-agent"
+        },
+        "session_calls": [
+          {
+            "method": "capture_viewport",
+            "arguments": {
+              "width": "640",
+              "height": "480",
+              "jpeg_quality": "70",
+              "use_render_fallback": "False",
+              "agent_id": "'snapshot-agent'",
+              "method": "'render'"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderCaptureViewportResponse"},
+        "usage": [{"tool": "capture_blender_viewport", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"width": {"bogus": 1}, "agent_id": "snapshot-agent"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderCaptureViewportRequest\nwidth\n  Input should be a valid integer [type=int_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/int_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "width": {"bogus": 1},
+              "height": 512,
+              "jpeg_quality": 85,
+              "method": "auto",
+              "use_render_fallback": false,
+              "agent_id": "snapshot-agent"
+            }
+          }
+        }
+      }
+    },
+    "set_blender_camera_view": {
+      "minimal": {
+        "arguments": {"location": [1, 2, 3], "rotation_euler": [0.1, 0.2, 0.3]},
+        "session_calls": [
+          {
+            "method": "set_camera_view",
+            "arguments": {
+              "location": "[1.0, 2.0, 3.0]",
+              "rotation_euler": "[0.1, 0.2, 0.3]",
+              "camera_name": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderSetCameraViewResponse"},
+        "usage": [{"tool": "set_blender_camera_view", "success": false}]
+      },
+      "full": {
+        "arguments": {"location": [1, 2, 3], "rotation_euler": [0.1, 0.2, 0.3], "camera_name": "Camera"},
+        "session_calls": [
+          {
+            "method": "set_camera_view",
+            "arguments": {
+              "location": "[1.0, 2.0, 3.0]",
+              "rotation_euler": "[0.1, 0.2, 0.3]",
+              "camera_name": "'Camera'"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderSetCameraViewResponse"},
+        "usage": [{"tool": "set_blender_camera_view", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"location": {"bogus": 1}, "rotation_euler": [0.1, 0.2, 0.3]},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSetCameraViewRequest\nlocation\n  Input should be a valid list [type=list_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/list_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {"location": {"bogus": 1}, "rotation_euler": [0.1, 0.2, 0.3], "camera_name": null}
+          }
+        }
+      }
+    },
+    "get_blender_camera_info": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [{"method": "get_camera_info", "arguments": {"camera_name": "None"}}],
+        "response": {"checked_against": "BlenderCameraInfoResponse"},
+        "usage": [{"tool": "get_blender_camera_info", "success": false}]
+      },
+      "full": {
+        "arguments": {"camera_name": "Camera"},
+        "session_calls": [{"method": "get_camera_info", "arguments": {"camera_name": "'Camera'"}}],
+        "response": {"checked_against": "BlenderCameraInfoResponse"},
+        "usage": [{"tool": "get_blender_camera_info", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"camera_name": {"bogus": 1}},
+        "session_calls": [{"method": "get_camera_info", "arguments": {"camera_name": "{'bogus': 1}"}}],
+        "response": {"checked_against": "BlenderCameraInfoResponse"}
+      }
+    },
+    "focus_blender_on_object": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [
+          {
+            "method": "focus_on_object",
+            "arguments": {"object_name": "'Cube'", "distance_factor": "2.0", "camera_name": "None"}
+          }
+        ],
+        "response": {"checked_against": "BlenderFocusOnObjectResponse"},
+        "usage": [{"tool": "focus_blender_on_object", "success": false}]
+      },
+      "full": {
+        "arguments": {"object_name": "Cube", "distance_factor": 3, "camera_name": "Camera"},
+        "session_calls": [
+          {
+            "method": "focus_on_object",
+            "arguments": {"object_name": "'Cube'", "distance_factor": "3.0", "camera_name": "'Camera'"}
+          }
+        ],
+        "response": {"checked_against": "BlenderFocusOnObjectResponse"},
+        "usage": [{"tool": "focus_blender_on_object", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderFocusOnObjectRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}, "distance_factor": 2.0, "camera_name": null}}
+        }
+      }
+    },
+    "get_blender_viewport_info": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [{"method": "get_viewport_info", "arguments": {}}],
+        "response": {"checked_against": "BlenderViewportInfoResponse"},
+        "usage": [{"tool": "get_blender_viewport_info", "success": false}]
+      }
+    },
+    "capture_blender_viewport_sequence": {
+      "minimal": {
+        "arguments": {"start_frame": 1, "end_frame": 3},
+        "session_calls": [
+          {
+            "method": "capture_viewport_sequence",
+            "arguments": {
+              "start_frame": "1",
+              "end_frame": "3",
+              "step": "1",
+              "width": "512",
+              "height": "512",
+              "jpeg_quality": "85",
+              "agent_id": "<session agent id>",
+              "method": "'auto'"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderCaptureSequenceResponse"},
+        "usage": [{"tool": "capture_blender_viewport_sequence", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "start_frame": 1,
+          "end_frame": 9,
+          "step": 2,
+          "width": 128,
+          "height": 96,
+          "jpeg_quality": 60,
+          "agent_id": "snapshot-agent",
+          "method": "render"
+        },
+        "session_calls": [
+          {
+            "method": "capture_viewport_sequence",
+            "arguments": {
+              "start_frame": "1",
+              "end_frame": "9",
+              "step": "2",
+              "width": "128",
+              "height": "96",
+              "jpeg_quality": "60",
+              "agent_id": "'snapshot-agent'",
+              "method": "'render'"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderCaptureSequenceResponse"},
+        "usage": [{"tool": "capture_blender_viewport_sequence", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"start_frame": {"bogus": 1}, "end_frame": 3, "agent_id": "snapshot-agent"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderCaptureSequenceRequest\nstart_frame\n  Input should be a valid integer [type=int_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/int_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "start_frame": {"bogus": 1},
+              "end_frame": 3,
+              "step": 1,
+              "width": 512,
+              "height": 512,
+              "jpeg_quality": 85,
+              "agent_id": "snapshot-agent",
+              "method": "auto"
+            }
+          }
+        }
+      }
+    },
+    "create_blender_object": {
+      "minimal": {
+        "arguments": {"object_type": "CUBE"},
+        "session_calls": [
+          {
+            "method": "create_object",
+            "arguments": {
+              "object_type": "'CUBE'",
+              "name": "None",
+              "location": "[0.0, 0.0, 0.0]",
+              "rotation_euler": "[0.0, 0.0, 0.0]",
+              "scale": "[1.0, 1.0, 1.0]"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderCreateObjectResponse"},
+        "usage": [{"tool": "create_blender_object", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_type": "SPHERE",
+          "name": "Ball",
+          "location": [1, 2, 3],
+          "rotation_euler": [0.1, 0.2, 0.3],
+          "scale": [2, 2, 2]
+        },
+        "session_calls": [
+          {
+            "method": "create_object",
+            "arguments": {
+              "object_type": "'SPHERE'",
+              "name": "'Ball'",
+              "location": "[1.0, 2.0, 3.0]",
+              "rotation_euler": "[0.1, 0.2, 0.3]",
+              "scale": "[2.0, 2.0, 2.0]"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderCreateObjectResponse"},
+        "usage": [{"tool": "create_blender_object", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_type": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderCreateObjectRequest\nobject_type\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "object_type": {"bogus": 1},
+              "name": null,
+              "location": [0.0, 0.0, 0.0],
+              "rotation_euler": [0.0, 0.0, 0.0],
+              "scale": [1.0, 1.0, 1.0]
+            }
+          }
+        }
+      }
+    },
+    "delete_blender_object": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [{"method": "delete_object", "arguments": {"object_name": "'Cube'"}}],
+        "response": {"checked_against": "BlenderDeleteObjectResponse"},
+        "usage": [{"tool": "delete_blender_object", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderDeleteObjectRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}}}
+        }
+      }
+    },
+    "set_blender_object_transform": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [
+          {
+            "method": "set_object_transform",
+            "arguments": {"object_name": "'Cube'", "location": "None", "rotation_euler": "None", "scale": "None"}
+          }
+        ],
+        "response": {"checked_against": "BlenderSetTransformResponse"},
+        "usage": [{"tool": "set_blender_object_transform", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_name": "Cube",
+          "location": [1, 2, 3],
+          "rotation_euler": [0.1, 0.2, 0.3],
+          "scale": [2, 2, 2]
+        },
+        "session_calls": [
+          {
+            "method": "set_object_transform",
+            "arguments": {
+              "object_name": "'Cube'",
+              "location": "[1.0, 2.0, 3.0]",
+              "rotation_euler": "[0.1, 0.2, 0.3]",
+              "scale": "[2.0, 2.0, 2.0]"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderSetTransformResponse"},
+        "usage": [{"tool": "set_blender_object_transform", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSetTransformRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {"object_name": {"bogus": 1}, "location": null, "rotation_euler": null, "scale": null}
+          }
+        }
+      }
+    },
+    "set_blender_object_parent": {
+      "minimal": {
+        "arguments": {"child_name": "Wheel", "parent_name": "Car"},
+        "session_calls": [
+          {
+            "method": "set_object_parent",
+            "arguments": {"child_name": "'Wheel'", "parent_name": "'Car'"}
+          }
+        ],
+        "response": {"checked_against": "BlenderSetParentResponse"},
+        "usage": [{"tool": "set_blender_object_parent", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"child_name": {"bogus": 1}, "parent_name": "Car"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSetParentRequest\nchild_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"child_name": {"bogus": 1}, "parent_name": "Car"}}
+        }
+      }
+    },
+    "clear_blender_object_parent": {
+      "minimal": {
+        "arguments": {"object_name": "Wheel"},
+        "session_calls": [
+          {
+            "method": "clear_object_parent",
+            "arguments": {"object_name": "'Wheel'", "keep_transform": "True"}
+          }
+        ],
+        "response": {"checked_against": "BlenderClearParentResponse"},
+        "usage": [{"tool": "clear_blender_object_parent", "success": false}]
+      },
+      "full": {
+        "arguments": {"object_name": "Wheel", "keep_transform": false},
+        "session_calls": [
+          {
+            "method": "clear_object_parent",
+            "arguments": {"object_name": "'Wheel'", "keep_transform": "False"}
+          }
+        ],
+        "response": {"checked_against": "BlenderClearParentResponse"},
+        "usage": [{"tool": "clear_blender_object_parent", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderClearParentRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}, "keep_transform": true}}
+        }
+      }
+    },
+    "assign_blender_material": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [
+          {
+            "method": "assign_material",
+            "arguments": {
+              "object_name": "'Cube'",
+              "material_name": "None",
+              "base_color": "[0.8, 0.8, 0.8, 1.0]",
+              "metallic": "0.0",
+              "roughness": "0.5"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderAssignMaterialResponse"},
+        "usage": [{"tool": "assign_blender_material", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_name": "Cube",
+          "material_name": "Red",
+          "base_color": [1, 0, 0, 1],
+          "metallic": 0.5,
+          "roughness": 0.25
+        },
+        "session_calls": [
+          {
+            "method": "assign_material",
+            "arguments": {
+              "object_name": "'Cube'",
+              "material_name": "'Red'",
+              "base_color": "[1.0, 0.0, 0.0, 1.0]",
+              "metallic": "0.5",
+              "roughness": "0.25"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderAssignMaterialResponse"},
+        "usage": [{"tool": "assign_blender_material", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderAssignMaterialRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "object_name": {"bogus": 1},
+              "material_name": null,
+              "base_color": [0.8, 0.8, 0.8, 1.0],
+              "metallic": 0.0,
+              "roughness": 0.5
+            }
+          }
+        }
+      }
+    },
+    "add_blender_modifier": {
+      "minimal": {
+        "arguments": {"object_name": "Cube", "modifier_type": "SUBSURF"},
+        "session_calls": [
+          {
+            "method": "add_modifier",
+            "arguments": {
+              "object_name": "'Cube'",
+              "modifier_type": "'SUBSURF'",
+              "modifier_name": "None",
+              "params": "{}"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderAddModifierResponse"},
+        "usage": [{"tool": "add_blender_modifier", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_name": "Cube",
+          "modifier_type": "SUBSURF",
+          "modifier_name": "Smooth",
+          "params": {"levels": 2}
+        },
+        "session_calls": [
+          {
+            "method": "add_modifier",
+            "arguments": {
+              "object_name": "'Cube'",
+              "modifier_type": "'SUBSURF'",
+              "modifier_name": "'Smooth'",
+              "params": "{'levels': 2}"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderAddModifierResponse"},
+        "usage": [{"tool": "add_blender_modifier", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}, "modifier_type": "SUBSURF"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderAddModifierRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "object_name": {"bogus": 1},
+              "modifier_type": "SUBSURF",
+              "modifier_name": null,
+              "params": {}
+            }
+          }
+        }
+      }
+    },
+    "set_blender_light_params": {
+      "minimal": {
+        "arguments": {"light_name": "Light"},
+        "session_calls": [
+          {
+            "method": "set_light_params",
+            "arguments": {
+              "light_name": "'Light'",
+              "energy": "None",
+              "color": "None",
+              "use_shadow": "None",
+              "spot_size": "None",
+              "spot_blend": "None",
+              "shadow_soft_size": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderSetLightParamsResponse"},
+        "usage": [{"tool": "set_blender_light_params", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "light_name": "Light",
+          "energy": 500,
+          "color": [1, 0.5, 0.25],
+          "use_shadow": false,
+          "spot_size": 0.8,
+          "spot_blend": 0.2,
+          "shadow_soft_size": 0.1
+        },
+        "session_calls": [
+          {
+            "method": "set_light_params",
+            "arguments": {
+              "light_name": "'Light'",
+              "energy": "500.0",
+              "color": "[1.0, 0.5, 0.25]",
+              "use_shadow": "False",
+              "spot_size": "0.8",
+              "spot_blend": "0.2",
+              "shadow_soft_size": "0.1"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderSetLightParamsResponse"},
+        "usage": [{"tool": "set_blender_light_params", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"light_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSetLightParamsRequest\nlight_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "light_name": {"bogus": 1},
+              "energy": null,
+              "color": null,
+              "use_shadow": null,
+              "spot_size": null,
+              "spot_blend": null,
+              "shadow_soft_size": null
+            }
+          }
+        }
+      }
+    },
+    "open_blender_file": {
+      "minimal": {
+        "arguments": {"file_path": "/tmp/scene.blend"},
+        "session_calls": [{"method": "open_blend_file", "arguments": {"file_path": "'/tmp/scene.blend'"}}],
+        "response": {"checked_against": "BlenderOpenFileResponse"},
+        "usage": [{"tool": "open_blender_file", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"file_path": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderOpenFileRequest\nfile_path\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"file_path": {"bogus": 1}}}
+        }
+      }
+    },
+    "save_blender_file": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [{"method": "save_blend_file", "arguments": {"file_path": "None"}}],
+        "response": {"checked_against": "BlenderSaveFileResponse"},
+        "usage": [{"tool": "save_blender_file", "success": false}]
+      },
+      "full": {
+        "arguments": {"file_path": "/tmp/out.blend"},
+        "session_calls": [{"method": "save_blend_file", "arguments": {"file_path": "'/tmp/out.blend'"}}],
+        "response": {"checked_against": "BlenderSaveFileResponse"},
+        "usage": [{"tool": "save_blender_file", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"file_path": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSaveFileRequest\nfile_path\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"file_path": {"bogus": 1}}}
+        }
+      }
+    },
+    "import_blender_file": {
+      "minimal": {
+        "arguments": {"file_path": "/tmp/model.obj", "file_format": "OBJ"},
+        "session_calls": [
+          {
+            "method": "import_file",
+            "arguments": {"file_path": "'/tmp/model.obj'", "file_format": "'OBJ'"}
+          }
+        ],
+        "response": {"checked_against": "BlenderImportFileResponse"},
+        "usage": [{"tool": "import_blender_file", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"file_path": {"bogus": 1}, "file_format": "OBJ"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderImportFileRequest\nfile_path\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"file_path": {"bogus": 1}, "file_format": "OBJ"}}
+        }
+      }
+    },
+    "export_blender_file": {
+      "minimal": {
+        "arguments": {"file_path": "/tmp/out.glb", "file_format": "GLTF"},
+        "session_calls": [
+          {
+            "method": "export_file",
+            "arguments": {"file_path": "'/tmp/out.glb'", "file_format": "'GLTF'", "selected_only": "False"}
+          }
+        ],
+        "response": {"checked_against": "BlenderExportFileResponse"},
+        "usage": [{"tool": "export_blender_file", "success": false}]
+      },
+      "full": {
+        "arguments": {"file_path": "/tmp/out.glb", "file_format": "GLTF", "selected_only": true},
+        "session_calls": [
+          {
+            "method": "export_file",
+            "arguments": {"file_path": "'/tmp/out.glb'", "file_format": "'GLTF'", "selected_only": "True"}
+          }
+        ],
+        "response": {"checked_against": "BlenderExportFileResponse"},
+        "usage": [{"tool": "export_blender_file", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"file_path": {"bogus": 1}, "file_format": "GLTF"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderExportFileRequest\nfile_path\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"file_path": {"bogus": 1}, "file_format": "GLTF", "selected_only": false}}
+        }
+      }
+    },
+    "get_blender_file_info": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [{"method": "get_file_info", "arguments": {}}],
+        "response": {"checked_against": "BlenderFileInfoResponse"},
+        "usage": [{"tool": "get_blender_file_info", "success": false}]
+      }
+    },
+    "set_blender_frame": {
+      "minimal": {
+        "arguments": {"frame": 12},
+        "session_calls": [{"method": "set_frame", "arguments": {"frame": "12"}}],
+        "response": {"checked_against": "BlenderSetFrameResponse"},
+        "usage": [{"tool": "set_blender_frame", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"frame": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSetFrameRequest\nframe\n  Input should be a valid integer [type=int_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/int_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"frame": {"bogus": 1}}}
+        }
+      }
+    },
+    "get_blender_frame": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [{"method": "get_frame", "arguments": {}}],
+        "response": {"checked_against": "BlenderGetFrameResponse"},
+        "usage": [{"tool": "get_blender_frame", "success": false}]
+      }
+    },
+    "set_blender_frame_range": {
+      "minimal": {
+        "arguments": {"frame_start": 1, "frame_end": 250},
+        "session_calls": [{"method": "set_frame_range", "arguments": {"frame_start": "1", "frame_end": "250"}}],
+        "response": {"checked_against": "BlenderSetFrameRangeResponse"},
+        "usage": [{"tool": "set_blender_frame_range", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"frame_start": {"bogus": 1}, "frame_end": 250},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSetFrameRangeRequest\nframe_start\n  Input should be a valid integer [type=int_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/int_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"frame_start": {"bogus": 1}, "frame_end": 250}}
+        }
+      }
+    },
+    "play_blender_animation": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [{"method": "play_animation", "arguments": {"action": "'play'"}}],
+        "response": {"checked_against": "BlenderPlayAnimationResponse"},
+        "usage": [{"tool": "play_blender_animation", "success": false}]
+      },
+      "full": {
+        "arguments": {"action": "reverse"},
+        "session_calls": [{"method": "play_animation", "arguments": {"action": "'reverse'"}}],
+        "response": {"checked_against": "BlenderPlayAnimationResponse"},
+        "usage": [{"tool": "play_blender_animation", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"action": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderPlayAnimationRequest\naction\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"action": {"bogus": 1}}}
+        }
+      }
+    },
+    "insert_blender_keyframe": {
+      "minimal": {
+        "arguments": {"object_name": "Cube", "data_path": "location", "frame": 10},
+        "session_calls": [
+          {
+            "method": "insert_keyframe",
+            "arguments": {"object_name": "'Cube'", "data_path": "'location'", "frame": "10", "index": "-1"}
+          }
+        ],
+        "response": {"checked_against": "BlenderInsertKeyframeResponse"},
+        "usage": [{"tool": "insert_blender_keyframe", "success": false}]
+      },
+      "full": {
+        "arguments": {"object_name": "Cube", "data_path": "location", "frame": 10, "index": 2},
+        "session_calls": [
+          {
+            "method": "insert_keyframe",
+            "arguments": {"object_name": "'Cube'", "data_path": "'location'", "frame": "10", "index": "2"}
+          }
+        ],
+        "response": {"checked_against": "BlenderInsertKeyframeResponse"},
+        "usage": [{"tool": "insert_blender_keyframe", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}, "data_path": "location", "frame": 10},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderInsertKeyframeRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {"object_name": {"bogus": 1}, "data_path": "location", "frame": 10, "index": -1}
+          }
+        }
+      }
+    },
+    "delete_blender_keyframe": {
+      "minimal": {
+        "arguments": {"object_name": "Cube", "data_path": "location", "frame": 10},
+        "session_calls": [
+          {
+            "method": "delete_keyframe",
+            "arguments": {"object_name": "'Cube'", "data_path": "'location'", "frame": "10", "index": "-1"}
+          }
+        ],
+        "response": {"checked_against": "BlenderDeleteKeyframeResponse"},
+        "usage": [{"tool": "delete_blender_keyframe", "success": false}]
+      },
+      "full": {
+        "arguments": {"object_name": "Cube", "data_path": "location", "frame": 10, "index": 2},
+        "session_calls": [
+          {
+            "method": "delete_keyframe",
+            "arguments": {"object_name": "'Cube'", "data_path": "'location'", "frame": "10", "index": "2"}
+          }
+        ],
+        "response": {"checked_against": "BlenderDeleteKeyframeResponse"},
+        "usage": [{"tool": "delete_blender_keyframe", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}, "data_path": "location", "frame": 10},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderDeleteKeyframeRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {"object_name": {"bogus": 1}, "data_path": "location", "frame": 10, "index": -1}
+          }
+        }
+      }
+    },
+    "get_blender_keyframes": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [{"method": "get_keyframes", "arguments": {"object_name": "'Cube'"}}],
+        "response": {"checked_against": "BlenderGetKeyframesResponse"},
+        "usage": [{"tool": "get_blender_keyframes", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderGetKeyframesRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}}}
+        }
+      }
+    },
+    "setup_blender_rigid_body": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [
+          {
+            "method": "setup_rigid_body",
+            "arguments": {
+              "object_name": "'Cube'",
+              "body_type": "'ACTIVE'",
+              "mass": "1.0",
+              "friction": "0.5",
+              "restitution": "0.0",
+              "collision_shape": "'CONVEX_HULL'",
+              "linear_damping": "0.04",
+              "angular_damping": "0.1"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderSetupRigidBodyResponse"},
+        "usage": [{"tool": "setup_blender_rigid_body", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_name": "Cube",
+          "body_type": "PASSIVE",
+          "mass": 2,
+          "friction": 0.7,
+          "restitution": 0.3,
+          "collision_shape": "BOX",
+          "linear_damping": 0.1,
+          "angular_damping": 0.2
+        },
+        "session_calls": [
+          {
+            "method": "setup_rigid_body",
+            "arguments": {
+              "object_name": "'Cube'",
+              "body_type": "'PASSIVE'",
+              "mass": "2.0",
+              "friction": "0.7",
+              "restitution": "0.3",
+              "collision_shape": "'BOX'",
+              "linear_damping": "0.1",
+              "angular_damping": "0.2"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderSetupRigidBodyResponse"},
+        "usage": [{"tool": "setup_blender_rigid_body", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSetupRigidBodyRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "object_name": {"bogus": 1},
+              "body_type": "ACTIVE",
+              "mass": 1.0,
+              "friction": 0.5,
+              "restitution": 0.0,
+              "collision_shape": "CONVEX_HULL",
+              "linear_damping": 0.04,
+              "angular_damping": 0.1
+            }
+          }
+        }
+      }
+    },
+    "add_blender_force_field": {
+      "minimal": {
+        "arguments": {"field_type": "WIND"},
+        "session_calls": [
+          {
+            "method": "add_force_field",
+            "arguments": {"field_type": "'WIND'", "strength": "1.0", "location": "None", "name": "None"}
+          }
+        ],
+        "response": {"checked_against": "BlenderAddForceFieldResponse"},
+        "usage": [{"tool": "add_blender_force_field", "success": false}]
+      },
+      "full": {
+        "arguments": {"field_type": "VORTEX", "strength": 3, "location": [1, 2, 3], "name": "Swirl"},
+        "session_calls": [
+          {
+            "method": "add_force_field",
+            "arguments": {
+              "field_type": "'VORTEX'",
+              "strength": "3.0",
+              "location": "[1.0, 2.0, 3.0]",
+              "name": "'Swirl'"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderAddForceFieldResponse"},
+        "usage": [{"tool": "add_blender_force_field", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"field_type": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderAddForceFieldRequest\nfield_type\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"field_type": {"bogus": 1}, "strength": 1.0, "location": null, "name": null}}
+        }
+      }
+    },
+    "get_blender_force_field_info": {
+      "minimal": {
+        "arguments": {"object_name": "Swirl"},
+        "session_calls": [{"method": "get_force_field_info", "arguments": {"object_name": "'Swirl'"}}],
+        "response": {"checked_against": "BlenderGetForceFieldInfoResponse"},
+        "usage": [{"tool": "get_blender_force_field_info", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderGetForceFieldInfoRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}}}
+        }
+      }
+    },
+    "add_blender_rigid_body_constraint": {
+      "minimal": {
+        "arguments": {"constraint_type": "HINGE", "object1_name": "A", "object2_name": "B"},
+        "session_calls": [
+          {
+            "method": "add_rigid_body_constraint",
+            "arguments": {
+              "constraint_type": "'HINGE'",
+              "object1_name": "'A'",
+              "object2_name": "'B'",
+              "location": "None",
+              "disable_collisions": "True"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderAddConstraintResponse"},
+        "usage": [{"tool": "add_blender_rigid_body_constraint", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "constraint_type": "HINGE",
+          "object1_name": "A",
+          "object2_name": "B",
+          "location": [0, 0, 1],
+          "disable_collisions": false
+        },
+        "session_calls": [
+          {
+            "method": "add_rigid_body_constraint",
+            "arguments": {
+              "constraint_type": "'HINGE'",
+              "object1_name": "'A'",
+              "object2_name": "'B'",
+              "location": "[0.0, 0.0, 1.0]",
+              "disable_collisions": "False"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderAddConstraintResponse"},
+        "usage": [{"tool": "add_blender_rigid_body_constraint", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"constraint_type": {"bogus": 1}, "object1_name": "A", "object2_name": "B"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderAddConstraintRequest\nconstraint_type\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "constraint_type": {"bogus": 1},
+              "object1_name": "A",
+              "object2_name": "B",
+              "location": null,
+              "disable_collisions": true
+            }
+          }
+        }
+      }
+    },
+    "get_blender_constraint_info": {
+      "minimal": {
+        "arguments": {"object_name": "Hinge"},
+        "session_calls": [{"method": "get_constraint_info", "arguments": {"object_name": "'Hinge'"}}],
+        "response": {"checked_against": "BlenderGetConstraintInfoResponse"},
+        "usage": [{"tool": "get_blender_constraint_info", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderGetConstraintInfoRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}}}
+        }
+      }
+    },
+    "get_blender_physics_state": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [{"method": "get_physics_state", "arguments": {"object_name": "'Cube'"}}],
+        "response": {"checked_against": "BlenderGetPhysicsStateResponse"},
+        "usage": [{"tool": "get_blender_physics_state", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderGetPhysicsStateRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}}}
+        }
+      }
+    },
+    "get_blender_object_trajectory": {
+      "minimal": {
+        "arguments": {"object_name": "Cube", "start_frame": 1, "end_frame": 10},
+        "session_calls": [
+          {
+            "method": "get_object_trajectory",
+            "arguments": {"object_name": "'Cube'", "start_frame": "1", "end_frame": "10", "step": "1"}
+          }
+        ],
+        "response": {"checked_against": "BlenderGetTrajectoryResponse"},
+        "usage": [{"tool": "get_blender_object_trajectory", "success": false}]
+      },
+      "full": {
+        "arguments": {"object_name": "Cube", "start_frame": 1, "end_frame": 10, "step": 3},
+        "session_calls": [
+          {
+            "method": "get_object_trajectory",
+            "arguments": {"object_name": "'Cube'", "start_frame": "1", "end_frame": "10", "step": "3"}
+          }
+        ],
+        "response": {"checked_against": "BlenderGetTrajectoryResponse"},
+        "usage": [{"tool": "get_blender_object_trajectory", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}, "start_frame": 1, "end_frame": 10},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderGetTrajectoryRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}, "start_frame": 1, "end_frame": 10, "step": 1}}
+        }
+      }
+    },
+    "bake_blender_simulation": {
+      "minimal": {
+        "arguments": {"frame_start": 1, "frame_end": 50},
+        "session_calls": [{"method": "bake_simulation", "arguments": {"frame_start": "1", "frame_end": "50"}}],
+        "response": {"checked_against": "BlenderBakeSimulationResponse"},
+        "usage": [{"tool": "bake_blender_simulation", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"frame_start": {"bogus": 1}, "frame_end": 50},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderBakeSimulationRequest\nframe_start\n  Input should be a valid integer [type=int_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/int_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"frame_start": {"bogus": 1}, "frame_end": 50}}
+        }
+      }
+    },
+    "free_blender_bake": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [{"method": "free_bake", "arguments": {}}],
+        "response": {"success": true, "error": null},
+        "usage": [{"tool": "free_blender_bake", "success": true}]
+      }
+    },
+    "execute_blender_script": {
+      "minimal": {
+        "arguments": {"script": "print(1)"},
+        "session_calls": [
+          {
+            "method": "execute_script",
+            "arguments": {"script": "'print(1)'", "timeout": "None", "max_output_chars": "32000"}
+          }
+        ],
+        "response": {"checked_against": "BlenderExecuteScriptResponse"},
+        "usage": [{"tool": "execute_blender_script", "success": false}]
+      },
+      "full": {
+        "arguments": {"script": "print(1)", "timeout": 5, "max_output_chars": 100},
+        "session_calls": [
+          {
+            "method": "execute_script",
+            "arguments": {"script": "'print(1)'", "timeout": "5.0", "max_output_chars": "100"}
+          }
+        ],
+        "response": {"checked_against": "BlenderExecuteScriptResponse"},
+        "usage": [{"tool": "execute_blender_script", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"script": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderExecuteScriptRequest\nscript\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"script": {"bogus": 1}, "timeout": null, "max_output_chars": 32000}}
+        }
+      }
+    },
+    "create_blender_mesh_from_data": {
+      "minimal": {
+        "arguments": {"name": "Tri", "vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0]]},
+        "session_calls": [
+          {
+            "method": "create_mesh_from_data",
+            "arguments": {
+              "name": "'Tri'",
+              "vertices": "[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]",
+              "edges": "[]",
+              "faces": "[]",
+              "location": "None",
+              "collection_name": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderCreateMeshFromDataResponse"},
+        "usage": [{"tool": "create_blender_mesh_from_data", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "name": "Tri",
+          "vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0]],
+          "edges": [[0, 1]],
+          "faces": [[0, 1, 2]],
+          "location": [1, 2, 3],
+          "collection_name": "Props"
+        },
+        "session_calls": [
+          {
+            "method": "create_mesh_from_data",
+            "arguments": {
+              "name": "'Tri'",
+              "vertices": "[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]",
+              "edges": "[[0, 1]]",
+              "faces": "[[0, 1, 2]]",
+              "location": "[1.0, 2.0, 3.0]",
+              "collection_name": "'Props'"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderCreateMeshFromDataResponse"},
+        "usage": [{"tool": "create_blender_mesh_from_data", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"name": {"bogus": 1}, "vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0]]},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderCreateMeshFromDataRequest\nname\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "name": {"bogus": 1},
+              "vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0]],
+              "edges": [],
+              "faces": [],
+              "location": null,
+              "collection_name": null
+            }
+          }
+        }
+      }
+    },
+    "apply_simready_metadata": {
+      "minimal": {
+        "arguments": {
+          "object_name": "Cube",
+          "metadata": {
+            "semantic": {"semantic_class": "cup"},
+            "physics": {"mass_kg": 2, "collider_type": "box"},
+            "material": {"substrate_type": "metal"}
+          }
+        },
+        "session_calls": [
+          {
+            "method": "apply_simready_metadata",
+            "arguments": {
+              "object_name": "'Cube'",
+              "metadata": "{'semantic': {'semantic_class': 'cup'}, 'physics': {'mass_kg': 2.0, 'collider_type': 'box', 'is_rigid_body': False}, 'material': {'substrate_type': 'metal'}}"
+            }
+          }
+        ],
+        "response": {"checked_against": "SimReadyApplyMetadataResponse"},
+        "usage": [{"tool": "apply_simready_metadata", "success": false}]
+      },
+      "invalid": {
+        "arguments": {
+          "object_name": {"bogus": 1},
+          "metadata": {
+            "semantic": {"semantic_class": "cup"},
+            "physics": {"mass_kg": 2, "collider_type": "box"},
+            "material": {"substrate_type": "metal"}
+          }
+        },
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for SimReadyApplyMetadataRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "object_name": {"bogus": 1},
+              "metadata": {
+                "semantic": {"semantic_class": "cup"},
+                "physics": {"mass_kg": 2, "collider_type": "box"},
+                "material": {"substrate_type": "metal"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "get_simready_metadata": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [{"method": "get_simready_metadata", "arguments": {"object_name": "'Cube'"}}],
+        "response": {"checked_against": "SimReadyGetMetadataResponse"},
+        "usage": [{"tool": "get_simready_metadata", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for SimReadyGetMetadataRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}}}
+        }
+      }
+    },
+    "validate_simready_compliance": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [
+          {
+            "method": "validate_simready_compliance",
+            "arguments": {
+              "object_names": "None",
+              "check_naming": "True",
+              "check_scale": "True",
+              "check_transforms": "True",
+              "check_materials": "True",
+              "check_hierarchy": "True"
+            }
+          }
+        ],
+        "response": {"checked_against": "SimReadyValidateResponse"},
+        "usage": [{"tool": "validate_simready_compliance", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_names": ["Cube"],
+          "check_naming": false,
+          "check_scale": false,
+          "check_transforms": false,
+          "check_materials": false,
+          "check_hierarchy": false
+        },
+        "session_calls": [
+          {
+            "method": "validate_simready_compliance",
+            "arguments": {
+              "object_names": "['Cube']",
+              "check_naming": "False",
+              "check_scale": "False",
+              "check_transforms": "False",
+              "check_materials": "False",
+              "check_hierarchy": "False"
+            }
+          }
+        ],
+        "response": {"checked_against": "SimReadyValidateResponse"},
+        "usage": [{"tool": "validate_simready_compliance", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_names": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for SimReadyValidateRequest\nobject_names\n  Input should be a valid list [type=list_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/list_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "object_names": {"bogus": 1},
+              "check_naming": true,
+              "check_scale": true,
+              "check_transforms": true,
+              "check_materials": true,
+              "check_hierarchy": true
+            }
+          }
+        }
+      }
+    },
+    "export_simready_usd": {
+      "minimal": {
+        "arguments": {"file_path": "/tmp/asset.usd"},
+        "session_calls": [
+          {
+            "method": "export_simready_usd",
+            "arguments": {
+              "file_path": "'/tmp/asset.usd'",
+              "object_names": "None",
+              "embed_metadata": "True",
+              "validate_before_export": "True"
+            }
+          }
+        ],
+        "response": {"checked_against": "SimReadyExportResponse"},
+        "usage": [{"tool": "export_simready_usd", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "file_path": "/tmp/asset.usd",
+          "object_names": ["Cube"],
+          "embed_metadata": false,
+          "validate_before_export": false
+        },
+        "session_calls": [
+          {
+            "method": "export_simready_usd",
+            "arguments": {
+              "file_path": "'/tmp/asset.usd'",
+              "object_names": "['Cube']",
+              "embed_metadata": "False",
+              "validate_before_export": "False"
+            }
+          }
+        ],
+        "response": {"checked_against": "SimReadyExportResponse"},
+        "usage": [{"tool": "export_simready_usd", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"file_path": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for SimReadyExportRequest\nfile_path\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "file_path": {"bogus": 1},
+              "object_names": null,
+              "embed_metadata": true,
+              "validate_before_export": true
+            }
+          }
+        }
+      }
+    },
+    "setup_simready_hierarchy": {
+      "minimal": {
+        "arguments": {"root_name": "asset_root", "child_names": ["Cube"]},
+        "session_calls": [
+          {
+            "method": "setup_simready_hierarchy",
+            "arguments": {"root_name": "'asset_root'", "child_names": "['Cube']", "semantic": "None"}
+          }
+        ],
+        "response": {"checked_against": "SimReadySetupHierarchyResponse"},
+        "usage": [{"tool": "setup_simready_hierarchy", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "root_name": "asset_root",
+          "child_names": ["Cube"],
+          "semantic": {"semantic_class": "cup", "semantic_qcode": "Q81727"}
+        },
+        "session_calls": [
+          {
+            "method": "setup_simready_hierarchy",
+            "arguments": {
+              "root_name": "'asset_root'",
+              "child_names": "['Cube']",
+              "semantic": "{'semantic_class': 'cup', 'semantic_qcode': 'Q81727'}"
+            }
+          }
+        ],
+        "response": {"checked_against": "SimReadySetupHierarchyResponse"},
+        "usage": [{"tool": "setup_simready_hierarchy", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"root_name": {"bogus": 1}, "child_names": ["Cube"]},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for SimReadySetupHierarchyRequest\nroot_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"root_name": {"bogus": 1}, "child_names": ["Cube"], "semantic": null}}
+        }
+      }
+    }
+  },
+  "embedded_differences": {
+    "attach_blender_window": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
+          "error_type": "ValueError"
+        },
+        "usage": [{"tool": "attach_blender_window", "success": false}]
+      },
+      "full": {
+        "arguments": {"instance_id": "instance-1", "window_id": "window-1"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "attach_blender_window requires --blender-mode attached (BLENDER__MODE=attached)",
+          "error_type": "ValueError"
+        },
+        "usage": [{"tool": "attach_blender_window", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"instance_id": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderAttachWindowRequest\ninstance_id\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"instance_id": {"bogus": 1}, "window_id": null}}
+        }
+      }
+    }
+  }
+}

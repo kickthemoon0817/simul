@@ -22,16 +22,56 @@ simul unreal status
 simul server --backends unreal --unreal-mode attached
 ```
 
-Discovery reports process identity, project path, loaded map, dirty map packages,
-and level viewport config keys. With one editor and one viewport, selectors may
-be omitted. Unreal layouts often contain several viewports: supply a key explicitly
-when selection is ambiguous. These keys identify level viewports, not operating
-system windows or arbitrary asset-editor tabs.
+`simul unreal instances` and the `list_unreal_instances` MCP tool run the same
+discovery and return the same payload; `--no-scan` is the tool's `scan: false`.
+Discovery probes the scan range (`UNREAL__SCAN_PORT_START` up to, not including,
+`UNREAL__SCAN_PORT_END`; 30010–30019 by default) plus the configured and attached
+ports on `UNREAL__HOST`, or on the attachment's host in attached mode. `--port`
+probes only that port, `--host` another host, and `--no-scan` only the active
+endpoint. Probes run concurrently, at most 32 at a time. Each step of a probe
+is bounded by `UNREAL__PING_TIMEOUT`, and every request carries
+`UNREAL__PASSPHRASE` when it is set. Each instance reports:
+
+| Field | Meaning |
+|---|---|
+| `name` | `default` for the active endpoint, otherwise `unreal-<port>` |
+| `host`, `port` | Remote Control endpoint |
+| `reachable`, `latency_ms` | Whether Remote Control answered `GET /remote/info` (an HTTP 401 refusal counts), and its round trip |
+| `active` | Unreal tools dispatch here: the configured endpoint, or the attached editor in attached mode |
+| `attached` | Editor, loaded map and viewport match the saved attachment (reported in either mode) |
+| `error` | Why the endpoint is unreachable, refused the request or has no identity available; otherwise null |
+| `instance_id`, `document_id`, `pid` | Editor process identity, loaded-map generation and process ID |
+| `engine_version`, `project_name`, `project_path`, `map_path` | Engine, project and loaded map |
+| `viewports`, `active_viewport` | Level viewport config keys, and the active one |
+| `dirty_map_packages` | Map packages with unsaved changes |
+
+The identity fields come from the editor's Python. They are null (the lists
+empty) when it does not answer, for example with Python execution disabled, an
+editor still starting up or one too busy to answer within the timeout; `error`
+then gives the reason, the editor is still `reachable`, and it cannot be
+attached until it answers.
+An editor whose Remote Control refuses the request with HTTP 401 (it enforces a
+passphrase and `UNREAL__PASSPHRASE` is missing or wrong) is reported the same
+way, with `error` saying to set `UNREAL__PASSPHRASE`. `ping_unreal` and
+`unreal_health_check` apply the same rule: Remote Control answered, so
+`reachable` is true, and the call fails with `error_type: AuthenticationError`
+and that `error` (`unreal_health_check`'s deprecated `connected` stays false).
+A scan leaves out ports where nothing answered, except the active endpoint. A
+port whose probe never left this machine (out of file descriptors or local
+ports, or a host name that does not resolve) is not dropped silently:
+`warnings` names it, since an editor there would be missing.
+The payload also carries `active_instance` (the active entry's name),
+`total_discovered` (reachable instances) and `warnings`, which also report a
+missing, invalid or stale attachment in attached mode.
+
+With one identified editor and one viewport, selectors may be omitted. Unreal
+layouts often contain several viewports: supply a key explicitly when selection
+is ambiguous. These keys identify level viewports, not operating system windows
+or arbitrary asset-editor tabs.
 
 The selection is stored in `~/.simul/unreal/attachment.json` with owner-only
 permissions on POSIX. Passphrases are not copied into that file; configure
 `UNREAL__PASSPHRASE` on the client when the editor requires authentication.
-Discovery uses `UNREAL__HOST`, `UNREAL__PORT`, and the existing scan-port range.
 
 ## Named editor controls
 
@@ -122,8 +162,9 @@ callers; agent IDs do not isolate shared scene edits or actor selection.
 
 ## Identity checks and limits
 
-The first discovery call installs a small in-memory Python module and a map-change
-listener. It changes no scene data. Opening/replacing a map, restarting the editor,
+The first discovery call (`simul unreal instances` or `list_unreal_instances`)
+installs a small in-memory Python module and a map-change listener in each editor
+that answers. It changes no scene data. Opening/replacing a map, restarting the editor,
 or removing the selected viewport invalidates the selection. Re-run `instances`
 and `attach`; a changed target is never accepted automatically. Reattaching or
 detaching takes effect on the next tool session without restarting the MCP server.

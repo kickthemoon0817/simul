@@ -1,0 +1,4487 @@
+{
+ "calls": [
+  {
+   "tool": "unreal_health_check",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "unreal_health_check",
+     "label": "Unreal",
+     "response_model": "UnrealHealthCheckResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "health_check",
+     "arguments": {}
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "health_check"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "ping_unreal",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "ping_unreal",
+     "label": "Unreal",
+     "response_model": "UnrealPingResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "ping",
+     "arguments": {}
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "ping"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "list_unreal_instances",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "list_unreal_instances",
+     "label": "Unreal",
+     "response_model": "UnrealListInstancesResponse",
+     "params": {
+      "scan": true
+     }
+    }
+   ],
+   "session": [
+    {
+     "method": "unreal_connection.discover_instances",
+     "arguments": {
+      "settings": "server",
+      "scan": true
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "instances": []
+    }
+   },
+   "usage": [
+    {
+     "success": true,
+     "params": {
+      "scan": true
+     }
+    }
+   ]
+  },
+  {
+   "tool": "list_unreal_instances",
+   "case": "every argument",
+   "arguments": {
+    "scan": false
+   },
+   "envelope": [
+    {
+     "tool": "list_unreal_instances",
+     "label": "Unreal",
+     "response_model": "UnrealListInstancesResponse",
+     "params": {
+      "scan": false
+     }
+    }
+   ],
+   "session": [
+    {
+     "method": "unreal_connection.discover_instances",
+     "arguments": {
+      "settings": "server",
+      "scan": false
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "instances": []
+    }
+   },
+   "usage": [
+    {
+     "success": true,
+     "params": {
+      "scan": false
+     }
+    }
+   ]
+  },
+  {
+   "tool": "capture_unreal_viewport",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "capture_unreal_viewport",
+     "label": "Unreal",
+     "response_model": "UnrealCaptureViewportResponse",
+     "params": {
+      "resolution_x": 1920,
+      "resolution_y": 1080,
+      "format": "png",
+      "inline": false
+     }
+    }
+   ],
+   "session": [
+    {
+     "method": "capture_viewport",
+     "arguments": {
+      "resolution_x": 1920,
+      "resolution_y": 1080,
+      "format": "png",
+      "inline": false
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "capture_viewport"
+    }
+   },
+   "usage": [
+    {
+     "success": true,
+     "params": {
+      "resolution_x": 1920,
+      "resolution_y": 1080,
+      "format": "png",
+      "inline": false
+     }
+    }
+   ]
+  },
+  {
+   "tool": "capture_unreal_viewport",
+   "case": "every argument",
+   "arguments": {
+    "resolution_x": 640,
+    "resolution_y": 360,
+    "format": "png",
+    "inline": true
+   },
+   "envelope": [
+    {
+     "tool": "capture_unreal_viewport",
+     "label": "Unreal",
+     "response_model": "UnrealCaptureViewportResponse",
+     "params": {
+      "resolution_x": 640,
+      "resolution_y": 360,
+      "format": "png",
+      "inline": true
+     }
+    }
+   ],
+   "session": [
+    {
+     "method": "capture_viewport",
+     "arguments": {
+      "resolution_x": 640,
+      "resolution_y": 360,
+      "format": "png",
+      "inline": true
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "capture_viewport"
+    }
+   },
+   "usage": [
+    {
+     "success": true,
+     "params": {
+      "resolution_x": 640,
+      "resolution_y": 360,
+      "format": "png",
+      "inline": true
+     }
+    }
+   ]
+  },
+  {
+   "tool": "execute_unreal_script",
+   "case": "required",
+   "arguments": {
+    "code": "import unreal\nprint('hi')"
+   },
+   "envelope": [
+    {
+     "tool": "execute_unreal_script",
+     "label": "Unreal",
+     "response_model": "UnrealExecuteScriptResponse",
+     "params": {
+      "code_bytes": 25,
+      "mode": "ExecuteFile"
+     }
+    }
+   ],
+   "session": [
+    {
+     "method": "execute_script",
+     "arguments": {
+      "code": "import unreal\nprint('hi')",
+      "mode": "ExecuteFile"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "execute_script"
+    }
+   },
+   "usage": [
+    {
+     "success": true,
+     "params": {
+      "code_bytes": 25,
+      "mode": "ExecuteFile"
+     }
+    }
+   ]
+  },
+  {
+   "tool": "execute_unreal_script",
+   "case": "every argument",
+   "arguments": {
+    "code": "import unreal\nprint('hi')",
+    "mode": "EvaluateStatement"
+   },
+   "envelope": [
+    {
+     "tool": "execute_unreal_script",
+     "label": "Unreal",
+     "response_model": "UnrealExecuteScriptResponse",
+     "params": {
+      "code_bytes": 25,
+      "mode": "EvaluateStatement"
+     }
+    }
+   ],
+   "session": [
+    {
+     "method": "execute_script",
+     "arguments": {
+      "code": "import unreal\nprint('hi')",
+      "mode": "EvaluateStatement"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "execute_script"
+    }
+   },
+   "usage": [
+    {
+     "success": true,
+     "params": {
+      "code_bytes": 25,
+      "mode": "EvaluateStatement"
+     }
+    }
+   ]
+  },
+  {
+   "tool": "control_unreal_ui",
+   "case": "required",
+   "arguments": {
+    "agent_control": "set_property"
+   },
+   "envelope": [
+    {
+     "tool": "control_unreal_ui",
+     "label": "Unreal",
+     "response_model": "UnrealUIResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "control_ui",
+     "arguments": {
+      "agent_control": "set_property",
+      "target": null,
+      "property_name": null,
+      "value": null,
+      "enabled": null,
+      "agent_id": "agent",
+      "position": null,
+      "activity": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "control_ui"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "control_unreal_ui",
+   "case": "every argument",
+   "arguments": {
+    "agent_control": "set_property",
+    "target": "Chair",
+    "property_name": "rotation",
+    "value": [
+     10.0,
+     20.5,
+     -30.0
+    ],
+    "enabled": true,
+    "agent_id": "builder",
+    "position": [
+     0.25,
+     0.75
+    ],
+    "activity": "Placing chairs"
+   },
+   "envelope": [
+    {
+     "tool": "control_unreal_ui",
+     "label": "Unreal",
+     "response_model": "UnrealUIResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "control_ui",
+     "arguments": {
+      "agent_control": "set_property",
+      "target": "Chair",
+      "property_name": "rotation",
+      "value": [
+       10.0,
+       20.5,
+       -30.0
+      ],
+      "enabled": true,
+      "agent_id": "builder",
+      "position": [
+       0.25,
+       0.75
+      ],
+      "activity": "Placing chairs"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "control_ui"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_engine_info",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "get_unreal_engine_info",
+     "label": "Unreal",
+     "response_model": "UnrealEngineInfoResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_engine_info",
+     "arguments": {}
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_engine_info"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_loaded_map",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "get_unreal_loaded_map",
+     "label": "Unreal",
+     "response_model": "UnrealLoadedMapResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_loaded_map",
+     "arguments": {}
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_loaded_map"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "list_unreal_actors",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "list_unreal_actors",
+     "label": "Unreal",
+     "response_model": "UnrealListActorsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "list_actors",
+     "arguments": {
+      "class_filter": null,
+      "tag_filter": null,
+      "max_results": 200
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "list_actors"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "list_unreal_actors",
+   "case": "every argument",
+   "arguments": {
+    "class_filter": "StaticMeshActor",
+    "tag_filter": "Prop",
+    "max_results": 5
+   },
+   "envelope": [
+    {
+     "tool": "list_unreal_actors",
+     "label": "Unreal",
+     "response_model": "UnrealListActorsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "list_actors",
+     "arguments": {
+      "class_filter": "StaticMeshActor",
+      "tag_filter": "Prop",
+      "max_results": 5
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "list_actors"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_actor_info",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "get_unreal_actor_info",
+     "label": "Unreal",
+     "response_model": "UnrealGetActorInfoResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_actor_info",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_actor_info"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "search_unreal_assets",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "search_unreal_assets",
+     "label": "Unreal",
+     "response_model": "UnrealSearchAssetsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "search_assets",
+     "arguments": {
+      "query": "",
+      "class_names": null,
+      "package_paths": null,
+      "max_results": 100
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "search_assets"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "search_unreal_assets",
+   "case": "every argument",
+   "arguments": {
+    "query": "chair",
+    "class_names": " StaticMesh, ,Material ",
+    "package_paths": "/Game/Props,, /Game/Env ",
+    "max_results": 7
+   },
+   "envelope": [
+    {
+     "tool": "search_unreal_assets",
+     "label": "Unreal",
+     "response_model": "UnrealSearchAssetsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "search_assets",
+     "arguments": {
+      "query": "chair",
+      "class_names": [
+       "StaticMesh",
+       "Material"
+      ],
+      "package_paths": [
+       "/Game/Props",
+       "/Game/Env"
+      ],
+      "max_results": 7
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "search_assets"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "describe_unreal_object",
+   "case": "required",
+   "arguments": {
+    "object_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "describe_unreal_object",
+     "label": "Unreal",
+     "response_model": "UnrealDescribeObjectResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "describe_object",
+     "arguments": {
+      "object_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "describe_object"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_actor_thumbnail",
+   "case": "required",
+   "arguments": {
+    "asset_path": "/Game/Meshes/SM_Chair"
+   },
+   "envelope": [
+    {
+     "tool": "get_unreal_actor_thumbnail",
+     "label": "Unreal",
+     "response_model": "UnrealGetThumbnailResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_actor_thumbnail",
+     "arguments": {
+      "asset_path": "/Game/Meshes/SM_Chair",
+      "width": 256,
+      "height": 256
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_actor_thumbnail"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_actor_thumbnail",
+   "case": "every argument",
+   "arguments": {
+    "asset_path": "/Game/Meshes/SM_Chair",
+    "width": 64,
+    "height": 32
+   },
+   "envelope": [
+    {
+     "tool": "get_unreal_actor_thumbnail",
+     "label": "Unreal",
+     "response_model": "UnrealGetThumbnailResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_actor_thumbnail",
+     "arguments": {
+      "asset_path": "/Game/Meshes/SM_Chair",
+      "width": 64,
+      "height": 32
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_actor_thumbnail"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "summarize_unreal_scene",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "summarize_unreal_scene",
+     "label": "Unreal",
+     "response_model": "UnrealSceneSummaryResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "summarize_scene",
+     "arguments": {}
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "summarize_scene"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_viewport_info",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "get_unreal_viewport_info",
+     "label": "Unreal",
+     "response_model": "UnrealViewportInfoResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_viewport_info",
+     "arguments": {}
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_viewport_info"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_camera_view",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "set_unreal_camera_view",
+     "label": "Unreal",
+     "response_model": "UnrealSetCameraViewResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_camera_view",
+     "arguments": {
+      "location": null,
+      "rotation": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_camera_view"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_camera_view",
+   "case": "every argument",
+   "arguments": {
+    "location_x": 100.0,
+    "location_y": -200.0,
+    "location_z": 300.5,
+    "rotation_pitch": -15.0,
+    "rotation_yaw": 90.0,
+    "rotation_roll": 0.5
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_camera_view",
+     "label": "Unreal",
+     "response_model": "UnrealSetCameraViewResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_camera_view",
+     "arguments": {
+      "location": {
+       "tuple": [
+        100.0,
+        -200.0,
+        300.5
+       ]
+      },
+      "rotation": {
+       "tuple": [
+        -15.0,
+        90.0,
+        0.5
+       ]
+      }
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_camera_view"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "focus_unreal_on_actor",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "focus_unreal_on_actor",
+     "label": "Unreal",
+     "response_model": "UnrealFocusActorResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "focus_on_actor",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "distance": 0.0
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "focus_on_actor"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "focus_unreal_on_actor",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "distance": 250.0
+   },
+   "envelope": [
+    {
+     "tool": "focus_unreal_on_actor",
+     "label": "Unreal",
+     "response_model": "UnrealFocusActorResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "focus_on_actor",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "distance": 250.0
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "focus_on_actor"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "spawn_unreal_actor",
+   "case": "required",
+   "arguments": {
+    "asset_path": "/Game/Meshes/SM_Chair"
+   },
+   "envelope": [
+    {
+     "tool": "spawn_unreal_actor",
+     "label": "Unreal",
+     "response_model": "UnrealSpawnActorResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "spawn_actor",
+     "arguments": {
+      "asset_path": "/Game/Meshes/SM_Chair",
+      "location": {
+       "tuple": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "rotation": {
+       "tuple": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "label": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "spawn_actor"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "spawn_unreal_actor",
+   "case": "every argument",
+   "arguments": {
+    "asset_path": "/Game/Meshes/SM_Chair",
+    "location_x": 1.5,
+    "location_y": -2.0,
+    "location_z": 3.0,
+    "rotation_pitch": 10.0,
+    "rotation_yaw": 20.0,
+    "rotation_roll": 30.0,
+    "label": "Chair"
+   },
+   "envelope": [
+    {
+     "tool": "spawn_unreal_actor",
+     "label": "Unreal",
+     "response_model": "UnrealSpawnActorResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "spawn_actor",
+     "arguments": {
+      "asset_path": "/Game/Meshes/SM_Chair",
+      "location": {
+       "tuple": [
+        1.5,
+        -2.0,
+        3.0
+       ]
+      },
+      "rotation": {
+       "tuple": [
+        10.0,
+        20.0,
+        30.0
+       ]
+      },
+      "label": "Chair"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "spawn_actor"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "delete_unreal_actor",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "delete_unreal_actor",
+     "label": "Unreal",
+     "response_model": "UnrealDeleteActorResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "delete_actor",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "delete_actor"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_transform",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_transform",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorTransformResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_actor_transform",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "location": null,
+      "rotation": null,
+      "scale": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_actor_transform"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_transform",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "location": [
+     1.0,
+     2.0,
+     3.0
+    ],
+    "rotation": [
+     0.0,
+     90.0,
+     0.0
+    ],
+    "scale": [
+     2.0,
+     2.0,
+     2.0
+    ]
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_transform",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorTransformResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_actor_transform",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "location": [
+       1.0,
+       2.0,
+       3.0
+      ],
+      "rotation": [
+       0.0,
+       90.0,
+       0.0
+      ],
+      "scale": [
+       2.0,
+       2.0,
+       2.0
+      ]
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_actor_transform"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_property",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "property_name": "bHidden",
+    "property_value": "true"
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_property",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorPropertyResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_actor_property",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "property_name": "bHidden",
+      "property_value": "true",
+      "generate_transaction": true
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_actor_property"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_property",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "property_name": "bHidden",
+    "property_value": "true",
+    "generate_transaction": false
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_property",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorPropertyResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_actor_property",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "property_name": "bHidden",
+      "property_value": "true",
+      "generate_transaction": false
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_actor_property"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "call_unreal_actor_function",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "function_name": "SetSpeed"
+   },
+   "envelope": [
+    {
+     "tool": "call_unreal_actor_function",
+     "label": "Unreal",
+     "response_model": "UnrealCallActorFunctionResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "call_actor_function",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "function_name": "SetSpeed",
+      "parameters": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "call_actor_function"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "call_unreal_actor_function",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "function_name": "SetSpeed",
+    "parameters": "{\"Speed\": 2}"
+   },
+   "envelope": [
+    {
+     "tool": "call_unreal_actor_function",
+     "label": "Unreal",
+     "response_model": "UnrealCallActorFunctionResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "call_actor_function",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "function_name": "SetSpeed",
+      "parameters": "{\"Speed\": 2}"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "call_actor_function"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_parent",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_parent",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorParentResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_actor_parent",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "parent_path": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_actor_parent"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_parent",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0"
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_parent",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorParentResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_actor_parent",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_actor_parent"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "add_unreal_component",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "component_class": "PointLightComponent"
+   },
+   "envelope": [
+    {
+     "tool": "add_unreal_component",
+     "label": "Unreal",
+     "response_model": "UnrealAddComponentResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "add_component",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "component_class": "PointLightComponent",
+      "component_name": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "add_component"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "add_unreal_component",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "component_class": "PointLightComponent",
+    "component_name": "Lamp"
+   },
+   "envelope": [
+    {
+     "tool": "add_unreal_component",
+     "label": "Unreal",
+     "response_model": "UnrealAddComponentResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "add_component",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "component_class": "PointLightComponent",
+      "component_name": "Lamp"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "add_component"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_visibility",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_visibility",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorVisibilityResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_actor_visibility",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "visible": true,
+      "propagate": true
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_actor_visibility"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_visibility",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "visible": false,
+    "propagate": false
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_visibility",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorVisibilityResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_actor_visibility",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "visible": false,
+      "propagate": false
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_actor_visibility"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_material_info",
+   "case": "required",
+   "arguments": {
+    "material_path": "/Game/Materials/M_Wood"
+   },
+   "envelope": [
+    {
+     "tool": "get_unreal_material_info",
+     "label": "Unreal",
+     "response_model": "UnrealGetMaterialInfoResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_material_info",
+     "arguments": {
+      "material_path": "/Game/Materials/M_Wood"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_material_info"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_material_params",
+   "case": "required",
+   "arguments": {
+    "material_path": "/Game/Materials/M_Wood"
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_material_params",
+     "label": "Unreal",
+     "response_model": "UnrealSetMaterialParamsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_material_params",
+     "arguments": {
+      "material_path": "/Game/Materials/M_Wood",
+      "scalar_params": null,
+      "vector_params": null,
+      "texture_params": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_material_params"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_material_params",
+   "case": "every argument",
+   "arguments": {
+    "material_path": "/Game/Materials/M_Wood",
+    "scalar_params_json": "{\"Roughness\": 0.4}",
+    "vector_params_json": "{\"Tint\": [1, 0.5, 0, 1]}",
+    "texture_params_json": "{\"Albedo\": \"/Game/Textures/T_Wood\"}"
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_material_params",
+     "label": "Unreal",
+     "response_model": "UnrealSetMaterialParamsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_material_params",
+     "arguments": {
+      "material_path": "/Game/Materials/M_Wood",
+      "scalar_params": {
+       "Roughness": 0.4
+      },
+      "vector_params": {
+       "Tint": [
+        1,
+        0.5,
+        0,
+        1
+       ]
+      },
+      "texture_params": {
+       "Albedo": "/Game/Textures/T_Wood"
+      }
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_material_params"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "create_unreal_material_instance",
+   "case": "required",
+   "arguments": {
+    "parent_path": "/Game/Materials/M_Wood",
+    "instance_name": "MI_Chair"
+   },
+   "envelope": [
+    {
+     "tool": "create_unreal_material_instance",
+     "label": "Unreal",
+     "response_model": "UnrealCreateMaterialInstanceResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "create_material_instance",
+     "arguments": {
+      "parent_path": "/Game/Materials/M_Wood",
+      "instance_name": "MI_Chair",
+      "save_path": ""
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "create_material_instance"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "create_unreal_material_instance",
+   "case": "every argument",
+   "arguments": {
+    "parent_path": "/Game/Materials/M_Wood",
+    "instance_name": "MI_Chair",
+    "save_path": "/Game/Materials"
+   },
+   "envelope": [
+    {
+     "tool": "create_unreal_material_instance",
+     "label": "Unreal",
+     "response_model": "UnrealCreateMaterialInstanceResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "create_material_instance",
+     "arguments": {
+      "parent_path": "/Game/Materials/M_Wood",
+      "instance_name": "MI_Chair",
+      "save_path": "/Game/Materials"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "create_material_instance"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "assign_unreal_material",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "material_path": "/Game/Materials/M_Wood"
+   },
+   "envelope": [
+    {
+     "tool": "assign_unreal_material",
+     "label": "Unreal",
+     "response_model": "UnrealAssignMaterialResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "assign_material",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "material_path": "/Game/Materials/M_Wood",
+      "slot_index": 0
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "assign_material"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "assign_unreal_material",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "material_path": "/Game/Materials/M_Wood",
+    "slot_index": 2
+   },
+   "envelope": [
+    {
+     "tool": "assign_unreal_material",
+     "label": "Unreal",
+     "response_model": "UnrealAssignMaterialResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "assign_material",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "material_path": "/Game/Materials/M_Wood",
+      "slot_index": 2
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "assign_material"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_light_params",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_light_params",
+     "label": "Unreal",
+     "response_model": "UnrealSetLightParamsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_light_params",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "intensity": null,
+      "color": null,
+      "temperature": null,
+      "use_temperature": null,
+      "attenuation_radius": null,
+      "cast_shadows": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_light_params"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_light_params",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "intensity": 5000.0,
+    "color": [
+     1.0,
+     0.5,
+     0.25
+    ],
+    "temperature": 6500.0,
+    "use_temperature": true,
+    "attenuation_radius": 800.0,
+    "cast_shadows": false
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_light_params",
+     "label": "Unreal",
+     "response_model": "UnrealSetLightParamsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_light_params",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "intensity": 5000.0,
+      "color": [
+       1.0,
+       0.5,
+       0.25
+      ],
+      "temperature": 6500.0,
+      "use_temperature": true,
+      "attenuation_radius": 800.0,
+      "cast_shadows": false
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_light_params"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_render_settings",
+   "case": "required",
+   "arguments": {
+    "setting_name": "r.ScreenPercentage",
+    "setting_value": "50"
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_render_settings",
+     "label": "Unreal",
+     "response_model": "UnrealSetRenderSettingsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_render_settings",
+     "arguments": {
+      "setting_name": "r.ScreenPercentage",
+      "setting_value": "50"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_render_settings"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "control_unreal_simulation",
+   "case": "required",
+   "arguments": {
+    "action": "start"
+   },
+   "envelope": [
+    {
+     "tool": "control_unreal_simulation",
+     "label": "Unreal",
+     "response_model": "UnrealControlSimulationResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "control_simulation",
+     "arguments": {
+      "action": "start"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "control_simulation"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_simulation_status",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "get_unreal_simulation_status",
+     "label": "Unreal",
+     "response_model": "UnrealGetSimulationStatusResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_simulation_status",
+     "arguments": {}
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_simulation_status"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "enable_unreal_physics",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "enable_unreal_physics",
+     "label": "Unreal",
+     "response_model": "UnrealEnablePhysicsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "enable_physics",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "enable": true,
+      "simulate_physics": true
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "enable_physics"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "enable_unreal_physics",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "enable": false,
+    "simulate_physics": false
+   },
+   "envelope": [
+    {
+     "tool": "enable_unreal_physics",
+     "label": "Unreal",
+     "response_model": "UnrealEnablePhysicsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "enable_physics",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "enable": false,
+      "simulate_physics": false
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "enable_physics"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_collision",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_collision",
+     "label": "Unreal",
+     "response_model": "UnrealSetCollisionResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_collision",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "collision_preset": "",
+      "collision_enabled": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_collision"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_collision",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "collision_preset": "OverlapAll",
+    "collision_enabled": false
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_collision",
+     "label": "Unreal",
+     "response_model": "UnrealSetCollisionResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_collision",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "collision_preset": "OverlapAll",
+      "collision_enabled": false
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_collision"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "apply_unreal_force",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "apply_unreal_force",
+     "label": "Unreal",
+     "response_model": "UnrealApplyForceResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "apply_force",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "force_x": 0.0,
+      "force_y": 0.0,
+      "force_z": 0.0,
+      "is_impulse": false,
+      "location_x": null,
+      "location_y": null,
+      "location_z": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "apply_force"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "apply_unreal_force",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "force_x": 1.0,
+    "force_y": 2.0,
+    "force_z": 3.0,
+    "is_impulse": true,
+    "location_x": 4.0,
+    "location_y": 5.0,
+    "location_z": 6.0
+   },
+   "envelope": [
+    {
+     "tool": "apply_unreal_force",
+     "label": "Unreal",
+     "response_model": "UnrealApplyForceResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "apply_force",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "force_x": 1.0,
+      "force_y": 2.0,
+      "force_z": 3.0,
+      "is_impulse": true,
+      "location_x": 4.0,
+      "location_y": 5.0,
+      "location_z": 6.0
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "apply_force"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_physics_params",
+   "case": "required",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_physics_params",
+     "label": "Unreal",
+     "response_model": "UnrealSetPhysicsParamsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_physics_params",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "mass": null,
+      "linear_damping": null,
+      "angular_damping": null,
+      "enable_gravity": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_physics_params"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_physics_params",
+   "case": "every argument",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "mass": 12.5,
+    "linear_damping": 0.1,
+    "angular_damping": 0.2,
+    "enable_gravity": false
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_physics_params",
+     "label": "Unreal",
+     "response_model": "UnrealSetPhysicsParamsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "set_physics_params",
+     "arguments": {
+      "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "mass": 12.5,
+      "linear_damping": 0.1,
+      "angular_damping": 0.2,
+      "enable_gravity": false
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "set_physics_params"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "import_unreal_usd",
+   "case": "required",
+   "arguments": {
+    "usd_path": "/tmp/in.usd"
+   },
+   "envelope": [
+    {
+     "tool": "import_unreal_usd",
+     "label": "Unreal",
+     "response_model": "UnrealImportUsdResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "import_usd",
+     "arguments": {
+      "usd_path": "/tmp/in.usd",
+      "destination_path": "/Game/Imports",
+      "import_options": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "import_usd"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "import_unreal_usd",
+   "case": "every argument",
+   "arguments": {
+    "usd_path": "/tmp/in.usd",
+    "destination_path": "/Game/USD",
+    "import_options": {
+     "import_lights": false
+    }
+   },
+   "envelope": [
+    {
+     "tool": "import_unreal_usd",
+     "label": "Unreal",
+     "response_model": "UnrealImportUsdResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "import_usd",
+     "arguments": {
+      "usd_path": "/tmp/in.usd",
+      "destination_path": "/Game/USD",
+      "import_options": {
+       "import_lights": false
+      }
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "import_usd"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "export_unreal_usd",
+   "case": "required",
+   "arguments": {
+    "actor_paths": "/Game/Maps/Test.Test:PersistentLevel.Chair_0, /Game/Maps/Test.Test:PersistentLevel.Table_0",
+    "output_path": "/tmp/out.usd"
+   },
+   "envelope": [
+    {
+     "tool": "export_unreal_usd",
+     "label": "Unreal",
+     "response_model": "UnrealExportUsdResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "export_usd",
+     "arguments": {
+      "actor_paths": [
+       "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "/Game/Maps/Test.Test:PersistentLevel.Table_0"
+      ],
+      "output_path": "/tmp/out.usd",
+      "export_options": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "export_usd"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "export_unreal_usd",
+   "case": "every argument",
+   "arguments": {
+    "actor_paths": "/Game/Maps/Test.Test:PersistentLevel.Chair_0, /Game/Maps/Test.Test:PersistentLevel.Table_0",
+    "output_path": "/tmp/out.usd",
+    "export_options": {
+     "export_sublayers": true
+    }
+   },
+   "envelope": [
+    {
+     "tool": "export_unreal_usd",
+     "label": "Unreal",
+     "response_model": "UnrealExportUsdResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "export_usd",
+     "arguments": {
+      "actor_paths": [
+       "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "/Game/Maps/Test.Test:PersistentLevel.Table_0"
+      ],
+      "output_path": "/tmp/out.usd",
+      "export_options": {
+       "export_sublayers": true
+      }
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "export_usd"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "convert_to_simready",
+   "case": "required",
+   "arguments": {
+    "usd_path": "/tmp/in.usd",
+    "output_path": "/tmp/out.usd"
+   },
+   "envelope": [
+    {
+     "tool": "convert_to_simready",
+     "label": "Unreal",
+     "response_model": "UnrealConvertToSimreadyResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "convert_to_simready",
+     "arguments": {
+      "usd_path": "/tmp/in.usd",
+      "output_path": "/tmp/out.usd",
+      "add_physics": true,
+      "add_collision": true,
+      "add_semantic_labels": true,
+      "target_up_axis": "Z",
+      "target_units": "meters"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "convert_to_simready"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "convert_to_simready",
+   "case": "every argument",
+   "arguments": {
+    "usd_path": "/tmp/in.usd",
+    "output_path": "/tmp/out.usd",
+    "add_physics": false,
+    "add_collision": false,
+    "add_semantic_labels": false,
+    "target_up_axis": "Y",
+    "target_units": "centimeters"
+   },
+   "envelope": [
+    {
+     "tool": "convert_to_simready",
+     "label": "Unreal",
+     "response_model": "UnrealConvertToSimreadyResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "convert_to_simready",
+     "arguments": {
+      "usd_path": "/tmp/in.usd",
+      "output_path": "/tmp/out.usd",
+      "add_physics": false,
+      "add_collision": false,
+      "add_semantic_labels": false,
+      "target_up_axis": "Y",
+      "target_units": "centimeters"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "convert_to_simready"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "validate_simready_asset",
+   "case": "required",
+   "arguments": {
+    "usd_path": "/tmp/in.usd"
+   },
+   "envelope": [
+    {
+     "tool": "validate_simready_asset",
+     "label": "Unreal",
+     "response_model": "UnrealValidateSimreadyResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "validate_simready_asset",
+     "arguments": {
+      "usd_path": "/tmp/in.usd",
+      "checks": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "validate_simready_asset"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "validate_simready_asset",
+   "case": "every argument",
+   "arguments": {
+    "usd_path": "/tmp/in.usd",
+    "checks": "physics, ,scale"
+   },
+   "envelope": [
+    {
+     "tool": "validate_simready_asset",
+     "label": "Unreal",
+     "response_model": "UnrealValidateSimreadyResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "validate_simready_asset",
+     "arguments": {
+      "usd_path": "/tmp/in.usd",
+      "checks": [
+       "physics",
+       "scale"
+      ]
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "validate_simready_asset"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_interchange_info",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "get_unreal_interchange_info",
+     "label": "Unreal",
+     "response_model": "UnrealGetInterchangeInfoResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_interchange_info",
+     "arguments": {}
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_interchange_info"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "batch_unreal_operations",
+   "case": "required",
+   "arguments": {
+    "operations": "[{\"objectPath\": \"/Script/Engine.Default__KismetSystemLibrary\", \"functionName\": \"GetEngineVersion\"}]"
+   },
+   "envelope": [
+    {
+     "tool": "batch_unreal_operations",
+     "label": "Unreal",
+     "response_model": "UnrealBatchOperationsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "batch_operations",
+     "arguments": {
+      "operations": [
+       {
+        "objectPath": "/Script/Engine.Default__KismetSystemLibrary",
+        "functionName": "GetEngineVersion"
+       }
+      ]
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "batch_operations"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "query_unreal_scene_graph",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "query_unreal_scene_graph",
+     "label": "Unreal",
+     "response_model": "UnrealQuerySceneGraphResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "query_scene_graph",
+     "arguments": {
+      "root_path": null,
+      "max_depth": 10,
+      "include_components": false,
+      "class_filter": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "query_scene_graph"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "query_unreal_scene_graph",
+   "case": "every argument",
+   "arguments": {
+    "root_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "max_depth": 3,
+    "include_components": true,
+    "class_filter": "StaticMeshActor"
+   },
+   "envelope": [
+    {
+     "tool": "query_unreal_scene_graph",
+     "label": "Unreal",
+     "response_model": "UnrealQuerySceneGraphResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "query_scene_graph",
+     "arguments": {
+      "root_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+      "max_depth": 3,
+      "include_components": true,
+      "class_filter": "StaticMeshActor"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "query_scene_graph"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "analyze_unreal_scene_for_robotics",
+   "case": "required",
+   "arguments": {},
+   "envelope": [
+    {
+     "tool": "analyze_unreal_scene_for_robotics",
+     "label": "Unreal",
+     "response_model": "UnrealAnalyzeSceneForRoboticsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "analyze_scene_for_robotics",
+     "arguments": {
+      "analysis_types": null,
+      "actor_filter": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "analyze_scene_for_robotics"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "analyze_unreal_scene_for_robotics",
+   "case": "every argument",
+   "arguments": {
+    "analysis_types": "traversability, ,graspability",
+    "actor_filter": "Prop"
+   },
+   "envelope": [
+    {
+     "tool": "analyze_unreal_scene_for_robotics",
+     "label": "Unreal",
+     "response_model": "UnrealAnalyzeSceneForRoboticsResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "analyze_scene_for_robotics",
+     "arguments": {
+      "analysis_types": [
+       "traversability",
+       "graspability"
+      ],
+      "actor_filter": "Prop"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "analyze_scene_for_robotics"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "generate_unreal_procedural_scene",
+   "case": "required",
+   "arguments": {
+    "scene_type": "warehouse"
+   },
+   "envelope": [
+    {
+     "tool": "generate_unreal_procedural_scene",
+     "label": "Unreal",
+     "response_model": "UnrealGenerateProceduralSceneResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "generate_procedural_scene",
+     "arguments": {
+      "scene_type": "warehouse",
+      "parameters": {},
+      "bounds_min": null,
+      "bounds_max": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "generate_procedural_scene"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "generate_unreal_procedural_scene",
+   "case": "every argument",
+   "arguments": {
+    "scene_type": "warehouse",
+    "parameters": "{\"rows\": 3}",
+    "bounds_min": "-100,-100,0",
+    "bounds_max": "100, 100, 50"
+   },
+   "envelope": [
+    {
+     "tool": "generate_unreal_procedural_scene",
+     "label": "Unreal",
+     "response_model": "UnrealGenerateProceduralSceneResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "generate_procedural_scene",
+     "arguments": {
+      "scene_type": "warehouse",
+      "parameters": {
+       "rows": 3
+      },
+      "bounds_min": [
+       -100.0,
+       -100.0,
+       0.0
+      ],
+      "bounds_max": [
+       100.0,
+       100.0,
+       50.0
+      ]
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "generate_procedural_scene"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_actor_by_semantic_label",
+   "case": "required",
+   "arguments": {
+    "label": "chair"
+   },
+   "envelope": [
+    {
+     "tool": "get_unreal_actor_by_semantic_label",
+     "label": "Unreal",
+     "response_model": "UnrealGetActorBySemanticLabelResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_actor_by_semantic_label",
+     "arguments": {
+      "label": "chair",
+      "match_mode": "exact",
+      "max_results": 100
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_actor_by_semantic_label"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "get_unreal_actor_by_semantic_label",
+   "case": "every argument",
+   "arguments": {
+    "label": "chair",
+    "match_mode": "contains",
+    "max_results": 9
+   },
+   "envelope": [
+    {
+     "tool": "get_unreal_actor_by_semantic_label",
+     "label": "Unreal",
+     "response_model": "UnrealGetActorBySemanticLabelResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "get_actor_by_semantic_label",
+     "arguments": {
+      "label": "chair",
+      "match_mode": "contains",
+      "max_results": 9
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "get_actor_by_semantic_label"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "generate_unreal_mesh_primitive",
+   "case": "required",
+   "arguments": {
+    "primitive_type": "box"
+   },
+   "envelope": [
+    {
+     "tool": "generate_unreal_mesh_primitive",
+     "label": "Unreal",
+     "response_model": "UnrealGenerateMeshPrimitiveResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "generate_mesh_primitive",
+     "arguments": {
+      "primitive_type": "box",
+      "dimensions": {},
+      "segments": 32,
+      "location": null,
+      "actor_label": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "generate_mesh_primitive"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "generate_unreal_mesh_primitive",
+   "case": "every argument",
+   "arguments": {
+    "primitive_type": "box",
+    "dimensions": "{\"x\": 100}",
+    "segments": 8,
+    "location": "1,2,3",
+    "actor_label": "Box"
+   },
+   "envelope": [
+    {
+     "tool": "generate_unreal_mesh_primitive",
+     "label": "Unreal",
+     "response_model": "UnrealGenerateMeshPrimitiveResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "generate_mesh_primitive",
+     "arguments": {
+      "primitive_type": "box",
+      "dimensions": {
+       "x": 100
+      },
+      "segments": 8,
+      "location": [
+       1.0,
+       2.0,
+       3.0
+      ],
+      "actor_label": "Box"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "generate_mesh_primitive"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "apply_unreal_mesh_boolean",
+   "case": "required",
+   "arguments": {
+    "target_mesh_path": "/Game/Meshes/SM_Chair",
+    "tool_mesh_path": "/Game/Meshes/SM_Hole",
+    "operation": "subtract"
+   },
+   "envelope": [
+    {
+     "tool": "apply_unreal_mesh_boolean",
+     "label": "Unreal",
+     "response_model": "UnrealApplyMeshBooleanResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "apply_mesh_boolean",
+     "arguments": {
+      "target_mesh_path": "/Game/Meshes/SM_Chair",
+      "tool_mesh_path": "/Game/Meshes/SM_Hole",
+      "operation": "subtract"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "apply_mesh_boolean"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "compute_unreal_convex_hull",
+   "case": "required",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair"
+   },
+   "envelope": [
+    {
+     "tool": "compute_unreal_convex_hull",
+     "label": "Unreal",
+     "response_model": "UnrealComputeConvexHullResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "compute_convex_hull",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "compute_convex_hull"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "decompose_unreal_convex_hull",
+   "case": "required",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair"
+   },
+   "envelope": [
+    {
+     "tool": "decompose_unreal_convex_hull",
+     "label": "Unreal",
+     "response_model": "UnrealDecomposeConvexHullResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "decompose_convex_hull",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "max_hulls": 16,
+      "max_vertices_per_hull": 32,
+      "min_cluster_size": 256,
+      "resolution": 100000
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "decompose_convex_hull"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "decompose_unreal_convex_hull",
+   "case": "every argument",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "max_hulls": 4,
+    "max_vertices_per_hull": 16,
+    "min_cluster_size": 64,
+    "resolution": 5000
+   },
+   "envelope": [
+    {
+     "tool": "decompose_unreal_convex_hull",
+     "label": "Unreal",
+     "response_model": "UnrealDecomposeConvexHullResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "decompose_convex_hull",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "max_hulls": 4,
+      "max_vertices_per_hull": 16,
+      "min_cluster_size": 64,
+      "resolution": 5000
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "decompose_convex_hull"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "edit_unreal_mesh_topology",
+   "case": "required",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "operation": "extrude"
+   },
+   "envelope": [
+    {
+     "tool": "edit_unreal_mesh_topology",
+     "label": "Unreal",
+     "response_model": "UnrealEditMeshTopologyResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "edit_mesh_topology",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "operation": "extrude",
+      "face_selection": null,
+      "edge_selection": null,
+      "distance": null,
+      "offset": null,
+      "scale": null,
+      "count": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "edit_mesh_topology"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "edit_unreal_mesh_topology",
+   "case": "every argument",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "operation": "extrude",
+    "face_selection": "0,1",
+    "edge_selection": "2",
+    "distance": 5.0,
+    "offset": 1.5,
+    "scale": "1, 2,3",
+    "count": 4
+   },
+   "envelope": [
+    {
+     "tool": "edit_unreal_mesh_topology",
+     "label": "Unreal",
+     "response_model": "UnrealEditMeshTopologyResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "edit_mesh_topology",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "operation": "extrude",
+      "face_selection": "0,1",
+      "edge_selection": "2",
+      "distance": 5.0,
+      "offset": 1.5,
+      "scale": [
+       1.0,
+       2.0,
+       3.0
+      ],
+      "count": 4
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "edit_mesh_topology"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "subdivide_unreal_mesh",
+   "case": "required",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair"
+   },
+   "envelope": [
+    {
+     "tool": "subdivide_unreal_mesh",
+     "label": "Unreal",
+     "response_model": "UnrealSubdivideMeshResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "subdivide_mesh",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "level": 2,
+      "scheme": "catmull_clark"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "subdivide_mesh"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "subdivide_unreal_mesh",
+   "case": "every argument",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "level": 1,
+    "scheme": "loop"
+   },
+   "envelope": [
+    {
+     "tool": "subdivide_unreal_mesh",
+     "label": "Unreal",
+     "response_model": "UnrealSubdivideMeshResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "subdivide_mesh",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "level": 1,
+      "scheme": "loop"
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "subdivide_mesh"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "simplify_unreal_mesh",
+   "case": "required",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair"
+   },
+   "envelope": [
+    {
+     "tool": "simplify_unreal_mesh",
+     "label": "Unreal",
+     "response_model": "UnrealSimplifyMeshResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "simplify_mesh",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "target_triangle_count": null,
+      "target_percentage": null,
+      "max_error": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "simplify_mesh"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "simplify_unreal_mesh",
+   "case": "every argument",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "target_triangle_count": 500,
+    "target_percentage": 0.5,
+    "max_error": 0.01
+   },
+   "envelope": [
+    {
+     "tool": "simplify_unreal_mesh",
+     "label": "Unreal",
+     "response_model": "UnrealSimplifyMeshResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "simplify_mesh",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "target_triangle_count": 500,
+      "target_percentage": 0.5,
+      "max_error": 0.01
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "simplify_mesh"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "cut_unreal_mesh_plane",
+   "case": "required",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "plane_origin": "0, 0,10",
+    "plane_normal": "0,0,1"
+   },
+   "envelope": [
+    {
+     "tool": "cut_unreal_mesh_plane",
+     "label": "Unreal",
+     "response_model": "UnrealCutMeshPlaneResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "cut_mesh_plane",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "plane_origin": [
+       0.0,
+       0.0,
+       10.0
+      ],
+      "plane_normal": [
+       0.0,
+       0.0,
+       1.0
+      ],
+      "fill_holes": true,
+      "keep_both_sides": false
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "cut_mesh_plane"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "cut_unreal_mesh_plane",
+   "case": "every argument",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "plane_origin": "0, 0,10",
+    "plane_normal": "0,0,1",
+    "fill_holes": false,
+    "keep_both_sides": true
+   },
+   "envelope": [
+    {
+     "tool": "cut_unreal_mesh_plane",
+     "label": "Unreal",
+     "response_model": "UnrealCutMeshPlaneResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "cut_mesh_plane",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "plane_origin": [
+       0.0,
+       0.0,
+       10.0
+      ],
+      "plane_normal": [
+       0.0,
+       0.0,
+       1.0
+      ],
+      "fill_holes": false,
+      "keep_both_sides": true
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "cut_mesh_plane"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "validate_unreal_mesh",
+   "case": "required",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair"
+   },
+   "envelope": [
+    {
+     "tool": "validate_unreal_mesh",
+     "label": "Unreal",
+     "response_model": "UnrealValidateMeshResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "validate_mesh",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "checks": null
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "validate_mesh"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "validate_unreal_mesh",
+   "case": "every argument",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "checks": "manifold,, normals "
+   },
+   "envelope": [
+    {
+     "tool": "validate_unreal_mesh",
+     "label": "Unreal",
+     "response_model": "UnrealValidateMeshResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "validate_mesh",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "checks": [
+       "manifold",
+       "normals"
+      ]
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "validate_mesh"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "convert_unreal_mesh_format",
+   "case": "required",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "target_format": "dynamic_mesh"
+   },
+   "envelope": [
+    {
+     "tool": "convert_unreal_mesh_format",
+     "label": "Unreal",
+     "response_model": "UnrealConvertMeshFormatResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "convert_mesh_format",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "target_format": "dynamic_mesh",
+      "tessellation_options": {}
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "convert_mesh_format"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "convert_unreal_mesh_format",
+   "case": "every argument",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "target_format": "dynamic_mesh",
+    "tessellation_options": "{\"level\": 2}"
+   },
+   "envelope": [
+    {
+     "tool": "convert_unreal_mesh_format",
+     "label": "Unreal",
+     "response_model": "UnrealConvertMeshFormatResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "convert_mesh_format",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "target_format": "dynamic_mesh",
+      "tessellation_options": {
+       "level": 2
+      }
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "convert_mesh_format"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "remesh_unreal_mesh",
+   "case": "required",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair"
+   },
+   "envelope": [
+    {
+     "tool": "remesh_unreal_mesh",
+     "label": "Unreal",
+     "response_model": "UnrealRemeshMeshResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "remesh_mesh",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "mode": "uniform",
+      "target_edge_length": null,
+      "target_triangle_count": null,
+      "smoothing_iterations": 3
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "remesh_mesh"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "remesh_unreal_mesh",
+   "case": "every argument",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "mode": "adaptive",
+    "target_edge_length": 2.5,
+    "target_triangle_count": 1000,
+    "smoothing_iterations": 5
+   },
+   "envelope": [
+    {
+     "tool": "remesh_unreal_mesh",
+     "label": "Unreal",
+     "response_model": "UnrealRemeshMeshResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "remesh_mesh",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "mode": "adaptive",
+      "target_edge_length": 2.5,
+      "target_triangle_count": 1000,
+      "smoothing_iterations": 5
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "remesh_mesh"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "compute_unreal_mesh_uv",
+   "case": "required",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair"
+   },
+   "envelope": [
+    {
+     "tool": "compute_unreal_mesh_uv",
+     "label": "Unreal",
+     "response_model": "UnrealComputeMeshUvResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "compute_mesh_uv",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "method": "auto_uv",
+      "uv_channel": 0,
+      "island_padding": 2.0
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "compute_mesh_uv"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  },
+  {
+   "tool": "compute_unreal_mesh_uv",
+   "case": "every argument",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "method": "planar",
+    "uv_channel": 1,
+    "island_padding": 4.0
+   },
+   "envelope": [
+    {
+     "tool": "compute_unreal_mesh_uv",
+     "label": "Unreal",
+     "response_model": "UnrealComputeMeshUvResponse",
+     "params": null
+    }
+   ],
+   "session": [
+    {
+     "method": "compute_mesh_uv",
+     "arguments": {
+      "mesh_path": "/Game/Meshes/SM_Chair",
+      "method": "planar",
+      "uv_channel": 1,
+      "island_padding": 4.0
+     }
+    }
+   ],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": true,
+     "method": "compute_mesh_uv"
+    }
+   },
+   "usage": [
+    {
+     "success": true
+    }
+   ]
+  }
+ ],
+ "errors": [
+  {
+   "tool": "capture_unreal_viewport",
+   "case": "invalid",
+   "arguments": {
+    "format": "jpg"
+   },
+   "envelope": [
+    {
+     "tool": "capture_unreal_viewport",
+     "label": "Unreal",
+     "response_model": "UnrealCaptureViewportResponse",
+     "params": {
+      "resolution_x": 1920,
+      "resolution_y": 1080,
+      "format": "jpg",
+      "inline": false
+     }
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "Invalid format 'jpg'. Must be one of ['png']",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "resolution_x": 1920,
+       "resolution_y": 1080,
+       "format": "jpg",
+       "inline": false
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "params": {
+      "resolution_x": 1920,
+      "resolution_y": 1080,
+      "format": "jpg",
+      "inline": false
+     },
+     "error": "Invalid format 'jpg'. Must be one of ['png']"
+    }
+   ]
+  },
+  {
+   "tool": "execute_unreal_script",
+   "case": "invalid",
+   "arguments": {
+    "code": "print(1)",
+    "mode": "Bogus"
+   },
+   "envelope": [
+    {
+     "tool": "execute_unreal_script",
+     "label": "Unreal",
+     "response_model": "UnrealExecuteScriptResponse",
+     "params": {
+      "code_bytes": 8,
+      "mode": "Bogus"
+     }
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "Invalid mode 'Bogus'. Must be one of ['EvaluateStatement', 'ExecuteFile', 'ExecuteStatement']",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "code": "print(1)",
+       "mode": "Bogus"
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "params": {
+      "code_bytes": 8,
+      "mode": "Bogus"
+     },
+     "error": "Invalid mode 'Bogus'. Must be one of ['EvaluateStatement', 'ExecuteFile', 'ExecuteStatement']"
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_camera_view",
+   "case": "invalid",
+   "arguments": {
+    "location_x": 1.0,
+    "location_y": 2.0
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_camera_view",
+     "label": "Unreal",
+     "response_model": "UnrealSetCameraViewResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "Give all three location components or none",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "location_x": 1.0,
+       "location_y": 2.0,
+       "location_z": null,
+       "rotation_pitch": null,
+       "rotation_yaw": null,
+       "rotation_roll": null
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "Give all three location components or none"
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_camera_view",
+   "case": "invalid",
+   "arguments": {
+    "location_x": 1.0,
+    "location_y": 2.0,
+    "location_z": 3.0,
+    "rotation_roll": 4.0
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_camera_view",
+     "label": "Unreal",
+     "response_model": "UnrealSetCameraViewResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "Give all three rotation components or none",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "location_x": 1.0,
+       "location_y": 2.0,
+       "location_z": 3.0,
+       "rotation_pitch": null,
+       "rotation_yaw": null,
+       "rotation_roll": 4.0
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "Give all three rotation components or none"
+    }
+   ]
+  },
+  {
+   "tool": "control_unreal_ui",
+   "case": "invalid",
+   "arguments": {
+    "agent_control": "bogus"
+   },
+   "envelope": [
+    {
+     "tool": "control_unreal_ui",
+     "label": "Unreal",
+     "response_model": "UnrealUIResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "1 validation error for UnrealUIRequest\nagent_control\n  Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor' [type=literal_error, input_value='bogus', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "agent_control": "bogus",
+       "target": null,
+       "property_name": null,
+       "value": null,
+       "enabled": null,
+       "agent_id": "agent",
+       "position": null,
+       "activity": null
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "1 validation error for UnrealUIRequest\nagent_control\n  Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor' [type=literal_error, input_value='bogus', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error"
+    }
+   ]
+  },
+  {
+   "tool": "control_unreal_ui",
+   "case": "invalid",
+   "arguments": {
+    "agent_control": "set_property",
+    "property_name": "color",
+    "value": [
+     1.0,
+     2.0,
+     3.0
+    ]
+   },
+   "envelope": [
+    {
+     "tool": "control_unreal_ui",
+     "label": "Unreal",
+     "response_model": "UnrealUIResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "1 validation error for UnrealUIRequest\nproperty_name\n  Input should be 'location', 'rotation' or 'scale' [type=literal_error, input_value='color', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "agent_control": "set_property",
+       "target": null,
+       "property_name": "color",
+       "value": [
+        1.0,
+        2.0,
+        3.0
+       ],
+       "enabled": null,
+       "agent_id": "agent",
+       "position": null,
+       "activity": null
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "1 validation error for UnrealUIRequest\nproperty_name\n  Input should be 'location', 'rotation' or 'scale' [type=literal_error, input_value='color', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error"
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_material_params",
+   "case": "invalid",
+   "arguments": {
+    "material_path": "/Game/Materials/M_Wood",
+    "scalar_params_json": "{bad"
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_material_params",
+     "label": "Unreal",
+     "response_model": "UnrealSetMaterialParamsResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+     "error_type": "JSONDecodeError",
+     "details": null
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+    }
+   ]
+  },
+  {
+   "tool": "batch_unreal_operations",
+   "case": "invalid",
+   "arguments": {
+    "operations": "not json"
+   },
+   "envelope": [
+    {
+     "tool": "batch_unreal_operations",
+     "label": "Unreal",
+     "response_model": "UnrealBatchOperationsResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "Expecting value: line 1 column 1 (char 0)",
+     "error_type": "JSONDecodeError",
+     "details": null
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "Expecting value: line 1 column 1 (char 0)"
+    }
+   ]
+  },
+  {
+   "tool": "generate_unreal_mesh_primitive",
+   "case": "invalid",
+   "arguments": {
+    "primitive_type": "box",
+    "location": "1,x,3"
+   },
+   "envelope": [
+    {
+     "tool": "generate_unreal_mesh_primitive",
+     "label": "Unreal",
+     "response_model": "UnrealGenerateMeshPrimitiveResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "could not convert string to float: 'x'",
+     "error_type": "ValueError",
+     "details": null
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "could not convert string to float: 'x'"
+    }
+   ]
+  },
+  {
+   "tool": "cut_unreal_mesh_plane",
+   "case": "invalid",
+   "arguments": {
+    "mesh_path": "/Game/Meshes/SM_Chair",
+    "plane_origin": "0,0,0",
+    "plane_normal": "up"
+   },
+   "envelope": [
+    {
+     "tool": "cut_unreal_mesh_plane",
+     "label": "Unreal",
+     "response_model": "UnrealCutMeshPlaneResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "could not convert string to float: 'up'",
+     "error_type": "ValueError",
+     "details": null
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "could not convert string to float: 'up'"
+    }
+   ]
+  }
+ ]
+}

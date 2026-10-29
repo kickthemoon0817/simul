@@ -40,6 +40,7 @@ used by `simul isaac launch` and `install-bridge`; the YAML default for
 | `LOGGING__LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `LOGGING__FILE_PATH` | `~/.simul/logs/simul.log` | Text log (rotated daily, 14 days kept) |
 | `LOGGING__AUDIT_PATH` | `~/.simul/logs/audit.jsonl` | One JSON line per tool call |
+| `ISAAC_SIM__ENABLED` | `auto` | Register the Isaac Sim tools: `auto` on Linux and Windows only (elsewhere when `--backends` names `isaac`), `true` on any OS, `false` never; see [isaac-sim.md](isaac-sim.md#platforms) |
 | `ISAAC_SIM__SOCKET_PORT` / `ISAAC_SIM__BRIDGE_PORT` | `8226` / `8229` | Isaac Sim transports |
 | `ISAAC_SIM__SOCKET_PROTOCOL` | `auto` | `python_server` (6.0+) or `vscode` (5.x) skips the one-time probe |
 | `ISAAC_SIM__SOCKET_AUTH_TOKEN` | unset | Token for a 6.0 python_server started with `--auth-token` |
@@ -105,7 +106,14 @@ your data. Each refusal is a structured `RefusedOperation` error:
 
 `security.rate_limiting` limits calls per agent session and per tool
 (`SECURITY__REQUESTS_PER_MINUTE`, `SECURITY__BURST_SIZE`), with an overall
-per-agent cap across all tools.
+per-agent cap across all tools. An Unreal tool's own argument checks (such as
+`capture_unreal_viewport`'s format, `execute_unreal_script`'s mode, the
+all-or-none camera groups of `set_unreal_camera_view` and `control_unreal_ui`'s
+control and property names) run inside the shared envelope, so a call they
+refuse spends a token and is recorded in the usage log like any other failed
+call. Arguments that do not match a tool's input schema (a wrong type, a
+missing required argument) are refused by the MCP layer before the call
+reaches the envelope: no token is spent and nothing is recorded.
 
 ### Multi-agent claims
 

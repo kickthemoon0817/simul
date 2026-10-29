@@ -15,7 +15,8 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # BlenderRuntimeSession, so an upgraded server can otherwise send arguments
 # (e.g. capture ``agent_id``) that the stale add-on rejects with a bare
 # TypeError. Version 2: capture tools take ``agent_id``.
-PROTOCOL_VERSION = 2
+# Version 3: capture tools take ``method``; execute_script takes ``max_output_chars``.
+PROTOCOL_VERSION = 3
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 
@@ -36,6 +37,11 @@ class BridgeRemoteError(RuntimeError):
         super().__init__(message)
         self.remote_type = remote_type
         self.details = details
+
+    @property
+    def error_type(self) -> str:
+        """The class of the exception raised inside Blender, which error envelopes report."""
+        return self.remote_type
 
 
 class BridgeWire:

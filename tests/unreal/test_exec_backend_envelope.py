@@ -125,7 +125,7 @@ def test_session_is_closed_even_when_the_call_raises(server) -> None:
 
     result = _run(server, adapter)
 
-    assert result["error_type"] == "Exception"
+    assert result["error_type"] == "RuntimeError"
     assert "editor went away" in result["error"]
     assert adapter.sessions_opened == 1
     assert adapter.sessions_closed == 1

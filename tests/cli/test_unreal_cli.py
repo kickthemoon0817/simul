@@ -407,21 +407,33 @@ def test_setup_rejects_non_ascii_passphrase_with_actionable_message(
 # ---------------------------------------------------------------------------
 
 
+class _ClosingStub:
+    """Session double that records whether the CLI closed it."""
+
+    settings = unreal_cli.get_settings()
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 def _stub_session_factory(monkeypatch, raw_result):
     """Replace unreal_cli._session with a stub returning the given raw_result.
 
     The stub's _execute_python is an async function so the CLI's
-    asyncio.run(...) call works unchanged.
+    asyncio.run(...) call works unchanged. Returns the stub.
     """
 
-    class _StubSession:
-        settings = unreal_cli.get_settings()
-
+    class _StubSession(_ClosingStub):
         async def _execute_python(self, code, mode):  # noqa: D401
             del code, mode
             return raw_result
 
-    monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: _StubSession())
+    stub = _StubSession()
+    monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: stub)
+    return stub
 
 
 def test_exec_refuses_when_script_execution_disabled(monkeypatch):
@@ -453,7 +465,7 @@ def test_exec_plain_print_succeeds_and_renders_output(monkeypatch) -> None:
     "No JSON output from Python execution" because the CLI ran the result
     through _parse_python_json (which is for internal callers).
     """
-    _stub_session_factory(
+    stub = _stub_session_factory(
         monkeypatch,
         {
             "ReturnValue": True,
@@ -465,6 +477,9 @@ def test_exec_plain_print_succeeds_and_renders_output(monkeypatch) -> None:
     result = runner.invoke(app, ["--json", "unreal", "exec", "print('hello')"])
 
     assert result.exit_code == 0, result.stdout
+    # Closed on the command's own event loop, so aiohttp has nothing to
+    # report as unclosed when the process exits.
+    assert stub.closed is True
     payload = json.loads(result.stdout)
     assert payload["success"] is True
     assert payload["return_value"] is True
@@ -730,9 +745,7 @@ def test_exec_long_inline_script_is_not_treated_as_path(monkeypatch) -> None:
     OSError (File name too long) on Python 3.11-3.13."""
     captured: Dict[str, Any] = {}
 
-    class _StubSession:
-        settings = unreal_cli.get_settings()
-
+    class _StubSession(_ClosingStub):
         async def _execute_python(self, code, mode):
             del mode
             captured["code"] = code
@@ -934,3 +947,134 @@ def test_setup_polls_specific_bind_address(tmp_path: Path, monkeypatch) -> None:
 
     runner.invoke(app, argv + ["--bind", "0.0.0.0", "--allow-public"])
     assert captured["host"] == unreal_cli.get_settings().unreal.host
+
+
+# ---------------------------------------------------------------------------
+# set-transform / spawn take x,y,z vectors; every command closes its session
+# ---------------------------------------------------------------------------
+
+ACTOR = "/Game/Map.Map:PersistentLevel.PointLight_0"
+
+
+class _ActorStub(_ClosingStub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list = []
+
+    async def set_actor_transform(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "actor_path": kwargs["actor_path"],
+            "location": [500.0, 20.0, 30.0],
+            "rotation": [10.0, 20.0, 30.0],
+            "scale": [2.0, 3.0, 4.0],
+        }
+
+    async def spawn_actor(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"actor_path": ACTOR, "actor_class": "PointLight", "location": kwargs["location"]}
+
+    async def health_check(self):
+        raise RuntimeError("connection reset")
+
+
+@pytest.fixture
+def actor_stub(monkeypatch) -> _ActorStub:
+    stub = _ActorStub()
+    monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: stub)
+    return stub
+
+
+def test_set_transform_sends_only_the_given_components(actor_stub: _ActorStub) -> None:
+    result = runner.invoke(
+        app, ["--json", "unreal", "set-transform", ACTOR, "--location", "500,20,30"]
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert actor_stub.calls == [
+        {"actor_path": ACTOR, "location": [500.0, 20.0, 30.0], "rotation": None, "scale": None}
+    ]
+    # The reply is the transform the editor read back, not a default.
+    assert json.loads(result.stdout)["scale"] == [2.0, 3.0, 4.0]
+    assert actor_stub.closed is True
+
+
+def test_set_transform_json_keeps_the_read_back_values_when_not_applied(
+    actor_stub: _ActorStub, monkeypatch
+) -> None:
+    """TransformNotApplied: exit 1, with the transform Unreal read back, as the MCP tool returns it."""
+    not_applied = {
+        "actor_path": ACTOR,
+        "location": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0],
+        "success": False,
+        "error": "Unreal did not apply: location, scale",
+        "error_type": "TransformNotApplied",
+    }
+
+    async def set_actor_transform(**kwargs):
+        return dict(not_applied)
+
+    monkeypatch.setattr(actor_stub, "set_actor_transform", set_actor_transform)
+    result = runner.invoke(
+        app,
+        ["--json", "unreal", "set-transform", ACTOR, "--location", "500,0,0", "--scale", "2,3,4"],
+    )
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == not_applied
+    assert actor_stub.closed is True
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        ["--location", "500"],
+        ["--rotation", "1,2,3,4"],
+        ["--scale", "1,x,1"],
+        ["--location", "nan,0,0"],
+    ],
+)
+def test_set_transform_refuses_a_vector_that_is_not_three_numbers(
+    actor_stub: _ActorStub, option: list
+) -> None:
+    result = runner.invoke(app, ["--json", "unreal", "set-transform", ACTOR, *option])
+
+    assert result.exit_code == 2, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["error_type"] == "InvalidArgument"
+    assert option[0] in payload["error"]
+    assert actor_stub.calls == []
+
+
+def test_spawn_defaults_to_the_origin_and_refuses_a_short_vector(actor_stub: _ActorStub) -> None:
+    ok = runner.invoke(app, ["--json", "unreal", "spawn", "/Script/Engine.PointLight"])
+    bad = runner.invoke(
+        app, ["--json", "unreal", "spawn", "/Script/Engine.PointLight", "--rotation", "0,90"]
+    )
+
+    assert ok.exit_code == 0, ok.stdout
+    assert actor_stub.calls[0]["location"] == [0.0, 0.0, 0.0]
+    assert actor_stub.calls[0]["rotation"] == [0.0, 0.0, 0.0]
+    assert bad.exit_code == 2
+    assert len(actor_stub.calls) == 1
+
+
+def test_a_command_that_raises_still_closes_its_session(actor_stub: _ActorStub) -> None:
+    result = runner.invoke(app, ["--json", "unreal", "health"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"] == "connection reset"
+    assert actor_stub.closed is True
+
+
+def test_setup_closes_its_polling_session(tmp_path: Path, monkeypatch) -> None:
+    uproject = _write_uproject(tmp_path)
+    stub = _ClosingStub()
+    monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: stub)
+    monkeypatch.setattr(unreal_cli, "_poll_health", _not_connected)
+
+    runner.invoke(app, ["--json", "unreal", "setup", str(uproject), "--no-launch", "--yes"])
+
+    assert stub.closed is True

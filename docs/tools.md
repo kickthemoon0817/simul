@@ -27,6 +27,8 @@ No running application needed. File arguments must be inside the sandbox
 
 Requires a running Isaac Sim 5.1.0, 6.0.0 or 6.0.1 reachable over the bridge
 (8229) or the stock Python socket (8226). See [isaac-sim.md](isaac-sim.md).
+Registered by default only on Linux and Windows, where Isaac Sim runs
+([Platforms](isaac-sim.md#platforms)).
 
 | Group | Tools |
 |---|---|
@@ -73,7 +75,7 @@ Requires an editor with Remote Control and Python enabled; run
 |---|---|
 | `unreal_health_check` | Connectivity, engine version, project name |
 | `ping_unreal` | Reachability and latency |
-| `list_unreal_instances` | Editors reachable on the scanned ports |
+| `list_unreal_instances` | Editors on the scanned ports: identity, viewports, active and attached flags. Same payload as `simul unreal instances`; see [unreal-attachment.md](unreal-attachment.md#discover-and-select) |
 | `control_unreal_ui` | Named editor controls and per-agent viewport pointers in attached mode; works with script execution disabled. See [unreal-attachment.md](unreal-attachment.md) |
 | `capture_unreal_viewport` | Viewport screenshot (PNG) |
 | `execute_unreal_script` | Run Python inside the editor |
@@ -135,6 +137,25 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | UI and attachment | `control_blender_ui`, `attach_blender_window` |
 | SimReady | `get_simready_metadata`, `apply_simready_metadata`, `setup_simready_hierarchy`, `validate_simready_compliance`, `export_simready_usd` |
 | Scripting | `execute_blender_script` |
+
+Behaviour worth knowing:
+
+- `capture_blender_viewport` captures the 3D View the user sees in attached
+  mode and needs no camera; `method: "render"` renders through the scene camera,
+  or a temporary one when the scene has none. Embedded (headless) mode has no 3D
+  View, so its captures are renders. The per-mode table is in
+  [blender-attachment.md](blender-attachment.md#capture-feedback).
+- `execute_blender_script` returns the first `max_output_chars` characters of
+  printed output (default 32 000, at most 100 000). A longer output sets
+  `output_truncated: true`, and `output_total_chars` gives its full length, so a
+  cut JSON dump is reported rather than failing to parse later. The default
+  keeps a typical result inside the server's 40 KB result budget. Above its
+  400 KB hard limit the server replaces the whole field instead of returning a
+  prefix, and it counts JSON bytes: at most 2 per printable ASCII character, 6
+  per control or other non-ASCII character and 12 per emoji. So output is also
+  cut at 300 000 bytes of JSON, which printable ASCII never reaches but heavily
+  non-ASCII output can, with the same report. Write larger results to a file
+  and return its path.
 
 ## Server
 

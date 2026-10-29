@@ -1,10 +1,12 @@
 """Every Unreal tool wrapper calls its session method with arguments the method accepts.
 
-The wrappers restate each ``UnrealRuntimeSession`` call by hand, so a renamed
-or removed session parameter used to surface only as a ``TypeError`` inside
-the envelope, on the first live call. Here every registered Unreal tool is
-invoked against a session double that binds each call to the real method
-signature and records the mismatch.
+The wrappers are built from the declarations in ``_unreal_tools``, which name
+each ``UnrealRuntimeSession`` method and the arguments it receives; a renamed
+or removed session parameter would surface only as a ``TypeError`` inside the
+envelope, on the first live call. ``test_tool_registry_drift.py`` checks the
+declarations statically; here every registered Unreal tool is invoked against
+a session double that binds each call to the real method signature and records
+the mismatch.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from typing import Any, Dict, Iterator, List, get_args, get_origin
 
 import pytest
 
+from simul.adapters import unreal_connection
 from simul.adapters.unreal_runtime import UnrealRuntimeSession
 from simul.config import Settings
 from simul.mcp import backends as backends_module
@@ -63,6 +66,17 @@ class _BindingSession:
             return _run(*args, **kwargs)
 
         return _call
+
+
+async def _no_editors(settings: Settings, **kwargs: Any) -> Dict[str, Any]:
+    return {
+        "success": True,
+        "error": None,
+        "instances": [],
+        "active_instance": None,
+        "total_discovered": 0,
+        "warnings": [],
+    }
 
 
 class _Adapter(AvailableAdapter):
@@ -144,6 +158,8 @@ def test_every_unreal_tool_calls_its_session_method_with_accepted_arguments(
     # Sandbox checks inside the session are what the double skips; the
     # wrappers' own path pre-checks must not short-circuit the binding.
     monkeypatch.setattr(instance, "_sandbox_denial", lambda *args, **kwargs: None)
+    # Instance discovery probes real ports with sessions of its own; keep it off the network.
+    monkeypatch.setattr(unreal_connection, "discover_instances", _no_editors)
 
     silent: List[str] = []
     dropped: Dict[str, List[str]] = {}

@@ -23,6 +23,7 @@ import bpy
 from bpy.app.handlers import persistent
 
 from ..adapters.blender_runtime import BlenderRuntimeSession
+from ..utils.errors import exception_message
 from ..utils.paths import PathPolicy
 from .agent_control import reset_ui
 from .agent_cursor import cursors, hide_annotations, observations
@@ -191,11 +192,14 @@ class BlenderBridge:
                 result = self._execute(request)
             return {"request_id": request_id, "success": True, "result": result}
         except Exception as exc:
-            logger.error("Blender bridge request %s failed: %s", request_id, exc)
+            message = exception_message(exc)
+            logger.error("Blender bridge request %s failed: %s", request_id, message)
             return {
                 "request_id": request_id,
                 "success": False,
-                "error": f"{type(exc).__name__}: {exc}",
+                # Notes carry context such as the object a bpy operator was
+                # adding a rigid body to; str(exc) alone would drop it.
+                "error": f"{type(exc).__name__}: {message}",
                 "error_type": type(exc).__name__,
                 "details": getattr(exc, "details", {}),
             }
@@ -291,7 +295,13 @@ class BlenderBridge:
             # Attached bpy must run inline on the main thread. The client bounds
             # waiting; it cannot safely interrupt an operation that already began.
             arguments.arguments["timeout"] = None
-        area = next((a for a in window.screen.areas if a.type == "VIEW_3D"), None)
+        # The largest 3D View is the one the user is most likely looking at:
+        # viewport captures draw it and the capture cue marks it.
+        area = max(
+            (a for a in window.screen.areas if a.type == "VIEW_3D"),
+            key=lambda a: a.width * a.height,
+            default=None,
+        )
         # Blender derives screen, scene and view layer from the window. Do not
         # pin scene/view_layer here: a script that loads a file (read_homefile,
         # open_mainfile) frees them, and a later operator in the same script

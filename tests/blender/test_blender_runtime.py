@@ -1,5 +1,6 @@
 """Tests for Blender runtime adapter functionality."""
 
+import json
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,34 +11,28 @@ import pytest
 
 from simul.adapters import blender_runtime
 from simul.config import SecurityConfig, Settings
+from tests.fakes import FakeMatrix, FakePropArray, FakeVector
 
 
-class FakeVector:
-    """Minimal 3-element vector that supports iteration and indexing."""
-
-    def __init__(self, values: tuple) -> None:
-        self._values = tuple(float(v) for v in values)
-
-    def __iter__(self):  # type: ignore[override]
-        return iter(self._values)
-
-    def __getitem__(self, idx: int) -> float:
-        return self._values[idx]
-
-    def __len__(self) -> int:
-        return len(self._values)
+def _box(low: float = -1.0, high: float = 1.0) -> List[FakePropArray]:
+    """Return a cube's eight bound_box corners, as Blender's bpy_prop_arrays."""
+    return [
+        FakePropArray((x, y, z))
+        for x in (low, high)
+        for y in (low, high)
+        for z in (low, high)
+    ]
 
 
-class FakeMatrix:
-    """Minimal 4×4 matrix mock with translation and matmul support."""
-
-    def __init__(self, translation: tuple = (0.0, 0.0, 0.0)) -> None:
-        self.translation = FakeVector(translation)
-
-    def __matmul__(self, other: Any) -> list:
-        """Identity-like transform: offset each corner by translation."""
-        t = self.translation
-        return [other[0] + t[0], other[1] + t[1], other[2] + t[2]]
+def _camera_forward(rotation_euler: Any) -> List[float]:
+    """Return where a camera with this XYZ Euler rotation looks: its local -Z."""
+    rx, ry, rz = rotation_euler
+    x, y, z = 0.0, 0.0, -1.0
+    # XYZ Euler applies X, then Y, then Z.
+    y, z = y * math.cos(rx) - z * math.sin(rx), y * math.sin(rx) + z * math.cos(rx)
+    x, z = x * math.cos(ry) + z * math.sin(ry), -x * math.sin(ry) + z * math.cos(ry)
+    x, y = x * math.cos(rz) - y * math.sin(rz), x * math.sin(rz) + y * math.cos(rz)
+    return [x, y, z]
 
 
 class FakeObject:
@@ -72,7 +67,7 @@ class FakeObject:
         self.modifiers = modifiers or []
         self.constraints = constraints or []
         self.material_slots = material_slots or []
-        self.matrix_world = matrix_world or FakeMatrix(location)
+        self.matrix_world = matrix_world or FakeMatrix.Translation(location)
         self.bound_box = bound_box or []
         self.data = data
 
@@ -449,27 +444,20 @@ class TestObservationTools:
     # -- get_bounding_box -------------------------------------------------
 
     def test_get_bounding_box_world_space(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
-        """Bounding box corners are transformed by matrix_world."""
-        # Unit cube local corners at (0,0,0)-(1,1,1)
-        local_corners = [
-            [0, 0, 0],
-            [1, 0, 0],
-            [1, 1, 0],
-            [0, 1, 0],
-            [0, 0, 1],
-            [1, 0, 1],
-            [1, 1, 1],
-            [0, 1, 1],
-        ]
-        matrix = FakeMatrix(translation=(10.0, 20.0, 30.0))
+        """Bounding box corners are transformed by matrix_world.
+
+        The corners are bpy_prop_arrays, which a mathutils Matrix does not
+        multiply (TypeError on Blender 5.0.1); each becomes a Vector first.
+        """
+        matrix = FakeMatrix.Translation((10.0, 20.0, 30.0))
         obj = FakeObject(
             name="Box",
             object_type="MESH",
             visible=True,
             matrix_world=matrix,
-            bound_box=local_corners,
+            bound_box=_box(0.0, 1.0),
         )
         fake_bpy = self._make_fake_bpy_with_objects([obj])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -480,28 +468,45 @@ class TestObservationTools:
 
         assert result["world_space"] is True
         assert len(result["corners"]) == 8
+        assert all(type(corner) is list for corner in result["corners"])
         assert result["bbox_min"] == [10.0, 20.0, 30.0]
         assert result["bbox_max"] == [11.0, 21.0, 31.0]
+
+    def test_get_bounding_box_world_space_applies_rotation_and_scale(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """The whole world matrix applies, not just its translation."""
+        # A quarter turn about Z, X scaled by 2, then moved to (5, 0, 1).
+        matrix = FakeMatrix(
+            [(0, -1, 0, 5.0), (2, 0, 0, 0.0), (0, 0, 1, 1.0), (0, 0, 0, 1)]
+        )
+        obj = FakeObject(
+            name="Turned",
+            object_type="MESH",
+            visible=True,
+            matrix_world=matrix,
+            bound_box=_box(-1.0, 1.0),
+        )
+        fake_bpy = self._make_fake_bpy_with_objects([obj])
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.get_bounding_box("Turned")
+
+        assert result["corners"][0] == [6.0, -2.0, 0.0]  # local (-1, -1, -1)
+        assert result["bbox_min"] == [4.0, -2.0, 0.0]
+        assert result["bbox_max"] == [6.0, 2.0, 2.0]
 
     def test_get_bounding_box_local_space(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Local-space bounding box skips matrix_world transform."""
-        local_corners = [
-            [-1, -1, -1],
-            [1, -1, -1],
-            [1, 1, -1],
-            [-1, 1, -1],
-            [-1, -1, 1],
-            [1, -1, 1],
-            [1, 1, 1],
-            [-1, 1, 1],
-        ]
         obj = FakeObject(
             name="Sphere",
             object_type="MESH",
             visible=True,
-            bound_box=local_corners,
+            bound_box=_box(-1.0, 1.0),
         )
         fake_bpy = self._make_fake_bpy_with_objects([obj])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -708,13 +713,13 @@ class TestObservationTools:
             name="A",
             object_type="MESH",
             visible=True,
-            matrix_world=FakeMatrix(translation=(0.0, 0.0, 0.0)),
+            matrix_world=FakeMatrix.Translation((0.0, 0.0, 0.0)),
         )
         obj_b = FakeObject(
             name="B",
             object_type="MESH",
             visible=True,
-            matrix_world=FakeMatrix(translation=(3.0, 4.0, 0.0)),
+            matrix_world=FakeMatrix.Translation((3.0, 4.0, 0.0)),
         )
         fake_bpy = self._make_fake_bpy_with_objects([obj_a, obj_b])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -737,7 +742,7 @@ class TestObservationTools:
             name="Ball",
             object_type="MESH",
             visible=True,
-            matrix_world=FakeMatrix(translation=(5.0, 5.0, 5.0)),
+            matrix_world=FakeMatrix.Translation((5.0, 5.0, 5.0)),
         )
         fake_bpy = self._make_fake_bpy_with_objects([obj])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -758,7 +763,7 @@ class TestObservationTools:
             name="Far",
             object_type="MESH",
             visible=True,
-            matrix_world=FakeMatrix(translation=(100.0, 0.0, 0.0)),
+            matrix_world=FakeMatrix.Translation((100.0, 0.0, 0.0)),
         )
         fake_bpy = self._make_fake_bpy_with_objects([obj])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -1022,25 +1027,16 @@ class TestVisualObservationTools:
 
     # -- focus_on_object ---------------------------------------------------
 
-    def test_focus_on_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_focus_on_object(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
         """focus_on_object positions camera based on object bounding box."""
-        # Unit cube at origin: 8 corners from (-1,-1,-1) to (1,1,1)
-        corners = [
-            (-1.0, -1.0, -1.0),
-            (1.0, -1.0, -1.0),
-            (1.0, 1.0, -1.0),
-            (-1.0, 1.0, -1.0),
-            (-1.0, -1.0, 1.0),
-            (1.0, -1.0, 1.0),
-            (1.0, 1.0, 1.0),
-            (-1.0, 1.0, 1.0),
-        ]
         mesh_obj = FakeObject(
             name="Cube",
             object_type="MESH",
             visible=True,
-            bound_box=corners,
-            matrix_world=FakeMatrix(translation=(0.0, 0.0, 0.0)),
+            bound_box=_box(-1.0, 1.0),
+            matrix_world=FakeMatrix.Translation((0.0, 0.0, 0.0)),
         )
         cam = self._make_camera_object()
         fake_bpy = self._make_fake_bpy_with_camera(objects=[cam, mesh_obj])
@@ -1057,30 +1053,58 @@ class TestVisualObservationTools:
         # Camera location should be offset from center
         cam_loc = result["camera_location"]
         assert len(cam_loc) == 3
-        # Camera should be placed along +Z +Y diagonal, i.e. negative Y and positive Z
+        # In front of and above the object: the -Y +Z diagonal.
         assert cam_loc[1] < 0.0  # -0.7071 direction
         assert cam_loc[2] > 0.0  # +0.7071 direction
 
+    @pytest.mark.parametrize(
+        "offset", [(0.0, 0.0, 0.0), (3.0, -2.0, 1.0), (-40.0, 25.0, -7.5)]
+    )
+    def test_focus_on_object_points_the_camera_at_the_object(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        offset: tuple,
+    ) -> None:
+        """The camera's -Z axis, where a Blender camera looks, runs through the center.
+
+        It used to point exactly away from the object: the object was behind
+        the camera and never in its view.
+        """
+        mesh_obj = FakeObject(
+            name="Cube",
+            object_type="MESH",
+            visible=True,
+            bound_box=_box(-1.0, 1.0),
+            matrix_world=FakeMatrix.Translation(offset),
+        )
+        cam = self._make_camera_object()
+        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam, mesh_obj])
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.focus_on_object("Cube")
+
+        assert result["look_at"] == pytest.approx(list(offset))
+        to_center = [c - p for c, p in zip(offset, cam.location)]
+        distance = math.sqrt(sum(v * v for v in to_center))
+        assert _camera_forward(cam.rotation_euler) == pytest.approx(
+            [v / distance for v in to_center]
+        )
+        # Level: no roll, so the camera's right axis stays horizontal.
+        assert cam.rotation_euler[1] == 0.0
+
     def test_focus_on_object_custom_distance(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
         """focus_on_object with larger distance_factor pushes camera further."""
-        corners = [
-            (-1.0, -1.0, -1.0),
-            (1.0, -1.0, -1.0),
-            (1.0, 1.0, -1.0),
-            (-1.0, 1.0, -1.0),
-            (-1.0, -1.0, 1.0),
-            (1.0, -1.0, 1.0),
-            (1.0, 1.0, 1.0),
-            (-1.0, 1.0, 1.0),
-        ]
         mesh_obj = FakeObject(
             name="Box",
             object_type="MESH",
             visible=True,
-            bound_box=corners,
-            matrix_world=FakeMatrix(translation=(0.0, 0.0, 0.0)),
+            bound_box=_box(-1.0, 1.0),
+            matrix_world=FakeMatrix.Translation((0.0, 0.0, 0.0)),
         )
         cam = self._make_camera_object()
         fake_bpy = self._make_fake_bpy_with_camera(objects=[cam, mesh_obj])
@@ -1106,96 +1130,8 @@ class TestVisualObservationTools:
         with pytest.raises(ValueError, match="Object not found"):
             session.focus_on_object("NonExistent")
 
-    # -- capture_viewport --------------------------------------------------
-
-    def test_capture_viewport_gpu_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """capture_viewport uses GPU offscreen fast path when available."""
-        cam = self._make_camera_object()
-        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam])
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-
-        session = blender_runtime.BlenderRuntimeSession()
-
-        gpu_result = {
-            "image_base64": "AAAA",
-            "width": 512,
-            "height": 512,
-            "engine": "BLENDER_EEVEE_NEXT",
-            "capture_method": "gpu_offscreen",
-        }
-        monkeypatch.setattr(
-            session, "_capture_gpu_offscreen", lambda w, h, q, e: gpu_result
-        )
-
-        result = session.capture_viewport(width=512, height=512, jpeg_quality=85)
-        assert result["capture_method"] == "gpu_offscreen"
-        assert result["image_base64"] == "AAAA"
-
-    def test_capture_viewport_fallback_on_gpu_failure(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """capture_viewport falls back to render when GPU path raises."""
-        cam = self._make_camera_object()
-        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam])
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-
-        session = blender_runtime.BlenderRuntimeSession()
-
-        def _gpu_fail(w: int, h: int, q: int, e: str) -> Dict[str, Any]:
-            raise RuntimeError("No GPU context")
-
-        fallback_result = {
-            "image_base64": "BBBB",
-            "width": 512,
-            "height": 512,
-            "engine": "BLENDER_EEVEE_NEXT",
-            "capture_method": "render_fallback",
-        }
-        monkeypatch.setattr(session, "_capture_gpu_offscreen", _gpu_fail)
-        monkeypatch.setattr(
-            session, "_capture_render_fallback", lambda w, h, q, e: fallback_result
-        )
-
-        result = session.capture_viewport(width=512, height=512, jpeg_quality=85)
-        assert result["capture_method"] == "render_fallback"
-        assert result["image_base64"] == "BBBB"
-
-    def test_capture_viewport_force_render_fallback(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """capture_viewport with use_render_fallback=True bypasses GPU."""
-        cam = self._make_camera_object()
-        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam])
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-
-        session = blender_runtime.BlenderRuntimeSession()
-
-        gpu_called = False
-
-        def _gpu_spy(w: int, h: int, q: int, e: str) -> Dict[str, Any]:
-            nonlocal gpu_called
-            gpu_called = True
-            return {"image_base64": "GPU", "capture_method": "gpu_offscreen"}
-
-        fallback_result = {
-            "image_base64": "RENDER",
-            "width": 256,
-            "height": 256,
-            "engine": "CYCLES",
-            "capture_method": "render_fallback",
-        }
-        monkeypatch.setattr(session, "_capture_gpu_offscreen", _gpu_spy)
-        monkeypatch.setattr(
-            session, "_capture_render_fallback", lambda w, h, q, e: fallback_result
-        )
-
-        result = session.capture_viewport(use_render_fallback=True)
-        assert gpu_called is False
-        assert result["capture_method"] == "render_fallback"
-        assert result["image_base64"] == "RENDER"
+    # capture_viewport's method selection, viewport and render paths are
+    # covered against a fuller bpy stand-in in test_viewport_capture.py.
 
     # -- capture_viewport_sequence -----------------------------------------
 
@@ -2346,165 +2282,8 @@ class TestAnimationTools:
         with pytest.raises(ValueError, match="Invalid action"):
             session.play_animation("fast_forward")
 
-    # -- insert_keyframe -----------------------------------------------------
-
-    def test_insert_keyframe(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Insert keyframe calls keyframe_insert on the object."""
-        kf_calls: List[Dict[str, Any]] = []
-        obj = FakeObject("Cube", "MESH", True)
-        # type: ignore[attr-defined]
-        obj.keyframe_insert = lambda **kw: kf_calls.append(kw)
-
-        objs = {"Cube": obj}
-        fake_bpy = self._make_fake_bpy_with_animation(objects=objs)
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.insert_keyframe("Cube", "location", 10, index=0)
-
-        assert result["object_name"] == "Cube"
-        assert result["data_path"] == "location"
-        assert result["frame"] == 10
-        assert kf_calls[0]["data_path"] == "location"
-        assert kf_calls[0]["frame"] == 10
-        assert kf_calls[0]["index"] == 0
-
-    # -- delete_keyframe -----------------------------------------------------
-
-    def test_delete_keyframe(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Delete keyframe calls keyframe_delete on the object."""
-        kf_calls: List[Dict[str, Any]] = []
-        obj = FakeObject("Cube", "MESH", True)
-        # type: ignore[attr-defined]
-        obj.keyframe_delete = lambda **kw: kf_calls.append(kw)
-
-        objs = {"Cube": obj}
-        fake_bpy = self._make_fake_bpy_with_animation(objects=objs)
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.delete_keyframe("Cube", "location", 10, index=0)
-
-        assert result["object_name"] == "Cube"
-        assert result["frame"] == 10
-        assert kf_calls[0]["data_path"] == "location"
-        assert kf_calls[0]["frame"] == 10
-
-    # -- get_keyframes -------------------------------------------------------
-
-    def test_get_keyframes_no_animation(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Object without animation data returns has_animation=False."""
-        obj = FakeObject("Cube", "MESH", True)
-        obj.animation_data = None  # type: ignore[attr-defined]
-
-        objs = {"Cube": obj}
-        fake_bpy = self._make_fake_bpy_with_animation(objects=objs)
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.get_keyframes("Cube")
-
-        assert result["has_animation"] is False
-        assert result["channels"] == []
-
-    def test_get_keyframes_legacy_fcurves(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Get keyframes using legacy fcurves (Blender 3.6-4.x)."""
-        kp1 = SimpleNamespace(co=(1.0, 0.0))
-        kp2 = SimpleNamespace(co=(10.0, 1.0))
-        kp3 = SimpleNamespace(co=(20.0, 2.0))
-
-        fcurve_x = SimpleNamespace(
-            data_path="location",
-            array_index=0,
-            keyframe_points=[kp1, kp2],
-        )
-        fcurve_y = SimpleNamespace(
-            data_path="location",
-            array_index=1,
-            keyframe_points=[kp3],
-        )
-
-        fake_action = SimpleNamespace(fcurves=[fcurve_x, fcurve_y])
-        fake_anim_data = SimpleNamespace(action=fake_action)
-
-        obj = FakeObject("Cube", "MESH", True)
-        obj.animation_data = fake_anim_data  # type: ignore[attr-defined]
-
-        objs = {"Cube": obj}
-        fake_bpy = self._make_fake_bpy_with_animation(objects=objs, version=(4, 0, 0))
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.get_keyframes("Cube")
-
-        assert result["has_animation"] is True
-        assert len(result["channels"]) == 2
-
-        ch0 = result["channels"][0]
-        assert ch0["data_path"] == "location"
-        assert ch0["array_index"] == 0
-        assert ch0["keyframe_count"] == 2
-        assert ch0["frame_range"] == [1, 10]
-
-        ch1 = result["channels"][1]
-        assert ch1["array_index"] == 1
-        assert ch1["keyframe_count"] == 1
-        assert ch1["frame_range"] == [20, 20]
-
-    def test_get_keyframes_v5_channelbag(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Get keyframes using channelbag API (Blender 5.0+)."""
-        kp1 = SimpleNamespace(co=(5.0, 0.0))
-        kp2 = SimpleNamespace(co=(15.0, 1.0))
-
-        fcurve = SimpleNamespace(
-            data_path="rotation_euler",
-            array_index=2,
-            keyframe_points=[kp1, kp2],
-        )
-        channelbag = SimpleNamespace(fcurves=[fcurve])
-        fake_action = SimpleNamespace(
-            channelbags=[channelbag],
-            fcurves=[],  # legacy fallback should not be used
-        )
-        fake_anim_data = SimpleNamespace(action=fake_action)
-
-        obj = FakeObject("Cube", "MESH", True)
-        obj.animation_data = fake_anim_data  # type: ignore[attr-defined]
-
-        objs = {"Cube": obj}
-        fake_bpy = self._make_fake_bpy_with_animation(objects=objs, version=(5, 0, 0))
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.get_keyframes("Cube")
-
-        assert result["has_animation"] is True
-        assert len(result["channels"]) == 1
-
-        ch = result["channels"][0]
-        assert ch["data_path"] == "rotation_euler"
-        assert ch["array_index"] == 2
-        assert ch["keyframe_count"] == 2
-        assert ch["frame_range"] == [5, 15]
-
-    def test_get_keyframes_object_not_found(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Get keyframes for nonexistent object raises ValueError."""
-        fake_bpy = self._make_fake_bpy_with_animation()
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        with pytest.raises(ValueError, match="Object not found"):
-            session.get_keyframes("Nonexistent")
+    # insert/delete/get_keyframes: tests/blender/test_keyframes.py covers them
+    # against the action API of each Blender version.
 
     def test_stop_animation_when_not_playing(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2651,6 +2430,9 @@ class TestExecuteScript:
         assert result["error"].startswith("TimeoutError")
         assert "still running" in result["error"]
         assert result["output"] is None
+        # Discarded, not cut: there is no truncation to report.
+        assert result["output_truncated"] is False
+        assert result["output_total_chars"] == 0
         assert result["return_value"] is None
         assert result["duration_seconds"] == 0.2
 
@@ -2682,20 +2464,139 @@ class TestExecuteScript:
         assert "ZeroDivisionError" in result["error"]
         assert "timed_out" not in result
 
-    def test_execute_script_output_capped(
+    def test_execute_script_returns_6000_chars_whole(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Script output is capped at 4096 chars."""
+        """Issue #231: 6000 printed chars used to come back cut at 4096, silently."""
         fake_bpy = self._make_fake_bpy_for_script()
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        # Print >4096 chars
-        result = session.execute_script("print('A' * 10000)")
+        result = session.execute_script("print('x' * 6000)")
 
-        assert result["output"] is not None
-        assert len(result["output"]) == 4096
+        assert result["output"] == "x" * 6000 + "\n"
+        assert result["output_truncated"] is False
+        assert result["output_total_chars"] == 6001
+
+    def test_execute_script_reports_a_cut_at_the_default_cap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.execute_script("print('A' * 50000)")
+
+        cap = blender_runtime.DEFAULT_SCRIPT_OUTPUT_CHARS
+        assert cap == 32_000
+        assert result["output"] == "A" * cap
+        assert result["output_truncated"] is True
+        assert result["output_total_chars"] == 50001
+        assert "error" not in result
+
+    def test_execute_script_cap_is_per_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        small = session.execute_script("print('{\"k\": 1}' * 10)", max_output_chars=25)
+        large = session.execute_script(
+            "print('B' * 90000)", max_output_chars=blender_runtime.MAX_SCRIPT_OUTPUT_CHARS
+        )
+
+        assert small["output"] == ('{"k": 1}' * 10)[:25]
+        assert small["output_truncated"] is True and small["output_total_chars"] == 81
+        assert large["output"] == "B" * 90000 + "\n"
+        assert large["output_truncated"] is False
+
+    def test_execute_script_caps_output_before_an_exception(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.execute_script("print('C' * 500)\nraise ValueError('late')", max_output_chars=100)
+
+        assert result["error"] == "ValueError: late"
+        assert result["output"] == "C" * 100
+        assert result["output_truncated"] is True and result["output_total_chars"] == 501
+
+    @pytest.mark.parametrize(
+        "text",
+        ["가", "é", "\x00", "\U0001F600"],
+        ids=["hangul", "latin1", "control", "emoji"],
+    )
+    def test_execute_script_holds_escape_heavy_output_under_the_json_cap(
+        self, monkeypatch: pytest.MonkeyPatch, text: str
+    ) -> None:
+        """The server counts escaped JSON bytes (6 or 12 here) and replaces a field over 400 KB.
+
+        100000 such characters would be replaced whole, so the prefix stops at
+        the JSON byte cap instead, and the cut is reported like any other.
+        """
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        cap = blender_runtime.MAX_SCRIPT_OUTPUT_CHARS
+        result = session.execute_script(f"print({text!r} * {cap})", max_output_chars=cap)
+
+        output = result["output"]
+        limit = blender_runtime.MAX_SCRIPT_OUTPUT_JSON_BYTES
+        assert output == text * len(output) and 0 < len(output) < cap
+        # The longest prefix that fits: one more character would not.
+        assert len(json.dumps(output)) <= limit < len(json.dumps(output + text))
+        assert result["output_truncated"] is True
+        assert result["output_total_chars"] == cap + 1
+
+    def test_execute_script_json_cap_never_cuts_printable_ascii(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Escaped quotes cost 2 bytes each; even 100000 of them stay under the JSON cap."""
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        cap = blender_runtime.MAX_SCRIPT_OUTPUT_CHARS
+        result = session.execute_script(f"print('\"' * {cap})", max_output_chars=cap)
+
+        assert result["output"] == '"' * cap
+        assert result["output_truncated"] is True and result["output_total_chars"] == cap + 1
+
+    def test_script_output_prefix_is_the_longest_that_fits(self) -> None:
+        limit = blender_runtime.MAX_SCRIPT_OUTPUT_JSON_BYTES
+        # 6-byte, 1-byte and 12-byte characters: 299972 JSON bytes, then emoji.
+        head = "가" * 49_990 + "a" * 30
+        assert len(json.dumps(head)) == 299_972
+        output = head + "\U0001F600" * 5
+
+        prefix = blender_runtime.script_output_prefix(output, 100_000)
+
+        assert prefix == head + "\U0001F600" * 2
+        assert len(json.dumps(prefix)) <= limit < len(json.dumps(prefix + "\U0001F600"))
+        assert blender_runtime.script_output_prefix(output, 10) == "가" * 10
+
+    @pytest.mark.parametrize("bad", [0, -1, 100_001, True, 12.5, "32000"])
+    def test_execute_script_rejects_an_out_of_range_cap(
+        self, monkeypatch: pytest.MonkeyPatch, bad: Any
+    ) -> None:
+        """The add-on validates too: it may serve a client that skipped the schema."""
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        with pytest.raises(ValueError, match="max_output_chars"):
+            session.execute_script("print('never runs')", max_output_chars=bad)
 
 
 class TestCreateMeshFromData:

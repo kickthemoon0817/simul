@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import socket
@@ -16,6 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from simul.adapters.blender_connection import BlenderAttachments, BlenderConnection
+from simul.adapters.blender_runtime import BlenderRuntimeSession
 from simul.blender_bridge.protocol import PROTOCOL_VERSION, BridgeFiles, BridgeWire
 from simul.cli import blender_cli
 from simul.cli.main import app
@@ -292,7 +294,17 @@ def test_mcp_transform_forwards_validated_values_over_attachment(
     def respond(endpoint: dict, payload: dict, timeout: float) -> dict:
         assert threading.current_thread() is not threading.main_thread()
         assert payload["method"] == "set_object_transform"
-        assert payload["args"] == ("Cube", [1.0, 2.0, 3.0], None, None)
+        # The add-on binds args and kwargs to the operation's signature, so the
+        # value each parameter receives is what reaches Blender.
+        bound = inspect.signature(BlenderRuntimeSession.set_object_transform).bind(
+            None, *payload["args"], **payload["kwargs"]
+        )
+        assert dict(list(bound.arguments.items())[1:]) == {
+            "object_name": "Cube",
+            "location": [1.0, 2.0, 3.0],
+            "rotation_euler": None,
+            "scale": None,
+        }
         return {
             "object_name": "Cube",
             "location": [1, 2, 3],
@@ -567,3 +579,28 @@ def test_addon_bundles_the_private_file_helpers(tmp_path: Path) -> None:
         check=True,
     )
     assert completed.stdout.strip() == "simul_blender_bridge.utils.private_files"
+
+
+def test_addon_bundles_the_error_message_helper(tmp_path: Path) -> None:
+    """The bridge renders exception notes with utils/errors.py, so the ZIP must carry it."""
+    import subprocess
+    import sys
+    import zipfile
+
+    addon = BlenderAttachments.build_addon(tmp_path / "addon.zip")
+    with zipfile.ZipFile(addon) as archive:
+        assert "simul_blender_bridge/utils/errors.py" in archive.namelist()
+        archive.extractall(tmp_path / "addons")
+    probe = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "from simul_blender_bridge.utils.errors import exception_message; "
+        "error = RuntimeError('poll() failed'); error.add_note('Failed to add rigid body'); "
+        "print(exception_message(error))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(tmp_path / "addons")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert completed.stdout.strip() == "Failed to add rigid body: poll() failed"
