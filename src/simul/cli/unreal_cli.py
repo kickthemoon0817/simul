@@ -13,9 +13,10 @@ JSON output on stdout, making them consumable by AI agents via Bash.
 import asyncio
 import hashlib
 import json
+import math
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Coroutine, Dict, List, NoReturn, Optional
+from typing import TYPE_CHECKING, Any, Coroutine, Dict, List, NoReturn, Optional, TypeVar
 
 import typer
 from rich.markup import escape as rich_escape
@@ -99,9 +100,55 @@ async def _script_refusal(session: "UnrealRuntimeSession") -> Dict[str, Any]:
     return session._script_execution_denied()
 
 
-def _run(coro: Coroutine[Any, Any, Dict[str, Any]]) -> Dict[str, Any]:
-    """Run an async session method; exit non-zero on an exception or failed payload."""
+T = TypeVar("T")
+
+
+async def _closing(session: "UnrealRuntimeSession", coro: Coroutine[Any, Any, T]) -> T:
+    """Await ``coro``, then close ``session``'s HTTP pool on the same event loop.
+
+    ``asyncio.run`` ends the loop when ``coro`` returns, and aiohttp cannot
+    close a pool after its loop is gone: it reports an unclosed client
+    session and connector on stderr when the session is collected instead.
+    """
+    try:
+        return await coro
+    finally:
+        await session.close()
+
+
+def _run(
+    coro: Coroutine[Any, Any, Dict[str, Any]],
+    session: Optional["UnrealRuntimeSession"] = None,
+) -> Dict[str, Any]:
+    """Run an async session method; exit non-zero on an exception or failed payload.
+
+    Pass the ``session`` that ``coro`` runs on so it is closed before the
+    event loop ends.
+    """
+    if session is not None:
+        coro = _closing(session, coro)
     return run_or_exit(coro, catch_exceptions=True)
+
+
+def _vector_option(value: Optional[str], option: str, axes: str) -> Optional[List[float]]:
+    """Parse a comma-separated option such as ``--location 1,2,3``.
+
+    Returns None when the option was not given; exits 2 unless the value is
+    three finite numbers.
+    """
+    if value is None:
+        return None
+    try:
+        vector = [float(part) for part in value.split(",")]
+    except ValueError:
+        vector = []
+    if len(vector) != 3 or not all(math.isfinite(v) for v in vector):
+        fail(
+            f"{option} takes three comma-separated numbers ({axes}), got {value!r}",
+            "InvalidArgument",
+            exit_code=2,
+        )
+    return vector
 
 
 # Common options
@@ -245,7 +292,7 @@ def health(
 ) -> None:
     """Check connectivity to Unreal Engine Remote Control API."""
     session = _session(host, port)
-    result = _run(session.health_check())
+    result = _run(session.health_check(), session)
     if is_json_mode():
         emit(result)
         return
@@ -273,7 +320,7 @@ def info(
 ) -> None:
     """Get Unreal Engine runtime information."""
     session = _session(host, port)
-    result = _run(session.get_engine_info())
+    result = _run(session.get_engine_info(), session)
     if is_json_mode():
         emit(result)
         return
@@ -290,7 +337,7 @@ def scene(
 ) -> None:
     """Summarize the current Unreal scene for AI consumption."""
     session = _session(host, port)
-    result = _run(session.summarize_scene())
+    result = _run(session.summarize_scene(), session)
     if is_json_mode():
         emit(result)
         return
@@ -307,7 +354,7 @@ def map(
 ) -> None:
     """Get the currently loaded persistent level path."""
     session = _session(host, port)
-    result = _run(session.get_loaded_map())
+    result = _run(session.get_loaded_map(), session)
     if is_json_mode():
         emit(result)
         return
@@ -331,7 +378,7 @@ def list_actors(
         class_filter=actor_class,
         tag_filter=tag,
         max_results=limit,
-    ))
+    ), session)
     if is_json_mode():
         emit(result)
         return
@@ -363,7 +410,7 @@ def actor_info(
 ) -> None:
     """Get detailed information about a specific actor."""
     session = _session(host, port)
-    result = _run(session.get_actor_info(actor_path))
+    result = _run(session.get_actor_info(actor_path), session)
     if is_json_mode():
         emit(result)
         return
@@ -377,17 +424,18 @@ def actor_info(
 def spawn(
     actor_class: str = typer.Argument(..., help="Actor class or asset path to spawn"),
     label: Optional[str] = typer.Option(None, "--label", "-l", help="Actor label"),
-    location: Optional[str] = typer.Option(None, "--location", "--pos", help="Location as x,y,z"),
-    rotation: Optional[str] = typer.Option(None, "--rotation", "--rot", help="Rotation as pitch,yaw,roll"),
+    location: Optional[str] = typer.Option(
+        None, "--location", "--pos", help="Location as x,y,z in cm (default 0,0,0)"
+    ),
+    rotation: Optional[str] = typer.Option(
+        None, "--rotation", "--rot", help="Rotation as pitch,yaw,roll in degrees (default 0,0,0)"
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
     """Spawn an actor from a class or asset path."""
-    try:
-        loc = tuple(float(v) for v in location.split(",")) if location else (0.0, 0.0, 0.0)
-        rot = tuple(float(v) for v in rotation.split(",")) if rotation else (0.0, 0.0, 0.0)
-    except (ValueError, IndexError) as e:
-        fail(f"Invalid transform value: {e}", "ValueError")
+    loc = _vector_option(location, "--location", "x,y,z") or [0.0, 0.0, 0.0]
+    rot = _vector_option(rotation, "--rotation", "pitch,yaw,roll") or [0.0, 0.0, 0.0]
 
     session = _session(host, port)
     result = _run(session.spawn_actor(
@@ -395,7 +443,7 @@ def spawn(
         location=loc,
         rotation=rot,
         label=label,
-    ))
+    ), session)
     if is_json_mode():
         emit(result)
         return
@@ -413,7 +461,7 @@ def delete(
 ) -> None:
     """Delete an actor from the level."""
     session = _session(host, port)
-    result = _run(session.delete_actor(actor_path))
+    result = _run(session.delete_actor(actor_path), session)
     if is_json_mode():
         emit(result)
         return
@@ -426,19 +474,20 @@ def delete(
 @app.command("set-transform")
 def set_transform(
     actor_path: str = typer.Argument(..., help="Actor path"),
-    location: Optional[str] = typer.Option(None, "--location", "--pos", help="Location as x,y,z"),
-    rotation: Optional[str] = typer.Option(None, "--rotation", "--rot", help="Rotation as pitch,yaw,roll"),
-    scale: Optional[str] = typer.Option(None, "--scale", help="Scale as x,y,z"),
+    location: Optional[str] = typer.Option(
+        None, "--location", "--pos", help="World location as x,y,z in cm; omit to keep it"
+    ),
+    rotation: Optional[str] = typer.Option(
+        None, "--rotation", "--rot", help="World rotation as pitch,yaw,roll in degrees; omit to keep it"
+    ),
+    scale: Optional[str] = typer.Option(None, "--scale", help="Scale as x,y,z; omit to keep it"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """Set an actor's location, rotation, and scale."""
-    try:
-        loc = tuple(float(v) for v in location.split(",")) if location else None
-        rot = tuple(float(v) for v in rotation.split(",")) if rotation else None
-        sc = tuple(float(v) for v in scale.split(",")) if scale else None
-    except ValueError as e:
-        fail(f"Invalid numeric value: {e}", "ValueError")
+    """Set an actor's world location, rotation and/or scale; what you leave out is kept."""
+    loc = _vector_option(location, "--location", "x,y,z")
+    rot = _vector_option(rotation, "--rotation", "pitch,yaw,roll")
+    sc = _vector_option(scale, "--scale", "x,y,z")
 
     session = _session(host, port)
     result = _run(session.set_actor_transform(
@@ -446,11 +495,13 @@ def set_transform(
         location=loc,
         rotation=rot,
         scale=sc,
-    ))
+    ), session)
     if is_json_mode():
         emit(result)
         return
-    console.print(f"[green]Transform set[/green] on {actor_path}")
+    console.print(f"[green]Transform set[/green] on {rich_escape(actor_path)}")
+    for key in ("location", "rotation", "scale"):
+        console.print(f"  {key}: {result[key]}")
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +526,7 @@ def set_property(
         actor_path=actor_path,
         property_name=property_name,
         property_value=json.dumps(parsed_value) if not isinstance(parsed_value, str) else parsed_value,
-    ))
+    ), session)
     if is_json_mode():
         emit(result)
         return
@@ -501,7 +552,7 @@ def search(
         class_names=[search_class] if search_class else None,
         package_paths=[package_path] if package_path else None,
         max_results=limit,
-    ))
+    ), session)
     if is_json_mode():
         emit(result)
         return
@@ -533,7 +584,7 @@ def sim(
         fail(msg, "ValueError")
 
     session = _session(host, port)
-    result = _run(session.control_simulation(action))
+    result = _run(session.control_simulation(action), session)
     if is_json_mode():
         emit(result)
         return
@@ -550,7 +601,7 @@ def sim_status(
 ) -> None:
     """Get current Play-In-Editor simulation status."""
     session = _session(host, port)
-    result = _run(session.get_simulation_status())
+    result = _run(session.get_simulation_status(), session)
     if is_json_mode():
         emit(result)
         return
@@ -574,14 +625,7 @@ def capture(
 ) -> None:
     """Capture viewport screenshot to a file."""
     session = _session(host, port)
-
-    async def save() -> Dict[str, Any]:
-        try:
-            return await session.capture_to_file(output, width, height, format)
-        finally:
-            await session.close()
-
-    result = _run(save())
+    result = _run(session.capture_to_file(output, width, height, format), session)
     if is_json_mode():
         emit(result)
         return
@@ -621,7 +665,7 @@ def exec_script(
     if not session.settings.security.allow_script_execution:
         _run(_script_refusal(session))
     try:
-        raw_result = asyncio.run(session._execute_python(code, mode=mode))
+        raw_result = asyncio.run(_closing(session, session._execute_python(code, mode=mode)))
     except Exception as e:
         fail(str(e), type(e).__name__)
 
@@ -716,7 +760,7 @@ def list_materials(
 ) -> None:
     """Get material information for an actor."""
     session = _session(host, port)
-    result = _run(session.get_material_info(actor_path))
+    result = _run(session.get_material_info(actor_path), session)
     if is_json_mode():
         emit(result)
         return
@@ -738,7 +782,7 @@ def scene_graph(
     result = _run(session.query_scene_graph(
         root_path=root,
         max_depth=depth,
-    ))
+    ), session)
     if is_json_mode():
         emit(result)
         return
@@ -760,7 +804,7 @@ def set_visibility(
     result = _run(session.set_actor_visibility(
         actor_path=actor_path,
         visible=visible,
-    ))
+    ), session)
     if is_json_mode():
         emit(result)
         return
@@ -1125,7 +1169,9 @@ def setup(
     # its exit says nothing about the editor; only watch a direct spawn.
     watch = proc if launch_plan and launch_plan[0] != "open" else None
     poll_kwargs: Dict[str, Any] = {"proc": watch} if watch is not None else {}
-    health = asyncio.run(_poll_health(session, wait_timeout, poll_interval, **poll_kwargs))
+    health = asyncio.run(
+        _closing(session, _poll_health(session, wait_timeout, poll_interval, **poll_kwargs))
+    )
 
     payload: Dict[str, Any] = {
         "uproject": str(uproject),
