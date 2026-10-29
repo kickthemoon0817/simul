@@ -836,7 +836,7 @@ class BlenderRuntimeSession:
         Both are world space whatever the camera's parent, and the rotation is
         an XYZ Euler whatever the camera's rotation mode: Blender stores it
         relative to the parent, in the camera's own mode (another Euler order,
-        QUATERNION or AXIS_ANGLE). The camera's scale is kept.
+        QUATERNION or AXIS_ANGLE). The camera's scale is kept, a mirror included.
 
         Args:
             location: World-space camera location [x, y, z].
@@ -848,6 +848,7 @@ class BlenderRuntimeSession:
             and rotation_euler.
         """
         cam_obj = self._resolve_camera(camera_name)
+        self._evaluate_transforms()
         self._place_in_world(cam_obj, location, rotation_euler)
         world_location, world_rotation = self._world_placement(cam_obj, rotation_euler)
         return {
@@ -870,6 +871,7 @@ class BlenderRuntimeSession:
         """
         cam_obj = self._resolve_camera(camera_name)
         cam_data = cam_obj.data
+        self._evaluate_transforms()
         location, rotation = self._world_placement(cam_obj)
         return {
             "camera_name": cam_obj.name,
@@ -925,6 +927,7 @@ class BlenderRuntimeSession:
         render = blender_module.context.scene.render
         data = cam_obj.data
 
+        self._evaluate_transforms()
         center, radius = self._bounding_sphere(self._world_bound_box(obj))
         if radius <= 0.0:
             radius = _POINT_RADIUS
@@ -3724,6 +3727,23 @@ class BlenderRuntimeSession:
         return changed
 
     @staticmethod
+    def _evaluate_transforms() -> None:
+        """
+        Bring every object's matrix_world up to date with its transform.
+
+        Blender recomputes matrix_world when it evaluates the depsgraph:
+        between events in a GUI, but only on demand in background Blender and
+        in the bpy module (embedded mode). There a location, scale or parent
+        written by an earlier call stays out of matrix_world until then. On
+        Blender 5.0.1 in the background, get_camera_info reported a camera
+        where it stood before set_object_transform moved it, focus_on_object
+        put back the scale just written, and set_camera_view missed by as much
+        as the camera's rig had just moved.
+        """
+        blender_module: Any = bpy
+        blender_module.context.evaluated_depsgraph_get()
+
+    @staticmethod
     def _place_in_world(
         obj: Any, location: List[float], rotation_euler: Sequence[float]
     ) -> None:
@@ -3737,16 +3757,26 @@ class BlenderRuntimeSession:
         or AXIS_ANGLE object ignores rotation_euler, and another Euler order
         reads the angles in its own order.
 
+        A mirrored object (an odd number of negative scales, its own or its
+        parents') stays mirrored, on its X axis: a camera then still looks
+        down its -Z with +Y up as asked, and its image is flipped left to
+        right. ``Matrix.to_scale()`` of a mirrored matrix is negative on every
+        axis, which would turn the camera to look backward.
+
         Args:
             obj: The object to place.
             location: World-space location [x, y, z].
             rotation_euler: World-space rotation [rx, ry, rz] in radians, XYZ order.
         """
         mathutils = _mathutils()
+        current = obj.matrix_world
+        scale = [abs(s) for s in current.to_scale()]
+        if current.is_negative:
+            scale[0] = -scale[0]
         obj.matrix_world = mathutils.Matrix.LocRotScale(
             mathutils.Vector(location),
             mathutils.Euler(rotation_euler, "XYZ"),
-            obj.matrix_world.to_scale(),
+            mathutils.Vector(scale),
         )
 
     @staticmethod
@@ -3758,7 +3788,8 @@ class BlenderRuntimeSession:
 
         Several Euler triples give the same rotation; the one nearest ``near``
         (the object's own rotation_euler by default) is returned, so a
-        rotation set as given reads back as given.
+        rotation set as given reads back as given. A mirrored object counts
+        as mirrored on its X axis, as _place_in_world places it.
 
         Args:
             obj: The object.
@@ -3767,8 +3798,12 @@ class BlenderRuntimeSession:
         Returns:
             The location [x, y, z] and rotation [rx, ry, rz] in radians.
         """
+        mathutils = _mathutils()
         matrix = obj.matrix_world
-        compatible = _mathutils().Euler(
+        if matrix.is_negative:
+            # Not a rotation: its Euler angles would describe no orientation.
+            matrix = matrix @ mathutils.Matrix.Scale(-1.0, 4, (1.0, 0.0, 0.0))
+        compatible = mathutils.Euler(
             obj.rotation_euler if near is None else near, "XYZ"
         )
         return list(matrix.translation), list(matrix.to_euler("XYZ", compatible))

@@ -86,13 +86,14 @@ class FakeCameraData:
         return 2 * math.atan(sensor / 2 / self.lens)
 
 
-def _rig() -> FakeTransformObject:
+def _rig(stored: bool = False) -> FakeTransformObject:
     """An empty moved, turned and scaled, as a camera rig is."""
     return FakeTransformObject(
         "Rig",
         location=(5.0, -3.0, 2.0),
         rotation_euler=(0.3, -0.2, math.radians(90)),
         scale=(2.0, 2.0, 2.0),
+        stored=stored,
     )
 
 
@@ -976,6 +977,7 @@ class TestVisualObservationTools:
         camera_type: str = "PERSP",
         setup: str = "unparented",
         scale: tuple = (1.0, 1.0, 1.0),
+        stored: bool = False,
         **data: Any,
     ) -> FakeTransformObject:
         """
@@ -984,13 +986,16 @@ class TestVisualObservationTools:
         Args:
             setup: A CAMERA_SETUPS key: parented to a rig that moved after the
                 parenting, and the rotation mode.
+            stored: Keep matrix_world (the camera's and its rig's) until the
+                depsgraph is evaluated, as background Blender and the bpy
+                module do; built evaluated.
             **data: Further FakeCameraData settings (sensor_fit, shift_x, ...).
 
         Returns:
             The camera object, with its FakeCameraData as .data.
         """
         parented, rotation_mode = CAMERA_SETUPS[setup]
-        rig = _rig() if parented else None
+        rig = _rig(stored) if parented else None
         cam_obj = FakeTransformObject(
             name,
             "CAMERA",
@@ -1007,9 +1012,11 @@ class TestVisualObservationTools:
             scale=scale,
             rotation_mode=rotation_mode,
             parent=rig,
+            stored=stored,
         )
         if rig is not None:
             _move_rig(rig)
+        cam_obj.evaluate()
         return cam_obj
 
     @staticmethod
@@ -1089,6 +1096,13 @@ class TestVisualObservationTools:
             def get(self, name: str) -> Optional[Any]:
                 return None
 
+        def evaluated_depsgraph_get() -> str:
+            """Recompute every stored matrix_world, as Blender's evaluation does."""
+            for obj in all_objects:
+                if isinstance(obj, FakeTransformObject):
+                    obj.evaluate()
+            return "depsgraph"
+
         return SimpleNamespace(
             app=SimpleNamespace(
                 version=version,
@@ -1103,7 +1117,9 @@ class TestVisualObservationTools:
                 collections=CollectionStore(),
                 images=ImageStore(),
             ),
-            context=SimpleNamespace(scene=scene),
+            context=SimpleNamespace(
+                scene=scene, evaluated_depsgraph_get=evaluated_depsgraph_get
+            ),
         )
 
     # -- set_camera_view ---------------------------------------------------
@@ -1538,6 +1554,123 @@ class TestVisualObservationTools:
         with pytest.raises(ValueError, match="lens shift"):
             self._focus(monkeypatch, self._cube(), cam)
         assert list(cam.location) == [0.0, 0.0, 5.0]
+
+    # Background Blender and the bpy module (embedded mode) recompute an
+    # object's matrix_world only when the depsgraph is evaluated, so what an
+    # earlier call wrote stays out of it until then. Read as it was, Blender
+    # 5.0.1 gave the three results these tests rule out.
+
+    def test_get_camera_info_reports_a_move_written_since_the_last_evaluation(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """It reported the camera where it stood before set_object_transform moved it."""
+        cam = self._make_camera_object(stored=True)
+        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam])
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        session = blender_runtime.BlenderRuntimeSession()
+        session.set_object_transform("Camera", location=[1.0, 2.0, 3.0])
+
+        result = session.get_camera_info()
+
+        assert result["location"] == pytest.approx([1.0, 2.0, 3.0])
+
+    def test_focus_on_object_keeps_a_scale_written_since_the_last_evaluation(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """It put back the scale the camera had before set_object_transform scaled it."""
+        cam = self._make_camera_object(stored=True)
+        cam.scale = FakeVector((2.0, 2.0, 2.0))
+
+        self._focus(monkeypatch, self._cube(), cam)
+
+        assert list(cam.scale) == pytest.approx([2.0, 2.0, 2.0])
+
+    def test_set_camera_view_places_a_camera_whose_rig_moved_since_the_last_evaluation(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """It solved the camera's local transform through the rig's old matrix,
+        so the camera landed off by the rig's move, 10 m, and the reply said
+        it was where asked."""
+        cam = self._make_camera_object(setup="parented", stored=True)
+        cam.parent.location = FakeVector((18.0, 1.0, -1.0))
+        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam])
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        location, rotation = [7.0, -7.0, 5.0], [1.1, 0.25, 0.78]
+
+        session = blender_runtime.BlenderRuntimeSession()
+        session.set_camera_view(location=location, rotation_euler=rotation)
+        fake_bpy.context.evaluated_depsgraph_get()
+
+        world = np.asarray(cam.matrix_world.rows)
+        assert world[:3, 3] == pytest.approx(location)
+        rotation_part = world[:3, :3] / np.linalg.norm(world[:3, :3], axis=0)
+        assert rotation_part == pytest.approx(euler_matrix(rotation))
+
+    @pytest.mark.parametrize(
+        "mirror",
+        [(-1.5, 1.5, 1.5), (1.5, -1.5, 1.5), (1.5, 1.5, -1.5)],
+        ids=["x", "y", "z"],
+    )
+    @pytest.mark.parametrize("setup", ["unparented", "parented_quaternion"])
+    def test_set_camera_view_turns_a_mirrored_camera_as_asked(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        mirror: Tuple[float, float, float],
+        setup: str,
+    ) -> None:
+        """A negative scale flips the camera's image; the camera still looks as asked.
+
+        Matrix.to_scale() of a mirrored matrix is negative on every axis, and
+        placing the camera with it turned it to look straight back: on Blender
+        5.0.1 its view direction was the opposite of the one asked, and the
+        reply gave (1.1, 3.39, 0.78) for (1.1, 0.25, 0.78). The mirror stays,
+        on the camera's X axis, and so does the size of its scale.
+        """
+        cam = self._make_camera_object(setup=setup, scale=mirror)
+        world_scale = np.linalg.norm(np.asarray(cam.matrix_world.rows)[:3, :3], axis=0)
+        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam])
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        location, rotation = [7.0, -7.0, 5.0], [1.1, 0.25, 0.78]
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.set_camera_view(location=location, rotation_euler=rotation)
+
+        world = np.asarray(cam.matrix_world.rows)
+        axes = world[:3, :3] / world_scale
+        asked = euler_matrix(rotation)
+        assert world[:3, 3] == pytest.approx(location)
+        # Looking down the asked -Z with the asked +Y up, flipped left to right.
+        assert axes @ [0.0, 0.0, -1.0] == pytest.approx(asked @ [0.0, 0.0, -1.0])
+        assert axes @ [0.0, 1.0, 0.0] == pytest.approx(asked @ [0.0, 1.0, 0.0])
+        assert axes @ [1.0, 0.0, 0.0] == pytest.approx(-(asked @ [1.0, 0.0, 0.0]))
+        assert np.linalg.norm(world[:3, :3], axis=0) == pytest.approx(world_scale)
+        assert result["location"] == pytest.approx(location)
+        assert result["rotation_euler"] == pytest.approx(rotation)
+        # Read back later the angles may differ by whole turns, not the rotation.
+        info = session.get_camera_info()["rotation_euler"]
+        assert euler_matrix(info) == pytest.approx(asked)
+
+    def test_focus_on_object_keeps_a_mirrored_camera_facing_the_object(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """A camera scaled -1 on X was turned away: the object stood behind it."""
+        center = (3.0, -2.0, 1.0)
+        cam = self._make_camera_object(scale=(-1.0, 1.0, 1.0))
+
+        self._focus(monkeypatch, self._cube(offset=center), cam)
+
+        for corner in _box():
+            x, y, depth = _in_frame(
+                cam,
+                [c + v for c, v in zip(center, corner)],
+                (18 / 50, 18 / 50 * 9 / 16),
+            )
+            assert 0.0 < x < 1.0 and 0.0 < y < 1.0, (x, y)
+            assert cam.data.clip_start < depth < cam.data.clip_end
 
     def test_focus_on_object_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """focus_on_object raises ValueError for missing object."""

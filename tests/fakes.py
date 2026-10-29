@@ -380,6 +380,16 @@ class FakeMatrix:
         return cls(np.eye(size))
 
     @classmethod
+    def Scale(  # noqa: N802
+        cls, factor: float, size: int, axis: Sequence[float]
+    ) -> "FakeMatrix":
+        """Scale by ``factor`` along ``axis`` (3x3 or 4x4), as ``mathutils.Matrix.Scale`` does."""
+        direction = np.asarray(axis, dtype=float) / np.linalg.norm(axis)
+        matrix = np.eye(size)
+        matrix[:3, :3] += (factor - 1.0) * np.outer(direction, direction)
+        return cls(matrix)
+
+    @classmethod
     def LocRotScale(  # noqa: N802
         cls, location: Any, rotation: Any, scale: Any
     ) -> "FakeMatrix":
@@ -411,8 +421,17 @@ class FakeMatrix:
     def inverted(self) -> "FakeMatrix":
         return FakeMatrix(np.linalg.inv(np.asarray(self.rows)))
 
+    @property
+    def is_negative(self) -> bool:
+        """Whether the matrix mirrors (a negative determinant), as mathutils reports it."""
+        return bool(np.linalg.det(np.asarray(self.rows)[:3, :3]) < 0)
+
     def to_scale(self) -> FakeVector:
-        return FakeVector(np.linalg.norm(np.asarray(self.rows)[:3, :3], axis=0))
+        """The axes' lengths, as mathutils returns them: negative on every axis
+        for a mirroring matrix (Blender 5.0.1 gives (-1.5, -1.5, -1.5) for a
+        scale of (-1.5, 1.5, 1.5))."""
+        lengths = np.linalg.norm(np.asarray(self.rows)[:3, :3], axis=0)
+        return FakeVector(-lengths if self.is_negative else lengths)
 
     def to_euler(self, order: str = "XYZ", compatible: Any = None) -> FakeEuler:
         if compatible is not None and not isinstance(compatible, FakeEuler):
@@ -454,9 +473,17 @@ class FakeTransformObject:
     the order ``rotation_mode`` names, from ``rotation_quaternion`` or from
     ``rotation_axis_angle``. Assigning it does what bpy's setter does: it
     solves the local transform through the parent and stores the rotation in
-    the property of the rotation mode only. So a write to ``location`` or
+    the property of the rotation mode only, a mirroring matrix as a rotation
+    and a scale negative on every axis. So a write to ``location`` or
     ``rotation_euler`` lands where it does in Blender: relative to the parent,
     and ignored by a QUATERNION or AXIS_ANGLE object.
+
+    With ``stored=True`` the object keeps ``matrix_world`` as Blender keeps
+    it for an original object: ``evaluate()`` (a depsgraph evaluation)
+    recomputes it, the parent's first, and assigning it stores the value
+    given. Writing location, rotation or scale, or moving the parent, leaves
+    it stale until then, as in background Blender and the bpy module, which
+    evaluate only on demand. By default it follows every write at once.
     """
 
     def __init__(
@@ -469,6 +496,7 @@ class FakeTransformObject:
         scale: Sequence[float] = (1.0, 1.0, 1.0),
         rotation_mode: str = "XYZ",
         parent: Optional["FakeTransformObject"] = None,
+        stored: bool = False,
     ) -> None:
         self.name = name
         self.type = object_type
@@ -486,6 +514,16 @@ class FakeTransformObject:
             if parent is not None
             else FakeMatrix.Identity(4)
         )
+        self._stores_matrix = stored
+        self._stored: Optional[FakeMatrix] = None
+        self.evaluate()
+
+    def evaluate(self) -> None:
+        """Recompute a stored matrix_world, the parent's first, as a depsgraph evaluation does."""
+        if self.parent is not None:
+            self.parent.evaluate()
+        if self._stores_matrix:
+            self._stored = self._composed()
 
     def _rotation(self) -> np.ndarray:
         if self.rotation_mode == "QUATERNION":
@@ -501,18 +539,29 @@ class FakeTransformObject:
             self.matrix_parent_inverse.rows
         )
 
-    @property
-    def matrix_world(self) -> FakeMatrix:
+    def _composed(self) -> FakeMatrix:
         basis = np.eye(4)
         basis[:3, :3] = self._rotation() * np.asarray(list(self.scale))
         basis[:3, 3] = list(self.location)
         return FakeMatrix(self._parent_matrix() @ basis)
+
+    @property
+    def matrix_world(self) -> FakeMatrix:
+        if self._stored is not None:
+            return FakeMatrix(self._stored.rows)
+        return self._composed()
 
     @matrix_world.setter
     def matrix_world(self, value: FakeMatrix) -> None:
         local = np.linalg.inv(self._parent_matrix()) @ np.asarray(value.rows)
         scale = np.linalg.norm(local[:3, :3], axis=0)
         rotation = local[:3, :3] / scale
+        if np.linalg.det(rotation) < 0:
+            # mat4_to_loc_rot_size: a mirror becomes a rotation and a scale
+            # negative on every axis.
+            rotation, scale = -rotation, -scale
+        if self._stores_matrix:
+            self._stored = FakeMatrix(value.rows)
         self.location = FakeVector(local[:3, 3])
         self.scale = FakeVector(scale)
         if self.rotation_mode == "QUATERNION":
