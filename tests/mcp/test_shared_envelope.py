@@ -396,6 +396,68 @@ def test_admitted_isaac_calls_hold_the_instance_lock_and_heartbeat(
     assert beats == ["isaac_ok", "isaac_broken"]
 
 
+def test_a_cancelled_isaac_call_releases_the_instance_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cancellation unwinds through the admission hook: the lock is freed, no heartbeat."""
+    instance = _server(monkeypatch, tmp_path)
+    lock = instance._get_instance_lock(instance._get_effective_instance_name())
+    beats: List[str] = []
+    monkeypatch.setattr(instance, "_heartbeat_active_binding", beats.append)
+
+    async def scenario() -> bool:
+        started = asyncio.Event()
+
+        async def long_step() -> Dict[str, Any]:
+            started.set()
+            await asyncio.sleep(60)
+            return {"success": True}
+
+        task = asyncio.ensure_future(instance._exec_isaac("isaac_step", long_step()))
+        await started.wait()
+        held = lock.locked()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return held
+
+    assert asyncio.run(scenario()) is True, "the call ran under the lock"
+    assert not lock.locked()
+    assert beats == []
+
+
+def test_a_failing_heartbeat_does_not_fail_a_call_that_ran(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The heartbeat is session bookkeeping after the call; its failure is only logged.
+
+    It runs as the admission hook exits, outside the call's exception
+    handling, so an error from it would escape the envelope and the caller
+    would get an unhandled exception in place of the result already recorded.
+    """
+    instance = _server(monkeypatch, tmp_path)
+    lock = instance._get_instance_lock(instance._get_effective_instance_name())
+    binding = SimpleNamespace(port=8226, agent_id="agent-a", last_heartbeat=0.0)
+    monkeypatch.setattr(instance, "_get_active_binding", lambda: binding)
+
+    def unwritable_session_dir(port: int) -> Any:
+        raise PermissionError(13, "Permission denied", "/sessions")
+
+    monkeypatch.setattr(
+        instance.session_manager, "get_instance_session", unwritable_session_dir
+    )
+
+    async def ok() -> Dict[str, Any]:
+        return {"success": True, "prims": ["/World"]}
+
+    payload = _payload(asyncio.run(instance._exec_isaac("isaac_ok", ok())))
+
+    assert payload == {"success": True, "prims": ["/World"]}
+    assert not lock.locked()
+    assert binding.last_heartbeat == 0.0, "only a heartbeat that landed is noted"
+    assert _records(instance, "isaac_ok") == [{"success": True, "error": None}]
+
+
 def test_lock_bypassing_isaac_tools_are_enveloped_too(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

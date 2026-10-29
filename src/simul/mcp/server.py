@@ -934,13 +934,31 @@ class SimulMCPServer(LoggerMixin):
         return True
 
     def _heartbeat_active_binding(self, tool_name: str) -> None:
-        """Mark the request's active binding alive after a call made through it."""
+        """Mark the request's active binding alive after a call made through it.
+
+        Best effort, like the session records it refreshes. The heartbeat runs
+        as the admission hook exits, after the call has run and been recorded,
+        so a failure here (a session directory that cannot be created or
+        read) is logged; raising would escape the envelope and replace the
+        call's result with an unhandled error.
+        """
         binding = self._get_active_binding()
-        if binding is not None:
+        if binding is None:
+            return
+        try:
             self.session_manager.get_instance_session(binding.port).heartbeat(
                 binding.agent_id, tool_name
             )
-            binding.last_heartbeat = time.time()
+        except Exception as exc:
+            self.logger.warning(
+                "Could not refresh the claim heartbeat for agent %r on port %s after %s: %s",
+                binding.agent_id,
+                binding.port,
+                tool_name,
+                exc,
+            )
+            return
+        binding.last_heartbeat = time.time()
 
     async def _exec_isaac(
         self,
