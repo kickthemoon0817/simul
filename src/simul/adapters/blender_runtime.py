@@ -31,6 +31,9 @@ from typing import (
     overload,
 )
 
+# The Blender add-on bundles this standard-library module next to this one.
+from ..utils.regex_guard import exponential_regex_construct
+
 try:
     import bpy
 
@@ -587,16 +590,38 @@ class BlenderRuntimeSession:
         Search for objects matching optional name pattern and type filter.
 
         Args:
-            name_pattern: Regex pattern for object name matching.
+            name_pattern: Python regular expression searched for in each object
+                name; a repeated group that holds a quantifier or alternatives,
+                as in (\\w+)+, is refused because it can run for hours.
             object_type: Blender object type filter (MESH, LIGHT, etc.).
             max_results: Maximum number of results.
 
         Returns:
             Dictionary with matched objects and truncation flag.
-        """
-        all_objects = self._resolve_object_source(None)
 
-        compiled_pattern = re.compile(name_pattern) if name_pattern else None
+        Raises:
+            ValueError: name_pattern is not a valid regular expression, or
+                repeats a group that holds a quantifier or alternatives (see
+                ``simul.utils.regex_guard``).
+        """
+        compiled_pattern = None
+        if name_pattern:
+            try:
+                compiled_pattern = re.compile(name_pattern)
+            except re.error as exc:
+                raise ValueError(
+                    f"name_pattern is not a valid regular expression: {exc}"
+                ) from exc
+            # The search runs on Blender's main thread, where nothing can stop it.
+            construct = exponential_regex_construct(name_pattern)
+            if construct is not None:
+                raise ValueError(
+                    f"name_pattern has {construct}: a failing search for it can "
+                    "freeze Blender for hours, since every way of splitting an "
+                    "object name between the repetitions is tried. Repeat a plain "
+                    "character class instead (\\w+ rather than (\\w+)+)"
+                )
+        all_objects = self._resolve_object_source(None)
         matches: List[Dict[str, Any]] = []
 
         for obj in all_objects:

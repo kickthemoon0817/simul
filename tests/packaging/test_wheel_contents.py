@@ -124,6 +124,7 @@ def test_wheel_ships_blender_attachment_sources(tmp_path: Path) -> None:
         "blender_bridge/agent_control.py", "mcp/schemas/blender_ui.py",
         "blender_bridge/agent_cursor.py",
         "adapters/blender_runtime.py", "adapters/blender_connection.py", "utils/paths.py",
+        "utils/regex_guard.py",
         "resources/__init__.py", "cli/blender_cli.py",
         "adapters/unreal_overlay.py", "adapters/unreal_connection.py",
         "resources/unreal/SimulAgentOverlay/SimulAgentOverlay.uplugin",

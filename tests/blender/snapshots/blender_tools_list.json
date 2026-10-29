@@ -345,7 +345,7 @@
           "name_pattern": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": null,
-            "description": "Regex pattern for object name matching."
+            "description": "Python regular expression searched for in each object name; a repeated group that holds a quantifier or alternatives, as in (\\w+)+, is refused because it can run for hours."
           },
           "object_type": {
             "anyOf": [{"type": "string"}, {"type": "null"}],

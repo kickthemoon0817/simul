@@ -155,6 +155,11 @@ Behaviour worth knowing:
   at half that size). An orthographic camera gets the `ortho_scale` that fits
   instead. A clip range that would cut the object away is widened, and the
   reply reports `distance`, `clip_start`, `clip_end` and `clip_adjusted`.
+- `search_blender_objects` refuses a `name_pattern` that repeats a group holding
+  a quantifier or alternatives, such as `(\w+)+`: Python's regex search
+  backtracks, and on a long object name such a pattern runs for hours on
+  Blender's main thread. `get_unreal_actor_by_semantic_label` refuses the same
+  patterns in regex mode.
 - `execute_blender_script` returns the first `max_output_chars` characters of
   printed output (default 32 000, at most 100 000). A longer output sets
   `output_truncated: true`, and `output_total_chars` gives its full length, so a

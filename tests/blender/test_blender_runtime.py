@@ -689,6 +689,76 @@ class TestObservationTools:
         assert result["count"] == 3
         assert result["truncated"] is True
 
+    @pytest.mark.parametrize(
+        ("pattern", "refusal"),
+        [
+            (r"^(\w+)+_x$", "a quantifier inside a repeated group"),
+            (r"(\w+_)*light", "a quantifier inside a repeated group"),
+            (r"(a|ab)*c", "alternatives inside a repeated group"),
+            ("Cube(", "not a valid regular expression"),
+        ],
+    )
+    def test_search_objects_refuses_a_pattern_before_searching_any_name(
+        self, monkeypatch: pytest.MonkeyPatch, pattern: str, refusal: str
+    ) -> None:
+        """The search runs on Blender's main thread, where nothing interrupts it.
+
+        A failing search for a repeated group that can match the same text in
+        several ways tries every split of the name: ^(\\w+)+_x$ took hours on
+        a 40-character object name and froze the editor, and
+        search_blender_objects stays registered with scripting disabled. An
+        invalid pattern raised re.error, reported as error_type "error".
+        """
+        searched: List[str] = []
+
+        class Recorded(FakeObject):
+            @property
+            def name(self) -> str:
+                searched.append(self._name)
+                return self._name
+
+            @name.setter
+            def name(self, value: str) -> None:
+                self._name = value
+
+        # Short enough that a search without the guard fails this test, not hangs it.
+        objects = [Recorded(name="a" * 12, object_type="MESH", visible=True)]
+        fake_bpy = self._make_fake_bpy_with_objects(objects)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        searched.clear()  # the fake's own name index read them
+
+        session = blender_runtime.BlenderRuntimeSession()
+        with pytest.raises(ValueError, match=refusal):
+            session.search_objects(name_pattern=pattern)
+        assert searched == []
+
+    @pytest.mark.parametrize(
+        ("pattern", "names"),
+        [
+            (r"^Cube\.\d+$", ["Cube.001"]),
+            (r"^(Cube|Light)$", ["Cube", "Light"]),
+            (r"(\.\d+)?$", ["Cube", "Cube.001", "Light"]),
+            (r".*ub.*", ["Cube", "Cube.001"]),
+        ],
+    )
+    def test_search_objects_still_takes_patterns_that_cannot_split_a_name(
+        self, monkeypatch: pytest.MonkeyPatch, pattern: str, names: List[str]
+    ) -> None:
+        objects = [
+            FakeObject(name="Cube", object_type="MESH", visible=True),
+            FakeObject(name="Cube.001", object_type="MESH", visible=True),
+            FakeObject(name="Light", object_type="LIGHT", visible=True),
+        ]
+        fake_bpy = self._make_fake_bpy_with_objects(objects)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.search_objects(name_pattern=pattern)
+
+        assert [o["name"] for o in result["objects"]] == names
+
     # -- summarize_scene --------------------------------------------------
 
     def test_summarize_scene(self, monkeypatch: pytest.MonkeyPatch) -> None:

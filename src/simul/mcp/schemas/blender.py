@@ -234,7 +234,11 @@ class BlenderSearchObjectsRequest(BaseModel):
     """Request for searching objects by criteria."""
 
     name_pattern: Optional[str] = Field(
-        None, description="Regex or glob pattern to match object names"
+        None,
+        description=(
+            "Python regular expression searched for in each object name; one that "
+            "repeats a group holding a quantifier or alternatives is refused"
+        ),
     )
     object_type: Optional[str] = Field(
         None, description="Filter by Blender object type (MESH, LIGHT, CAMERA, etc.)"

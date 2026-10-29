@@ -302,6 +302,13 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             )
             client.delete_object("ProbeCamera")
             client.delete_object("ProbeRig")
+            # A pattern that can backtrack for hours is refused before it
+            # runs on Blender's main thread; a plain one still searches.
+            refused = tool("search_blender_objects", name_pattern=r"^(\w+)+_x$")
+            assert refused["success"] is False, refused
+            assert "repeated group" in refused["error"]
+            found = tool("search_blender_objects", name_pattern=r"^Attachment\w+$")
+            assert [o["name"] for o in found["objects"]] == ["AttachmentProbe"]
             # The tool lists location as optional; omitting it means the origin.
             wind = tool("add_blender_force_field", field_type="WIND", name="ProbeWind")
             assert wind["success"] is True, wind

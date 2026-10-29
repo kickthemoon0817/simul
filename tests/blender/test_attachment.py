@@ -604,3 +604,35 @@ def test_addon_bundles_the_error_message_helper(tmp_path: Path) -> None:
         check=True,
     )
     assert completed.stdout.strip() == "Failed to add rigid body: poll() failed"
+
+
+def test_addon_bundles_the_regex_guard(tmp_path: Path) -> None:
+    """blender_runtime imports utils/regex_guard.py, so the ZIP must carry it.
+
+    An interpreter without simul (and without bpy) imports the bundled
+    runtime, so its guard comes from the add-on's own copy.
+    """
+    import subprocess
+    import sys
+    import zipfile
+
+    addon = BlenderAttachments.build_addon(tmp_path / "addon.zip")
+    with zipfile.ZipFile(addon) as archive:
+        assert "simul_blender_bridge/utils/regex_guard.py" in archive.namelist()
+        archive.extractall(tmp_path / "addons")
+    probe = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "from simul_blender_bridge.adapters import blender_runtime; "
+        "guard = blender_runtime.exponential_regex_construct; "
+        "print(guard.__module__); print(guard(r'^(\\w+)+_x$'))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(tmp_path / "addons")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert completed.stdout.splitlines() == [
+        "simul_blender_bridge.utils.regex_guard",
+        "a quantifier inside a repeated group, as in (\\w+)+",
+    ]

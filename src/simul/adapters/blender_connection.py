@@ -356,6 +356,7 @@ class BlenderAttachments:
             "utils/errors.py": "utils/errors.py",
             "utils/paths.py": "utils/paths.py",
             "utils/private_files.py": "utils/private_files.py",
+            "utils/regex_guard.py": "utils/regex_guard.py",
             "resources/__init__.py": "resources/__init__.py",
         }
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
