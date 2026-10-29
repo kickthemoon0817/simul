@@ -39,6 +39,7 @@ from simul.blender_bridge.protocol import (
 from simul.config import Settings
 from simul.mcp import backends as backends_module
 from simul.mcp import server as server_module
+from simul.mcp.server import default_agent_label
 from simul.mcp.schemas.blender import BlenderSceneObjectsRequest
 from simul.mcp.session_manager import SessionManager
 from simul.mcp.usage_tracker import ToolUsageTracker
@@ -340,13 +341,13 @@ def test_isaac_claimed_instance_refusal(
     assert _snapshot(refused) == {
         "success": False,
         "error": (
-            "Isaac instance 'default' is claimed by agent 'agent-a' for 'RL training run'; "
+            f"Isaac instance 'default' is claimed by agent '{default_agent_label('agent-a')}' for 'RL training run'; "
             "isaac_sim.enforce_claims refuses mutating tools from other agents while that claim is live."
         ),
         "error_type": "InstanceClaimed",
         "details": {
             "instance": "default",
-            "holder_agent_id": "agent-a",
+            "holder_agent_id": default_agent_label("agent-a"),
             "holder_purpose": "RL training run",
             "claim_expires_in_seconds": "<seconds>",
             "hint": (

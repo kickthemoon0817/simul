@@ -154,6 +154,18 @@ _CONTEXT_NETWORK_TRANSPORTS: Tuple[str, ...] = ("streamable-http", "sse")
 _ANONYMOUS_AGENT: str = "anonymous"
 
 
+def default_agent_label(session_id: str) -> str:
+    """Return the published agent label for a session that names none.
+
+    A one-way digest of the transport session id: the label is shown to every
+    client (``list_isaac_instances`` lists claim holders), while over HTTP the
+    session id itself is what a client presents as ``Mcp-Session-Id`` to act
+    in that session, so it must never be the label.
+    """
+    digest = hashlib.sha256(f"agent-label:{session_id}".encode("utf-8")).hexdigest()
+    return f"session-{digest[:12]}"
+
+
 def _request_principal() -> Optional[str]:
     """Return the authenticated principal of the current request, or None.
 
@@ -676,12 +688,12 @@ class SimulMCPServer(LoggerMixin):
         self._switch_active_instance(instance_name)
 
     def _resolve_agent_id(self, agent_id: Optional[str]) -> str:
-        """Resolve a stable per-session agent id."""
+        """Resolve a stable per-session agent id (see ``default_agent_label``)."""
         if agent_id:
             return agent_id
         session_id = self._get_request_session_id()
         if session_id:
-            return session_id
+            return default_agent_label(session_id)
         if self._get_request_context() is not None:
             # A request without a client identity; see _request_is_anonymous.
             return _ANONYMOUS_AGENT
@@ -785,10 +797,15 @@ class SimulMCPServer(LoggerMixin):
         if self._request_is_anonymous():
             return sessions[0] if sessions else None
         owner = self._claim_owner()
+        raw_session = self._get_request_session_id()
         for session in sessions:
+            holder_owner = session.get("owner")
+            if holder_owner is None and raw_session and session.get("agent_id") == raw_session:
+                # Written by an older server, whose default label was the raw
+                # session id: still this session's own claim until it expires.
+                continue
             if session.get("agent_id") != caller_agent_id:
                 return session
-            holder_owner = session.get("owner")
             if holder_owner is not None and holder_owner != owner:
                 return session
         return None

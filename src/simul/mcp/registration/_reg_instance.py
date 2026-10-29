@@ -155,9 +155,10 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             instance_name: Name of the instance to activate.
             purpose: Free-text description of what you're doing. Other agents
                      will see this and can decide whether to join or avoid.
-            agent_id: Unique label for this agent. Defaults to the MCP
-                      session id. A claim stays bound to the MCP session that
-                      made it, so reusing another agent's label is refused.
+            agent_id: Unique label for this agent. Defaults to a label
+                      derived from (but not revealing) the MCP session. A
+                      claim stays bound to the MCP session that made it, so
+                      reusing another agent's label is refused.
 
         Returns:
             Confirmation with the new active instance, session info,
@@ -268,9 +269,10 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
 
         Args:
             purpose: Free-text description of what you're doing.
-            agent_id: Unique label for this agent. Defaults to the MCP
-                      session id. A claim stays bound to the MCP session that
-                      made it, so reusing another agent's label is refused.
+            agent_id: Unique label for this agent. Defaults to a label
+                      derived from (but not revealing) the MCP session. A
+                      claim stays bound to the MCP session that made it, so
+                      reusing another agent's label is refused.
 
         Returns:
             Registration result with compatibility info.

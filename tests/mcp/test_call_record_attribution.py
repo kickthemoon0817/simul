@@ -85,7 +85,9 @@ def test_agent_id_comes_from_the_mcp_session(
 
     asyncio.run(_tool(instance, "execute_isaac_script")(CODE))
 
-    assert instance.usage_tracker.get_recent()[0]["agent_id"] == "session-42"
+    assert instance.usage_tracker.get_recent()[0]["agent_id"] == server_module.default_agent_label(
+        "session-42"
+    )
 
 
 def test_granular_tools_are_attributed_without_a_hash(

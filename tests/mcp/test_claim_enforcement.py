@@ -14,6 +14,7 @@ from fastmcp import Client
 from fastmcp.tools import ToolResult
 
 from simul.config import Settings
+from simul.mcp.server import default_agent_label
 from simul.mcp import backends as backends_module
 from simul.mcp import server as server_module
 from simul.mcp import session_manager as session_manager_module
@@ -158,7 +159,7 @@ async def test_enforced_mode_refuses_foreign_mutation_but_not_reads(
     refused = _payload(await _as(ctx, "agent-b", lambda: execute(code="print(1)")))
     assert refused["success"] is False
     assert refused["error_type"] == "InstanceClaimed"
-    assert refused["details"]["holder_agent_id"] == "agent-a"
+    assert refused["details"]["holder_agent_id"] == default_agent_label("agent-a")
     assert refused["details"]["holder_purpose"] == "RL training run, do not touch"
     assert "claim_isaac_instance" in refused["details"]["hint"]
     assert "release_isaac_instance" in refused["details"]["hint"]
@@ -230,7 +231,9 @@ async def test_release_refuses_someone_elses_claim(monkeypatch: pytest.MonkeyPat
     assert refused["error_type"] == "PermissionError"
 
     sessions = instance.session_manager.get_instance_session(8226).get_status()["sessions"]
-    assert sorted(s["agent_id"] for s in sessions) == ["agent-a", "agent-b"]
+    assert sorted(s["agent_id"] for s in sessions) == sorted(
+        default_agent_label(s) for s in ("agent-a", "agent-b")
+    )
 
 
 @pytest.mark.asyncio
