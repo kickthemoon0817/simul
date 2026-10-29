@@ -17,6 +17,11 @@ from ..utils.private_files import BridgeFiles
 # An attachment record is a few hundred bytes; refuse anything that is not.
 MAX_ATTACHMENT_BYTES = 64 * 1024
 
+# Probes in flight at once. Each holds a socket: a wide scan range probed all
+# at once runs out of file descriptors (macOS allows 256 by default), and the
+# probes that fail would hide the editors on those ports.
+MAX_CONCURRENT_PROBES = 32
+
 # What an attachment pins besides its viewport; the editor's verify() checks these.
 _TARGET_KEYS = ("instance_id", "document_id", "project_path", "map_path")
 # Identity read through the editor's Python, null until it answers.
@@ -67,17 +72,27 @@ def _endpoint_settings(settings: Settings, host: str, port: int) -> Settings:
 async def probe_instance(settings: Settings, host: str, port: int) -> dict[str, Any]:
     """Probe one Remote Control endpoint and read its editor's identity.
 
-    ``GET /remote/info`` decides ``reachable`` and ``latency_ms``; when it
-    answers, the editor's Python reports the identity. An HTTP 401 also counts
-    as an answer: Remote Control refuses a missing or wrong passphrase, so the
-    editor is reachable without identity. Each step is bounded by
-    ``unreal.ping_timeout``. A failed step does not raise: the identity fields
-    stay null (lists empty) and ``error`` says why.
+    ``UnrealRuntimeSession.ping`` decides ``reachable``, ``latency_ms`` and,
+    when it fails, ``error``, so discovery and ``ping_unreal`` agree: an HTTP
+    401 is an answer (Remote Control refuses a missing or wrong passphrase),
+    reported reachable with ping's authentication error and no identity. When
+    Remote Control accepts the request, the editor's Python reports the
+    identity. Each step is bounded by ``unreal.ping_timeout``. A failed step
+    does not raise: the identity fields stay null (lists empty) and ``error``
+    says why.
 
     Returns:
         ``host``, ``port``, ``reachable``, ``latency_ms``, ``error`` and the
         identity fields of ``UnrealRuntimeSession.editor_identity``.
     """
+    record, _ = await _probe(settings, host, port)
+    return record
+
+
+async def _probe(
+    settings: Settings, host: str, port: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``probe_instance``'s record, and the ``ping`` payload it started from."""
     from .unreal_runtime import UnrealRuntimeSession
 
     timeout = settings.unreal.ping_timeout
@@ -93,20 +108,12 @@ async def probe_instance(settings: Settings, host: str, port: int) -> dict[str, 
     session = UnrealRuntimeSession(_endpoint_settings(settings, host, port))
     try:
         ping = await session.ping()
-        if ping.get("status") == 401:
-            # Remote Control answered, so an editor is there; listing it with
-            # the reason beats a scan silently dropping it.
-            record["reachable"] = True
-            record["error"] = (
-                "Remote Control refused the request (HTTP 401): set "
-                "UNREAL__PASSPHRASE to the editor's passphrase"
-            )
-            return record
-        if not ping.get("reachable"):
-            record["error"] = ping.get("error") or f"No answer within {timeout}s"
-            return record
-        record["reachable"] = True
+        record["reachable"] = bool(ping.get("reachable"))
         record["latency_ms"] = ping.get("latency_ms")
+        if ping.get("error") or not record["reachable"]:
+            # Silent, refused (HTTP 401) or never sent; ping says which.
+            record["error"] = ping.get("error") or f"No answer within {timeout}s"
+            return record, ping
         try:
             identity = await asyncio.wait_for(session.editor_identity(), timeout)
         except TimeoutError:
@@ -114,23 +121,34 @@ async def probe_instance(settings: Settings, host: str, port: int) -> dict[str, 
                 f"Editor identity did not answer within {timeout}s; the editor may "
                 "be busy (UNREAL__PING_TIMEOUT sets the limit)"
             )
-            return record
+            return record, ping
         except Exception as exc:
             record["error"] = (
                 f"Editor identity unavailable ({exc}); discovery needs "
                 "PythonScriptPlugin with remote Python execution (simul unreal setup)"
             )
-            return record
+            return record, ping
         if identity.get("error"):
             record["error"] = f"Editor identity unavailable: {identity['error']}"
-            return record
+            return record, ping
         for key in _IDENTITY_KEYS:
             record[key] = identity.get(key)
         for key in _IDENTITY_LISTS:
             record[key] = list(identity.get(key) or [])
-        return record
+        return record, ping
     finally:
         await session.close()
+
+
+def _port_ranges(ports: list[int]) -> str:
+    """Ports as ascending runs: ``[30010, 30011, 30012, 30015]`` -> ``30010-30012, 30015``."""
+    runs: list[list[int]] = []
+    for port in sorted(ports):
+        if runs and port == runs[-1][1] + 1:
+            runs[-1][1] = port
+        else:
+            runs.append([port, port])
+    return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
 
 
 def _is_attached(record: dict[str, Any], attachment: dict[str, Any] | None) -> bool:
@@ -155,7 +173,7 @@ async def discover_instances(
 
     The payload of both ``simul unreal instances`` and the
     ``list_unreal_instances`` MCP tool. Endpoints are probed concurrently with
-    ``probe_instance``.
+    ``probe_instance``, at most ``MAX_CONCURRENT_PROBES`` at a time.
 
     The active endpoint is the one Unreal tools dispatch to: the configured
     ``unreal.host``/``unreal.port``, or the saved attachment's endpoint in
@@ -176,8 +194,11 @@ async def discover_instances(
         ``active_instance``, ``total_discovered`` (reachable instances) and
         ``warnings``. A scan leaves out ports where nothing answered, except
         the active endpoint; ``port`` and ``scan=False`` always report the
-        endpoint they probed.
+        endpoint they probed. A port left out because its probe never left
+        this machine (``ping``'s ``ProbeNotSent``) is named in ``warnings``.
     """
+    from .unreal_runtime import PROBE_NOT_SENT
+
     cfg = settings.unreal
     warnings: list[str] = []
     attachment: dict[str, Any] | None = None
@@ -202,13 +223,20 @@ async def discover_instances(
         ports = sorted(set(range(cfg.scan_port_start, cfg.scan_port_end)) | extra)
     report_all = port is not None or not scan
 
-    records = await asyncio.gather(
-        *(probe_instance(settings, probe_host, p) for p in ports)
-    )
+    limit = asyncio.Semaphore(MAX_CONCURRENT_PROBES)
+
+    async def bounded_probe(p: int) -> tuple[dict[str, Any], dict[str, Any]]:
+        async with limit:
+            return await _probe(settings, probe_host, p)
+
+    probes = await asyncio.gather(*(bounded_probe(p) for p in ports))
     instances: list[dict[str, Any]] = []
-    for record in records:
+    not_sent: dict[str, list[int]] = {}
+    for record, ping in probes:
         is_active = (record["host"], record["port"]) == active
         if not (record["reachable"] or is_active or report_all):
+            if ping.get("error_type") == PROBE_NOT_SENT:
+                not_sent.setdefault(record["error"], []).append(record["port"])
             continue
         instances.append(
             {
@@ -236,6 +264,11 @@ async def discover_instances(
         warnings.append(
             "The attached editor restarted, replaced its map or lost the attached "
             "viewport; run simul unreal instances, then simul unreal attach"
+        )
+    for reason, missed in not_sent.items():
+        warnings.append(
+            f"{reason}: {probe_host} port(s) {_port_ranges(missed)}; an editor "
+            "there would be missing from instances"
         )
     return {
         "success": True,
