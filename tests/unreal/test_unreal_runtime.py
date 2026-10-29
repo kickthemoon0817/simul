@@ -2106,37 +2106,6 @@ class TestPassphraseHeader:
             == "5f4dcc3b5aa765d61d8327deb882cf99"
         )
 
-    def test_probe_port_omits_passphrase_header_by_default(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Backward compat: probe_port() with no passphrase_md5 must NOT
-        inject the header — preserves discovery behavior for editors
-        without passphrase enforcement."""
-        monkeypatch.setattr(unreal_runtime, "AIOHTTP_AVAILABLE", True)
-        captured: Dict[str, Any] = {}
-
-        class _CaptureSession:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-
-            async def __aenter__(self):
-                raise RuntimeError("stop here — only the constructor matters")
-
-            async def __aexit__(self, *args):
-                pass
-
-        monkeypatch.setattr(
-            unreal_runtime.aiohttp, "ClientSession", _CaptureSession, raising=True
-        )
-
-        asyncio.run(
-            unreal_runtime.UnrealRuntimeSession.probe_port(
-                "127.0.0.1", 30010, timeout=1.0
-            )
-        )
-
-        assert "Passphrase" not in captured["headers"]
-
     def test_unreal_config_reads_passphrase_from_env_var(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2154,34 +2123,3 @@ class TestPassphraseHeader:
         from simul.config import Settings as _Settings
         settings = _Settings()
         assert settings.unreal.passphrase == "from-env"
-
-    def test_probe_port_injects_passphrase_when_supplied(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Closes the iter4 code-review HIGH: discovery against a
-        passphrase-enforcing editor must carry the header."""
-        monkeypatch.setattr(unreal_runtime, "AIOHTTP_AVAILABLE", True)
-        captured: Dict[str, Any] = {}
-        md5_hash = "5f4dcc3b5aa765d61d8327deb882cf99"
-
-        class _CaptureSession:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-
-            async def __aenter__(self):
-                raise RuntimeError("stop here — only the constructor matters")
-
-            async def __aexit__(self, *args):
-                pass
-
-        monkeypatch.setattr(
-            unreal_runtime.aiohttp, "ClientSession", _CaptureSession, raising=True
-        )
-
-        asyncio.run(
-            unreal_runtime.UnrealRuntimeSession.probe_port(
-                "127.0.0.1", 30010, timeout=1.0, passphrase_md5=md5_hash
-            )
-        )
-
-        assert captured["headers"]["Passphrase"] == md5_hash

@@ -146,7 +146,7 @@ def test_listing_tools_accept_offset(listed_tools: List[Any]) -> None:
 
 
 def test_instructions_state_the_axis_convention() -> None:
-    assert "Z-up" in server_module._MCP_INSTRUCTIONS
+    assert "Z-up" in server_module.build_instructions({"isaac"})
 
 
 # ---------------------------------------------------------------------------

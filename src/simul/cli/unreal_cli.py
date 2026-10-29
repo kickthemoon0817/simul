@@ -172,16 +172,24 @@ async def _attached_call(method: str, **kwargs: Any) -> Dict[str, Any]:
 
 
 @app.command("instances")
-def instances(host: Optional[str] = _host_opt, port: Optional[int] = _port_opt) -> None:
-    """Discover running editors and their level viewport identifiers."""
-    from ..adapters.unreal_connection import UnrealAttachments
+def instances(
+    host: Optional[str] = _host_opt,
+    port: Optional[int] = typer.Option(
+        None, "--port", "-p", help="Probe only this Remote Control port"
+    ),
+    scan: bool = typer.Option(
+        True,
+        "--scan/--no-scan",
+        help="Probe the configured port range; --no-scan probes only the active endpoint",
+    ),
+) -> None:
+    """Discover running editors: identity, level viewports, active/attached flags.
 
-    async def inspect() -> Dict[str, Any]:
-        return {
-            "instances": await UnrealAttachments(get_settings()).instances(host, port)
-        }
+    Same payload as the list_unreal_instances MCP tool.
+    """
+    from ..adapters.unreal_connection import discover_instances
 
-    emit(_run(inspect()))
+    emit(_run(discover_instances(get_settings(), host=host, port=port, scan=scan)))
 
 
 @app.command("attach")

@@ -51,10 +51,13 @@ wheels exist for Python 3.11 and 3.13 only.
 - **Settings** (`config.py`): a single `Settings` object built from the YAML
   file and the environment; see [configuration.md](configuration.md).
 - **Backend registry** (`mcp/backends.py`): each backend is one `BackendSpec`
-  naming its adapter, availability probe and registration module. The server
-  iterates the registry for adapters, tool registration, the capability report
-  (`get_capabilities`, `simul info`) and the routing instructions it sends
-  to clients.
+  naming its adapter, availability probe, registration module, the text its
+  instructions state (summary, guidance, routing rule) and any gate beyond
+  the runtime (`skip_check`; Isaac Sim's registers its tools only on Linux and
+  Windows unless `isaac_sim.enabled` or `--backends` says otherwise). The
+  server iterates the registry for adapters, tool registration, the capability
+  report (`get_capabilities`, `simul info`) and the instructions it sends to
+  clients, which cover only the backends whose tools registered.
 - **Adapters** (`adapters/`): implement `BackendAdapter` from
   `adapters/base.py`. Isaac Sim uses a TCP client with bridge-then-socket
   fallback; Unreal uses Remote Control HTTP; Blender runs `bpy` in-process or
@@ -63,16 +66,22 @@ wheels exist for Python 3.11 and 3.13 only.
   `@tool_meta` decorator (name, description, hints); `_reg_isaac.py` builds
   the MCP wrapper from each method's signature and docstring. The USD,
   Blender and Unreal modules register their wrappers by hand over adapter
-  sessions. Every call goes through a shared envelope that applies rate
-  limiting, the file sandbox, usage recording and result-size budgets.
+  sessions. Every call goes through one shared envelope
+  (`SimulMCPServer._run_envelope`): the rate limit, the backend's admission
+  hook (Isaac's claim enforcement and per-instance lock), request
+  validation, the call, success normalisation, exactly one usage record and
+  the result-size budget. An exception that escapes a tool becomes an
+  `ErrorResponse` named after its class (or the `error_type` it declares),
+  with its `details` and any context added as exception notes.
 - **Results**: tools return JSON-serializable dicts; errors are
-  `ErrorResponse(...).dict()` with `success: false` and an error type.
+  `ErrorResponse(...).model_dump()` with `success: false` and an error type.
 
 ### Adding a backend
 
 1. Implement `BackendAdapter` in `src/simul/adapters/`.
 2. Write its registration module in `src/simul/mcp/registration/`.
-3. Add one `BackendSpec` to `src/simul/mcp/backends.py`.
+3. Add one `BackendSpec` to `src/simul/mcp/backends.py`, with the summary
+   sentence and routing rule the instructions state for it.
 
 The server, `simul info`, `get_capabilities` and the routing
 instructions pick it up from there.
@@ -132,7 +141,10 @@ be checked on both a 5.1 and a 6.0 install. Copy any project a test mutates
 The FastMCP test double lives in `tests/fakes.py` and is installed by the
 `fake_fastmcp` fixture. `tests/mcp/test_tool_meta_drift.py` fails when an
 Isaac tool method lacks `@tool_meta` or its wrapper drifts from the
-implementation.
+implementation. A session-wide fixture in `tests/conftest.py` makes
+`simul.mcp.backends.is_isaac_platform_supported` report a supported platform,
+so the suite registers the Isaac tools on a macOS machine just as on Linux CI;
+`tests/mcp/test_isaac_platform_gate.py` pins the platform per test instead.
 
 Isaac Sim's own interpreter is used only for one smoke test:
 

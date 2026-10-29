@@ -27,6 +27,7 @@ class FakeFastMCP:
         self.instructions: Optional[str] = kwargs.get("instructions")
         self.tools: List[SimpleNamespace] = []
         self.by_name: Dict[str, ToolFunction] = {}
+        self.resources: List[str] = []
         self.local_provider = SimpleNamespace(_components={})
         self.run_calls: List[Dict[str, Any]] = []
 
@@ -60,10 +61,13 @@ class FakeFastMCP:
                 return SimpleNamespace(annotations=tool.kwargs.get("annotations"))
         return None
 
-    def resource(self, *args: Any, **kwargs: Any) -> Callable[[ToolFunction], ToolFunction]:
-        """Accept a resource registration and return the function unchanged."""
+    def resource(
+        self, uri: str, *args: Any, **kwargs: Any
+    ) -> Callable[[ToolFunction], ToolFunction]:
+        """Record the resource's URI; the decorator hands the function back unchanged."""
 
         def decorator(func: ToolFunction) -> ToolFunction:
+            self.resources.append(uri)
             return func
 
         return decorator

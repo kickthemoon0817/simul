@@ -27,6 +27,8 @@ No running application needed. File arguments must be inside the sandbox
 
 Requires a running Isaac Sim 5.1.0, 6.0.0 or 6.0.1 reachable over the bridge
 (8229) or the stock Python socket (8226). See [isaac-sim.md](isaac-sim.md).
+Registered by default only on Linux and Windows, where Isaac Sim runs
+([Platforms](isaac-sim.md#platforms)).
 
 | Group | Tools |
 |---|---|
@@ -73,7 +75,7 @@ Requires an editor with Remote Control and Python enabled; run
 |---|---|
 | `unreal_health_check` | Connectivity, engine version, project name |
 | `ping_unreal` | Reachability and latency |
-| `list_unreal_instances` | Editors reachable on the scanned ports |
+| `list_unreal_instances` | Editors on the scanned ports: identity, viewports, active and attached flags. Same payload as `simul unreal instances`; see [unreal-attachment.md](unreal-attachment.md#discover-and-select) |
 | `control_unreal_ui` | Named editor controls and per-agent viewport pointers in attached mode; works with script execution disabled. See [unreal-attachment.md](unreal-attachment.md) |
 | `capture_unreal_viewport` | Viewport screenshot (PNG) |
 | `execute_unreal_script` | Run Python inside the editor |

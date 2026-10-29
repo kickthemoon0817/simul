@@ -46,9 +46,10 @@ class TestMCPDiscoverability:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The server identifies as ``simul``; its instructions carry the 3D scope."""
+        monkeypatch.setattr(server_module, "_FASTMCP_SUPPORTS_INSTRUCTIONS", True)
         instance = _make_server(monkeypatch)
         assert instance.mcp.name == "simul"
-        assert "3D simulation" in server_module._MCP_INSTRUCTIONS
+        assert "3D simulation" in instance.mcp.instructions
 
     def test_server_version_is_set(
         self, monkeypatch: pytest.MonkeyPatch
@@ -76,15 +77,27 @@ class TestMCPDiscoverability:
     def test_instructions_mention_key_domains(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Instructions must mention Isaac Sim, USD, Blender, Unreal."""
+        """With every backend registered the instructions cover Isaac Sim, USD, Blender, Unreal."""
         monkeypatch.setattr(server_module, "_FASTMCP_SUPPORTS_INSTRUCTIONS", True)
-        instance = _make_server(monkeypatch)
+        instance = _make_full_server(monkeypatch)
         text: str = instance.mcp.instructions
         for keyword in ("Isaac Sim", "USD", "Blender", "Unreal"):
             assert keyword in text, f"Missing domain keyword: {keyword}"
 
+    def test_instructions_leave_out_unregistered_backends(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only Isaac registers here, so the instructions name no other engine."""
+        monkeypatch.setattr(server_module, "_FASTMCP_SUPPORTS_INSTRUCTIONS", True)
+        instance = _make_server(monkeypatch)
+        text: str = instance.mcp.instructions
+        assert "Isaac Sim" in text
+        for keyword in ("Blender", "Unreal", "blender", "unreal", "load_usd_file"):
+            assert keyword not in text, f"Mentions an unregistered backend: {keyword}"
+
     # ------------------------------------------------------------------
-    # 3. Core tool listing (USD gated on its adapter, Isaac always registered)
+    # 3. Core tool listing (USD gated on its adapter; Isaac registered on a supported
+    #    platform, which tests/conftest.py reports for the whole session)
     # ------------------------------------------------------------------
     _CORE_USD_TOOLS: frozenset[str] = frozenset({
         "load_usd_file",
@@ -113,7 +126,7 @@ class TestMCPDiscoverability:
         leaked = self._CORE_USD_TOOLS & tool_names
         assert not leaked, f"USD tools registered without an adapter: {leaked}"
 
-    def test_isaac_tools_always_registered(
+    def test_isaac_tools_registered_on_supported_platform(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Isaac Sim tools register even when Isaac is unreachable."""
@@ -261,9 +274,10 @@ class TestCapabilitiesReport:
 
         assert set(report) == {"isaac", "usd", "blender", "unreal"}
         for backend, entry in report.items():
-            assert set(entry) == {"enabled", "available", "capabilities"}, backend
+            assert set(entry) == {"enabled", "available", "capabilities", "skipped"}, backend
             assert entry["enabled"] is True, backend
             assert entry["available"] is True, backend
+            assert entry["skipped"] is None, backend
         assert "load_usd_files" in report["usd"]["capabilities"]
         assert report["blender"]["capabilities"] == ["stub_capability"]
         assert report["unreal"]["capabilities"] == ["stub_capability"]
@@ -276,7 +290,12 @@ class TestCapabilitiesReport:
 
         report = instance.get_capabilities()
 
-        assert report["usd"] == {"enabled": True, "available": False, "capabilities": []}
+        assert report["usd"] == {"enabled": True, "available": False, "capabilities": [], "skipped": None}
         assert report["blender"]["available"] is False
-        assert report["unreal"] == {"enabled": False, "available": False, "capabilities": []}
+        assert report["unreal"] == {
+            "enabled": False,
+            "available": False,
+            "capabilities": [],
+            "skipped": "left out of --backends",
+        }
         assert report["isaac"]["enabled"] is False

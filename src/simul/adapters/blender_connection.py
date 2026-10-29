@@ -353,6 +353,7 @@ class BlenderAttachments:
             "blender_bridge/agent_cursor.py": "blender_bridge/agent_cursor.py",
             "blender_bridge/protocol.py": "blender_bridge/protocol.py",
             "adapters/blender_runtime.py": "adapters/blender_runtime.py",
+            "utils/errors.py": "utils/errors.py",
             "utils/paths.py": "utils/paths.py",
             "utils/private_files.py": "utils/private_files.py",
             "resources/__init__.py": "resources/__init__.py",

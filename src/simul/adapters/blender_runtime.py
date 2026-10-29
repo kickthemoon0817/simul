@@ -15,7 +15,7 @@ import os
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, overload
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, overload
 
 try:
     import bpy
@@ -53,6 +53,31 @@ def add_context_hint(error: Optional[str]) -> Optional[str]:
     if not error or _CONTEXT_MEMBER_ERROR not in error or CONTEXT_OVERRIDE_HINT in error:
         return error
     return f"{error}. {CONTEXT_OVERRIDE_HINT}"
+
+
+def _bpy_op(description: str, operator: Callable[..., Any], /, **properties: Any) -> Any:
+    """Run one ``bpy.ops`` operator, noting ``description`` on its failure.
+
+    The exception propagates unchanged, so its class reaches the error
+    envelope's ``error_type``: bpy raises RuntimeError for a failed poll or an
+    error the operator reports, and TypeError for a bad property value. The
+    note names what bpy's message leaves out, such as the object or the
+    resolved file path; error envelopes render it as a ``description: message``
+    prefix (``simul.utils.errors.exception_message``).
+
+    Args:
+        description: What failed, e.g. ``Failed to add rigid body to 'Cube'``.
+        operator: The ``bpy.ops`` operator to call.
+        **properties: The operator's properties.
+
+    Returns:
+        The operator's result.
+    """
+    try:
+        return operator(**properties)
+    except Exception as exc:
+        exc.add_note(description)
+        raise
 
 
 @dataclass
@@ -1175,12 +1200,11 @@ class BlenderRuntimeSession:
             raise ValueError(f"Not a .blend file: {file_path}")
 
         blender_module: Any = bpy
-        try:
-            blender_module.ops.wm.open_mainfile(filepath=file_path)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to open .blend file '{file_path}': {exc}"
-            ) from exc
+        _bpy_op(
+            f"Failed to open .blend file '{file_path}'",
+            blender_module.ops.wm.open_mainfile,
+            filepath=file_path,
+        )
 
         obj_count = len(blender_module.data.objects)
         return {"file_path": file_path, "object_count": obj_count}
@@ -1203,12 +1227,11 @@ class BlenderRuntimeSession:
         blender_module: Any = bpy
 
         if file_path is not None:
-            try:
-                blender_module.ops.wm.save_as_mainfile(filepath=file_path)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Failed to save .blend file to '{file_path}': {exc}"
-                ) from exc
+            _bpy_op(
+                f"Failed to save .blend file to '{file_path}'",
+                blender_module.ops.wm.save_as_mainfile,
+                filepath=file_path,
+            )
             return {"file_path": file_path}
 
         current = blender_module.data.filepath
@@ -1218,10 +1241,7 @@ class BlenderRuntimeSession:
                 "Pass a file_path argument."
             )
         self._deny_outside_sandbox(current, write=True)
-        try:
-            blender_module.ops.wm.save_mainfile()
-        except Exception as exc:
-            raise RuntimeError(f"Failed to save .blend file: {exc}") from exc
+        blender_module.ops.wm.save_mainfile()
         return {"file_path": current}
 
     def import_file(self, file_path: str, file_format: str) -> Dict[str, Any]:
@@ -1432,24 +1452,16 @@ class BlenderRuntimeSession:
 
         if action == "stop":
             if screen.is_animation_playing:
-                try:
-                    blender_module.ops.screen.animation_cancel(restore_frame=False)
-                except Exception as exc:
-                    raise RuntimeError(f"Failed to cancel animation: {exc}") from exc
+                blender_module.ops.screen.animation_cancel(restore_frame=False)
             return {
                 "action": "stop",
                 "is_playing": False,
             }
 
-        try:
-            if action == "reverse":
-                blender_module.ops.screen.animation_play(reverse=True)
-            else:
-                blender_module.ops.screen.animation_play()
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to play animation (action={action}): {exc}"
-            ) from exc
+        if action == "reverse":
+            blender_module.ops.screen.animation_play(reverse=True)
+        else:
+            blender_module.ops.screen.animation_play()
 
         return {
             "action": action,
@@ -1611,19 +1623,15 @@ class BlenderRuntimeSession:
 
         scene = blender_module.context.scene
         if scene.rigidbody_world is None:
-            try:
-                blender_module.ops.rigidbody.world_add()
-            except Exception as exc:
-                raise RuntimeError(f"Failed to create rigid body world: {exc}") from exc
+            blender_module.ops.rigidbody.world_add()
 
         blender_module.context.view_layer.objects.active = obj
         obj.select_set(True)
-        try:
-            blender_module.ops.rigidbody.object_add(type=body_type.upper())
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to add rigid body to '{object_name}': {exc}"
-            ) from exc
+        _bpy_op(
+            f"Failed to add rigid body to '{object_name}'",
+            blender_module.ops.rigidbody.object_add,
+            type=body_type.upper(),
+        )
 
         rb = obj.rigid_body
         rb.mass = mass
@@ -1662,14 +1670,7 @@ class BlenderRuntimeSession:
         blender_module: Any = bpy
         loc = tuple(location or [0.0, 0.0, 0.0])
 
-        try:
-            blender_module.ops.object.effector_add(
-                type=field_type.upper(), location=loc
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to add force field '{field_type}': {exc}"
-            ) from exc
+        blender_module.ops.object.effector_add(type=field_type.upper(), location=loc)
         field_obj = blender_module.context.active_object
         if name:
             field_obj.name = name
@@ -1734,29 +1735,16 @@ class BlenderRuntimeSession:
 
         scene = blender_module.context.scene
         if scene.rigidbody_world is None:
-            try:
-                blender_module.ops.rigidbody.world_add()
-            except Exception as exc:
-                raise RuntimeError(f"Failed to create rigid body world: {exc}") from exc
+            blender_module.ops.rigidbody.world_add()
 
         loc = tuple(location or [0.0, 0.0, 0.0])
-        try:
-            blender_module.ops.object.empty_add(location=loc)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to add constraint empty at {loc}: {exc}"
-            ) from exc
+        blender_module.ops.object.empty_add(location=loc)
         empty = blender_module.context.active_object
         empty.name = f"RBC_{object1_name}_{object2_name}"
 
         empty.select_set(True)
         blender_module.context.view_layer.objects.active = empty
-        try:
-            blender_module.ops.rigidbody.constraint_add(type=constraint_type.upper())
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to add rigid body constraint '{constraint_type}': {exc}"
-            ) from exc
+        blender_module.ops.rigidbody.constraint_add(type=constraint_type.upper())
 
         rbc = empty.rigid_body_constraint
         rbc.object1 = obj1
@@ -1951,13 +1939,8 @@ class BlenderRuntimeSession:
         pc.frame_end = frame_end
 
         # Blender 4.0 removed the positional context-override dict.
-        try:
-            with blender_module.context.temp_override(scene=scene, point_cache=pc):
-                blender_module.ops.ptcache.bake(bake=True)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to bake simulation (frames {frame_start}-{frame_end}): {exc}"
-            ) from exc
+        with blender_module.context.temp_override(scene=scene, point_cache=pc):
+            blender_module.ops.ptcache.bake(bake=True)
 
         return {
             "frame_start": frame_start,
@@ -1978,11 +1961,8 @@ class BlenderRuntimeSession:
             raise ValueError("No rigid body world to free")
 
         pc = scene.rigidbody_world.point_cache
-        try:
-            with blender_module.context.temp_override(scene=scene, point_cache=pc):
-                blender_module.ops.ptcache.free_bake()
-        except Exception as exc:
-            raise RuntimeError(f"Failed to free baked simulation data: {exc}") from exc
+        with blender_module.context.temp_override(scene=scene, point_cache=pc):
+            blender_module.ops.ptcache.free_bake()
 
         return {}
 

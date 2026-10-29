@@ -48,6 +48,14 @@ EDITOR_STATE = (
     "_simul_editor = sys.modules['_simul_unreal_attachment_v1']\n"
 )
 
+# Identity for discovery and attachment, plus the project name. The name is read
+# here rather than in STATE_MODULE.identity(): an editor keeps the module an
+# earlier simul installed for its whole lifetime, so new fields go outside it.
+EDITOR_IDENTITY = EDITOR_STATE + (
+    "print(json.dumps(dict(_simul_editor.identity(),"
+    " project_name=unreal.SystemLibrary.get_game_name())))\n"
+)
+
 CONTROL_UI = """
 import json, unreal
 level = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)

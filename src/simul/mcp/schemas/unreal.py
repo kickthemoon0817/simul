@@ -53,33 +53,88 @@ class UnrealPingResponse(BaseModel):
 
 
 class UnrealInstanceInfo(BaseModel):
-    """Information about a single discovered Unreal Engine instance."""
+    """One endpoint reported by Unreal discovery.
 
-    name: str = Field(..., description="Instance identifier")
+    ``list_unreal_instances`` and ``simul unreal instances`` return the same
+    records (``simul.adapters.unreal_connection.discover_instances``). The
+    identity fields are null, and the lists empty, when the editor's Python
+    did not answer; ``error`` says why.
+    """
+
+    name: str = Field(
+        ..., description="'default' for the active endpoint, otherwise 'unreal-<port>'"
+    )
     host: str = Field(..., description="Remote Control API host")
     port: int = Field(..., description="Remote Control API port")
-    reachable: bool = Field(..., description="Whether the instance responded to ping")
-    active: bool = Field(False, description="Whether this is the currently active instance")
+    reachable: bool = Field(
+        ..., description="Whether Remote Control answered GET /remote/info"
+    )
+    active: bool = Field(
+        False,
+        description=(
+            "Whether Unreal tools target this endpoint: the configured "
+            "host/port, or the attached editor in attached mode"
+        ),
+    )
+    attached: bool = Field(
+        False,
+        description=(
+            "Whether this editor, its loaded map and the selected viewport "
+            "match the saved simul unreal attach selection"
+        ),
+    )
+    latency_ms: Optional[float] = Field(
+        None, description="GET /remote/info round trip in milliseconds"
+    )
+    error: Optional[str] = Field(
+        None,
+        description="Why the endpoint is unreachable or its identity is unavailable",
+    )
+    instance_id: Optional[str] = Field(
+        None, description="Editor process identity; changes when the editor restarts"
+    )
+    document_id: Optional[str] = Field(
+        None, description="Loaded-map generation; changes when a map is opened or replaced"
+    )
+    pid: Optional[int] = Field(None, description="Editor process ID")
     engine_version: Optional[str] = Field(None, description="Unreal Engine version")
-    project_name: Optional[str] = Field(None, description="Active project name")
-    loaded_map: Optional[str] = Field(None, description="Currently loaded level path")
-    latency_ms: Optional[float] = Field(None, description="Ping latency in milliseconds")
+    project_name: Optional[str] = Field(None, description="Project name")
+    project_path: Optional[str] = Field(None, description="Absolute .uproject path")
+    map_path: Optional[str] = Field(None, description="Loaded editor world path")
+    active_viewport: Optional[str] = Field(
+        None, description="Config key of the active level viewport"
+    )
+    viewports: List[str] = Field(
+        default_factory=list,
+        description="Level viewport config keys, for simul unreal attach --viewport",
+    )
+    dirty_map_packages: List[str] = Field(
+        default_factory=list, description="Map packages with unsaved changes"
+    )
 
 
 class UnrealListInstancesResponse(BaseModel):
-    """Response listing all discovered Unreal Engine instances."""
+    """Response listing discovered Unreal editors."""
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     instances: List[UnrealInstanceInfo] = Field(
-        default_factory=list, description="Discovered instances"
+        default_factory=list,
+        description=(
+            "Discovered instances by port; a scan omits ports where nothing "
+            "answered, except the active endpoint"
+        ),
     )
     active_instance: Optional[str] = Field(
-        None, description="Name of the currently active instance"
+        None, description="Name of the instance Unreal tools target"
     )
-    total_discovered: int = Field(0, description="Total instances found via port scan")
+    total_discovered: int = Field(0, description="Instances whose Remote Control answered")
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Attached-mode problems: missing, invalid or stale attachment",
+    )
 
 
 class UnrealHealthCheckResponse(BaseModel):

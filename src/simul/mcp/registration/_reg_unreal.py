@@ -4,7 +4,6 @@ Unreal Engine runtime tool registration for the Simul MCP server.
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from fastmcp.tools.tool import ToolResult
@@ -31,6 +30,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     """
     # Imported here rather than at module level: the adapter needs aiohttp,
     # and this module must import even where the Unreal backend is absent.
+    from ...adapters import unreal_connection
     from ...adapters.unreal_runtime import UNREAL_EXEC_MODES, UnrealRuntimeSession
 
     surface = THIN_UNREAL_TOOLS if thin else None
@@ -100,9 +100,13 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     @tool(
         name="list_unreal_instances",
         description=(
-            "Discover all running Unreal Engine instances by scanning the configured "
-            "port range for Remote Control API endpoints. Returns each instance's "
-            "reachability, engine version, project name, and latency."
+            "Discover running Unreal editors (same payload as `simul unreal "
+            "instances`). Each instance: reachable, latency_ms, error, editor "
+            "identity (pid, instance_id, project_name, project_path, map_path, "
+            "viewports, dirty_map_packages; null when its Python does not "
+            "answer), active (Unreal tools target it) and attached (the saved "
+            "`simul unreal attach` selection). Ports that do not answer are "
+            "omitted, except the active one."
         ),
         annotations=server._tool_annotations(
             read_only=True,
@@ -117,93 +121,26 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
         scan: bool = True,
     ) -> ToolResult:
         """
-        Scan configured port range for running Unreal Engine instances.
+        Discover running Unreal editors.
 
         Args:
-            scan: When True, probe ports in the configured range concurrently.
+            scan: When True, probe the configured port range plus the
+                configured and attached ports concurrently. When False, probe
+                only the active endpoint.
 
         Returns:
-            List of discovered instances or error response.
+            Discovered instances or error response.
         """
-
-        async def _list_instances(session: Any) -> Dict[str, Any]:
-            from ...adapters.unreal_runtime import (
-                UnrealRuntimeSession,
-                _passphrase_to_md5,
-            )
-
-            cfg = server.settings.unreal
-            host = cfg.host
-            active_port = cfg.port
-            if cfg.mode == "attached":
-                session._load_attachment()
-                host, active_port = session.host, session.port
-            instances: List[UnrealInstanceInfo] = []
-
-            if scan:
-                ports = list(range(cfg.scan_port_start, cfg.scan_port_end))
-                # Always include the active port even if outside scan range
-                if active_port not in ports:
-                    ports.insert(0, active_port)
-                # If a passphrase is configured, every probe must carry the
-                # header — otherwise a passphrase-enforcing editor returns
-                # 401 and discovery silently reports it as unreachable.
-                discovery_md5 = _passphrase_to_md5(cfg.passphrase)
-                results = await asyncio.gather(
-                    *(
-                        UnrealRuntimeSession.probe_port(
-                            host,
-                            port,
-                            timeout=cfg.ping_timeout,
-                            passphrase_md5=discovery_md5,
-                        )
-                        for port in ports
-                    ),
-                    return_exceptions=True,
-                )
-                for port, probe_result in zip(ports, results):
-                    if isinstance(probe_result, BaseException):
-                        continue
-                    instances.append(
-                        UnrealInstanceInfo(
-                            name="default" if port == active_port else f"unreal-{port}",
-                            host=host,
-                            port=port,
-                            reachable=probe_result.get("reachable", False),
-                            active=port == active_port,
-                            engine_version=probe_result.get("engine_version"),
-                            project_name=probe_result.get("project_name"),
-                            loaded_map=None,
-                            latency_ms=probe_result.get("latency_ms"),
-                        )
-                    )
-            else:
-                payload = await session.ping()
-                instances.append(
-                    UnrealInstanceInfo(
-                        name="default",
-                        host=host,
-                        port=active_port,
-                        reachable=payload.get("reachable", False),
-                        active=True,
-                        latency_ms=payload.get("latency_ms"),
-                    )
-                )
-
-            reachable = [i for i in instances if i.reachable]
-            return UnrealListInstancesResponse(
-                success=True,
-                instances=instances,
-                active_instance=next((i.name for i in instances if i.active), None),
-                total_discovered=len(reachable),
-            ).model_dump()
-
         return await server._exec_backend(
             "list_unreal_instances",
             server.unreal_adapter,
             "Unreal",
             UnrealListInstancesResponse,
-            _list_instances,
+            # Discovery opens its own session per probed port; the envelope's
+            # session is bound to one endpoint and goes unused.
+            lambda _session: unreal_connection.discover_instances(
+                server.settings, scan=scan
+            ),
             params={"scan": scan},
         )
 
