@@ -1586,6 +1586,23 @@ class TestVisualObservationTools:
 
         assert list(cam.scale) == pytest.approx([2.0, 2.0, 2.0])
 
+    def test_get_bounding_box_reports_a_move_written_since_the_last_evaluation(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """World-space corners came from the matrix_world before the move."""
+        cube = FakeTransformObject("Cube", object_type="MESH", stored=True)
+        cube.bound_box = _box(-1.0, 1.0)
+        fake_bpy = self._make_fake_bpy_with_camera(objects=[cube])
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        session = blender_runtime.BlenderRuntimeSession()
+        session.set_object_transform("Cube", location=[10.0, 0.0, 0.0])
+
+        result = session.get_bounding_box("Cube", world_space=True)
+
+        assert result["bbox_min"] == pytest.approx([9.0, -1.0, -1.0])
+        assert result["bbox_max"] == pytest.approx([11.0, 1.0, 1.0])
+
     def test_set_camera_view_places_a_camera_whose_rig_moved_since_the_last_evaluation(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:

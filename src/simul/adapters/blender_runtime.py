@@ -564,6 +564,9 @@ class BlenderRuntimeSession:
         obj = self._get_object_or_raise(object_name)
 
         if world_space:
+            # matrix_world lags a transform written by an earlier call until
+            # the depsgraph is evaluated (background Blender / embedded mode).
+            self._evaluate_transforms()
             corners = self._world_bound_box(obj)
         else:
             corners = [list(co) for co in obj.bound_box]
@@ -3602,6 +3605,7 @@ class BlenderRuntimeSession:
             width: Render width.
             height: Render height.
         """
+        self._evaluate_transforms()
         corners: List[List[float]] = []
         for obj in scene.objects:
             if (
