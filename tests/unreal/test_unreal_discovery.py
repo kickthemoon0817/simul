@@ -9,7 +9,6 @@ released after binding, so connections to it are refused.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import random
 import socket
@@ -410,9 +409,13 @@ def test_an_editor_without_identity_stays_reachable_and_says_why(
     assert reason in record["error"]
 
 
-@pytest.mark.parametrize("passphrase", [None, "password"])
+@pytest.mark.parametrize(
+    "passphrase,header",
+    # UE compares the header with the MD5 of the plaintext (FMD5::HashAnsiString).
+    [(None, None), ("password", "5f4dcc3b5aa765d61d8327deb882cf99")],
+)
 def test_every_probe_carries_the_configured_passphrase(
-    tmp_path: Any, passphrase: Optional[str]
+    tmp_path: Any, passphrase: Optional[str], header: Optional[str]
 ) -> None:
     """A passphrase-enforcing editor rejects requests without the header, so discovery must send it."""
     with _Editors([{"identity": _identity("auth", 9)}]) as editors:
@@ -424,8 +427,7 @@ def test_every_probe_carries_the_configured_passphrase(
         "/remote/info",
         "/remote/object/call",
     ]
-    expected = hashlib.md5(passphrase.encode()).hexdigest() if passphrase else None
-    assert {request["headers"].get("Passphrase") for request in requests} == {expected}
+    assert {request["headers"].get("Passphrase") for request in requests} == {header}
 
 
 def test_attach_explains_an_editor_without_identity(tmp_path: Any) -> None:
