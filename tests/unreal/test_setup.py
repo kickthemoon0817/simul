@@ -155,12 +155,51 @@ def test_patch_ini_preserves_unrelated_sections(tmp_path: Path) -> None:
     assert "bEnableRemotePythonExecution=True" in text
 
 
-def test_patch_ini_omits_bind_and_websocket_when_unset(tmp_path: Path) -> None:
-    """Default behavior: leave UE's defaults alone for hostname + WS port."""
-    patch_remote_control_ini(tmp_path, port=30010)
+def test_patch_ini_pins_websocket_bind_to_loopback_when_unset(tmp_path: Path) -> None:
+    """Without --bind the WS bind is pinned to loopback (UE's own default is
+    0.0.0.0 with an allow-all client list); the WS port keeps UE's default."""
+    result = patch_remote_control_ini(tmp_path, port=30010)
     text = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
+    assert "RemoteControlWebsocketServerBindAddress=127.0.0.1" in text
+    assert "RemoteControlWebsocketServerBindAddress" in result.added
+    assert result.warnings == []  # a brand-new ini was never exposed
     assert "RemoteControlHttpServerHostname" not in text
     assert "RemoteControlWebSocketServerPort" not in text
+
+
+def test_patch_ini_pins_loopback_on_an_ini_from_an_older_setup(tmp_path: Path) -> None:
+    """Projects set up before the pin have no WS bind key: the next run adds
+    it and warns, since that editor was listening on every interface."""
+    config_dir = tmp_path / "Config"
+    config_dir.mkdir()
+    target = config_dir / "DefaultRemoteControl.ini"
+    target.write_text(
+        f"[{REMOTE_CONTROL_SECTION}]\n"
+        "bAutoStartWebServer=True\n"
+        "bAutoStartWebSocketServer=True\n"
+        "RemoteControlHttpServerPort=30010\n"
+        "bRestrictServerAccess=True\n"
+        "bEnableRemotePythonExecution=True\n"
+        "bAllowConsoleCommandRemoteExecution=True\n",
+        encoding="utf-8",
+    )
+
+    result = patch_remote_control_ini(tmp_path, port=30010)
+
+    assert result.changed is True
+    assert result.added == ["RemoteControlWebsocketServerBindAddress"]
+    assert "RemoteControlWebsocketServerBindAddress=127.0.0.1" in target.read_text()
+    assert any("0.0.0.0" in w and "restart the editor" in w for w in result.warnings)
+    assert patch_remote_control_ini(tmp_path, port=30010).changed is False
+
+
+def test_keep_public_bind_without_an_existing_bind_still_pins_loopback(tmp_path: Path) -> None:
+    """--allow-public without --bind keeps an earlier public bind; when there
+    is none, there is nothing public to keep, so loopback is pinned."""
+    uproject = _write_uproject(tmp_path, {"FileVersion": 3})
+    ensure_remote_control_config(uproject, port=30010, keep_public_bind=True)
+    rc_text = (tmp_path / "Config" / "DefaultRemoteControl.ini").read_text()
+    assert "RemoteControlWebsocketServerBindAddress=127.0.0.1" in rc_text
 
 
 def test_patch_ini_writes_bind_to_websocket_address_when_set(tmp_path: Path) -> None:
@@ -368,7 +407,8 @@ def test_patch_ini_noop_when_already_correct(tmp_path: Path) -> None:
         "RemoteControlHttpServerPort=30010\n"
         "bRestrictServerAccess=True\n"
         "bEnableRemotePythonExecution=True\n"
-        "bAllowConsoleCommandRemoteExecution=True\n",
+        "bAllowConsoleCommandRemoteExecution=True\n"
+        "RemoteControlWebsocketServerBindAddress=127.0.0.1\n",
         encoding="utf-8",
     )
     before = target.read_text()
