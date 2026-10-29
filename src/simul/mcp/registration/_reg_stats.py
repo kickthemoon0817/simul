@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 from ._helpers import with_param_descriptions
 

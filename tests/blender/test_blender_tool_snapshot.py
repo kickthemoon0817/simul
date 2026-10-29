@@ -664,7 +664,7 @@ def _record_calls(tmp_path: Path, mode: str) -> Dict[str, Any]:
                             ],
                         }
                     invalid = _invalid_arguments(
-                        CALLS[name]["minimal"], listed[name].inputSchema
+                        CALLS[name]["minimal"], listed[name].input_schema
                     )
                     if invalid is not None:
                         before = len(_usage_rows(instance))

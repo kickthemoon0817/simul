@@ -60,7 +60,7 @@ def _tool(instance: server_module.SimulMCPServer, name: str) -> SimpleNamespace:
 
 
 def _hints(instance: server_module.SimulMCPServer, name: str) -> Dict[str, Any]:
-    return _tool(instance, name).kwargs["annotations"].model_dump(exclude_none=True)
+    return _tool(instance, name).kwargs["annotations"].model_dump(by_alias=True, exclude_none=True)
 
 
 def _payload(result: Any) -> Dict[str, Any]:

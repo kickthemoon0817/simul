@@ -364,7 +364,7 @@ def test_attach_existing_gui_and_refuse_changed_targets(
                     width=64, height=64, use_render_fallback=True, agent_id="viewer"
                 )
             )
-            assert mcp_capture.content[0].mimeType == "image/jpeg"
+            assert mcp_capture.content[0].mime_type == "image/jpeg"
             refused = json.loads(
                 asyncio.run(capture_tool.func(width=64, height=64, agent_id="   "))
                 .content[0]

@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 from ..schemas.common import ErrorResponse
 from ._helpers import with_param_descriptions
@@ -163,6 +163,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             Confirmation with the new active instance, session info,
             and compatibility status.
         """
+        refusal = server._session_required_error("set_active_isaac_instance")
+        if refusal is not None:
+            return server._as_text_result(refusal)
         if instance_name not in server._isaac_clients:
             available = list(server._isaac_clients.keys())
             return server._as_text_result(
@@ -272,6 +275,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         Returns:
             Registration result with compatibility info.
         """
+        refusal = server._session_required_error("claim_isaac_instance")
+        if refusal is not None:
+            return server._as_text_result(refusal)
         instance_name = server._get_effective_instance_name()
         client = server._isaac_clients.get(instance_name)
         if not client:
@@ -342,6 +348,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         Returns:
             Release confirmation.
         """
+        refusal = server._session_required_error("release_isaac_instance")
+        if refusal is not None:
+            return server._as_text_result(refusal)
         instance_name = server._get_effective_instance_name()
         binding = server._get_active_binding()
         _agent_id = agent_id or (binding.agent_id if binding is not None else None)

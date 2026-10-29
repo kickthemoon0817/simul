@@ -96,7 +96,7 @@ def test_location_is_listed_as_optional_and_can_be_left_out(
     async def _run() -> Any:
         async with Client(instance.mcp) as client:
             tools = {t.name: t for t in await client.list_tools()}
-            return tools["add_blender_force_field"].inputSchema
+            return tools["add_blender_force_field"].input_schema
 
     schema = asyncio.run(_run())
     assert schema["required"] == ["field_type"]

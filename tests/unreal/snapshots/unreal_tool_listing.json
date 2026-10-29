@@ -2,13 +2,14 @@
  "tools": [
   {
    "name": "unreal_health_check",
-   "title": null,
+   "title": "Unreal Health Check",
    "description": "Check connectivity to the Unreal Engine Remote Control API.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
-    "properties": {},
-    "type": "object"
+    "properties": {}
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -22,18 +23,18 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "ping_unreal",
-   "title": null,
+   "title": "Ping Unreal",
    "description": "Pre-flight check: verify that a running Unreal Engine instance is reachable on the configured Remote Control API port. Call this before other Unreal tools to confirm connectivity and measure latency.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
-    "properties": {},
-    "type": "object"
+    "properties": {}
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -47,14 +48,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "list_unreal_instances",
-   "title": null,
+   "title": "List Unreal Instances",
    "description": "Discover running Unreal editors (same payload as `simul unreal instances`). Each instance: reachable, latency_ms, error, editor identity (pid, instance_id, project_name, project_path, map_path, viewports, dirty_map_packages; null when its Python does not answer), active (Unreal tools target it) and attached (the saved `simul unreal attach` selection). Ports that do not answer are omitted, except the active one.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "scan": {
@@ -62,9 +63,9 @@
       "description": "When True, probe the configured port range plus the configured and attached ports concurrently. When False, probe only the active endpoint.",
       "type": "boolean"
      }
-    },
-    "type": "object"
+    }
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -78,14 +79,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "capture_unreal_viewport",
-   "title": null,
+   "title": "Capture Unreal Viewport",
    "description": "Capture a viewport screenshot via HighResScreenshot and return its path on the editor host. Pass inline=true to also receive the image itself as an image content block; captures above the inline size cap return the path alone.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "resolution_x": {
@@ -108,9 +109,9 @@
       "description": "Also return the image as an image content block.",
       "type": "boolean"
      }
-    },
-    "type": "object"
+    }
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -124,14 +125,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "execute_unreal_script",
-   "title": null,
+   "title": "Execute Unreal Script",
    "description": "Execute arbitrary Python code inside the Unreal Engine editor. Use for operations not covered by other tools. The code runs via PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return structured data. For granular CLI operations see: simul unreal --help",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "code": {
@@ -146,9 +147,9 @@
     },
     "required": [
      "code"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -162,14 +163,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "control_unreal_ui",
-   "title": null,
+   "title": "Control Unreal Ui",
    "description": "Named controls in the explicitly attached Unreal editor: inspect, select actors, edit transforms, pilot/eject actors, set game view, and show per-agent overlay cursors. Requires simul unreal attach.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "agent_control": {
@@ -262,9 +263,9 @@
     },
     "required": [
      "agent_control"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -278,18 +279,18 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "get_unreal_engine_info",
-   "title": null,
+   "title": "Get Unreal Engine Info",
    "description": "Get Unreal Engine runtime information.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
-    "properties": {},
-    "type": "object"
+    "properties": {}
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -303,18 +304,18 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "get_unreal_loaded_map",
-   "title": null,
+   "title": "Get Unreal Loaded Map",
    "description": "Get the currently loaded persistent level path.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
-    "properties": {},
-    "type": "object"
+    "properties": {}
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -328,14 +329,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "list_unreal_actors",
-   "title": null,
+   "title": "List Unreal Actors",
    "description": "List actors in the current Unreal Engine level with optional class and tag filters.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "class_filter": {
@@ -353,9 +354,9 @@
       "description": "Maximum number of actors to return.",
       "type": "integer"
      }
-    },
-    "type": "object"
+    }
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -369,14 +370,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "get_unreal_actor_info",
-   "title": null,
+   "title": "Get Unreal Actor Info",
    "description": "Get detailed information about a specific actor including transform, components, and tags.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -386,9 +387,9 @@
     },
     "required": [
      "actor_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -402,14 +403,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "search_unreal_assets",
-   "title": null,
+   "title": "Search Unreal Assets",
    "description": "Search the Unreal Asset Registry by name, class, or package path.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "query": {
@@ -432,9 +433,9 @@
       "description": "Maximum number of results.",
       "type": "integer"
      }
-    },
-    "type": "object"
+    }
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -448,14 +449,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "describe_unreal_object",
-   "title": null,
+   "title": "Describe Unreal Object",
    "description": "Get full property and function metadata for any UObject by path.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "object_path": {
@@ -465,9 +466,9 @@
     },
     "required": [
      "object_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -481,14 +482,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "get_unreal_actor_thumbnail",
-   "title": null,
+   "title": "Get Unreal Actor Thumbnail",
    "description": "Get a thumbnail image for an Unreal asset. The image arrives as an MCP image content block, followed by a JSON block with asset_path, format, width, height and image_attached=true.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "asset_path": {
@@ -508,9 +509,9 @@
     },
     "required": [
      "asset_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -524,18 +525,18 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "summarize_unreal_scene",
-   "title": null,
+   "title": "Summarize Unreal Scene",
    "description": "Generate an LLM-friendly digest of the current Unreal scene.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
-    "properties": {},
-    "type": "object"
+    "properties": {}
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -549,18 +550,18 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "get_unreal_viewport_info",
-   "title": null,
+   "title": "Get Unreal Viewport Info",
    "description": "Get active viewport camera and render information.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
-    "properties": {},
-    "type": "object"
+    "properties": {}
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -574,14 +575,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "set_unreal_camera_view",
-   "title": null,
+   "title": "Set Unreal Camera View",
    "description": "Set the editor viewport camera position and rotation.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "location_x": {
@@ -656,9 +657,9 @@
       "default": null,
       "description": "Camera roll in degrees."
      }
-    },
-    "type": "object"
+    }
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -672,14 +673,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "focus_unreal_on_actor",
-   "title": null,
+   "title": "Focus Unreal On Actor",
    "description": "Focus the editor viewport camera on a specific actor.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -694,9 +695,9 @@
     },
     "required": [
      "actor_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -710,14 +711,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "spawn_unreal_actor",
-   "title": null,
+   "title": "Spawn Unreal Actor",
    "description": "Spawn an actor from a class or asset path.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "asset_path": {
@@ -762,9 +763,9 @@
     },
     "required": [
      "asset_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -778,14 +779,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "delete_unreal_actor",
-   "title": null,
+   "title": "Delete Unreal Actor",
    "description": "Delete an actor from the level. DESTRUCTIVE operation.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -795,9 +796,9 @@
     },
     "required": [
      "actor_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -811,14 +812,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "set_unreal_actor_transform",
-   "title": null,
+   "title": "Set Unreal Actor Transform",
    "description": "Set an actor's world location, rotation and/or scale. Each is optional; one left out keeps its current value. Returns the transform read back.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -879,9 +880,9 @@
     },
     "required": [
      "actor_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -895,14 +896,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "set_unreal_actor_property",
-   "title": null,
+   "title": "Set Unreal Actor Property",
    "description": "Set a property on an Unreal actor by name and JSON value.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -927,9 +928,9 @@
      "actor_path",
      "property_name",
      "property_value"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -943,14 +944,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "call_unreal_actor_function",
-   "title": null,
+   "title": "Call Unreal Actor Function",
    "description": "Call a BlueprintCallable UFUNCTION on an actor.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -970,9 +971,9 @@
     "required": [
      "actor_path",
      "function_name"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -986,14 +987,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "set_unreal_actor_parent",
-   "title": null,
+   "title": "Set Unreal Actor Parent",
    "description": "Attach an actor to a parent actor or detach it.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -1008,9 +1009,9 @@
     },
     "required": [
      "actor_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1024,14 +1025,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "add_unreal_component",
-   "title": null,
+   "title": "Add Unreal Component",
    "description": "Add a component to an Unreal actor.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -1051,9 +1052,9 @@
     "required": [
      "actor_path",
      "component_class"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1067,14 +1068,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "set_unreal_actor_visibility",
-   "title": null,
+   "title": "Set Unreal Actor Visibility",
    "description": "Set actor visibility in the Unreal level.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -1094,9 +1095,9 @@
     },
     "required": [
      "actor_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1110,14 +1111,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "get_unreal_material_info",
-   "title": null,
+   "title": "Get Unreal Material Info",
    "description": "Get material instance parameters and metadata.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "material_path": {
@@ -1127,9 +1128,9 @@
     },
     "required": [
      "material_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1143,14 +1144,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "set_unreal_material_params",
-   "title": null,
+   "title": "Set Unreal Material Params",
    "description": "Set scalar/vector/texture parameters on a Material Instance.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "material_path": {
@@ -1175,9 +1176,9 @@
     },
     "required": [
      "material_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1191,14 +1192,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "create_unreal_material_instance",
-   "title": null,
+   "title": "Create Unreal Material Instance",
    "description": "Create a Material Instance Constant from a parent material.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "parent_path": {
@@ -1218,9 +1219,9 @@
     "required": [
      "parent_path",
      "instance_name"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1234,14 +1235,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "assign_unreal_material",
-   "title": null,
+   "title": "Assign Unreal Material",
    "description": "Assign a material to a mesh component's material slot.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -1261,9 +1262,9 @@
     "required": [
      "actor_path",
      "material_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1277,14 +1278,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "set_unreal_light_params",
-   "title": null,
+   "title": "Set Unreal Light Params",
    "description": "Set light component parameters (intensity, color, temperature, shadows); a parameter left out keeps its current value.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -1373,9 +1374,9 @@
     },
     "required": [
      "actor_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1389,14 +1390,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "set_unreal_render_settings",
-   "title": null,
+   "title": "Set Unreal Render Settings",
    "description": "Set rendering or post-process settings via console command.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "setting_name": {
@@ -1411,9 +1412,9 @@
     "required": [
      "setting_name",
      "setting_value"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1427,14 +1428,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "control_unreal_simulation",
-   "title": null,
+   "title": "Control Unreal Simulation",
    "description": "Control Play-In-Editor: start, stop, pause or resume. Exact frame stepping is unsupported.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "action": {
@@ -1444,9 +1445,9 @@
     },
     "required": [
      "action"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1460,18 +1461,18 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "get_unreal_simulation_status",
-   "title": null,
+   "title": "Get Unreal Simulation Status",
    "description": "Get current Play-In-Editor simulation status (playing, paused, stopped).",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
-    "properties": {},
-    "type": "object"
+    "properties": {}
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1485,14 +1486,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "enable_unreal_physics",
-   "title": null,
+   "title": "Enable Unreal Physics",
    "description": "Enable or disable physics simulation on an actor.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -1512,9 +1513,9 @@
     },
     "required": [
      "actor_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1528,14 +1529,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "set_unreal_collision",
-   "title": null,
+   "title": "Set Unreal Collision",
    "description": "Set an actor's collision preset and/or enable or disable its collision; what is left out is kept. Returns the state read back.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -1562,9 +1563,9 @@
     },
     "required": [
      "actor_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1578,14 +1579,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "apply_unreal_force",
-   "title": null,
+   "title": "Apply Unreal Force",
    "description": "Apply a force or impulse to an actor's physics body.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -1651,9 +1652,9 @@
     },
     "required": [
      "actor_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1667,14 +1668,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "set_unreal_physics_params",
-   "title": null,
+   "title": "Set Unreal Physics Params",
    "description": "Set physics body parameters (mass, damping, gravity) on an actor.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
@@ -1732,9 +1733,9 @@
     },
     "required": [
      "actor_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1748,14 +1749,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "import_unreal_usd",
-   "title": null,
+   "title": "Import Unreal Usd",
    "description": "Import USD with Unreal's optional USDImporter plugin, enabled at editor startup.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "usd_path": {
@@ -1783,9 +1784,9 @@
     },
     "required": [
      "usd_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1799,14 +1800,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "export_unreal_usd",
-   "title": null,
+   "title": "Export Unreal Usd",
    "description": "Export selected Unreal actors with the optional USDImporter plugin's LevelExporterUSD.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_paths": {
@@ -1834,9 +1835,9 @@
     "required": [
      "actor_paths",
      "output_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1850,14 +1851,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "convert_to_simready",
-   "title": null,
+   "title": "Convert To Simready",
    "description": "Unavailable in Unreal: SimReady conversion returns UnsupportedOperation without writing files.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "usd_path": {
@@ -1897,9 +1898,9 @@
     "required": [
      "usd_path",
      "output_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1913,14 +1914,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "validate_simready_asset",
-   "title": null,
+   "title": "Validate Simready Asset",
    "description": "Unavailable in Unreal: SimReady validation returns UnsupportedOperation.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "usd_path": {
@@ -1935,9 +1936,9 @@
     },
     "required": [
      "usd_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1951,18 +1952,18 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "get_unreal_interchange_info",
-   "title": null,
+   "title": "Get Unreal Interchange Info",
    "description": "Query available Interchange pipelines and supported formats.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
-    "properties": {},
-    "type": "object"
+    "properties": {}
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -1976,14 +1977,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "batch_unreal_operations",
-   "title": null,
+   "title": "Batch Unreal Operations",
    "description": "Execute multiple Remote Control operations in one HTTP call.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "operations": {
@@ -1993,9 +1994,9 @@
     },
     "required": [
      "operations"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2009,14 +2010,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "query_unreal_scene_graph",
-   "title": null,
+   "title": "Query Unreal Scene Graph",
    "description": "Query the Unreal scene graph hierarchy.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "root_path": {
@@ -2053,9 +2054,9 @@
       "default": null,
       "description": "Filter actors by UClass name."
      }
-    },
-    "type": "object"
+    }
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2069,14 +2070,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "analyze_unreal_scene_for_robotics",
-   "title": null,
+   "title": "Analyze Unreal Scene For Robotics",
    "description": "Classify level actors for robotics from their collision setup: floor-like surfaces a robot can stand on, small Movable objects it can grasp, and collision counts and problems (static meshes with physics collision but no simple shapes). Uses the bounding box of each actor's collision-enabled components; the thresholds come back as criteria.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "analysis_types": {
@@ -2096,9 +2097,9 @@
       "default": null,
       "description": "Only analyze actors whose label or object path contains this text, ignoring case; empty or null analyzes every actor."
      }
-    },
-    "type": "object"
+    }
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2112,14 +2113,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "generate_unreal_procedural_scene",
-   "title": null,
+   "title": "Generate Unreal Procedural Scene",
    "description": "Build a room, corridor, warehouse or outdoor test scene from Engine basic shapes inside the bounds, in one undoable transaction; the same arguments give the same scene. Returns the spawned actor paths and the tag and outliner folder that group them.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "scene_type": {
@@ -2144,9 +2145,9 @@
     },
     "required": [
      "scene_type"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2160,14 +2161,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "get_unreal_actor_by_semantic_label",
-   "title": null,
+   "title": "Get Unreal Actor By Semantic Label",
    "description": "Find level actors whose actor tags match a label: exact, contains or regex, ignoring case.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "label": {
@@ -2187,9 +2188,9 @@
     },
     "required": [
      "label"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2203,14 +2204,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "generate_unreal_mesh_primitive",
-   "title": null,
+   "title": "Generate Unreal Mesh Primitive",
    "description": "Create a parametric mesh primitive (box, sphere, cylinder, cone, torus, capsule).",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "primitive_type": {
@@ -2247,9 +2248,9 @@
     },
     "required": [
      "primitive_type"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2263,14 +2264,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "apply_unreal_mesh_boolean",
-   "title": null,
+   "title": "Apply Unreal Mesh Boolean",
    "description": "Apply boolean operation (union, subtract, intersect) between two meshes.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "target_mesh_path": {
@@ -2290,9 +2291,9 @@
      "target_mesh_path",
      "tool_mesh_path",
      "operation"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2306,14 +2307,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "compute_unreal_convex_hull",
-   "title": null,
+   "title": "Compute Unreal Convex Hull",
    "description": "Compute convex hull envelope of a mesh.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
@@ -2323,9 +2324,9 @@
     },
     "required": [
      "mesh_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2339,14 +2340,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "decompose_unreal_convex_hull",
-   "title": null,
+   "title": "Decompose Unreal Convex Hull",
    "description": "V-HACD convex decomposition for collision geometry.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
@@ -2376,9 +2377,9 @@
     },
     "required": [
      "mesh_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2392,14 +2393,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "edit_unreal_mesh_topology",
-   "title": null,
+   "title": "Edit Unreal Mesh Topology",
    "description": "Edit mesh topology (extrude, bevel, inset, loop cut, scale_faces).",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
@@ -2479,9 +2480,9 @@
     "required": [
      "mesh_path",
      "operation"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2495,14 +2496,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "subdivide_unreal_mesh",
-   "title": null,
+   "title": "Subdivide Unreal Mesh",
    "description": "Catmull-Clark / Loop / bilinear subdivision.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
@@ -2522,9 +2523,9 @@
     },
     "required": [
      "mesh_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2538,14 +2539,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "simplify_unreal_mesh",
-   "title": null,
+   "title": "Simplify Unreal Mesh",
    "description": "Simplify/decimate a mesh to reduce triangle count.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
@@ -2591,9 +2592,9 @@
     },
     "required": [
      "mesh_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2607,14 +2608,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "cut_unreal_mesh_plane",
-   "title": null,
+   "title": "Cut Unreal Mesh Plane",
    "description": "Cut/slice a mesh along an arbitrary plane.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
@@ -2644,9 +2645,9 @@
      "mesh_path",
      "plane_origin",
      "plane_normal"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2660,14 +2661,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "validate_unreal_mesh",
-   "title": null,
+   "title": "Validate Unreal Mesh",
    "description": "Validate mesh integrity (manifold, normals, degenerates, self-intersection).",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
@@ -2682,9 +2683,9 @@
     },
     "required": [
      "mesh_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2698,14 +2699,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "convert_unreal_mesh_format",
-   "title": null,
+   "title": "Convert Unreal Mesh Format",
    "description": "Convert mesh between formats (static mesh, dynamic mesh, skeletal mesh).",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
@@ -2725,9 +2726,9 @@
     "required": [
      "mesh_path",
      "target_format"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2741,14 +2742,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "remesh_unreal_mesh",
-   "title": null,
+   "title": "Remesh Unreal Mesh",
    "description": "Remesh a mesh (uniform, adaptive) to improve triangle quality.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
@@ -2792,9 +2793,9 @@
     },
     "required": [
      "mesh_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2808,14 +2809,14 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   },
   {
    "name": "compute_unreal_mesh_uv",
-   "title": null,
+   "title": "Compute Unreal Mesh Uv",
    "description": "Generate or recompute UV coordinates for a mesh.",
    "inputSchema": {
+    "type": "object",
     "additionalProperties": false,
     "properties": {
      "mesh_path": {
@@ -2840,9 +2841,9 @@
     },
     "required": [
      "mesh_path"
-    ],
-    "type": "object"
+    ]
    },
+   "execution": null,
    "outputSchema": null,
    "icons": null,
    "annotations": {
@@ -2856,8 +2857,7 @@
     "fastmcp": {
      "tags": []
     }
-   },
-   "execution": null
+   }
   }
  ],
  "surfaces": {

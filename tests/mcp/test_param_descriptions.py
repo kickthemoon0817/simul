@@ -74,7 +74,7 @@ def listed_tools() -> List[Any]:
 def _property_descriptions(tool: Any) -> Dict[str, str]:
     return {
         name: str(prop.get("description", ""))
-        for name, prop in tool.inputSchema.get("properties", {}).items()
+        for name, prop in tool.input_schema.get("properties", {}).items()
     }
 
 
@@ -125,7 +125,7 @@ def test_deprecated_aliases_point_at_the_new_name(listed_tools: List[Any]) -> No
 
 def test_search_query_is_required(listed_tools: List[Any]) -> None:
     search = next(tool for tool in listed_tools if tool.name == "search_isaac_prims")
-    assert "query" in search.inputSchema.get("required", [])
+    assert "query" in search.input_schema.get("required", [])
 
 
 def test_listing_tools_accept_offset(listed_tools: List[Any]) -> None:

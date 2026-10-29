@@ -164,7 +164,10 @@ Each bridge writes a discovery file to `isaac_sim.discovery_dir` (default
 `/tmp/simul`) with its bridge port and Python socket port. Agents list
 them with `list_isaac_instances` and switch with `set_active_isaac_instance`.
 `claim_isaac_instance` / `release_isaac_instance` mark an instance as in use;
-claims are advisory unless `ISAAC_SIM__ENFORCE_CLAIMS=true`.
+claims are advisory unless `ISAAC_SIM__ENFORCE_CLAIMS=true`. The switch and
+the claim belong to the caller's MCP session, which an HTTP client on the
+sessionless 2026-07-28 protocol does not have
+([configuration.md](configuration.md#multi-agent-claims)).
 
 ## Remote hosts
 

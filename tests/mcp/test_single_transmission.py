@@ -25,7 +25,7 @@ from typing import Any, Dict, List
 import pytest
 
 
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 from simul.config import Settings
 from simul.mcp import backends as backends_module
@@ -113,7 +113,7 @@ def test_annotations_drop_constant_noise(monkeypatch: pytest.MonkeyPatch) -> Non
     assert annotated, "expected tools to carry annotations"
 
     for annotations in annotated:
-        dumped = annotations.model_dump(exclude_none=True)
+        dumped = annotations.model_dump(by_alias=True, exclude_none=True)
         assert "readOnlyHint" in dumped
         assert dumped.get("idempotentHint") is not False
         assert dumped.get("openWorldHint") is not True

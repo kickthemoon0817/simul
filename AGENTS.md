@@ -98,6 +98,19 @@ Procedure for both: `docs/releasing.md`.
 
 ## Runtime Notes
 
+- MCP sessions: FastMCP 4 serves both protocol eras. A client that connects
+  with the initialize handshake (2025-11-25 and earlier) is one session per
+  connection. The sessionless 2026-07-28 protocol is scoped as FastMCP scopes
+  its own per-client state: an authenticated request to its user, stdio (one
+  client) to one session per server, and an unauthenticated HTTP or SSE
+  request to no session, because nothing tells those clients apart. Such a
+  request acts as the `anonymous` agent: it targets the default Isaac
+  instance, shares one rate-limit budget with every other anonymous request,
+  finds every live claim foreign, and gets `SessionRequired` from
+  `set_active_isaac_instance`, `claim_isaac_instance` and
+  `release_isaac_instance`. Per-session state (Isaac routing, bindings and
+  claims, rate-limit buckets, the default `agent_id`) keys on that session
+  (`SimulMCPServer._get_request_session_id`).
 - Unreal attached mode: `simul unreal instances` / `attach` select an existing
   editor, map and level viewport. `simul server --backends unreal --unreal-mode attached`
   uses that selection; `control_unreal_ui` provides named editor controls even with

@@ -43,7 +43,7 @@ from typing import (
     Type,
 )
 
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 from pydantic import BaseModel
 
 from ...adapters.blender_runtime import BlenderRuntimeSession

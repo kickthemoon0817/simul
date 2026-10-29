@@ -193,8 +193,10 @@
   "tools": {
     "control_blender_ui": {
       "name": "control_blender_ui",
+      "title": "Control Blender Ui",
       "description": "Perform a named agent_control action in the explicitly attached Blender window. Use inspect for editor IDs, active tool, Properties tabs, shared workspace and agent cursors. Actions display labelled agent pointers; move_cursor moves this overlay, never the OS cursor. Use observe after an external screenshot to show a brief eye badge and viewport pulse. Before set_tool on a shared workspace, use isolate_workspace then inspect for new editor IDs. Uses Blender UI APIs, not physical key/click events or arbitrary button lookup. Requires attached mode; does not launch Blender or execute arbitrary scripts.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "agent_control": {
@@ -239,23 +241,25 @@
             "description": "Visible agent label, 1 to 64 printable characters; defaults to the MCP session identity. Use distinct stable labels for named agents across connections. clear_cursor removes only this agent's marker in the attached window; markers expire after 120 seconds."
           }
         },
-        "required": ["agent_control"],
-        "type": "object"
+        "required": ["agent_control"]
       },
       "annotations": {"readOnlyHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_info": {
       "name": "get_blender_info",
+      "title": "Get Blender Info",
       "description": "Get information about the active Blender runtime.",
-      "inputSchema": {"additionalProperties": false, "properties": {}, "type": "object"},
+      "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "attach_blender_window": {
       "name": "attach_blender_window",
+      "title": "Attach Blender Window",
       "description": "Attached mode: select the Blender process and window that Blender tools act on, the same as `simul blender attach`. Use it to recover after another file was loaded (read_homefile, open_mainfile) or Blender restarted. Succeeds only when the choice is unambiguous; pass instance_id/window_id from the error details or get_blender_info otherwise.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "instance_id": {
@@ -268,16 +272,17 @@
             "default": null,
             "description": "Window ID; required when the selected process has several windows."
           }
-        },
-        "type": "object"
+        }
       },
       "annotations": {"readOnlyHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "list_blender_scene_objects": {
       "name": "list_blender_scene_objects",
+      "title": "List Blender Scene Objects",
       "description": "List objects from the active Blender scene.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "collection_name": {
@@ -287,40 +292,43 @@
           },
           "include_hidden": {"default": false, "description": "Include hidden objects when true.", "type": "boolean"},
           "max_items": {"default": 200, "description": "Maximum number of objects to return.", "type": "integer"}
-        },
-        "type": "object"
+        }
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_object_info": {
       "name": "get_blender_object_info",
+      "title": "Get Blender Object Info",
       "description": "Get detailed information about a single Blender object.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {"object_name": {"description": "Name of the target object.", "type": "string"}},
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_mesh_info": {
       "name": "get_blender_mesh_info",
+      "title": "Get Blender Mesh Info",
       "description": "Get mesh geometry counts for a Blender mesh object.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {"object_name": {"description": "Name of the mesh object.", "type": "string"}},
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_bounding_box": {
       "name": "get_blender_bounding_box",
+      "title": "Get Blender Bounding Box",
       "description": "Get the bounding box of a Blender object.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Name of the target object.", "type": "string"},
@@ -330,16 +338,17 @@
             "type": "boolean"
           }
         },
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "search_blender_objects": {
       "name": "search_blender_objects",
+      "title": "Search Blender Objects",
       "description": "Search for objects in the Blender scene by name pattern or type.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "name_pattern": {
@@ -353,50 +362,54 @@
             "description": "Blender object type filter (MESH, LIGHT, etc.)."
           },
           "max_results": {"default": 50, "description": "Maximum number of results.", "type": "integer"}
-        },
-        "type": "object"
+        }
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "summarize_blender_scene": {
       "name": "summarize_blender_scene",
+      "title": "Summarize Blender Scene",
       "description": "Get a high-level summary of the Blender scene.",
-      "inputSchema": {"additionalProperties": false, "properties": {}, "type": "object"},
+      "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_material_info": {
       "name": "get_blender_material_info",
+      "title": "Get Blender Material Info",
       "description": "Get material information with bounded node tree traversal.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {"material_name": {"description": "Name of the Blender material.", "type": "string"}},
-        "required": ["material_name"],
-        "type": "object"
+        "required": ["material_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_distance_between": {
       "name": "get_blender_distance_between",
+      "title": "Get Blender Distance Between",
       "description": "Measure the Euclidean distance between two Blender objects.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name_a": {"description": "First object name.", "type": "string"},
           "object_name_b": {"description": "Second object name.", "type": "string"}
         },
-        "required": ["object_name_a", "object_name_b"],
-        "type": "object"
+        "required": ["object_name_a", "object_name_b"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "check_blender_object_bounds": {
       "name": "check_blender_object_bounds",
+      "title": "Check Blender Object Bounds",
       "description": "Check if a Blender object is within spatial bounds.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Name of the Blender object to test.", "type": "string"},
@@ -411,16 +424,17 @@
             "type": "array"
           }
         },
-        "required": ["object_name", "bounds_min", "bounds_max"],
-        "type": "object"
+        "required": ["object_name", "bounds_min", "bounds_max"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "capture_blender_viewport": {
       "name": "capture_blender_viewport",
+      "title": "Capture Blender Viewport",
       "description": "Capture Blender as a JPEG. In attached mode the default (method='auto') is the 3D View the user sees: view angle, shading, overlays, Edit Mode and unsaved edits, with no camera needed, keeping the view's aspect ratio within width x height (capture_method viewport; an external engine's Rendered view, such as Cycles, is read from the screen as viewport_screen and includes overlapping UI). Embedded (headless bpy) mode has no 3D View, so 'auto' renders. method='render' renders through the scene camera, or through a temporary camera removed afterwards: aligned to the 3D View when attached, framing the visible objects when embedded or when the window shows no 3D View (render_temp_camera_view / render_temp_camera_framing). The image arrives as an MCP image content block, followed by a JSON block with success, width, height, engine, capture_method, format and image_attached=true. In attached mode, briefly show an agent eye badge and border pulse after success. Agent annotations are excluded from the captured image.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "width": {
@@ -450,16 +464,17 @@
             "default": null,
             "description": "Visible capture feedback label in attached mode; ignored in embedded mode."
           }
-        },
-        "type": "object"
+        }
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "set_blender_camera_view": {
       "name": "set_blender_camera_view",
+      "title": "Set Blender Camera View",
       "description": "Place a Blender camera (the active one by default) at a world-space location and XYZ Euler rotation, whatever its parent and rotation mode.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "location": {
@@ -478,16 +493,17 @@
             "description": "Target camera name. Uses active camera when None."
           }
         },
-        "required": ["location", "rotation_euler"],
-        "type": "object"
+        "required": ["location", "rotation_euler"]
       },
       "annotations": {"readOnlyHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_camera_info": {
       "name": "get_blender_camera_info",
+      "title": "Get Blender Camera Info",
       "description": "Get a Blender camera's world-space location and XYZ Euler rotation, lens and clip range (the active camera by default).",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "camera_name": {
@@ -495,16 +511,17 @@
             "default": null,
             "description": "Target camera name. Uses active camera when None."
           }
-        },
-        "type": "object"
+        }
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "focus_blender_on_object": {
       "name": "focus_blender_on_object",
+      "title": "Focus Blender On Object",
       "description": "Frame a Blender object with a camera (the active one by default): aim it from the front and above at the object's bounding-box center, at the distance where the object fits the frame (an orthographic camera gets the ortho_scale that fits it), widening the clip range when it would cut the object away.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Object to focus on.", "type": "string"},
@@ -519,23 +536,25 @@
             "description": "Target camera name. Uses active camera when None."
           }
         },
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_viewport_info": {
       "name": "get_blender_viewport_info",
+      "title": "Get Blender Viewport Info",
       "description": "Get active viewport and render settings.",
-      "inputSchema": {"additionalProperties": false, "properties": {}, "type": "object"},
+      "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "capture_blender_viewport_sequence": {
       "name": "capture_blender_viewport_sequence",
+      "title": "Capture Blender Viewport Sequence",
       "description": "Capture a frame range as base64-encoded JPEGs, each made like capture_blender_viewport with the same method (the 3D View when attached, a camera render in embedded mode). In attached mode, briefly show an agent eye badge and border pulse after success. Agent annotations are excluded from the captured images.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "start_frame": {"description": "First frame to capture.", "type": "integer"},
@@ -564,16 +583,17 @@
             "type": "string"
           }
         },
-        "required": ["start_frame", "end_frame"],
-        "type": "object"
+        "required": ["start_frame", "end_frame"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "create_blender_object": {
       "name": "create_blender_object",
+      "title": "Create Blender Object",
       "description": "Create a new object in the Blender scene.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_type": {"description": "Type key (CUBE, SPHERE, POINT_LIGHT, CAMERA, etc.).", "type": "string"},
@@ -601,28 +621,30 @@
             "type": "array"
           }
         },
-        "required": ["object_type"],
-        "type": "object"
+        "required": ["object_type"]
       },
       "annotations": {"readOnlyHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "delete_blender_object": {
       "name": "delete_blender_object",
+      "title": "Delete Blender Object",
       "description": "Delete an object from the Blender scene.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {"object_name": {"description": "Name of the object to delete.", "type": "string"}},
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "set_blender_object_transform": {
       "name": "set_blender_object_transform",
+      "title": "Set Blender Object Transform",
       "description": "Set location, rotation, and/or scale on a Blender object.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Object to transform.", "type": "string"},
@@ -642,31 +664,33 @@
             "description": "New scale [sx, sy, sz] or None to keep current."
           }
         },
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "set_blender_object_parent": {
       "name": "set_blender_object_parent",
+      "title": "Set Blender Object Parent",
       "description": "Parent one Blender object to another.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "child_name": {"description": "Object to parent.", "type": "string"},
           "parent_name": {"description": "Object to be the parent.", "type": "string"}
         },
-        "required": ["child_name", "parent_name"],
-        "type": "object"
+        "required": ["child_name", "parent_name"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "clear_blender_object_parent": {
       "name": "clear_blender_object_parent",
+      "title": "Clear Blender Object Parent",
       "description": "Remove parent from a Blender object.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Object to unparent.", "type": "string"},
@@ -676,16 +700,17 @@
             "type": "boolean"
           }
         },
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "assign_blender_material": {
       "name": "assign_blender_material",
+      "title": "Assign Blender Material",
       "description": "Assign a Principled BSDF material to a Blender object.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Object to assign material to.", "type": "string"},
@@ -703,16 +728,17 @@
           "metallic": {"default": 0.0, "description": "Metallic value 0-1.", "type": "number"},
           "roughness": {"default": 0.5, "description": "Roughness value 0-1.", "type": "number"}
         },
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "add_blender_modifier": {
       "name": "add_blender_modifier",
+      "title": "Add Blender Modifier",
       "description": "Add a modifier to a Blender object.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Object to add modifier to.", "type": "string"},
@@ -729,16 +755,17 @@
             "type": "object"
           }
         },
-        "required": ["object_name", "modifier_type"],
-        "type": "object"
+        "required": ["object_name", "modifier_type"]
       },
       "annotations": {"readOnlyHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "set_blender_light_params": {
       "name": "set_blender_light_params",
+      "title": "Set Blender Light Params",
       "description": "Set light parameters on a Blender light object.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "light_name": {"description": "Light object name.", "type": "string"},
@@ -773,28 +800,30 @@
             "description": "Shadow softness / radius."
           }
         },
-        "required": ["light_name"],
-        "type": "object"
+        "required": ["light_name"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "open_blender_file": {
       "name": "open_blender_file",
+      "title": "Open Blender File",
       "description": "Open a .blend file, replacing the current scene.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {"file_path": {"description": "Absolute path to the .blend file.", "type": "string"}},
-        "required": ["file_path"],
-        "type": "object"
+        "required": ["file_path"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "save_blender_file": {
       "name": "save_blender_file",
+      "title": "Save Blender File",
       "description": "Save the current .blend file.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "file_path": {
@@ -802,31 +831,33 @@
             "default": null,
             "description": "Path to save to. None saves in place."
           }
-        },
-        "type": "object"
+        }
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "import_blender_file": {
       "name": "import_blender_file",
+      "title": "Import Blender File",
       "description": "Import a file into the Blender scene.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "file_path": {"description": "Absolute path to the file.", "type": "string"},
           "file_format": {"description": "One of OBJ, FBX, GLTF, USD, STL, PLY.", "type": "string"}
         },
-        "required": ["file_path", "file_format"],
-        "type": "object"
+        "required": ["file_path", "file_format"]
       },
       "annotations": {"readOnlyHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "export_blender_file": {
       "name": "export_blender_file",
+      "title": "Export Blender File",
       "description": "Export scene objects to a file.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "file_path": {"description": "Absolute path to export to.", "type": "string"},
@@ -837,57 +868,62 @@
             "type": "boolean"
           }
         },
-        "required": ["file_path", "file_format"],
-        "type": "object"
+        "required": ["file_path", "file_format"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_file_info": {
       "name": "get_blender_file_info",
+      "title": "Get Blender File Info",
       "description": "Get information about the current .blend file.",
-      "inputSchema": {"additionalProperties": false, "properties": {}, "type": "object"},
+      "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "set_blender_frame": {
       "name": "set_blender_frame",
+      "title": "Set Blender Frame",
       "description": "Set the current animation frame.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {"frame": {"description": "Frame number to set.", "type": "integer"}},
-        "required": ["frame"],
-        "type": "object"
+        "required": ["frame"]
       },
       "annotations": {"readOnlyHint": false, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_frame": {
       "name": "get_blender_frame",
+      "title": "Get Blender Frame",
       "description": "Get the current frame and animation range.",
-      "inputSchema": {"additionalProperties": false, "properties": {}, "type": "object"},
+      "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "set_blender_frame_range": {
       "name": "set_blender_frame_range",
+      "title": "Set Blender Frame Range",
       "description": "Set the animation frame range.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "frame_start": {"description": "Start frame of the animation range.", "type": "integer"},
           "frame_end": {"description": "End frame of the animation range.", "type": "integer"}
         },
-        "required": ["frame_start", "frame_end"],
-        "type": "object"
+        "required": ["frame_start", "frame_end"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "play_blender_animation": {
       "name": "play_blender_animation",
+      "title": "Play Blender Animation",
       "description": "Control animation playback (play, stop, reverse).",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "action": {
@@ -895,16 +931,17 @@
             "description": "One of 'play', 'stop', or 'reverse'.",
             "type": "string"
           }
-        },
-        "type": "object"
+        }
       },
       "annotations": {"readOnlyHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "insert_blender_keyframe": {
       "name": "insert_blender_keyframe",
+      "title": "Insert Blender Keyframe",
       "description": "Insert a keyframe on an object property.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Name of the object.", "type": "string"},
@@ -915,16 +952,17 @@
           "frame": {"description": "Frame number for the keyframe.", "type": "integer"},
           "index": {"default": -1, "description": "Array index (-1 for all channels).", "type": "integer"}
         },
-        "required": ["object_name", "data_path", "frame"],
-        "type": "object"
+        "required": ["object_name", "data_path", "frame"]
       },
       "annotations": {"readOnlyHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "delete_blender_keyframe": {
       "name": "delete_blender_keyframe",
+      "title": "Delete Blender Keyframe",
       "description": "Delete a keyframe from an object property.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Name of the object.", "type": "string"},
@@ -935,28 +973,30 @@
           "frame": {"description": "Frame number of the keyframe to delete.", "type": "integer"},
           "index": {"default": -1, "description": "Array index (-1 for all channels).", "type": "integer"}
         },
-        "required": ["object_name", "data_path", "frame"],
-        "type": "object"
+        "required": ["object_name", "data_path", "frame"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_keyframes": {
       "name": "get_blender_keyframes",
+      "title": "Get Blender Keyframes",
       "description": "Get keyframe summary for an object.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {"object_name": {"description": "Name of the object.", "type": "string"}},
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "setup_blender_rigid_body": {
       "name": "setup_blender_rigid_body",
+      "title": "Setup Blender Rigid Body",
       "description": "Set up rigid body physics on a Blender object.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Name of the target object.", "type": "string"},
@@ -972,16 +1012,17 @@
           "linear_damping": {"default": 0.04, "description": "Linear damping factor.", "type": "number"},
           "angular_damping": {"default": 0.1, "description": "Angular damping factor.", "type": "number"}
         },
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "add_blender_force_field": {
       "name": "add_blender_force_field",
+      "title": "Add Blender Force Field",
       "description": "Add a force field to the scene.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "field_type": {"description": "Force field type (FORCE, WIND, VORTEX, etc.).", "type": "string"},
@@ -997,28 +1038,30 @@
             "description": "Optional name for the field object."
           }
         },
-        "required": ["field_type"],
-        "type": "object"
+        "required": ["field_type"]
       },
       "annotations": {"readOnlyHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_force_field_info": {
       "name": "get_blender_force_field_info",
+      "title": "Get Blender Force Field Info",
       "description": "Get force field parameters for an object.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {"object_name": {"description": "Name of the force field object.", "type": "string"}},
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "add_blender_rigid_body_constraint": {
       "name": "add_blender_rigid_body_constraint",
+      "title": "Add Blender Rigid Body Constraint",
       "description": "Add a rigid body constraint between two objects.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "constraint_type": {"description": "Constraint type (FIXED, POINT, HINGE, etc.).", "type": "string"},
@@ -1035,40 +1078,43 @@
             "type": "boolean"
           }
         },
-        "required": ["constraint_type", "object1_name", "object2_name"],
-        "type": "object"
+        "required": ["constraint_type", "object1_name", "object2_name"]
       },
       "annotations": {"readOnlyHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_constraint_info": {
       "name": "get_blender_constraint_info",
+      "title": "Get Blender Constraint Info",
       "description": "Get rigid body constraint info for an object.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {"object_name": {"description": "Name of the constraint empty object.", "type": "string"}},
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_physics_state": {
       "name": "get_blender_physics_state",
+      "title": "Get Blender Physics State",
       "description": "Get current physics state of an object.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {"object_name": {"description": "Name of the object.", "type": "string"}},
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_blender_object_trajectory": {
       "name": "get_blender_object_trajectory",
+      "title": "Get Blender Object Trajectory",
       "description": "Sample object position over a frame range.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Name of the object to track.", "type": "string"},
@@ -1076,38 +1122,41 @@
           "end_frame": {"description": "Last frame of trajectory (inclusive).", "type": "integer"},
           "step": {"default": 1, "description": "Frame step size.", "type": "integer"}
         },
-        "required": ["object_name", "start_frame", "end_frame"],
-        "type": "object"
+        "required": ["object_name", "start_frame", "end_frame"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "bake_blender_simulation": {
       "name": "bake_blender_simulation",
+      "title": "Bake Blender Simulation",
       "description": "Bake physics simulation for a frame range.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "frame_start": {"description": "First frame to bake.", "type": "integer"},
           "frame_end": {"description": "Last frame to bake.", "type": "integer"}
         },
-        "required": ["frame_start", "frame_end"],
-        "type": "object"
+        "required": ["frame_start", "frame_end"]
       },
       "annotations": {"readOnlyHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "free_blender_bake": {
       "name": "free_blender_bake",
+      "title": "Free Blender Bake",
       "description": "Free (delete) baked physics simulation data.",
-      "inputSchema": {"additionalProperties": false, "properties": {}, "type": "object"},
+      "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "execute_blender_script": {
       "name": "execute_blender_script",
+      "title": "Execute Blender Script",
       "description": "Execute arbitrary Python code inside Blender with access to bpy. Assign to __result__ to return a value. Printed output comes back in output, cut to its first max_output_chars characters (default 32000, at most 100000), or earlier when they exceed 300000 bytes of JSON (heavily non-ASCII output); a cut sets output_truncated=true and output_total_chars to the full length. Write larger results to a file and return its path instead.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "script": {"description": "Python source code to execute.", "type": "string"},
@@ -1122,16 +1171,17 @@
             "type": "integer"
           }
         },
-        "required": ["script"],
-        "type": "object"
+        "required": ["script"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "create_blender_mesh_from_data": {
       "name": "create_blender_mesh_from_data",
+      "title": "Create Blender Mesh From Data",
       "description": "Create a mesh object from raw vertex, edge, and face data. Use for procedural geometry.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "name": {"description": "Desired object name.", "type": "string"},
@@ -1163,16 +1213,17 @@
             "description": "Target collection (scene collection if None)."
           }
         },
-        "required": ["name", "vertices"],
-        "type": "object"
+        "required": ["name", "vertices"]
       },
       "annotations": {"readOnlyHint": false},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "apply_simready_metadata": {
       "name": "apply_simready_metadata",
+      "title": "Apply Simready Metadata",
       "description": "Apply NVIDIA SimReady metadata (semantic labels, physics properties, material info) to a Blender object as custom properties. Stored with simready_ prefix for USD export.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Target Blender object.", "type": "string"},
@@ -1182,28 +1233,30 @@
             "type": "object"
           }
         },
-        "required": ["object_name", "metadata"],
-        "type": "object"
+        "required": ["object_name", "metadata"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "get_simready_metadata": {
       "name": "get_simready_metadata",
+      "title": "Get Simready Metadata",
       "description": "Read NVIDIA SimReady metadata from a Blender object. Returns semantic labels, physics properties, and material info stored as simready_ custom properties.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {"object_name": {"description": "Blender object to inspect.", "type": "string"}},
-        "required": ["object_name"],
-        "type": "object"
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "validate_simready_compliance": {
       "name": "validate_simready_compliance",
+      "title": "Validate Simready Compliance",
       "description": "Validate Blender objects against NVIDIA SimReady conventions: naming (lowercase_underscore), scale (meters), clean transforms, material segmentation, hierarchy.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_names": {
@@ -1216,16 +1269,17 @@
           "check_transforms": {"default": true, "description": "Validate clean transforms.", "type": "boolean"},
           "check_materials": {"default": true, "description": "Validate material segmentation.", "type": "boolean"},
           "check_hierarchy": {"default": true, "description": "Validate hierarchy structure.", "type": "boolean"}
-        },
-        "type": "object"
+        }
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "export_simready_usd": {
       "name": "export_simready_usd",
+      "title": "Export Simready Usd",
       "description": "Export a SimReady-compliant USD file from Blender. Validates objects before export, selects the requested objects, and carries simready_ custom properties into USD attributes.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "file_path": {"description": "Output .usd / .usda / .usdc path.", "type": "string"},
@@ -1241,16 +1295,17 @@
           },
           "validate_before_export": {"default": true, "description": "Run validation first.", "type": "boolean"}
         },
-        "required": ["file_path"],
-        "type": "object"
+        "required": ["file_path"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "setup_simready_hierarchy": {
       "name": "setup_simready_hierarchy",
+      "title": "Setup Simready Hierarchy",
       "description": "Create a SimReady-compliant object hierarchy in Blender with a root empty (XForm equivalent) and parent the given children under it. Optionally applies semantic labels to the root.",
       "inputSchema": {
+        "type": "object",
         "additionalProperties": false,
         "properties": {
           "root_name": {"description": "Name for the root empty object.", "type": "string"},
@@ -1265,8 +1320,7 @@
             "description": "Optional semantic labels dict to apply to the root."
           }
         },
-        "required": ["root_name", "child_names"],
-        "type": "object"
+        "required": ["root_name", "child_names"]
       },
       "annotations": {"readOnlyHint": false},
       "_meta": {"fastmcp": {"tags": []}}

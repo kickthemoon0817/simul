@@ -27,7 +27,7 @@ from typing import (
     Type,
 )
 
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 from pydantic import BaseModel, Field, create_model, model_validator
 
 from ._helpers import describe_params

@@ -466,7 +466,7 @@ class _RecordingAdapter(AvailableAdapter):
 def _result(result: Any) -> Dict[str, Any]:
     """The client's view of one call: error flag, image blocks and the JSON block."""
     texts = [block.text for block in result.content if getattr(block, "type", None) == "text"]
-    images = [block.mimeType for block in result.content if getattr(block, "type", None) == "image"]
+    images = [block.mime_type for block in result.content if getattr(block, "type", None) == "image"]
     try:
         payload: Any = json.loads(texts[-1])
     except (IndexError, ValueError):

@@ -98,7 +98,7 @@ def test_registered_metadata_comes_from_the_decorator(isaac_server: server_modul
     for meta in _decorated().values():
         tool = by_name[meta.name]
         assert tool.kwargs["description"] == meta.description
-        hints = tool.kwargs["annotations"].model_dump(exclude_none=True)
+        hints = tool.kwargs["annotations"].model_dump(by_alias=True, exclude_none=True)
         assert hints["readOnlyHint"] is meta.read_only, meta.name
         assert hints.get("destructiveHint", False) is meta.destructive, meta.name
         assert hints.get("idempotentHint", False) is meta.idempotent, meta.name

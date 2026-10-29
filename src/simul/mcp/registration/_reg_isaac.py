@@ -16,7 +16,7 @@ import inspect
 import typing
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, Dict, Optional
 
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 from ..tools._meta import ToolMeta, iter_tool_methods
 from ..tools.isaac_tools import IsaacTools

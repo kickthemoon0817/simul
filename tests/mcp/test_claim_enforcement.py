@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 import pytest
 from fastmcp import Client
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 from simul.config import Settings
 from simul.mcp import backends as backends_module

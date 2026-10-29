@@ -316,18 +316,22 @@ class TestSimReadyLine:
         )
         assert "Blender" not in instance.mcp.instructions
 
+    @pytest.mark.parametrize("mode", ["legacy", "auto"])
     @pytest.mark.parametrize(("surface", "simready"), [("thin", False), ("full", True)])
     def test_the_client_receives_the_instructions_written_after_registration(
-        self, monkeypatch: pytest.MonkeyPatch, surface: str, simready: bool
+        self, monkeypatch: pytest.MonkeyPatch, surface: str, simready: bool, mode: str
     ) -> None:
-        """Over the real FastMCP protocol, initialize carries what tools/list matches."""
+        """Over the real FastMCP protocol, the instructions match tools/list.
+
+        ``legacy`` negotiates them through the initialize handshake, ``auto``
+        through server/discover on the sessionless 2026-07-28 protocol.
+        """
         instance = _macos_default_server(monkeypatch, surface, fake=False)
 
         async def handshake() -> Tuple[Optional[str], List[str]]:
-            async with Client(instance.mcp) as client:
+            async with Client(instance.mcp, mode=mode) as client:
                 names = [tool.name for tool in await client.list_tools()]
-                assert client.initialize_result is not None
-                return client.initialize_result.instructions, names
+                return client.instructions, names
 
         instructions, names = asyncio.run(handshake())
 
