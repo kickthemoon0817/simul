@@ -10,7 +10,8 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
-
+from fastmcp import Client
+from fastmcp.tools.tool import ToolResult
 
 from simul.config import Settings
 from simul.mcp import backends as backends_module
@@ -80,8 +81,9 @@ def _tool(instance: server_module.SimulMCPServer, name: str) -> SimpleNamespace:
 
 
 def _payload(result: Any) -> dict[str, Any]:
-    if isinstance(result, dict):
-        return result
+    """Read a tool result's one JSON block; a plain dict would reach the client twice."""
+    assert isinstance(result, ToolResult), f"{type(result).__name__} is sent twice"
+    assert result.structured_content is None
     return json.loads(result.content[0].text)
 
 
@@ -229,6 +231,40 @@ async def test_release_refuses_someone_elses_claim(monkeypatch: pytest.MonkeyPat
 
     sessions = instance.session_manager.get_instance_session(8226).get_status()["sessions"]
     assert sorted(s["agent_id"] for s in sessions) == ["agent-a", "agent-b"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("claim_isaac_instance", {"purpose": "lighting pass"}),
+        ("set_active_isaac_instance", {"instance_name": "default", "purpose": "lighting pass"}),
+    ],
+)
+async def test_a_refused_claim_reaches_the_client_once(
+    tmp_path: Path, tool: str, arguments: dict[str, Any]
+) -> None:
+    """Over the real FastMCP protocol a refusal is one JSON block, like any result.
+
+    Both tools returned the InstanceClaimed dict itself, which FastMCP sends
+    twice: as JSON text and again as structuredContent.
+    """
+    settings = Settings(isaac_sim={"enforce_claims": True, "discovery_dir": str(tmp_path / "disc")})
+    instance = server_module.SimulMCPServer(settings=settings, backends={"isaac"})
+    instance.session_manager = SessionManager(tmp_path / "sessions")
+    instance._isaac_clients = {"default": FakeIsaacClient(socket_port=8226, bridge_port=8229)}
+    instance.session_manager.get_instance_session(8226).register(
+        "trainer", "RL training run", owner="another-session"
+    )
+
+    async with Client(instance.mcp) as client:
+        result = await client.call_tool(tool, arguments)
+
+    assert result.structured_content is None
+    (block,) = result.content
+    payload = json.loads(block.text)
+    assert payload["error_type"] == "InstanceClaimed"
+    assert payload["details"]["holder_agent_id"] == "trainer"
 
 
 # ---------------------------------------------------------------------------
