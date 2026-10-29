@@ -722,8 +722,21 @@ def test_trees_stand_on_the_ground_under_their_crowns() -> None:
         ("room", {"wall_thickness": 480}, None, "leaves less than 50 cm inside the walls"),
         ("room", {"wall_height": 600}, None, "wall_height 600 cm exceeds the 490 cm"),
         ("room", {"door_width": 961}, None, "door_width 961 cm does not fit in the 960 cm"),
+        ("room", {"door_width": 100}, ([0, 0, 0], [120, 400, 300]), "door_width 100 cm does not fit in the 80 cm"),
         ("room", {"door_width": "wide"}, None, "door_width must be a number"),
         ("room", {"props": 200}, ([0, 0, 0], [300, 300, 300]), "props: only"),
+        (
+            "room",
+            {"props": 1},
+            ([0, 0, 0], [3000, 100, 300]),
+            "props: the room is 60 cm across inside its walls; props need 70 cm",
+        ),
+        (
+            "warehouse",
+            {"rows": 0, "props": 1},
+            ([0, 0, 0], [3000, 100, 300]),
+            "props: the warehouse is 60 cm across inside its walls; props need 70 cm",
+        ),
         ("corridor", {"props": 1}, ([0, 0, 0], [2000, 140, 300]), "100 cm wide inside its walls; props need 110"),
         ("warehouse", {"rows": 3}, None, "rows: 3 rows do not fit; 2 rows"),
         ("warehouse", {}, ([0, 0, 0], [400, 400, 300]), "pass rows 0"),
@@ -772,6 +785,46 @@ def test_default_counts_fit_small_and_large_bounds(scene_type: str, bounds_max: 
     for seed in range(20):
         plan = plan_scene(scene_type, {"seed": seed}, [0, 0, 0], bounds_max)
         assert len(plan.pieces) <= procedural.MAX_PIECES
+
+
+@pytest.mark.parametrize(
+    "scene_type, parameters",
+    [("room", {}), ("corridor", {}), ("warehouse", {"rows": 0}), ("outdoor", {})],
+)
+@pytest.mark.parametrize(
+    "bounds_max", [[120, 400, 300], [3000, 110, 300], [110, 3000, 300], [3000, 100, 500], [100, 3000, 500]]
+)
+def test_default_scenes_fit_narrow_bounds(
+    scene_type: str, parameters: Dict[str, Any], bounds_max: List[float]
+) -> None:
+    """Defaults used to fail here: a 100 cm doorway in a narrower room, props or crowns too wide for the floor."""
+    for seed in range(10):
+        plan = plan_scene(scene_type, {**parameters, "seed": seed}, [0, 0, 0], bounds_max)
+        for piece in plan.pieces:
+            low, high = _bounds_of(piece)
+            assert min(low) >= -1e-6, piece
+            assert all(value <= bound + 1e-6 for value, bound in zip(high, bounds_max)), piece
+
+
+def test_a_narrow_room_narrows_its_doorway_and_its_props() -> None:
+    closet = plan_scene("room", {"props": 0}, [0, 0, 0], [120, 400, 300])
+    south = [_bounds_of(p) for p in closet.pieces if "_Wall_" in p.label and _bounds_of(p)[0][1] == 0]
+    # The default doorway takes the 80 cm between the side walls.
+    assert [(low[0], high[0]) for low, high in south] == [(0, 20), (100, 120)]
+
+    hall = plan_scene("room", {}, [0, 0, 0], [3000, 110, 300])
+    boxes = [p for p in hall.pieces if "_Box_" in p.label]
+    # 70 cm inside the walls, less 20 cm of clearance on each side.
+    assert boxes and all(max(p.size[:2]) <= 30 + 1e-6 for p in boxes)
+    assert "Box" not in _kinds(plan_scene("room", {}, [0, 0, 0], [3000, 100, 300]))
+
+
+def test_trees_shrink_to_fit_a_narrow_strip() -> None:
+    plan = plan_scene("outdoor", {"trees": 5, "rocks": 0}, [0, 0, 0], [4000, 100, 500])
+    crowns = [p for p in plan.pieces if "_Crown_" in p.label]
+
+    assert len(crowns) == 5
+    assert all(max(p.size[:2]) <= 100 + 1e-6 for p in crowns)
 
 
 # ---------------------------------------------------------------------------

@@ -2047,8 +2047,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Attach an actor to a parent actor or detach it.
 
-        Uses ``EditorLevelLibrary.SetActorSelectionState`` and the
-        ``AttachToActor`` UFUNCTION via Remote Control.
+        Calls the actor's ``K2_AttachToActor`` UFUNCTION, or without a parent
+        ``K2_DetachFromActor``, via Remote Control, keeping the world
+        transform either way.
 
         Args:
             actor_path: Child actor path.

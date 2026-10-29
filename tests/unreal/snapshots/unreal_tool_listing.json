@@ -2128,7 +2128,7 @@
      },
      "parameters": {
       "default": "{}",
-      "description": "JSON object; lengths in cm, counts 0 to 200. Any type: seed (integer, 42). room: wall_thickness (20), wall_height (bounds top), door_width (100, 0 for none), props (one per 16 m2 of floor). corridor: wall_thickness, wall_height, props (one per 3 m). warehouse: wall_thickness, wall_height, rows (as many as fit), shelf_depth (100), shelf_height (300, capped by the bounds), aisle_width (250), props (one per 16 m2 of free floor). outdoor: trees (one per 20 m2), rocks (one per 10 m2). Props are Movable boxes; everything else is Static.",
+      "description": "JSON object; lengths in cm, counts 0 to 200. Any type: seed (integer, 42). room: wall_thickness (20), wall_height (bounds top), door_width (100, capped by the side walls; 0 for none), props (one per 16 m2 of floor). corridor: wall_thickness, wall_height, props (one per 3 m). warehouse: wall_thickness, wall_height, rows (as many as fit), shelf_depth (100), shelf_height (300, capped by the bounds), aisle_width (250), props (one per 16 m2 of free floor). outdoor: trees (one per 20 m2), rocks (one per 10 m2). Props are Movable boxes; everything else is Static.",
       "type": "string"
      },
      "bounds_min": {

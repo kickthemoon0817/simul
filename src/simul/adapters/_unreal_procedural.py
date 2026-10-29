@@ -221,13 +221,15 @@ def plan_scene(
     """Plan a scene of Engine basic shapes inside the bounds.
 
     Every scene has a 10 cm floor slab filling the bounds in plan, at the
-    bottom of the bounds. Props are Movable boxes 30 to 80 cm on a side, set
-    on the floor; every other piece is Static. Everything placed keeps 20 cm
-    clear of everything else.
+    bottom of the bounds. Props are Movable boxes 30 to 80 cm on a side
+    (smaller on a floor too narrow for 80 cm), set on the floor; every other
+    piece is Static. Everything placed keeps 20 cm clear of everything else.
 
     * room: four walls on the edges of the bounds, a doorway centred in the
-      wall at minimum y (``door_width``, 100 cm, 0 for none) kept clear for
-      1 m inside, and ``props`` (one per 16 m^2 inside the walls).
+      wall at minimum y (``door_width``, 100 cm or the width between the side
+      walls if less, 0 for none) kept clear for 1 m inside, and ``props``
+      (one per 16 m^2 inside the walls; none when the room is under 70 cm
+      across inside its walls).
     * corridor: walls along the two long sides, and ``props`` (one per 3 m of
       corridor) beside either wall, never two at the same point along the
       corridor, so a 60 cm passage stays free.
@@ -236,8 +238,9 @@ def plan_scene(
       ``props`` in the aisles (one per 16 m^2 of free floor; smaller in narrow
       aisles, none when aisles are under 90 cm).
     * outdoor: ground, ``trees`` (one per 20 m^2; a cylinder trunk under a
-      sphere crown, 2.5 to 5 m tall and capped by the bounds) and ``rocks``
-      (one per 10 m^2; flattened spheres).
+      sphere crown 0.4 of the tree's height across, 2.5 to 5 m tall and
+      capped by the bounds, so that the crown fits their narrower side) and
+      ``rocks`` (one per 10 m^2; flattened spheres).
 
     Walls are ``wall_thickness`` (20 cm) thick and ``wall_height`` tall (up
     to the top of the bounds). Shelves are ``shelf_depth`` (100 cm) deep and
@@ -371,8 +374,20 @@ def _walls(plan: _Plan, thickness: float, height: float, door_width: float = 0.0
     plan.add("Wall", CUBE, _Area(b.x1 - thickness, b.y0 + thickness, b.x1, b.y1 - thickness), ground, height)
 
 
+def _prop_floor(inner: _Area, largest: float = PROP_SIZE[1]) -> Tuple[_Area, float]:
+    """Where props stand inside the walls, and the largest prop side that fits there.
+
+    Props keep CLEARANCE from the walls, so they are placed in ``inner`` moved
+    in by CLEARANCE on every side; sampling only there keeps a narrow floor
+    from failing by chance. A largest side under PROP_SIZE[0] means no prop
+    fits.
+    """
+    floor = _Area(inner.x0 + CLEARANCE, inner.y0 + CLEARANCE, inner.x1 - CLEARANCE, inner.y1 - CLEARANCE)
+    return floor, min(largest, floor.width, floor.depth)
+
+
 def _props(plan: _Plan, count: int, area: _Area, largest: float = PROP_SIZE[1]) -> None:
-    """``count`` Movable boxes up to ``largest`` cm on a side inside ``area``, clear of everything placed."""
+    """``count`` Movable boxes up to ``largest`` cm on a side standing in ``area``, clear of everything placed."""
     for index in range(count):
         for _ in range(_ATTEMPTS):
             width, depth = plan.rng.uniform(PROP_SIZE[0], largest), plan.rng.uniform(PROP_SIZE[0], largest)
@@ -393,13 +408,23 @@ def _room(plan: _Plan, parameters: Mapping[str, Any]) -> None:
     if not _is_number(door_width) or not math.isfinite(door_width) or door_width < 0:
         raise ValueError(f"door_width must be a number of centimetres, 0 for no doorway, got {door_width!r}")
     inner = _interior(plan, thickness, True, True)
+    if "door_width" not in parameters:
+        # The default doorway narrows to fit a narrow room.
+        door_width = min(door_width, inner.width)
     if door_width > inner.width:
         raise ValueError(f"door_width {door_width:g} cm does not fit in the {inner.width:g} cm between the side walls")
-    props = _count(parameters, "props", _per(inner.width * inner.depth, PROP_AREA))
+    floor, largest = _prop_floor(inner)
+    roomy = largest >= PROP_SIZE[0]
+    props = _count(parameters, "props", _per(inner.width * inner.depth, PROP_AREA) if roomy else 0)
+    if props and not roomy:
+        raise ValueError(
+            f"props: the room is {min(inner.width, inner.depth):g} cm across inside its walls; props need "
+            f"{PROP_SIZE[0] + 2 * CLEARANCE:g} cm"
+        )
     _check_total(5 if door_width else 4, props)
     plan.floor()
     _walls(plan, thickness, height, float(door_width))
-    _props(plan, props, inner)
+    _props(plan, props, floor, largest)
 
 
 def _corridor(plan: _Plan, parameters: Mapping[str, Any]) -> None:
@@ -492,14 +517,19 @@ def _warehouse(plan: _Plan, parameters: Mapping[str, Any]) -> None:
             f"ends; it is {a1 - a0:g} cm inside the walls"
         )
     # Props stand in the aisles with clearance on both sides and room to move.
-    largest = min(PROP_SIZE[1], aisle - 3 * CLEARANCE)
+    floor, largest = _prop_floor(inner, min(PROP_SIZE[1], aisle - 3 * CLEARANCE))
     roomy = largest >= PROP_SIZE[0]
     free_floor = inner.width * inner.depth - rows * shelf_length * depth
     props = _count(parameters, "props", _per(free_floor, PROP_AREA) if roomy else 0)
     if props and not roomy:
+        if aisle - 3 * CLEARANCE < PROP_SIZE[0]:
+            raise ValueError(
+                f"props: {aisle:g} cm aisles leave no room for props; props need aisles of "
+                f"{PROP_SIZE[0] + 3 * CLEARANCE:g} cm"
+            )
         raise ValueError(
-            f"props: {aisle:g} cm aisles leave no room for props; props need aisles of "
-            f"{PROP_SIZE[0] + 3 * CLEARANCE:g} cm"
+            f"props: the warehouse is {min(inner.width, inner.depth):g} cm across inside its walls; props "
+            f"need {PROP_SIZE[0] + 2 * CLEARANCE:g} cm"
         )
     _check_total(4, rows, props)
     plan.floor()
@@ -512,7 +542,7 @@ def _warehouse(plan: _Plan, parameters: Mapping[str, Any]) -> None:
         else:
             shelf = _Area(lo, a0 + aisle, lo + depth, a1 - aisle)
         plan.add("Shelf", CUBE, shelf, plan.ground, shelf_height)
-    _props(plan, props, inner, largest)
+    _props(plan, props, floor, largest)
 
 
 def _outdoor(plan: _Plan, parameters: Mapping[str, Any]) -> None:
@@ -526,10 +556,12 @@ def _outdoor(plan: _Plan, parameters: Mapping[str, Any]) -> None:
             f"trees: need {MIN_TREE_HEIGHT:g} cm between the ground and bounds_max z, there are {plan.headroom:g} cm"
         )
     plan.floor("Ground")
+    # The crown, 0.4 of the tree's height across, has to fit the narrower side of the bounds.
+    narrow = min(plan.bounds.width, plan.bounds.depth)
     for index in range(trees):
         for _ in range(_ATTEMPTS):
-            tree = min(plan.rng.uniform(*TREE_HEIGHT), plan.headroom)
-            crown = 0.4 * tree
+            tree = min(plan.rng.uniform(*TREE_HEIGHT), plan.headroom, narrow / 0.4)
+            crown = min(0.4 * tree, narrow)
             spot = plan.find_spot(plan.bounds, crown, crown)
             if spot is None:
                 continue
