@@ -2176,7 +2176,7 @@
      },
      "match_mode": {
       "default": "exact",
-      "description": "``exact`` (a tag equals label), ``contains`` (a tag contains label) or ``regex`` (label is a Python regular expression searched for in each tag); every mode ignores case.",
+      "description": "exact (a tag equals label), contains (a tag contains label) or regex (label is a Python regular expression searched for in each tag; a repeated group that holds a quantifier or alternatives, as in (\\w+)+, is refused because it can run for hours); every mode ignores case.",
       "type": "string"
      },
      "max_results": {

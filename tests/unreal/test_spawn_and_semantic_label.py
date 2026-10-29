@@ -32,7 +32,10 @@ import pytest
 from aiohttp import web
 from fastmcp import Client
 
-from simul.adapters.unreal_runtime import UnrealRuntimeSession
+from simul.adapters.unreal_runtime import (
+    UnrealRuntimeSession,
+    _exponential_regex_construct,
+)
 from simul.config import Settings
 from simul.mcp.server import SimulMCPServer
 
@@ -593,6 +596,14 @@ async def test_semantic_label_lookup_counts_matches_past_max_results(
     [
         ({"match_mode": "fuzzy"}, "match_mode must be one of exact, contains, regex"),
         ({"label": "chair(", "match_mode": "regex"}, "not a valid regular expression"),
+        (
+            {"label": r"^(\w+)+_light$", "match_mode": "regex"},
+            "a quantifier inside a repeated group",
+        ),
+        (
+            {"label": "(a|ab)*c", "match_mode": "regex"},
+            "alternatives inside a repeated group",
+        ),
         ({"max_results": 0}, "max_results must be between 1 and 5000"),
     ],
 )
@@ -605,6 +616,31 @@ async def test_semantic_label_lookup_refuses_bad_input_before_any_request(
     with pytest.raises(ValueError, match=message):
         await session.get_actor_by_semantic_label(**{"label": "chair", **kwargs})
     session._execute_python.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("pattern", "refused"),
+    [
+        (r"^(\w+)+_light$", True),
+        (r"(\w+_)*light", True),
+        (r"((a+)?)+", True),
+        (r"(?=(a+)+)b", True),
+        (r"(a|ab)*c", True),
+        (r"^chair_\d+$", False),
+        (r"^(chair|table)$", False),
+        (r"(_\d+)?$", False),
+        (r".*leg.*", False),
+        (r"(ab{2})+", False),
+    ],
+)
+def test_regex_mode_refuses_only_repeated_groups_that_can_split_a_tag(
+    pattern: str, refused: bool
+) -> None:
+    """The search runs on the editor's game thread, where nothing interrupts
+    it. A failing search for a repeated group that can match the same text in
+    several ways tries every split of the tag: ^(\\w+)+_light$ takes over a
+    second on a 26-character tag and doubles with each further character."""
+    assert (_exponential_regex_construct(pattern) is not None) is refused
 
 
 # ---------------------------------------------------------------------------
