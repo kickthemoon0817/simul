@@ -464,7 +464,8 @@ class TestObservationTools:
                 materials=MaterialStore(),
                 collections=CollectionStore(),
             ),
-            context=SimpleNamespace(scene=scene),
+            # Real bpy always has it; world-space reads evaluate transforms first.
+            context=SimpleNamespace(scene=scene, evaluated_depsgraph_get=lambda: "depsgraph"),
         )
 
     # -- get_object_info --------------------------------------------------

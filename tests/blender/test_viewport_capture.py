@@ -250,6 +250,7 @@ class FakeBlender:
                 area=self.area if with_view else None,
                 window=self.window if with_view else None,
                 temp_override=self._temp_override,
+                evaluated_depsgraph_get=lambda: "depsgraph",
             ),
             data=SimpleNamespace(
                 images=self.images,
