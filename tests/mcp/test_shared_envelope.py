@@ -12,11 +12,14 @@ instance lock plug in as its admission hook.
 from __future__ import annotations
 
 import asyncio
+import gc
+import inspect
 import json
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Coroutine, Dict, Iterator, List, Optional
 
 import pytest
 from pydantic import BaseModel, Field
@@ -33,14 +36,21 @@ from tests.fakes import FakeFastMCP
 
 
 def _server(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **security: Any
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    isaac_sim: Optional[Dict[str, Any]] = None,
+    **security: Any,
 ) -> server_module.SimulMCPServer:
     monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
     monkeypatch.setattr(server_module, "TaskConfig", None)
     monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
     monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
     monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", None)
-    instance = server_module.SimulMCPServer(settings=Settings(security=security))
+    sections: Dict[str, Any] = {"security": security}
+    if isaac_sim is not None:
+        sections["isaac_sim"] = isaac_sim
+    instance = server_module.SimulMCPServer(settings=Settings(**sections))
     instance.usage_tracker = ToolUsageTracker(log_dir=tmp_path)
     return instance
 
@@ -346,6 +356,30 @@ def test_invalid_input_releases_what_the_caller_prepared(
     assert ran == []
 
 
+def test_a_call_that_ran_is_not_discarded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``discard`` is for a call that never started; one that ran or raised keeps its outcome."""
+    instance = _server(monkeypatch, tmp_path)
+    discarded: List[str] = []
+
+    async def ok(_request: Any) -> Dict[str, Any]:
+        return {"success": True}
+
+    async def broken(_request: Any) -> Dict[str, Any]:
+        raise RuntimeError("bridge dropped the frame")
+
+    for call in (ok, broken):
+        asyncio.run(
+            instance._run_envelope(
+                "named_tool", call, discard=lambda: discarded.append("discarded")
+            )
+        )
+
+    assert discarded == []
+    assert [row["success"] for row in _records(instance, "named_tool")] == [True, False]
+
+
 # ---------------------------------------------------------------------------
 # Isaac's admission hook
 # ---------------------------------------------------------------------------
@@ -424,6 +458,86 @@ def test_a_cancelled_isaac_call_releases_the_instance_lock(
     assert asyncio.run(scenario()) is True, "the call ran under the lock"
     assert not lock.locked()
     assert beats == []
+
+
+def test_a_call_cancelled_while_queued_for_the_lock_closes_its_coroutine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A call given up while it waits for a busy instance leaves no coroutine unawaited.
+
+    CancelledError leaves the admission hook before any stage that discarded
+    the tool coroutine, which then warned "coroutine ... was never awaited"
+    when collected. The call reached no verdict, so nothing is recorded.
+    """
+    instance = _server(monkeypatch, tmp_path)
+    lock = instance._get_instance_lock(instance._get_effective_instance_name())
+    acquire = instance._acquire_instance_lock
+    ran: List[str] = []
+
+    async def tool() -> Dict[str, Any]:
+        ran.append("tool")
+        return {"success": True}
+
+    async def scenario(coro: Coroutine[Any, Any, Dict[str, Any]]) -> None:
+        queued = asyncio.Event()
+
+        async def acquire_once_queued(target: asyncio.Lock) -> bool:
+            queued.set()
+            return await acquire(target)
+
+        monkeypatch.setattr(instance, "_acquire_instance_lock", acquire_once_queued)
+        async with lock:  # another call holds the instance
+            task = asyncio.ensure_future(instance._exec_isaac("isaac_tool", coro))
+            await queued.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    coro = tool()
+    asyncio.run(scenario(coro))
+
+    assert ran == []
+    assert inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
+    assert not lock.locked()
+    assert _records(instance, "isaac_tool") == []
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        del coro
+        gc.collect()
+    assert [str(w.message) for w in caught if "never awaited" in str(w.message)] == []
+
+
+def test_an_admission_error_propagates_and_closes_the_coroutine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An exception raised by the admission hook itself is no verdict on the call.
+
+    It propagates to FastMCP unrecorded, as the envelope documents, and the
+    tool coroutine that never ran is closed instead of left to warn.
+    """
+    instance = _server(monkeypatch, tmp_path, isaac_sim={"enforce_claims": True})
+    lock = instance._get_instance_lock(instance._get_effective_instance_name())
+    ran: List[str] = []
+
+    def unreadable_session_dir(port: int) -> Any:
+        raise PermissionError(13, "Permission denied", "/sessions")
+
+    monkeypatch.setattr(
+        instance.session_manager, "get_instance_session", unreadable_session_dir
+    )
+
+    async def tool() -> Dict[str, Any]:
+        ran.append("tool")
+        return {"success": True}
+
+    coro = tool()
+    with pytest.raises(PermissionError):
+        asyncio.run(instance._exec_isaac("isaac_tool", coro))
+
+    assert ran == []
+    assert inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
+    assert not lock.locked()
+    assert _records(instance, "isaac_tool") == []
 
 
 def test_a_failing_heartbeat_does_not_fail_a_call_that_ran(

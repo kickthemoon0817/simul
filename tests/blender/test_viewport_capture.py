@@ -25,6 +25,7 @@ import pytest
 
 from simul.adapters import blender_runtime
 from simul.utils.paths import PathPolicy
+from tests.fakes import FakeMatrix, FakePropArray
 
 JPEG_PREFIX = b"\xff\xd8"
 
@@ -197,8 +198,16 @@ class FakeBlender:
         self.header = SimpleNamespace(
             type="HEADER", width=2000, height=100, x=0, y=1000, data=None
         )
+        # Redraw tags and screenshots in the order they happened.
+        self.events: List[str] = []
         self.region = SimpleNamespace(
-            type="WINDOW", width=2000, height=1000, x=0, y=0, data=self.view
+            type="WINDOW",
+            width=2000,
+            height=1000,
+            x=0,
+            y=0,
+            data=self.view,
+            tag_redraw=lambda: self.events.append("tag_redraw"),
         )
         self.area = SimpleNamespace(
             type="VIEW_3D",
@@ -308,6 +317,7 @@ class FakeBlender:
         self.images.render_result = FakeImage("Render Result", 1, 1)
 
     def _screenshot_area(self, filepath: str) -> set:
+        self.events.append("screenshot")
         self.screenshots.append(
             {
                 "format": (self.settings.media_type, self.settings.file_format),
@@ -583,6 +593,28 @@ def test_cycles_rendered_view_is_cropped_from_the_screen(
     assert vars(fake.settings) == vars(_image_settings())
 
 
+def test_screen_capture_tags_the_region_so_the_screenshot_redraws_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, gpu: FakeGPU
+) -> None:
+    """Without a tag, screenshot_area returns an older frame (live on 5.0.1).
+
+    That frame, one to four draws old, could hold agent annotations drawn
+    before the bridge hid them for the capture. screenshot_area redraws tagged
+    regions and reads that frame, so the tag must come right before it: a
+    redraw in between would use the tag up.
+    """
+    fake = FakeBlender(tmp_path, shading="RENDERED", engine="CYCLES")
+    fake.region.width, fake.region.height = 20, 10
+    fake.area.width, fake.area.height = 20, 11
+    fake.images.screenshot = (20, 11, np.zeros(20 * 11 * 4, np.float32))
+    session = _session(monkeypatch, fake, tmp_path)
+
+    result = session.capture_viewport(width=64, height=64)
+
+    assert result["capture_method"] == "viewport_screen"
+    assert fake.events == ["tag_redraw", "screenshot"]
+
+
 # -- render -----------------------------------------------------------------
 
 
@@ -669,22 +701,20 @@ def test_orthographic_view_gets_an_orthographic_camera_backed_off_its_clip_range
 
 
 def test_embedded_render_without_a_camera_frames_the_visible_objects(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mathutils: ModuleType
 ) -> None:
     def _object(
         kind: str, offset: Tuple[float, float, float], visible: bool = True
     ) -> SimpleNamespace:
-        matrix = [
-            [1, 0, 0, offset[0]],
-            [0, 1, 0, offset[1]],
-            [0, 0, 1, offset[2]],
-            [0, 0, 0, 1],
+        # bpy_prop_array corners, which the strict Matrix refuses to multiply
+        # unless they become Vectors first, as in Blender.
+        corners = [
+            FakePropArray((x, y, z)) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)
         ]
-        corners = [(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]
         return SimpleNamespace(
             type=kind,
             hide_render=False,
-            matrix_world=matrix,
+            matrix_world=FakeMatrix.Translation(offset),
             bound_box=corners,
             visible_get=lambda: visible,
         )

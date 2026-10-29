@@ -46,7 +46,15 @@ class UnrealPingResponse(BaseModel):
     """Response for a lightweight Unreal Engine reachability probe."""
 
     success: bool = Field(..., description="Whether request was successful")
-    reachable: bool = Field(..., description="Whether the Remote Control API responded")
+    reachable: bool = Field(
+        ...,
+        description=(
+            "Whether Remote Control answered GET /remote/info. A refusal (HTTP "
+            "401, error_type AuthenticationError) is an answer: reachable, with "
+            "error saying to set UNREAL__PASSPHRASE. list_unreal_instances "
+            "reports the same"
+        ),
+    )
     address: str = Field(..., description="host:port that was probed")
     latency_ms: Optional[float] = Field(None, description="Round-trip time in milliseconds")
     error: Optional[str] = Field(None, description="Error message when success is False")
@@ -67,7 +75,12 @@ class UnrealInstanceInfo(BaseModel):
     host: str = Field(..., description="Remote Control API host")
     port: int = Field(..., description="Remote Control API port")
     reachable: bool = Field(
-        ..., description="Whether Remote Control answered GET /remote/info"
+        ...,
+        description=(
+            "Whether Remote Control answered GET /remote/info, as ping_unreal "
+            "decides it: a refusal (HTTP 401) is reachable, with error saying "
+            "to set UNREAL__PASSPHRASE"
+        ),
     )
     active: bool = Field(
         False,
@@ -88,7 +101,10 @@ class UnrealInstanceInfo(BaseModel):
     )
     error: Optional[str] = Field(
         None,
-        description="Why the endpoint is unreachable or its identity is unavailable",
+        description=(
+            "Why the endpoint is unreachable, refused the request or has no "
+            "identity available"
+        ),
     )
     instance_id: Optional[str] = Field(
         None, description="Editor process identity; changes when the editor restarts"
@@ -133,7 +149,12 @@ class UnrealListInstancesResponse(BaseModel):
     total_discovered: int = Field(0, description="Instances whose Remote Control answered")
     warnings: List[str] = Field(
         default_factory=list,
-        description="Attached-mode problems: missing, invalid or stale attachment",
+        description=(
+            "Attached-mode problems (missing, invalid or stale attachment), and "
+            "ports whose probe never left this machine (out of file descriptors "
+            "or local ports, or a host that does not resolve), where an editor "
+            "would be missing from instances"
+        ),
     )
 
 
@@ -142,13 +163,18 @@ class UnrealHealthCheckResponse(BaseModel):
 
     success: bool = Field(..., description="Whether request was successful")
     reachable: bool = Field(
-        ..., description="Whether the Remote Control API responded"
+        ...,
+        description=(
+            "Whether the Remote Control API responded, as ping_unreal decides "
+            "it: a refusal (HTTP 401) is reachable, with error saying to set "
+            "UNREAL__PASSPHRASE"
+        ),
     )
     connected: bool = Field(
         ...,
         description=(
-            "Deprecated alias of reachable, kept for one release; read "
-            "reachable instead"
+            "Deprecated, kept for one release: reachable and not refused "
+            "(false on HTTP 401). Read reachable and error instead"
         ),
     )
     engine_version: Optional[str] = Field(

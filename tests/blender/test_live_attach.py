@@ -200,6 +200,33 @@ def test_attach_existing_gui_and_refuse_changed_targets(
                 .text
             )
             assert moved["success"] is True and moved["location"] == [1, 2, 3]
+
+            def tool(tool_name: str, /, **kwargs: Any) -> dict[str, Any]:
+                found = next(t for t in server.mcp.tools if t.name == tool_name)
+                return json.loads(asyncio.run(found.func(**kwargs)).content[0].text)
+
+            # bound_box corners are bpy_prop_arrays, which mathutils' Matrix
+            # does not multiply: world space used to raise TypeError.
+            box = tool("get_blender_bounding_box", object_name="AttachmentProbe")
+            assert box["success"] is True, box
+            assert box["bbox_min"] == pytest.approx([0.0, 1.0, 2.0])
+            assert box["bbox_max"] == pytest.approx([2.0, 3.0, 4.0])
+            # The focused camera faces the object (it used to face away).
+            focused = tool("focus_blender_on_object", object_name="AttachmentProbe")
+            assert focused["success"] is True, focused
+            framed = client.execute_script(
+                "from bpy_extras.object_utils import world_to_camera_view\n"
+                "scene = bpy.context.scene\n"
+                "probe = bpy.data.objects['AttachmentProbe'].location\n"
+                "x, y, depth = world_to_camera_view(scene, scene.camera, probe)\n"
+                "__result__ = (round(x, 3), round(y, 3), depth > 0)"
+            )
+            assert framed["return_value"] == "(0.5, 0.5, True)"
+            # The tool lists location as optional; omitting it means the origin.
+            wind = tool("add_blender_force_field", field_type="WIND", name="ProbeWind")
+            assert wind["success"] is True, wind
+            assert wind["location"] == [0.0, 0.0, 0.0]
+            client.delete_object("ProbeWind")
             client.delete_object("AttachmentProbe")
             client.execute_script(
                 "bpy.context.view_layer.objects.active = bpy.data.objects['Cube']\n"

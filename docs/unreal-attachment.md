@@ -28,32 +28,41 @@ Discovery probes the scan range (`UNREAL__SCAN_PORT_START` up to, not including,
 `UNREAL__SCAN_PORT_END`; 30010–30019 by default) plus the configured and attached
 ports on `UNREAL__HOST`, or on the attachment's host in attached mode. `--port`
 probes only that port, `--host` another host, and `--no-scan` only the active
-endpoint. Each step of a probe is bounded by `UNREAL__PING_TIMEOUT`, and every
-request carries `UNREAL__PASSPHRASE` when it is set. Each instance reports:
+endpoint. Probes run concurrently, at most 32 at a time. Each step of a probe
+is bounded by `UNREAL__PING_TIMEOUT`, and every request carries
+`UNREAL__PASSPHRASE` when it is set. Each instance reports:
 
 | Field | Meaning |
 |---|---|
 | `name` | `default` for the active endpoint, otherwise `unreal-<port>` |
 | `host`, `port` | Remote Control endpoint |
-| `reachable`, `latency_ms` | Whether Remote Control answered `GET /remote/info`, and its round trip |
+| `reachable`, `latency_ms` | Whether Remote Control answered `GET /remote/info` (an HTTP 401 refusal counts), and its round trip |
 | `active` | Unreal tools dispatch here: the configured endpoint, or the attached editor in attached mode |
 | `attached` | Editor, loaded map and viewport match the saved attachment (reported in either mode) |
-| `error` | Why the endpoint is unreachable or its identity is unavailable; otherwise null |
+| `error` | Why the endpoint is unreachable, refused the request or has no identity available; otherwise null |
 | `instance_id`, `document_id`, `pid` | Editor process identity, loaded-map generation and process ID |
 | `engine_version`, `project_name`, `project_path`, `map_path` | Engine, project and loaded map |
 | `viewports`, `active_viewport` | Level viewport config keys, and the active one |
 | `dirty_map_packages` | Map packages with unsaved changes |
 
 The identity fields come from the editor's Python. They are null (the lists
-empty) when it does not answer, for example with Python execution disabled or
-an editor too busy to answer within the timeout; `error` then gives the reason,
-the editor is still `reachable`, and it cannot be attached until it answers.
+empty) when it does not answer, for example with Python execution disabled, an
+editor still starting up or one too busy to answer within the timeout; `error`
+then gives the reason, the editor is still `reachable`, and it cannot be
+attached until it answers.
 An editor whose Remote Control refuses the request with HTTP 401 (it enforces a
-passphrase and `UNREAL__PASSPHRASE` is missing or wrong) is reported the same way.
-A scan leaves out ports where nothing answered, except the active endpoint.
+passphrase and `UNREAL__PASSPHRASE` is missing or wrong) is reported the same
+way, with `error` saying to set `UNREAL__PASSPHRASE`. `ping_unreal` and
+`unreal_health_check` apply the same rule: Remote Control answered, so
+`reachable` is true, and the call fails with `error_type: AuthenticationError`
+and that `error` (`unreal_health_check`'s deprecated `connected` stays false).
+A scan leaves out ports where nothing answered, except the active endpoint. A
+port whose probe never left this machine (out of file descriptors or local
+ports, or a host name that does not resolve) is not dropped silently:
+`warnings` names it, since an editor there would be missing.
 The payload also carries `active_instance` (the active entry's name),
-`total_discovered` (reachable instances) and `warnings`, which in attached mode
-report a missing, invalid or stale attachment.
+`total_discovered` (reachable instances) and `warnings`, which also report a
+missing, invalid or stale attachment in attached mode.
 
 With one identified editor and one viewport, selectors may be omitted. Unreal
 layouts often contain several viewports: supply a key explicitly when selection
