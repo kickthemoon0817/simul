@@ -194,25 +194,22 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
         Returns:
             Blender object listing response or error response.
         """
-        input_data = server._validate_input(
-            BlenderSceneObjectsRequest,
-            collection_name=collection_name,
-            include_hidden=include_hidden,
-            max_items=max_items,
-        )
-        if isinstance(input_data, dict):
-            return server._as_text_result(input_data)
-
         return await server._exec_backend(
             "list_blender_scene_objects",
             server.blender_adapter,
             "Blender",
             BlenderSceneObjectsResponse,
-            lambda session: session.list_scene_objects(
-                collection_name=input_data.collection_name,
-                include_hidden=input_data.include_hidden,
-                max_items=input_data.max_items,
+            lambda session, request: session.list_scene_objects(
+                collection_name=request.collection_name,
+                include_hidden=request.include_hidden,
+                max_items=request.max_items,
             ),
+            request_model=BlenderSceneObjectsRequest,
+            request_kwargs={
+                "collection_name": collection_name,
+                "include_hidden": include_hidden,
+                "max_items": max_items,
+            },
         )
 
     # -- Phase 1: Core Observation tools ----------------------------------
@@ -232,18 +229,14 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
     async def get_blender_object_info(
         object_name: str,
     ) -> ToolResult:
-        input_data = server._validate_input(
-            BlenderObjectInfoRequest,
-            object_name=object_name,
-        )
-        if isinstance(input_data, dict):
-            return server._as_text_result(input_data)
         return await server._exec_backend(
             "get_blender_object_info",
             server.blender_adapter,
             "Blender",
             BlenderObjectInfoResponse,
-            lambda session: session.get_object_info(input_data.object_name),
+            lambda session, request: session.get_object_info(request.object_name),
+            request_model=BlenderObjectInfoRequest,
+            request_kwargs={"object_name": object_name},
         )
 
     @tool(

@@ -66,10 +66,15 @@ wheels exist for Python 3.11 and 3.13 only.
   `@tool_meta` decorator (name, description, hints); `_reg_isaac.py` builds
   the MCP wrapper from each method's signature and docstring. The USD,
   Blender and Unreal modules register their wrappers by hand over adapter
-  sessions. Every call goes through a shared envelope that applies rate
-  limiting, the file sandbox, usage recording and result-size budgets.
+  sessions. Every call goes through one shared envelope
+  (`SimulMCPServer._run_envelope`): the rate limit, the backend's admission
+  hook (Isaac's claim enforcement and per-instance lock), request
+  validation, the call, success normalisation, exactly one usage record and
+  the result-size budget. An exception that escapes a tool becomes an
+  `ErrorResponse` named after its class (or the `error_type` it declares),
+  with its `details` and any context added as exception notes.
 - **Results**: tools return JSON-serializable dicts; errors are
-  `ErrorResponse(...).dict()` with `success: false` and an error type.
+  `ErrorResponse(...).model_dump()` with `success: false` and an error type.
 
 ### Adding a backend
 

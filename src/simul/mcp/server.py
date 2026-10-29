@@ -14,9 +14,12 @@ import json
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import (
     Any,
+    AsyncContextManager,
+    AsyncIterator,
     Awaitable,
     Callable,
     Coroutine,
@@ -24,6 +27,7 @@ from typing import (
     Iterable,
     List,
     Literal,
+    Mapping,
     Optional,
     Set,
     Tuple,
@@ -45,6 +49,7 @@ from ..adapters.base import BackendAdapter
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
 from ..resources import find_checkout_root, resource
+from ..utils.errors import exception_message, exception_type_name
 from ..utils.paths import PathPolicy, SandboxDenied, sandbox_error
 from ..utils.timing import RateLimiter
 from .backends import ALL_BACKEND_NAMES, BACKENDS, NOT_SELECTED, backend_skip_reason
@@ -176,6 +181,39 @@ class IsaacSessionRoute:
     session_id: str
     active_instance: str
     bindings: Dict[str, IsaacSessionBinding] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """The verdict of an envelope stage that a call must not run.
+
+    Attributes:
+        payload: The error envelope the caller receives instead of a result.
+        usage_error: The short reason the usage log records (``rate_limited``,
+            ``instance_claimed``, ``instance_busy``), so refused calls can be
+            told apart from calls that ran and failed.
+    """
+
+    payload: Dict[str, Any]
+    usage_error: str
+
+
+# A backend's admission hook. The envelope enters it after the rate limit with
+# the tool name; it yields a Refusal to stop the call or None to admit it, and
+# stays entered until the admitted call has finished, so it can hold a resource
+# (Isaac holds the target instance's lock) for exactly that long.
+Admission = Callable[[str], AsyncContextManager[Optional[Refusal]]]
+
+# What a USD, Blender or Unreal tool runs inside its session: called with the
+# open session, plus the validated request when the tool declares a request
+# model; returns the payload, directly or as an awaitable.
+BackendCall = Callable[..., Union[Dict[str, Any], Awaitable[Dict[str, Any]]]]
+
+
+@asynccontextmanager
+async def _admit_every_call(tool_name: str) -> AsyncIterator[Optional[Refusal]]:
+    """The admission hook of a backend with nothing to gate."""
+    yield None
 
 
 class SimulMCPServer(LoggerMixin):
@@ -686,125 +724,289 @@ class SimulMCPServer(LoggerMixin):
         self._read_only_tools[tool_name] = read_only
         return read_only
 
-    async def _exec_isaac(
+    async def _run_envelope(
         self,
         tool_name: str,
-        coro: Coroutine[Any, Any, Dict[str, Any]],
+        call: Callable[[Optional[BaseModel]], Awaitable[Dict[str, Any]]],
+        *,
+        admission: Admission = _admit_every_call,
+        request_model: Optional[Type[BaseModel]] = None,
+        request_kwargs: Optional[Mapping[str, Any]] = None,
+        response_model: Optional[Type[BaseModel]] = None,
         params: Optional[Dict[str, Any]] = None,
         script_sha256: Optional[str] = None,
+        discard: Optional[Callable[[], None]] = None,
     ) -> ToolResult:
-        """
-        Execute an Isaac Sim tool coroutine with rate limiting,
-        unified error handling, and usage tracking.
+        """Run one tool call through the envelope every backend shares.
+
+        The stages, in order: the per-agent rate limit; the backend's
+        ``admission`` hook (Isaac's claim enforcement and instance lock);
+        validation of ``request_kwargs`` against ``request_model``; the call;
+        success normalisation (``apply_success_from_error``) and, for a
+        successful payload, the ``response_model`` schema; one usage record;
+        then the result budget and single transmission. A refusal ends the
+        call at its stage, and an exception from the call becomes an
+        ErrorResponse named after the exception, so every outcome, refusals
+        and invalid input included, is rate limited, recorded exactly once
+        and sent once.
 
         Args:
-            tool_name: Name of the tool for rate limiting.
-            coro: Awaitable coroutine returned by an IsaacTools method.
-            params: Optional dict of call parameters for usage logging.
-            script_sha256: Digest of the agent-authored source for script tools.
+            tool_name: Registered tool name, for the rate limit, the logs and
+                the usage record.
+            call: Performs the operation. Receives the validated request, or
+                None without a ``request_model``, and returns the payload or
+                an error envelope.
+            admission: The backend's gate between the rate limit and the call.
+            request_model: Model the tool's arguments are validated against
+                before ``call`` runs.
+            request_kwargs: The arguments to validate.
+            response_model: Schema a successful payload is validated against;
+                an error envelope keeps its own fields.
+            params: Call parameters worth keeping in the usage log.
+            script_sha256: Digest of the agent-authored source for script
+                tools, recorded in place of the source.
+            discard: Called when the call will not run (refused or invalid)
+                to release what the caller prepared for it.
 
         Returns:
-            Tool result dict or error response dict.
+            The payload as one JSON content block, plus an image block when it
+            carries one.
         """
         agent_id = self._resolve_agent_id(None)
-        rate_error = self._check_rate_limit(tool_name, agent_id)
-        if rate_error is not None:
+
+        def record(duration_ms: float, success: bool, error: Optional[str]) -> None:
             self.usage_tracker.record(
                 tool_name,
-                0.0,
-                False,
+                duration_ms,
+                success,
                 params=params,
-                error="rate_limited",
+                error=error,
                 agent_id=agent_id,
                 script_sha256=script_sha256,
             )
-            # Caller already built the coroutine; nothing will await it now.
-            coro.close()
-            return self._as_text_result(rate_error)
+
+        def refuse(refusal: Refusal) -> ToolResult:
+            record(0.0, False, refusal.usage_error)
+            if discard is not None:
+                discard()
+            return self._as_text_result(refusal.payload)
+
+        rate_error = self._check_rate_limit(tool_name, agent_id)
+        if rate_error is not None:
+            return refuse(Refusal(rate_error, "rate_limited"))
+        async with admission(tool_name) as refusal:
+            if refusal is not None:
+                return refuse(refusal)
+            started = time.monotonic()
+            payload = await self._call_outcome(
+                tool_name, call, request_model, request_kwargs, response_model, discard
+            )
+            error = payload.get("error")
+            record(
+                (time.monotonic() - started) * 1000,
+                payload.get("success") is not False and not error,
+                str(error) if error else None,
+            )
+        return self._as_text_result(payload)
+
+    async def _call_outcome(
+        self,
+        tool_name: str,
+        call: Callable[[Optional[BaseModel]], Awaitable[Dict[str, Any]]],
+        request_model: Optional[Type[BaseModel]],
+        request_kwargs: Optional[Mapping[str, Any]],
+        response_model: Optional[Type[BaseModel]],
+        discard: Optional[Callable[[], None]],
+    ) -> Dict[str, Any]:
+        """Validate the request, run the call and normalise what it returns.
+
+        The middle stages of ``_run_envelope``; its arguments are documented
+        there.
+
+        Returns:
+            The call's payload with ``success`` set, the ValidationError
+            envelope for invalid input, or the error envelope of the exception
+            the call (or the response schema) raised.
+        """
+        request: Optional[BaseModel] = None
+        if request_model is not None:
+            validated = self._validate_input(request_model, **(request_kwargs or {}))
+            if isinstance(validated, dict):
+                if discard is not None:
+                    discard()
+                return validated
+            request = validated
+        try:
+            payload = await call(request)
+            if not isinstance(payload, dict):
+                raise TypeError(
+                    f"{tool_name} returned {type(payload).__name__}, not a JSON object"
+                )
+            apply_success_from_error(payload)
+            if payload.get("success") is False and payload.get("error"):
+                # An error envelope built by the tool (input validation,
+                # not-found, script failure) keeps its own fields; forcing it
+                # through the success schema would only replace the message
+                # with a pydantic complaint.
+                return payload
+            if response_model is not None:
+                # Constructing the model is the validation; its dump conforms.
+                return response_model(**payload).model_dump()
+            return payload
+        except Exception as exc:
+            return self._exception_payload(tool_name, exc)
+
+    def _exception_payload(self, tool_name: str, exc: Exception) -> Dict[str, Any]:
+        """Build the error envelope for an exception that escaped a tool call.
+
+        A sandbox denial keeps the SandboxError envelope every layer reports.
+        Any other exception is named by its class, or by the ``error_type`` a
+        structured exception declares (Blender's AttachmentStale, an error the
+        Blender add-on relays), keeps the context its notes add, and carries
+        its ``details`` when it has any.
+
+        Args:
+            tool_name: Registered tool name, for the log line.
+            exc: The exception.
+
+        Returns:
+            The error envelope.
+        """
+        if isinstance(exc, SandboxDenied):
+            return sandbox_error(exc.details)
+        error_type = exception_type_name(exc)
+        message = exception_message(exc)
+        self.logger.error("Tool %s failed: %s: %s", tool_name, error_type, message)
+        details = getattr(exc, "details", None)
+        return ErrorResponse(
+            error=message,
+            error_type=error_type,
+            details=details if isinstance(details, dict) and details else None,
+        ).model_dump()
+
+    @asynccontextmanager
+    async def _isaac_admission(self, tool_name: str) -> AsyncIterator[Optional[Refusal]]:
+        """Admit an Isaac call to the instance the request targets.
+
+        With ``isaac_sim.enforce_claims`` on, a mutating tool is refused while
+        another agent holds a live claim on the instance. Then the instance's
+        lock is taken, bounded by ``server.timeout`` so a caller queued behind
+        a long step learns the instance is busy instead of waiting until its
+        own client gives up, which would read as "unreachable". An admitted
+        call holds the lock until it has finished, and the caller's binding
+        heartbeat is refreshed before the lock is released.
+
+        Args:
+            tool_name: Registered tool name, for the read-only check and the
+                heartbeat.
+
+        Yields:
+            An InstanceClaimed or InstanceBusy refusal, or None once admitted.
+        """
         instance_name = self._get_effective_instance_name()
-        # --- claim enforcement (isaac_sim.enforce_claims) ---
         if self.settings.isaac_sim.enforce_claims and not await self._tool_is_read_only(tool_name):
             holder = self._foreign_claim(instance_name, self._request_agent_id())
             if holder is not None:
-                self.usage_tracker.record(
-                    tool_name,
-                    0.0,
-                    False,
-                    params=params,
-                    error="instance_claimed",
-                    agent_id=agent_id,
-                    script_sha256=script_sha256,
-                )
-                coro.close()
-                return self._as_text_result(self._claimed_error(instance_name, holder))
-        # --- end claim enforcement ---
+                yield Refusal(self._claimed_error(instance_name, holder), "instance_claimed")
+                return
         lock = self._get_instance_lock(instance_name)
-        try:
-            # Bounded, so a caller queued behind a long step learns the instance
-            # is busy instead of waiting until its own client gives up. Without
-            # this the only signal is a timeout, which reads as "unreachable".
-            await asyncio.wait_for(lock.acquire(), timeout=self._instance_lock_timeout)
-        except asyncio.TimeoutError:
-            self.usage_tracker.record(
-                tool_name,
-                0.0,
-                False,
-                params=params,
-                error="instance_busy",
-                agent_id=agent_id,
-                script_sha256=script_sha256,
-            )
-            coro.close()
-            return self._as_text_result(
+        if not await self._acquire_instance_lock(lock):
+            yield Refusal(
                 ErrorResponse(
                     error=(
                         f"Isaac instance {instance_name!r} is busy with another "
                         "call. It is running, not unreachable — retry shortly."
                     ),
                     error_type="InstanceBusy",
-                ).model_dump()
+                ).model_dump(),
+                "instance_busy",
             )
+            return
         try:
-            t0 = time.monotonic()
-            try:
-                result = await coro
-                duration_ms = (time.monotonic() - t0) * 1000
-                success = not result.get("error")
-                self.usage_tracker.record(
-                    tool_name,
-                    duration_ms,
-                    success,
-                    params=params,
-                    error=result.get("error") if not success else None,
-                    agent_id=agent_id,
-                    script_sha256=script_sha256,
-                )
-                binding = self._get_active_binding()
-                if binding is not None:
-                    self.session_manager.get_instance_session(binding.port).heartbeat(
-                        binding.agent_id, tool_name
-                    )
-                    binding.last_heartbeat = time.time()
-                return self._as_text_result(result)
-            except Exception as exc:
-                duration_ms = (time.monotonic() - t0) * 1000
-                self.usage_tracker.record(
-                    tool_name,
-                    duration_ms,
-                    False,
-                    params=params,
-                    error=str(exc),
-                    agent_id=agent_id,
-                    script_sha256=script_sha256,
-                )
-                logger.error("Isaac tool %s failed: %s", tool_name, exc)
-                return self._as_text_result(
-                    ErrorResponse(
-                        error=str(exc), error_type=type(exc).__name__
-                    ).model_dump()
-                )
+            yield None
+            self._heartbeat_active_binding(tool_name)
         finally:
             lock.release()
+
+    async def _acquire_instance_lock(self, lock: asyncio.Lock) -> bool:
+        """Wait up to ``server.timeout`` for an Isaac instance's lock.
+
+        Returns:
+            True once the lock is held, False when it stayed taken.
+        """
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=self._instance_lock_timeout)
+        except asyncio.TimeoutError:
+            return False
+        return True
+
+    def _heartbeat_active_binding(self, tool_name: str) -> None:
+        """Mark the request's active binding alive after a call made through it.
+
+        Best effort, like the session records it refreshes. The heartbeat runs
+        as the admission hook exits, after the call has run and been recorded,
+        so a failure here (a session directory that cannot be created or
+        read) is logged; raising would escape the envelope and replace the
+        call's result with an unhandled error.
+        """
+        binding = self._get_active_binding()
+        if binding is None:
+            return
+        try:
+            self.session_manager.get_instance_session(binding.port).heartbeat(
+                binding.agent_id, tool_name
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Could not refresh the claim heartbeat for agent %r on port %s after %s: %s",
+                binding.agent_id,
+                binding.port,
+                tool_name,
+                exc,
+            )
+            return
+        binding.last_heartbeat = time.time()
+
+    async def _exec_isaac(
+        self,
+        tool_name: str,
+        coro: Coroutine[Any, Any, Dict[str, Any]],
+        params: Optional[Dict[str, Any]] = None,
+        script_sha256: Optional[str] = None,
+        *,
+        bypass_instance_lock: bool = False,
+    ) -> ToolResult:
+        """Run an Isaac Sim tool coroutine through the shared envelope.
+
+        Isaac's admission hook (claim enforcement, the instance lock and the
+        binding heartbeat) gates the call. ``bypass_instance_lock`` leaves it
+        out for a tool that has to reach an instance another call is holding:
+        ``interrupt_isaac_script``, which stops that call, and ``ping_isaac``.
+
+        Args:
+            tool_name: Registered tool name.
+            coro: The coroutine an IsaacTools method returned; closed unawaited
+                when the call is refused.
+            params: Call parameters worth keeping in the usage log.
+            script_sha256: Digest of the agent-authored source for script tools.
+            bypass_instance_lock: Skip the claim check and the instance lock.
+
+        Returns:
+            The payload as one JSON content block, plus an image block when it
+            carries one.
+        """
+
+        async def call(_request: Optional[BaseModel]) -> Dict[str, Any]:
+            return await coro
+
+        return await self._run_envelope(
+            tool_name,
+            call,
+            admission=_admit_every_call if bypass_instance_lock else self._isaac_admission,
+            params=params,
+            script_sha256=script_sha256,
+            discard=coro.close,
+        )
 
     def _sandbox_denial(
         self, path_str: Optional[str], *, write: bool = False
@@ -825,8 +1027,18 @@ class SimulMCPServer(LoggerMixin):
         return self._path_policy.denial(path_str, write=write)
 
     def _validate_input(
-        self, model: Type[BaseModel], **kwargs
+        self, model: Type[BaseModel], **kwargs: Any
     ) -> Union[BaseModel, Dict[str, Any]]:
+        """Validate tool arguments against ``model``.
+
+        Args:
+            model: The request model.
+            **kwargs: The tool arguments.
+
+        Returns:
+            The model instance, or the ValidationError envelope naming the
+            input when the arguments do not fit it.
+        """
         try:
             return model(**kwargs)
         except Exception as e:
@@ -834,175 +1046,102 @@ class SimulMCPServer(LoggerMixin):
                 error=str(e), error_type="ValidationError", details={"input": kwargs}
             ).model_dump()
 
-    def _validate_output(
-        self,
-        result: Any,
-        models: Tuple[Type[BaseModel], ...],
-        tool_name: str,
-    ) -> Dict[str, Any]:
-        if isinstance(result, BaseModel):
-            payload: Any = result.model_dump()
-        else:
-            payload = result
-
-        if (
-            isinstance(payload, dict)
-            and payload.get("success") is False
-            and payload.get("error")
-        ):
-            return payload
-
-        if not isinstance(payload, dict):
-            return ErrorResponse(
-                error="Tool returned invalid response type",
-                error_type="ValidationError",
-                details={"type": type(payload).__name__},
-            ).model_dump()
-
-        for model in models:
-            try:
-                model(**payload)
-                return payload
-            except Exception:
-                continue
-
-        return ErrorResponse(
-            error="Tool response failed schema validation",
-            error_type="ValidationError",
-            details={"tool": tool_name},
-        ).model_dump()
-
     async def _exec_backend(
         self,
         tool_name: str,
         adapter: Any,
         adapter_label: str,
         response_model: Type[BaseModel],
-        call: Callable[[Any], Union[Dict[str, Any], Awaitable[Dict[str, Any]]]],
+        call: BackendCall,
         params: Optional[Dict[str, Any]] = None,
+        *,
+        request_model: Optional[Type[BaseModel]] = None,
+        request_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> ToolResult:
         """
-        Run a USD, Blender or Unreal tool with the shared envelope.
+        Run a USD, Blender or Unreal tool through the shared envelope.
 
-        This is the one place every non-Isaac tool passes through, so it
-        carries everything a tool owes the operator and the caller: the
-        per-agent rate limit, the usage record, the availability check, the
-        session scope, success normalisation, schema validation, sandbox and
-        exception wrapping, the result budget and single transmission. Tools
-        that hand-rolled this block drifted on every one of those points.
+        The envelope (``_run_envelope``) carries what every tool owes the
+        operator and the caller: the per-agent rate limit, request
+        validation, exception wrapping, success normalisation, the response
+        schema, the usage record, the result budget and single transmission.
+        What is particular to these backends is the call itself
+        (``_run_backend_call``): the availability check and the session scope.
 
         Args:
             tool_name: Registered tool name, used for rate limiting and logs.
             adapter: Runtime adapter, or None when the backend is absent.
             adapter_label: Human-readable backend name for the error message.
             response_model: Schema a successful payload is validated against.
-            call: Receives an open session and returns the payload, or an
+            call: Receives an open session, followed by the validated request
+                when ``request_model`` is given, and returns the payload, or an
                 error envelope (``success`` False with ``error``) that is
-                passed through as is. May be sync or async. Parse tool
-                input inside ``call``, not before it, so malformed input
-                comes back as an error payload instead of escaping as an
-                unhandled exception.
+                passed through as is. May be sync or async.
             params: Call parameters worth keeping in the usage log.
+            request_model: Model ``request_kwargs`` are validated against
+                inside the envelope, so invalid input is rate limited and
+                recorded like any other failed call. Without it, parse tool
+                input inside ``call``, not before it.
+            request_kwargs: The tool arguments to validate.
 
         Returns:
             The payload as one JSON content block, plus an image block when
             it carries one.
         """
-        agent_id = self._resolve_agent_id(None)
-        rate_error = self._check_rate_limit(tool_name, agent_id)
-        if rate_error is not None:
-            self.usage_tracker.record(
-                tool_name, 0.0, False, params=params, error="rate_limited", agent_id=agent_id
-            )
-            return self._as_text_result(rate_error)
 
-        started = time.monotonic()
-        payload = await self._run_backend_call(
-            tool_name, adapter, adapter_label, response_model, call
-        )
-        duration_ms = (time.monotonic() - started) * 1000
-        error = payload.get("error")
-        success = not error and payload.get("success", True) is not False
-        self.usage_tracker.record(
+        async def run(request: Optional[BaseModel]) -> Dict[str, Any]:
+            return await self._run_backend_call(adapter, adapter_label, call, request)
+
+        return await self._run_envelope(
             tool_name,
-            duration_ms,
-            success,
+            run,
+            request_model=request_model,
+            request_kwargs=request_kwargs,
+            response_model=response_model,
             params=params,
-            error=str(error) if error else None,
-            agent_id=agent_id,
         )
-        return self._as_text_result(payload)
 
     async def _run_backend_call(
         self,
-        tool_name: str,
         adapter: Any,
         adapter_label: str,
-        response_model: Type[BaseModel],
-        call: Callable[[Any], Union[Dict[str, Any], Awaitable[Dict[str, Any]]]],
+        call: BackendCall,
+        request: Optional[BaseModel] = None,
     ) -> Dict[str, Any]:
-        """Open a session, run ``call`` and validate what it returns.
+        """Open a session and run ``call`` in it.
+
+        An exception propagates to the envelope, which reports it.
 
         Args:
-            tool_name: Registered tool name for logs and validation errors.
             adapter: Runtime adapter, or None when the backend is absent.
             adapter_label: Human-readable backend name for the error message.
-            response_model: Schema a successful payload is validated against.
-            call: Receives the open session and returns the payload.
+            call: Receives the open session (and ``request``, when given) and
+                returns the payload.
+            request: The validated request, passed to ``call`` after the
+                session.
 
         Returns:
-            The validated payload, or an error envelope.
+            The payload, or the error envelope of an absent backend.
         """
-        models = (response_model, ErrorResponse)
-        try:
-            if adapter is None or not adapter.is_available():
-                return self._validate_output(
-                    ErrorResponse(
-                        error=f"{adapter_label} runtime not available",
-                        error_type="RuntimeError",
-                    ).model_dump(),
-                    models,
-                    tool_name,
-                )
+        if adapter is None or not adapter.is_available():
+            return ErrorResponse(
+                error=f"{adapter_label} runtime not available",
+                error_type="RuntimeError",
+            ).model_dump()
 
-            with adapter.create_session() as session:
-                # Unreal sessions are async, Blender sessions are sync; accept
-                # both so one envelope serves every backend.
-                if getattr(adapter, "session_blocks_io", False):
-                    # The adapter declares its session only waits on I/O (never
-                    # bpy), so keep other MCP requests responsive meanwhile.
-                    payload = await asyncio.to_thread(call, session)
-                else:
-                    payload = call(session)
-                if inspect.isawaitable(payload):
-                    payload = await payload
-                apply_success_from_error(payload)
-                if payload.get("success") is False and payload.get("error"):
-                    # An error envelope built by the tool (input validation,
-                    # not-found, script failure) keeps its own fields; forcing
-                    # it through the success schema would only replace the
-                    # message with a pydantic complaint.
-                    return self._validate_output(payload, models, tool_name)
-                # Constructing the model is the validation; its dump already
-                # conforms, so it is returned as is rather than re-validated
-                # through _validate_output (a second full pydantic pass).
-                return response_model(**payload).model_dump()
-        except SandboxDenied as exc:
-            return self._validate_output(sandbox_error(exc.details), models, tool_name)
-        except Exception as exc:
-            self.logger.error("Error in %s: %s", tool_name, exc)
-            # Structured errors (e.g. Blender's AttachmentStale) name their own
-            # type and details so clients can branch on them.
-            details = getattr(exc, "details", None)
-            return self._validate_output(
-                ErrorResponse(
-                    error=str(exc),
-                    error_type=str(getattr(exc, "error_type", "Exception")),
-                    details=details if isinstance(details, dict) and details else None,
-                ).model_dump(),
-                models,
-                tool_name,
-            )
+        arguments = () if request is None else (request,)
+        with adapter.create_session() as session:
+            # Unreal sessions are async, Blender sessions are sync; accept
+            # both so one envelope serves every backend.
+            if getattr(adapter, "session_blocks_io", False):
+                # The adapter declares its session only waits on I/O (never
+                # bpy), so keep other MCP requests responsive meanwhile.
+                payload = await asyncio.to_thread(call, session, *arguments)
+            else:
+                payload = call(session, *arguments)
+            if inspect.isawaitable(payload):
+                payload = await payload
+        return payload
 
     def _as_text_result(self, payload: Dict[str, Any]) -> ToolResult:
         """Return ``payload`` within the result budget, sent once.
