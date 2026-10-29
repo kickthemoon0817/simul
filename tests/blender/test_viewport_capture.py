@@ -282,6 +282,8 @@ class FakeBlender:
             clip_start=0.1,
             clip_end=100.0,
             ortho_scale=6.0,
+            shift_x=0.0,
+            shift_y=0.0,
         )
 
     @staticmethod

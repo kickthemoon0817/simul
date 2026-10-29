@@ -458,17 +458,17 @@
     },
     "set_blender_camera_view": {
       "name": "set_blender_camera_view",
-      "description": "Set the active camera's location and rotation.",
+      "description": "Place a Blender camera (the active one by default) at a world-space location and XYZ Euler rotation, whatever its parent and rotation mode.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "location": {
-            "description": "Camera location [x, y, z].",
+            "description": "World-space camera location [x, y, z].",
             "items": {"type": "number"},
             "type": "array"
           },
           "rotation_euler": {
-            "description": "Camera rotation [rx, ry, rz] in radians.",
+            "description": "World-space camera rotation [rx, ry, rz] in radians, as an XYZ Euler.",
             "items": {"type": "number"},
             "type": "array"
           },
@@ -486,7 +486,7 @@
     },
     "get_blender_camera_info": {
       "name": "get_blender_camera_info",
-      "description": "Get information about the active Blender camera.",
+      "description": "Get a Blender camera's world-space location and XYZ Euler rotation, lens and clip range (the active camera by default).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -503,14 +503,14 @@
     },
     "focus_blender_on_object": {
       "name": "focus_blender_on_object",
-      "description": "Focus the camera on a specific Blender object.",
+      "description": "Frame a Blender object with a camera (the active one by default): aim it from the front and above at the object's bounding-box center, at the distance where the object fits the frame (an orthographic camera gets the ortho_scale that fits it), widening the clip range when it would cut the object away.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Object to focus on.", "type": "string"},
           "distance_factor": {
-            "default": 2.0,
-            "description": "Distance multiplier from bbox diagonal.",
+            "default": 1.0,
+            "description": "Multiple of the framing distance (of ortho_scale for an orthographic camera): 1.0 fits the object's bounding sphere in the frame with 5% to spare, 2.0 shows the object at half that size, and below 1.0 crops it.",
             "type": "number"
           },
           "camera_name": {

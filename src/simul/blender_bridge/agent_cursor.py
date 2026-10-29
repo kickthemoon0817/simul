@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import time
 from collections.abc import Iterator
@@ -10,6 +11,8 @@ from contextlib import contextmanager
 from typing import Any
 
 import bpy
+
+logger = logging.getLogger(__name__)
 
 
 class AgentCursors:
@@ -359,7 +362,9 @@ def hide_annotations() -> Iterator[None]:
     The flag only changes what the next redraw paints: a capture that reads the
     screen tags its region so the screenshot redraws it without annotations.
     That redraw stays on screen, so the editors are tagged again on exit to
-    bring the annotations back, also when the capture fails.
+    bring the annotations back, also when the capture fails. Tagging them is
+    cosmetic and best effort: an error from it is logged, never raised, so it
+    can neither replace a failed capture's own error nor fail one that worked.
     """
     previous = cursors.suspended, observations.suspended
     cursors.suspended = observations.suspended = True
@@ -367,4 +372,7 @@ def hide_annotations() -> Iterator[None]:
         yield
     finally:
         cursors.suspended, observations.suspended = previous
-        cursors.redraw()
+        try:
+            cursors.redraw()
+        except Exception:
+            logger.exception("Could not redraw the editors after a capture")

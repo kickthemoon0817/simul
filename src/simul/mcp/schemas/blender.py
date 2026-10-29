@@ -462,14 +462,17 @@ class BlenderCaptureViewportResponse(BaseModel):
 
 
 class BlenderSetCameraViewRequest(BaseModel):
-    """Request to set the active camera's transform."""
+    """Request to place a camera in world space."""
 
     location: List[float] = Field(
-        ..., description="Camera location [x, y, z]", min_length=3, max_length=3
+        ...,
+        description="World-space camera location [x, y, z]",
+        min_length=3,
+        max_length=3,
     )
     rotation_euler: List[float] = Field(
         ...,
-        description="Camera rotation [rx, ry, rz] in radians",
+        description="World-space camera rotation [rx, ry, rz] in radians, as an XYZ Euler",
         min_length=3,
         max_length=3,
     )
@@ -488,13 +491,13 @@ class BlenderSetCameraViewResponse(BaseModel):
     camera_name: str = Field(..., description="Name of the camera that was updated")
     location: List[float] = Field(
         ...,
-        description="New camera location [x, y, z]",
+        description="The camera's world-space location [x, y, z]",
         min_length=3,
         max_length=3,
     )
     rotation_euler: List[float] = Field(
         ...,
-        description="New camera rotation [rx, ry, rz]",
+        description="The camera's world-space rotation [rx, ry, rz] in radians, XYZ Euler",
         min_length=3,
         max_length=3,
     )
@@ -510,13 +513,16 @@ class BlenderCameraInfoResponse(BaseModel):
     camera_name: str = Field(..., description="Active camera name")
     location: List[float] = Field(
         ...,
-        description="Camera location [x, y, z]",
+        description="World-space camera location [x, y, z]",
         min_length=3,
         max_length=3,
     )
     rotation_euler: List[float] = Field(
         ...,
-        description="Camera rotation [rx, ry, rz]",
+        description=(
+            "World-space camera rotation [rx, ry, rz] in radians, XYZ Euler, "
+            "whatever the camera's parent and rotation mode"
+        ),
         min_length=3,
         max_length=3,
     )
@@ -532,8 +538,12 @@ class BlenderFocusOnObjectRequest(BaseModel):
 
     object_name: str = Field(..., description="Object name to focus on")
     distance_factor: float = Field(
-        2.0,
-        description="Distance multiplier from bounding box diagonal",
+        1.0,
+        description=(
+            "Multiple of the framing distance (of ortho_scale for an orthographic "
+            "camera): 1.0 fits the object's bounding sphere in the frame with 5% to "
+            "spare, 2.0 shows the object at half that size, below 1.0 crops it"
+        ),
         ge=0.5,
         le=20.0,
     )
@@ -553,7 +563,7 @@ class BlenderFocusOnObjectResponse(BaseModel):
     object_name: str = Field(..., description="Object that was focused on")
     camera_location: List[float] = Field(
         ...,
-        description="New camera location [x, y, z]",
+        description="The camera's new world-space location [x, y, z]",
         min_length=3,
         max_length=3,
     )
@@ -562,6 +572,24 @@ class BlenderFocusOnObjectResponse(BaseModel):
         description="Point the camera is aimed at [x, y, z]",
         min_length=3,
         max_length=3,
+    )
+    # Optional: an add-on built before these were reported still answers.
+    distance: Optional[float] = Field(
+        None, description="Distance from the camera to look_at"
+    )
+    clip_start: Optional[float] = Field(
+        None, description="The camera's near clip distance after the call"
+    )
+    clip_end: Optional[float] = Field(
+        None, description="The camera's far clip distance after the call"
+    )
+    clip_adjusted: Optional[bool] = Field(
+        None,
+        description="True when the clip range was widened so it spans the object",
+    )
+    ortho_scale: Optional[float] = Field(
+        None,
+        description="The ortho_scale set to fit the object; null unless the camera is orthographic",
     )
 
 

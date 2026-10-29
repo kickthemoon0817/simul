@@ -769,7 +769,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="set_blender_camera_view",
-        description="Set the active camera's location and rotation.",
+        description=(
+            "Place a Blender camera (the active one by default) at a world-space location "
+            "and XYZ Euler rotation, whatever its parent and rotation mode."
+        ),
         hints=IDEMPOTENT,
         operation="set_camera_view",
         request=BlenderSetCameraViewRequest,
@@ -777,14 +780,22 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_camera_info",
-        description="Get information about the active Blender camera.",
+        description=(
+            "Get a Blender camera's world-space location and XYZ Euler rotation, lens and "
+            "clip range (the active camera by default)."
+        ),
         hints=READ_ONLY,
         operation="get_camera_info",
         response=BlenderCameraInfoResponse,
     ),
     BlenderTool(
         name="focus_blender_on_object",
-        description="Focus the camera on a specific Blender object.",
+        description=(
+            "Frame a Blender object with a camera (the active one by default): aim it from "
+            "the front and above at the object's bounding-box center, at the distance where "
+            "the object fits the frame (an orthographic camera gets the ortho_scale that fits "
+            "it), widening the clip range when it would cut the object away."
+        ),
         hints=IDEMPOTENT,
         operation="focus_on_object",
         request=BlenderFocusOnObjectRequest,

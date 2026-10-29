@@ -230,8 +230,10 @@ BACKENDS: Tuple[BackendSpec, ...] = (
         settings_attribute="blender",
         adapter_factory=_blender_adapter,
         register_tools=_register_blender,
+        # Only 'blender': the 'simready' tools are routed by their own line,
+        # which names the backends that registered them (build_instructions).
         routing_rule=(
-            "Tools containing 'blender' or 'simready' → use local bpy in embedded mode, or the exact "
+            "Tools containing 'blender' → use local bpy in embedded mode, or the exact "
             "window selected with 'simul blender attach' in attached mode; never switch targets automatically."
         ),
         summary="Use Blender tools when a Blender runtime is connected.",

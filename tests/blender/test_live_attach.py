@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import base64
 import io
@@ -211,17 +212,96 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             assert box["success"] is True, box
             assert box["bbox_min"] == pytest.approx([0.0, 1.0, 2.0])
             assert box["bbox_max"] == pytest.approx([2.0, 3.0, 4.0])
-            # The focused camera faces the object (it used to face away).
+
+            def framing(camera: str, target: str) -> dict[str, Any]:
+                """Where the target's world bounding box lands in the camera's view."""
+                seen = client.execute_script(
+                    "from bpy_extras.object_utils import world_to_camera_view\n"
+                    "from mathutils import Vector\n"
+                    "scene = bpy.context.scene\n"
+                    "bpy.context.view_layer.update()\n"
+                    f"camera = bpy.data.objects[{camera!r}]\n"
+                    f"target = bpy.data.objects[{target!r}]\n"
+                    "corners = [target.matrix_world @ Vector(c) for c in target.bound_box]\n"
+                    "views = [world_to_camera_view(scene, camera, c) for c in corners]\n"
+                    "middle = world_to_camera_view(scene, camera, sum(corners, Vector()) / 8)\n"
+                    "clip = (camera.data.clip_start, camera.data.clip_end)\n"
+                    "__result__ = {\n"
+                    "    'center': (round(middle.x, 3), round(middle.y, 3)),\n"
+                    "    'in_frame': all(0 <= v.x <= 1 and 0 <= v.y <= 1 for v in views),\n"
+                    "    'in_clip': all(clip[0] <= v.z <= clip[1] for v in views),\n"
+                    "}"
+                )
+                assert seen.get("error") is None, seen
+                return ast.literal_eval(seen["return_value"])
+
+            whole = {"center": (0.5, 0.5), "in_frame": True, "in_clip": True}
+            # The focused camera faces the object (it used to face away), and
+            # the whole object fits its frame (corners of the default cube fell
+            # just outside a 16:9 frame).
             focused = tool("focus_blender_on_object", object_name="AttachmentProbe")
             assert focused["success"] is True, focused
-            framed = client.execute_script(
-                "from bpy_extras.object_utils import world_to_camera_view\n"
-                "scene = bpy.context.scene\n"
-                "probe = bpy.data.objects['AttachmentProbe'].location\n"
-                "x, y, depth = world_to_camera_view(scene, scene.camera, probe)\n"
-                "__result__ = (round(x, 3), round(y, 3), depth > 0)"
+            assert framing("Camera", "AttachmentProbe") == whole
+            # A 60 m cube landed beyond the 100 m clip_end, out of sight.
+            big = tool(
+                "create_blender_object",
+                object_type="CUBE",
+                name="BigProbe",
+                location=[0, 0, 30],
+                scale=[30, 30, 30],
             )
-            assert framed["return_value"] == "(0.5, 0.5, True)"
+            assert big["success"] is True, big
+            focused = tool("focus_blender_on_object", object_name="BigProbe")
+            assert focused["success"] is True and focused["clip_adjusted"] is True
+            assert framing("Camera", "BigProbe") == whole
+            client.delete_object("BigProbe")
+            # A camera parented to a rig that moved since, storing its rotation
+            # as a quaternion (as glTF imports do), was moved but not turned.
+            rigged = client.execute_script(
+                "scene = bpy.context.scene\n"
+                "rig = bpy.data.objects.new('ProbeRig', None)\n"
+                "scene.collection.objects.link(rig)\n"
+                "rig.location, rig.rotation_euler, rig.scale = (5, -3, 2), (0.3, -0.2, 1.57), (2, 2, 2)\n"
+                "camera = bpy.data.objects.new('ProbeCamera', bpy.data.cameras.new('ProbeCamera'))\n"
+                "scene.collection.objects.link(camera)\n"
+                "bpy.context.view_layer.update()\n"
+                "camera.parent = rig\n"
+                "camera.matrix_parent_inverse = rig.matrix_world.inverted()\n"
+                "rig.location, rig.rotation_euler = (8, 1, -1), (0.3, -0.2, 2.36)\n"
+                "camera.rotation_mode = 'QUATERNION'\n"
+            )
+            assert rigged.get("error") is None, rigged
+            focused = tool(
+                "focus_blender_on_object",
+                object_name="AttachmentProbe",
+                camera_name="ProbeCamera",
+            )
+            assert focused["success"] is True, focused
+            assert framing("ProbeCamera", "AttachmentProbe") == whole
+            placed = tool(
+                "set_blender_camera_view",
+                location=[7, -7, 5],
+                rotation_euler=[1.1, 0.25, 0.78],
+                camera_name="ProbeCamera",
+            )
+            assert placed["success"] is True, placed
+            world = client.execute_script(
+                "from mathutils import Euler, Vector\n"
+                "bpy.context.view_layer.update()\n"
+                "world = bpy.data.objects['ProbeCamera'].matrix_world\n"
+                "turn = world.to_quaternion().rotation_difference(\n"
+                "    Euler((1.1, 0.25, 0.78)).to_quaternion())\n"
+                "__result__ = ((world.translation - Vector((7, -7, 5))).length < 1e-4,"
+                " turn.angle < 1e-4)"
+            )
+            assert world["return_value"] == "(True, True)", world
+            camera_info = tool("get_blender_camera_info", camera_name="ProbeCamera")
+            assert camera_info["location"] == pytest.approx([7, -7, 5], abs=1e-4)
+            assert camera_info["rotation_euler"] == pytest.approx(
+                [1.1, 0.25, 0.78], abs=1e-4
+            )
+            client.delete_object("ProbeCamera")
+            client.delete_object("ProbeRig")
             # The tool lists location as optional; omitting it means the origin.
             wind = tool("add_blender_force_field", field_type="WIND", name="ProbeWind")
             assert wind["success"] is True, wind

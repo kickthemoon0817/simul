@@ -4,14 +4,22 @@ import json
 import math
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import pytest
 
 
 from simul.adapters import blender_runtime
 from simul.config import SecurityConfig, Settings
-from tests.fakes import FakeMatrix, FakePropArray, FakeVector
+from tests.fakes import (
+    FakeEuler,
+    FakeMatrix,
+    FakePropArray,
+    FakeTransformObject,
+    FakeVector,
+    euler_matrix,
+)
 
 
 def _box(low: float = -1.0, high: float = 1.0) -> List[FakePropArray]:
@@ -24,15 +32,122 @@ def _box(low: float = -1.0, high: float = 1.0) -> List[FakePropArray]:
     ]
 
 
-def _camera_forward(rotation_euler: Any) -> List[float]:
-    """Return where a camera with this XYZ Euler rotation looks: its local -Z."""
+def _rotate_xyz(rotation_euler: Any, vector: Sequence[float]) -> List[float]:
+    """Turn a vector by an XYZ Euler rotation: about X, then Y, then Z."""
     rx, ry, rz = rotation_euler
-    x, y, z = 0.0, 0.0, -1.0
-    # XYZ Euler applies X, then Y, then Z.
+    x, y, z = vector
     y, z = y * math.cos(rx) - z * math.sin(rx), y * math.sin(rx) + z * math.cos(rx)
     x, z = x * math.cos(ry) + z * math.sin(ry), -x * math.sin(ry) + z * math.cos(ry)
     x, y = x * math.cos(rz) - y * math.sin(rz), x * math.sin(rz) + y * math.cos(rz)
     return [x, y, z]
+
+
+def _camera_forward(rotation_euler: Any) -> List[float]:
+    """Return where a camera with this XYZ Euler rotation looks: its local -Z."""
+    return _rotate_xyz(rotation_euler, (0.0, 0.0, -1.0))
+
+
+class FakeCameraData:
+    """Camera data whose field of view follows its lens and sensor, as in Blender.
+
+    ``angle`` spans the side of the frame the sensor is fitted to: it comes
+    from sensor_height for sensor_fit VERTICAL, from sensor_width otherwise.
+    """
+
+    def __init__(
+        self,
+        lens: float = 50.0,
+        sensor_width: float = 36.0,
+        sensor_height: float = 24.0,
+        sensor_fit: str = "AUTO",
+        camera_type: str = "PERSP",
+        clip_start: float = 0.1,
+        clip_end: float = 1000.0,
+        shift_x: float = 0.0,
+        shift_y: float = 0.0,
+        ortho_scale: float = 6.0,
+    ) -> None:
+        self.lens = lens
+        self.sensor_width = sensor_width
+        self.sensor_height = sensor_height
+        self.sensor_fit = sensor_fit
+        self.type = camera_type
+        self.clip_start = clip_start
+        self.clip_end = clip_end
+        self.shift_x = shift_x
+        self.shift_y = shift_y
+        self.ortho_scale = ortho_scale
+
+    @property
+    def angle(self) -> float:
+        sensor = (
+            self.sensor_height if self.sensor_fit == "VERTICAL" else self.sensor_width
+        )
+        return 2 * math.atan(sensor / 2 / self.lens)
+
+
+def _rig() -> FakeTransformObject:
+    """An empty moved, turned and scaled, as a camera rig is."""
+    return FakeTransformObject(
+        "Rig",
+        location=(5.0, -3.0, 2.0),
+        rotation_euler=(0.3, -0.2, math.radians(90)),
+        scale=(2.0, 2.0, 2.0),
+    )
+
+
+def _move_rig(rig: FakeTransformObject) -> None:
+    """Move a rig after a camera was parented to it, so the camera's local
+    transform no longer equals its world transform."""
+    rig.location = FakeVector((8.0, 1.0, -1.0))
+    rig.rotation_euler = FakeEuler((0.3, -0.2, math.radians(135)))
+
+
+# How a camera is attached and stores its rotation: (parented, rotation_mode).
+# Writing location and rotation_euler directly misplaces every camera here
+# but the unparented XYZ one; set_camera_view's rotation also turns a ZXY
+# camera wrongly, while focus_on_object's level (x, 0, 0) rotation does not.
+CAMERA_SETUPS = {
+    "unparented": (False, "XYZ"),
+    "parented": (True, "XYZ"),
+    "quaternion": (False, "QUATERNION"),
+    "axis_angle": (False, "AXIS_ANGLE"),
+    "zxy_euler": (False, "ZXY"),
+    "parented_quaternion": (True, "QUATERNION"),
+}
+
+
+def _world_axes(obj: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """An object's local X, Y and -Z axes in world space, unit length."""
+    rotation = np.asarray(obj.matrix_world.rows)[:3, :3]
+    rotation = rotation / np.linalg.norm(rotation, axis=0)
+    return rotation[:, 0], rotation[:, 1], -rotation[:, 2]
+
+
+def _in_frame(
+    camera: Any,
+    point: Sequence[float],
+    half: Tuple[float, float],
+    offset: Tuple[float, float] = (0.0, 0.0),
+    ortho_scale: Optional[float] = None,
+) -> Tuple[float, float, float]:
+    """Where a world point appears to a camera, as world_to_camera_view reports it.
+
+    (x, y) run from 0 to 1 across the frame, z is the depth along the view
+    axis. ``half`` is the frame's half width and height at unit depth (per
+    unit of ortho_scale for an orthographic camera) and ``offset`` its center
+    off the view axis; each test states them for its lens and aspect.
+    """
+    matrix = np.asarray(camera.matrix_world.rows)
+    matrix[:3, :3] = matrix[:3, :3] / np.linalg.norm(matrix[:3, :3], axis=0)
+    x, y, z, _w = np.linalg.inv(matrix) @ np.array([*point, 1.0])
+    depth = -z
+    scale = ortho_scale if ortho_scale is not None else depth
+    return (
+        0.5 + (x / scale - offset[0]) / (2 * half[0]),
+        0.5 + (y / scale - offset[1]) / (2 * half[1]),
+        depth,
+    )
 
 
 class FakeObject:
@@ -789,27 +904,42 @@ class TestVisualObservationTools:
         clip_start: float = 0.1,
         clip_end: float = 1000.0,
         camera_type: str = "PERSP",
-    ) -> SimpleNamespace:
+        setup: str = "unparented",
+        scale: tuple = (1.0, 1.0, 1.0),
+        **data: Any,
+    ) -> FakeTransformObject:
         """
-        Build a fake Camera object with data sub-object.
+        Build a fake camera object whose world transform behaves as in Blender.
+
+        Args:
+            setup: A CAMERA_SETUPS key: parented to a rig that moved after the
+                parenting, and the rotation mode.
+            **data: Further FakeCameraData settings (sensor_fit, shift_x, ...).
 
         Returns:
-            SimpleNamespace camera object with .data for camera properties.
+            The camera object, with its FakeCameraData as .data.
         """
-        cam_data = SimpleNamespace(
-            lens=lens,
-            sensor_width=sensor_width,
-            clip_start=clip_start,
-            clip_end=clip_end,
-            type=camera_type,
+        parented, rotation_mode = CAMERA_SETUPS[setup]
+        rig = _rig() if parented else None
+        cam_obj = FakeTransformObject(
+            name,
+            "CAMERA",
+            FakeCameraData(
+                lens=lens,
+                sensor_width=sensor_width,
+                clip_start=clip_start,
+                clip_end=clip_end,
+                camera_type=camera_type,
+                **data,
+            ),
+            location=location,
+            rotation_euler=rotation_euler,
+            scale=scale,
+            rotation_mode=rotation_mode,
+            parent=rig,
         )
-        cam_obj = SimpleNamespace(
-            name=name,
-            type="CAMERA",
-            location=list(location),
-            rotation_euler=list(rotation_euler),
-            data=cam_data,
-        )
+        if rig is not None:
+            _move_rig(rig)
         return cam_obj
 
     @staticmethod
@@ -863,6 +993,8 @@ class TestVisualObservationTools:
             resolution_x=resolution_x,
             resolution_y=resolution_y,
             resolution_percentage=resolution_percentage,
+            pixel_aspect_x=1.0,
+            pixel_aspect_y=1.0,
             film_transparent=film_transparent,
             image_settings=image_settings,
         )
@@ -906,8 +1038,10 @@ class TestVisualObservationTools:
 
     # -- set_camera_view ---------------------------------------------------
 
-    def test_set_camera_view(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_camera_view sets location and rotation on the active camera."""
+    def test_set_camera_view(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """set_camera_view places the active camera and reports where it is."""
         cam = self._make_camera_object()
         fake_bpy = self._make_fake_bpy_with_camera(objects=[cam])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -920,10 +1054,14 @@ class TestVisualObservationTools:
         )
 
         assert result["camera_name"] == "Camera"
-        assert result["location"] == [1.0, 2.0, 3.0]
-        assert result["rotation_euler"] == [0.1, 0.2, 0.3]
+        assert result["location"] == pytest.approx([1.0, 2.0, 3.0])
+        assert result["rotation_euler"] == pytest.approx([0.1, 0.2, 0.3])
+        assert list(cam.location) == pytest.approx([1.0, 2.0, 3.0])
+        assert list(cam.rotation_euler) == pytest.approx([0.1, 0.2, 0.3])
 
-    def test_set_camera_view_by_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_set_camera_view_by_name(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
         """set_camera_view targets a named camera."""
         cam1 = self._make_camera_object(name="Main")
         cam2 = self._make_camera_object(name="Side", location=(10.0, 0.0, 0.0))
@@ -940,7 +1078,38 @@ class TestVisualObservationTools:
             camera_name="Side",
         )
         assert result["camera_name"] == "Side"
-        assert result["location"] == [5.0, 5.0, 5.0]
+        assert result["location"] == pytest.approx([5.0, 5.0, 5.0])
+        assert list(cam2.location) == pytest.approx([5.0, 5.0, 5.0])
+        assert list(cam1.location) == [0.0, 0.0, 5.0]
+
+    @pytest.mark.parametrize("setup", list(CAMERA_SETUPS))
+    def test_set_camera_view_places_the_camera_in_world_space(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, setup: str
+    ) -> None:
+        """The camera ends up at the world location and XYZ Euler rotation given.
+
+        set_camera_view wrote location and rotation_euler, which placed a
+        parented camera relative to its rig, left a QUATERNION or AXIS_ANGLE
+        camera (glTF imports store quaternions) unturned, and turned a ZXY
+        camera by the angles taken in its own order. The camera's scale stays.
+        """
+        cam = self._make_camera_object(setup=setup, scale=(1.5, 1.5, 1.5))
+        world_scale = list(cam.matrix_world.to_scale())
+        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam])
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        location, rotation = [7.0, -7.0, 5.0], [1.1, 0.25, 0.78]
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.set_camera_view(location=location, rotation_euler=rotation)
+
+        world = np.asarray(cam.matrix_world.rows)
+        scale = np.linalg.norm(world[:3, :3], axis=0)
+        assert world[:3, 3] == pytest.approx(location)
+        assert world[:3, :3] / scale == pytest.approx(euler_matrix(rotation))
+        assert scale == pytest.approx(world_scale)
+        assert result["location"] == pytest.approx(location)
+        assert result["rotation_euler"] == pytest.approx(rotation)
 
     def test_set_camera_view_no_camera_raises(
         self, monkeypatch: pytest.MonkeyPatch
@@ -956,10 +1125,17 @@ class TestVisualObservationTools:
 
     # -- get_camera_info ---------------------------------------------------
 
-    def test_get_camera_info(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """get_camera_info returns lens, sensor, clip, type."""
+    def test_get_camera_info(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """get_camera_info returns the placement, lens, sensor, clip and type."""
         cam = self._make_camera_object(
-            lens=35.0, sensor_width=32.0, clip_start=0.01, clip_end=500.0
+            location=(1.0, 2.0, 3.0),
+            rotation_euler=(0.1, 0.2, 4.0),
+            lens=35.0,
+            sensor_width=32.0,
+            clip_start=0.01,
+            clip_end=500.0,
         )
         fake_bpy = self._make_fake_bpy_with_camera(objects=[cam])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -969,13 +1145,47 @@ class TestVisualObservationTools:
         result = session.get_camera_info()
 
         assert result["camera_name"] == "Camera"
+        assert result["location"] == pytest.approx([1.0, 2.0, 3.0])
+        # The camera's own angles, not an equivalent a whole turn away (4 - 2 pi).
+        assert result["rotation_euler"] == pytest.approx([0.1, 0.2, 4.0])
         assert result["lens"] == 35.0
         assert result["sensor_width"] == 32.0
         assert result["clip_start"] == 0.01
         assert result["clip_end"] == 500.0
         assert result["camera_type"] == "PERSP"
 
-    def test_get_camera_info_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize("setup", ["parented", "quaternion", "parented_quaternion"])
+    def test_get_camera_info_reports_the_world_placement(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, setup: str
+    ) -> None:
+        """location and rotation_euler say where the camera is, as set_camera_view takes them.
+
+        They were the local values: relative to the parent, and for a
+        quaternion camera a rotation_euler Blender does not use at all.
+        """
+        cam = self._make_camera_object(
+            setup=setup, location=(1.0, 2.0, 3.0), rotation_euler=(0.4, 0.5, 0.6)
+        )
+        cam.rotation_quaternion = FakeVector((0.8, 0.2, 0.1, 0.55))
+        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam])
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.get_camera_info()
+
+        world = np.asarray(cam.matrix_world.rows)
+        rotation = world[:3, :3] / np.linalg.norm(world[:3, :3], axis=0)
+        assert result["location"] == pytest.approx(list(world[:3, 3]))
+        assert euler_matrix(result["rotation_euler"]) == pytest.approx(rotation)
+        # Neither is the local value the camera stores.
+        assert result["rotation_euler"] != pytest.approx([0.4, 0.5, 0.6])
+        parented, _mode = CAMERA_SETUPS[setup]
+        assert (result["location"] != pytest.approx([1.0, 2.0, 3.0])) is parented
+
+    def test_get_camera_info_named(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
         """get_camera_info on a named camera."""
         cam = self._make_camera_object(name="Ortho", camera_type="ORTHO", lens=24.0)
         fake_bpy = self._make_fake_bpy_with_camera(objects=[cam], camera_name="Ortho")
@@ -1027,97 +1237,237 @@ class TestVisualObservationTools:
 
     # -- focus_on_object ---------------------------------------------------
 
-    def test_focus_on_object(
-        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
-    ) -> None:
-        """focus_on_object positions camera based on object bounding box."""
-        mesh_obj = FakeObject(
-            name="Cube",
-            object_type="MESH",
+    @staticmethod
+    def _cube(
+        name: str = "Cube",
+        offset: Sequence[float] = (0.0, 0.0, 0.0),
+        half: float = 1.0,
+        object_type: str = "MESH",
+    ) -> FakeObject:
+        """A cube ``2 * half`` wide at ``offset``; ``half=0`` gives a point's bound_box."""
+        return FakeObject(
+            name=name,
+            object_type=object_type,
             visible=True,
-            bound_box=_box(-1.0, 1.0),
-            matrix_world=FakeMatrix.Translation((0.0, 0.0, 0.0)),
+            bound_box=_box(-half, half),
+            matrix_world=FakeMatrix.Translation(offset),
         )
-        cam = self._make_camera_object()
-        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam, mesh_obj])
+
+    def _focus(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        target: Any,
+        camera: Any,
+        resolution: Tuple[int, int] = (1920, 1080),
+        **arguments: Any,
+    ) -> Dict[str, Any]:
+        """Call focus_on_object on ``target`` with ``camera`` as the scene camera."""
+        fake_bpy = self._make_fake_bpy_with_camera(
+            objects=[camera, target],
+            camera_name=camera.name,
+            resolution_x=resolution[0],
+            resolution_y=resolution[1],
+        )
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-
         session = blender_runtime.BlenderRuntimeSession()
-        result = session.focus_on_object("Cube")
-
-        assert result["camera_name"] == "Camera"
-        assert result["object_name"] == "Cube"
-        # Center of unit cube at origin should be [0, 0, 0]
-        assert result["look_at"] == [0.0, 0.0, 0.0]
-        # Camera location should be offset from center
-        cam_loc = result["camera_location"]
-        assert len(cam_loc) == 3
-        # In front of and above the object: the -Y +Z diagonal.
-        assert cam_loc[1] < 0.0  # -0.7071 direction
-        assert cam_loc[2] > 0.0  # +0.7071 direction
+        return session.focus_on_object(target.name, **arguments)
 
     @pytest.mark.parametrize(
-        "offset", [(0.0, 0.0, 0.0), (3.0, -2.0, 1.0), (-40.0, 25.0, -7.5)]
+        ("resolution", "data", "half", "offset"),
+        [
+            # A 50 mm lens on a 36 x 24 mm sensor; AUTO fits the 36 mm to the
+            # longer side, so a 16:9 frame reaches 18/50 across and 9/16 of
+            # that up: the frame's height decides the distance.
+            ((1920, 1080), {}, (18 / 50, 18 / 50 * 9 / 16), (0.0, 0.0)),
+            ((1080, 1920), {}, (18 / 50 * 9 / 16, 18 / 50), (0.0, 0.0)),
+            # VERTICAL fits the 24 mm sensor height to the frame's height.
+            (
+                (1920, 1080),
+                {"sensor_fit": "VERTICAL"},
+                (12 / 50 * 16 / 9, 12 / 50),
+                (0.0, 0.0),
+            ),
+            # HORIZONTAL fits the 36 mm to the width even in a portrait frame.
+            (
+                (1080, 1920),
+                {"sensor_fit": "HORIZONTAL"},
+                (18 / 50, 18 / 50 * 16 / 9),
+                (0.0, 0.0),
+            ),
+            # A lens shift of 0.1 moves the frame up by a tenth of its width,
+            # leaving less of it below the axis.
+            (
+                (1920, 1080),
+                {"shift_y": 0.1},
+                (18 / 50, 18 / 50 * 9 / 16),
+                (0.0, 0.1 * 2 * 18 / 50),
+            ),
+        ],
+        ids=["landscape", "portrait", "vertical_fit", "horizontal_fit", "shift"],
     )
-    def test_focus_on_object_points_the_camera_at_the_object(
+    def test_focus_on_object_fits_the_object_in_the_frame(
         self,
         monkeypatch: pytest.MonkeyPatch,
         mathutils: Any,
+        resolution: Tuple[int, int],
+        data: Dict[str, Any],
+        half: Tuple[float, float],
+        offset: Tuple[float, float],
+    ) -> None:
+        """The camera stands where the bounding sphere fits the frame's narrower reach.
+
+        It stood twice the box's diagonal away whatever its lens and aspect:
+        the corners of the default cube fell just outside a 16:9 frame.
+        """
+        center = (3.0, -2.0, 1.0)
+        cube = self._cube(offset=center)
+        cam = self._make_camera_object(**data)
+
+        result = self._focus(monkeypatch, cube, cam, resolution)
+
+        reach = min(half[0] - abs(offset[0]), half[1] - abs(offset[1]))
+        expected = math.sqrt(3) * 1.05 / math.sin(math.atan(reach))
+        assert result["distance"] == pytest.approx(expected)
+        assert result["look_at"] == pytest.approx(list(center))
+        for corner in _box():
+            x, y, depth = _in_frame(
+                cam, [c + v for c, v in zip(center, corner)], half, offset
+            )
+            assert 0.0 < x < 1.0 and 0.0 < y < 1.0, (x, y)
+            assert cam.data.clip_start < depth < cam.data.clip_end
+
+    @pytest.mark.parametrize("offset", [(0.0, 0.0, 0.0), (-40.0, 25.0, -7.5)])
+    @pytest.mark.parametrize("setup", list(CAMERA_SETUPS))
+    def test_focus_on_object_aims_the_camera_whatever_its_parent_and_rotation_mode(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        setup: str,
         offset: tuple,
     ) -> None:
-        """The camera's -Z axis, where a Blender camera looks, runs through the center.
+        """In world space the camera stands in front of and above the object and looks at it, level.
 
-        It used to point exactly away from the object: the object was behind
-        the camera and never in its view.
+        focus_on_object always looks along the same diagonal, so the cases
+        differ in the local transform that gets there: through a rig that
+        moved after the camera was parented, or stored as a quaternion or
+        axis-angle. Writing location and rotation_euler, as it did, misplaced
+        those cameras.
         """
-        mesh_obj = FakeObject(
-            name="Cube",
-            object_type="MESH",
-            visible=True,
-            bound_box=_box(-1.0, 1.0),
-            matrix_world=FakeMatrix.Translation(offset),
-        )
-        cam = self._make_camera_object()
-        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam, mesh_obj])
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        cam = self._make_camera_object(setup=setup, scale=(1.5, 1.5, 1.5))
+        world_scale = list(cam.matrix_world.to_scale())
 
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.focus_on_object("Cube")
+        result = self._focus(monkeypatch, self._cube(offset=offset), cam)
 
-        assert result["look_at"] == pytest.approx(list(offset))
-        to_center = [c - p for c, p in zip(offset, cam.location)]
-        distance = math.sqrt(sum(v * v for v in to_center))
-        assert _camera_forward(cam.rotation_euler) == pytest.approx(
-            [v / distance for v in to_center]
-        )
-        # Level: no roll, so the camera's right axis stays horizontal.
-        assert cam.rotation_euler[1] == 0.0
+        right, up, forward = _world_axes(cam)
+        location = np.asarray(cam.matrix_world.rows)[:3, 3]
+        diagonal = np.array([0.0, -math.sqrt(0.5), math.sqrt(0.5)])
+        assert location == pytest.approx(np.add(offset, diagonal * result["distance"]))
+        assert result["camera_location"] == pytest.approx(list(location))
+        assert forward == pytest.approx(-diagonal)
+        assert right[2] == pytest.approx(0.0, abs=1e-9)
+        assert up[2] > 0.0
+        assert list(cam.matrix_world.to_scale()) == pytest.approx(world_scale)
 
-    def test_focus_on_object_custom_distance(
+    def test_focus_on_object_distance_factor_scales_the_framing_distance(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
-        """focus_on_object with larger distance_factor pushes camera further."""
-        mesh_obj = FakeObject(
-            name="Box",
-            object_type="MESH",
-            visible=True,
-            bound_box=_box(-1.0, 1.0),
-            matrix_world=FakeMatrix.Translation((0.0, 0.0, 0.0)),
+        """2.5 stands 2.5 times as far back on the same line as 1.0, the default."""
+        cam = self._make_camera_object()
+        default = self._focus(monkeypatch, self._cube(), cam)
+        farther = self._focus(monkeypatch, self._cube(), cam, distance_factor=2.5)
+
+        assert farther["distance"] == pytest.approx(2.5 * default["distance"])
+        assert farther["camera_location"] == pytest.approx(
+            [2.5 * v for v in default["camera_location"]]
+        )
+
+    @pytest.mark.parametrize(
+        ("half", "start_moved", "end_moved"),
+        [
+            # A 60 m cube stands about 275 m away, past the 100 m clip_end.
+            (30.0, False, True),
+            # A 1 cm cube stands about 5 cm away, nearer than the 10 cm clip_start.
+            (0.005, True, False),
+            # The default cube inside the default clip range changes nothing.
+            (1.0, False, False),
+        ],
+        ids=["far", "near", "inside"],
+    )
+    def test_focus_on_object_widens_a_clip_range_that_cuts_the_object_away(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        half: float,
+        start_moved: bool,
+        end_moved: bool,
+    ) -> None:
+        """Every corner lies inside the clip range afterwards, and the reply says so.
+
+        The 60 m cube used to land 165 to 250 m away, beyond clip_end, so the
+        camera saw nothing while the tool reported success.
+        """
+        cam = self._make_camera_object(clip_start=0.1, clip_end=100.0)
+
+        result = self._focus(monkeypatch, self._cube(half=half), cam)
+
+        depths = [
+            _in_frame(cam, [half * v for v in corner], (0.36, 0.2025))[2]
+            for corner in _box()
+        ]
+        assert cam.data.clip_start < min(depths) <= max(depths) < cam.data.clip_end
+        assert (result["clip_start"], result["clip_end"]) == (
+            cam.data.clip_start,
+            cam.data.clip_end,
+        )
+        assert (cam.data.clip_start != 0.1) is start_moved
+        assert (cam.data.clip_end != 100.0) is end_moved
+        assert result["clip_adjusted"] is (start_moved or end_moved)
+
+    def test_focus_on_object_fits_an_orthographic_camera_by_its_scale(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """An orthographic frame is ortho_scale wide whatever the distance, so that is what changes."""
+        cam = self._make_camera_object(camera_type="ORTHO")
+
+        result = self._focus(monkeypatch, self._cube(), cam)
+
+        # AUTO spreads ortho_scale over the 16:9 frame's width.
+        half = (0.5, 0.5 * 9 / 16)
+        expected = math.sqrt(3) * 1.05 / half[1]
+        assert result["ortho_scale"] == pytest.approx(expected)
+        assert cam.data.ortho_scale == pytest.approx(expected)
+        assert result["distance"] == pytest.approx(2 * math.sqrt(3))
+        for corner in _box():
+            x, y, depth = _in_frame(cam, corner, half, ortho_scale=expected)
+            assert 0.0 < x < 1.0 and 0.0 < y < 1.0, (x, y)
+            assert cam.data.clip_start < depth < cam.data.clip_end
+
+    def test_focus_on_object_frames_a_point_as_a_unit_sphere(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """An empty's bounding box is one point; it gets the size of an empty's display."""
+        empty = self._cube(
+            "Target", offset=(2.0, 3.0, 4.0), half=0.0, object_type="EMPTY"
         )
         cam = self._make_camera_object()
-        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam, mesh_obj])
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
 
-        session = blender_runtime.BlenderRuntimeSession()
-        result_near = session.focus_on_object("Box", distance_factor=1.0)
-        result_far = session.focus_on_object("Box", distance_factor=5.0)
+        result = self._focus(monkeypatch, empty, cam)
 
-        near_dist = math.sqrt(sum(c**2 for c in result_near["camera_location"]))
-        far_dist = math.sqrt(sum(c**2 for c in result_far["camera_location"]))
-        assert far_dist > near_dist
+        assert result["look_at"] == pytest.approx([2.0, 3.0, 4.0])
+        assert result["distance"] == pytest.approx(
+            1.05 / math.sin(math.atan(18 / 50 * 9 / 16))
+        )
+
+    def test_focus_on_object_refuses_a_shift_that_moves_the_frame_off_the_axis(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """With shift_y 0.5 the 16:9 frame lies wholly above the axis: no distance centers the object."""
+        cam = self._make_camera_object(shift_y=0.5)
+
+        with pytest.raises(ValueError, match="lens shift"):
+            self._focus(monkeypatch, self._cube(), cam)
+        assert list(cam.location) == [0.0, 0.0, 5.0]
 
     def test_focus_on_object_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """focus_on_object raises ValueError for missing object."""
@@ -1129,6 +1479,42 @@ class TestVisualObservationTools:
         session = blender_runtime.BlenderRuntimeSession()
         with pytest.raises(ValueError, match="Object not found"):
             session.focus_on_object("NonExistent")
+
+    @pytest.mark.parametrize(
+        "direction",
+        [
+            (1.0, 0.0, 0.0),
+            (-1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, -1.0, 0.0),
+            (1.0, 2.0, -3.0),
+            (-2.0, -1.0, 0.5),
+            (0.3, -0.4, 5.0),
+            (-0.2, 0.1, -8.0),
+            (0.0, 0.0, -1.0),
+            (0.0, 0.0, 1.0),
+        ],
+    )
+    def test_look_at_rotation_turns_a_level_camera_to_the_target(
+        self, direction: Tuple[float, float, float]
+    ) -> None:
+        """Each direction gets its own rotation: the camera's -Z runs to the target,
+        its X axis stays horizontal (no roll) and its Y axis does not point down."""
+        location = [1.0, -2.0, 0.5]
+        target = [p + d for p, d in zip(location, direction)]
+
+        rotation = blender_runtime.BlenderRuntimeSession._look_at_rotation(
+            location, target
+        )
+
+        length = math.sqrt(sum(d * d for d in direction))
+        assert _camera_forward(rotation) == pytest.approx(
+            [d / length for d in direction]
+        )
+        assert _rotate_xyz(rotation, (1.0, 0.0, 0.0))[2] == pytest.approx(
+            0.0, abs=1e-12
+        )
+        assert _rotate_xyz(rotation, (0.0, 1.0, 0.0))[2] >= -1e-12
 
     # capture_viewport's method selection, viewport and render paths are
     # covered against a fuller bpy stand-in in test_viewport_capture.py.
