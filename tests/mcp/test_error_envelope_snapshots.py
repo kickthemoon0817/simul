@@ -253,7 +253,12 @@ def test_isaac_tool_that_raises(
 def test_isaac_partial_failure_without_a_success_flag(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A hand-built payload naming a failure under ``*_error`` and no ``success``."""
+    """A hand-built payload naming a failure under ``*_error`` and no ``success``.
+
+    Isaac payloads now pass through ``apply_success_from_error`` like every
+    other backend's; the Isaac envelope used to forward them untouched and
+    record the call as a success.
+    """
     instance = _isaac_server(monkeypatch, tmp_path)
 
     async def partial(include_prim_count: bool = False) -> Dict[str, Any]:
@@ -266,8 +271,9 @@ def test_isaac_partial_failure_without_a_success_flag(
     assert payload == {
         "stage_url": "anon:stage",
         "timeline_error": "timeline unavailable",
+        "success": False,
     }
-    assert _records(instance, "get_isaac_stage_info") == [{"success": True}]
+    assert _records(instance, "get_isaac_stage_info") == [{"success": False}]
 
 
 def test_isaac_rate_limited(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -429,6 +435,7 @@ def _embedded_blender(
 def test_blender_bpy_failure_with_object_context(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """bpy's RuntimeError keeps its class; the object it concerned rides as a note."""
     instance = _embedded_blender(monkeypatch, tmp_path)
 
     payload = _call(instance, "setup_blender_rigid_body", object_name="Cube")
@@ -437,7 +444,7 @@ def test_blender_bpy_failure_with_object_context(
     assert payload == {
         "success": False,
         "error": message,
-        "error_type": "Exception",
+        "error_type": "RuntimeError",
         "details": None,
     }
     assert _records(instance, "setup_blender_rigid_body") == [
@@ -448,7 +455,11 @@ def test_blender_bpy_failure_with_object_context(
 def test_blender_bpy_failure_without_added_context(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A bad enum is a TypeError from bpy, whose message already lists the valid values."""
+    """A bad enum is a TypeError from bpy, whose message already lists the valid values.
+
+    The wrapper that restated the field type, and re-raised the TypeError as a
+    RuntimeError, is gone.
+    """
     instance = _embedded_blender(monkeypatch, tmp_path)
 
     payload = _call(
@@ -458,11 +469,11 @@ def test_blender_bpy_failure_without_added_context(
         location=[0.0, 0.0, 0.0],
     )
 
-    message = f"Failed to add force field 'BOGUS': {ENUM_MISSING}"
+    message = ENUM_MISSING
     assert payload == {
         "success": False,
         "error": message,
-        "error_type": "Exception",
+        "error_type": "TypeError",
         "details": None,
     }
     assert _records(instance, "add_blender_force_field") == [
@@ -473,7 +484,10 @@ def test_blender_bpy_failure_without_added_context(
 def test_blender_attached_bpy_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The add-on replies with the failure; the client raises it as a BridgeRemoteError."""
+    """The add-on replies with the failure; the client raises it as a BridgeRemoteError.
+
+    The envelope reports the class the add-on raised, which the reply names.
+    """
     settings = Settings(
         blender={
             "mode": "attached",
@@ -522,7 +536,7 @@ def test_blender_attached_bpy_failure(
     assert payload == {
         "success": False,
         "error": remote,
-        "error_type": "Exception",
+        "error_type": "RuntimeError",
         "details": None,
     }
     assert _records(instance, "setup_blender_rigid_body") == [
@@ -533,6 +547,7 @@ def test_blender_attached_bpy_failure(
 def test_blender_validation_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Validated inside the envelope now, so the failure is recorded like any other."""
     instance = _embedded_blender(monkeypatch, tmp_path)
 
     payload = _call(instance, "list_blender_scene_objects", max_items=0)
@@ -545,28 +560,41 @@ def test_blender_validation_error(
         "error_type": "ValidationError",
         "details": {"input": arguments},
     }
-    assert _records(instance, "list_blender_scene_objects") == []
+    assert _records(instance, "list_blender_scene_objects") == [
+        {"success": False, "error": message}
+    ]
 
 
 def test_blender_validation_error_and_the_rate_limit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """With one token, an invalid call followed by a valid one."""
+    """With one token, an invalid call followed by a valid one.
+
+    The invalid call spends the token, so the valid one is refused; before,
+    invalid input never reached the rate limit.
+    """
     instance = _embedded_blender(monkeypatch, tmp_path, burst_size=1)
+    agent = instance._resolve_agent_id(None)
 
     invalid = _call(instance, "get_blender_object_info", object_name=None)
     payload = _call(instance, "get_blender_object_info", object_name="Missing")
 
     assert invalid["error_type"] == "ValidationError"
-
-    assert payload == {
+    assert _snapshot(payload) == {
         "success": False,
-        "error": "Object not found: Missing",
-        "error_type": "Exception",
-        "details": None,
+        "error": "Rate limit exceeded; retry in <seconds> s",
+        "error_type": "RateLimitError",
+        "details": {
+            "tool": "get_blender_object_info",
+            "agent_id": agent,
+            "scope": "tool",
+            "limit_per_minute": 60,
+        },
+        "retry_after_seconds": "<seconds>",
     }
     assert _records(instance, "get_blender_object_info") == [
-        {"success": False, "error": "Object not found: Missing"}
+        {"success": False, "error": invalid["error"]},
+        {"success": False, "error": "rate_limited"},
     ]
 
 
@@ -627,6 +655,7 @@ def _unreal_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, port: int) -
 def test_unreal_editor_refuses_the_connection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """aiohttp's exception escapes the session and is named by its class."""
     port = _refused_port()
     instance = _unreal_server(monkeypatch, tmp_path, port)
     message, raised = _aiohttp_refusal(port)
@@ -637,7 +666,7 @@ def test_unreal_editor_refuses_the_connection(
     assert payload == {
         "success": False,
         "error": message,
-        "error_type": "Exception",
+        "error_type": "ClientConnectorError",
         "details": None,
     }
     assert _records(instance, "execute_unreal_script") == [
