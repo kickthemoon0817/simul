@@ -6,12 +6,12 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
-
+from fastmcp import Client
 
 from simul.config import Settings
 from simul.mcp import backends as backends_module
 from simul.mcp import server as server_module
-from tests.fakes import FakeFastMCP
+from tests.fakes import BlenderSessionAdapter, FakeFastMCP, StrictBlenderSession
 
 
 class FakeBlenderAdapter:
@@ -177,3 +177,148 @@ class TestIter17WrapperSurfacesAdapterError:
             f"iter18 invariant broken: error message did not survive "
             f"Pydantic. Full response: {result}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Each tool reaches the session operation it names
+# ---------------------------------------------------------------------------
+
+
+def _strict_server(
+    monkeypatch: pytest.MonkeyPatch, session: StrictBlenderSession, mode: str
+) -> server_module.SimulMCPServer:
+    """A real FastMCP server whose Blender sessions are ``session``."""
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
+    monkeypatch.setattr(
+        backends_module,
+        "BlenderRuntimeAdapter",
+        lambda settings: BlenderSessionAdapter(settings, session),
+    )
+    settings = Settings(blender={"mode": mode}, security={"rate_limiting_enabled": False})
+    return server_module.SimulMCPServer(settings, backends={"blender"})
+
+
+def _call_through_client(
+    instance: server_module.SimulMCPServer, tool: str, arguments: dict
+) -> dict:
+    async def _run() -> dict:
+        async with Client(instance.mcp) as client:
+            result = await client.call_tool(tool, arguments)
+            return json.loads(result.content[-1].text)
+
+    return asyncio.run(_run())
+
+
+@pytest.mark.parametrize("mode", ["embedded", "attached"])
+def test_check_blender_object_bounds_calls_is_object_within_bounds(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """It called check_object_bounds, which BlenderRuntimeSession never had (since 70a3fbc)."""
+    session = StrictBlenderSession(
+        responses={
+            "is_object_within_bounds": {
+                "object_name": "Cube",
+                "within_bounds": True,
+                "object_location": [0.5, 0.5, 0.5],
+            }
+        }
+    )
+    instance = _strict_server(monkeypatch, session, mode)
+
+    payload = _call_through_client(
+        instance,
+        "check_blender_object_bounds",
+        {"object_name": "Cube", "bounds_min": [0, 0, 0], "bounds_max": [1, 1, 1]},
+    )
+
+    assert session.rejected == []
+    assert session.calls == [
+        (
+            "is_object_within_bounds",
+            {
+                "object_name": "Cube",
+                "bounds_min": [0.0, 0.0, 0.0],
+                "bounds_max": [1.0, 1.0, 1.0],
+            },
+        )
+    ]
+    assert payload == {
+        "success": True,
+        "error": None,
+        "object_name": "Cube",
+        "within_bounds": True,
+        "object_location": [0.5, 0.5, 0.5],
+    }
+
+
+@pytest.mark.parametrize("mode", ["embedded", "attached"])
+def test_set_blender_light_params_forwards_every_parameter(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """It raised NameError on every call: the line defining ``col`` was dropped in 70a3fbc."""
+    session = StrictBlenderSession(
+        responses={
+            "set_light_params": {
+                "light_name": "Light",
+                "light_type": "SPOT",
+                "energy": 500.0,
+                "color": [1.0, 0.5, 0.25],
+            }
+        }
+    )
+    instance = _strict_server(monkeypatch, session, mode)
+
+    payload = _call_through_client(
+        instance,
+        "set_blender_light_params",
+        {
+            "light_name": "Light",
+            "energy": 500,
+            "color": [1, 0.5, 0.25],
+            "use_shadow": False,
+            "spot_size": 0.8,
+            "spot_blend": 0.2,
+            "shadow_soft_size": 0.1,
+        },
+    )
+
+    assert session.rejected == []
+    assert session.calls == [
+        (
+            "set_light_params",
+            {
+                "light_name": "Light",
+                "energy": 500.0,
+                "color": [1.0, 0.5, 0.25],
+                "use_shadow": False,
+                "spot_size": 0.8,
+                "spot_blend": 0.2,
+                "shadow_soft_size": 0.1,
+            },
+        )
+    ]
+    assert payload == {
+        "success": True,
+        "error": None,
+        "light_name": "Light",
+        "light_type": "SPOT",
+        "energy": 500.0,
+        "color": [1.0, 0.5, 0.25],
+    }
+    # Omitted parameters stay None, so the session leaves those properties alone.
+    session.calls.clear()
+    _call_through_client(instance, "set_blender_light_params", {"light_name": "Light"})
+    assert session.calls == [
+        (
+            "set_light_params",
+            {
+                "light_name": "Light",
+                "energy": None,
+                "color": None,
+                "use_shadow": None,
+                "spot_size": None,
+                "spot_blend": None,
+                "shadow_soft_size": None,
+            },
+        )
+    ]

@@ -836,7 +836,9 @@ class BlenderSetLightParamsRequest(BaseModel):
 
     light_name: str = Field(..., description="Light object name")
     energy: Optional[float] = Field(None, description="Light energy/power")
-    color: Optional[List[float]] = Field(None, description="Light color RGB [r, g, b]")
+    color: Optional[List[float]] = Field(
+        None, min_length=3, max_length=3, description="Light color RGB [r, g, b]"
+    )
     use_shadow: Optional[bool] = Field(None, description="Enable shadow casting")
     spot_size: Optional[float] = Field(
         None, description="Spot cone angle radians (SPOT only)"
