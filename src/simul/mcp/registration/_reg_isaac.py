@@ -77,23 +77,26 @@ def _register_ping(server: "SimulMCPServer") -> None:
             Dict with reachable status, address, and timeout. ``success``
             tracks ``reachable``: an unreachable instance is a failed ping.
         """
-        rate_error = server._check_rate_limit("ping_isaac")
-        if rate_error:
-            return server._as_text_result(rate_error)
-        client = server._get_request_isaac_client()
-        reachable = await client.ping()
-        payload: Dict[str, Any] = {
-            "success": reachable,
-            "reachable": reachable,
-            "address": client.address,
-            "bridge_address": client.bridge_address,
-            "bridge_circuit_open": client.bridge_circuit_open,
-            "vscode_address": client.vscode_address,
-            "timeout_seconds": client.timeout_seconds,
-        }
-        if not reachable:
-            payload["error"] = f"Isaac Sim is not reachable at {client.address}"
-        return server._as_text_result(payload)
+        # A probe has to answer while another call holds the instance.
+        return await server._exec_isaac("ping_isaac", _ping(server), bypass_instance_lock=True)
+
+
+async def _ping(server: "SimulMCPServer") -> Dict[str, Any]:
+    """Probe the instance the request targets and describe its transports."""
+    client = server._get_request_isaac_client()
+    reachable = await client.ping()
+    payload: Dict[str, Any] = {
+        "success": reachable,
+        "reachable": reachable,
+        "address": client.address,
+        "bridge_address": client.bridge_address,
+        "bridge_circuit_open": client.bridge_circuit_open,
+        "vscode_address": client.vscode_address,
+        "timeout_seconds": client.timeout_seconds,
+    }
+    if not reachable:
+        payload["error"] = f"Isaac Sim is not reachable at {client.address}"
+    return payload
 
 
 def _build_tool_wrapper(
@@ -153,11 +156,7 @@ def _build_tool_wrapper(
                 return server._as_text_result(denial)
         call = getattr(server._isaac_tools, method_name)(**arguments)
         if meta.bypasses_instance_lock:
-            rate_error = server._check_rate_limit(meta.name)
-            if rate_error is not None:
-                call.close()
-                return server._as_text_result(rate_error)
-            return server._as_text_result(await call)
+            return await server._exec_isaac(meta.name, call, bypass_instance_lock=True)
         if meta.script:
             code = str(arguments["code"])
             return await server._exec_isaac(
