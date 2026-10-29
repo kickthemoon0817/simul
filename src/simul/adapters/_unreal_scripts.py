@@ -194,6 +194,83 @@ if values:
 print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}))
 """
 
+# Expects ``args`` = {"path", "location", "rotation", "label"}: location
+# [x, y, z] cm, rotation [pitch, yaw, roll] degrees, label None to keep the
+# default. An Actor class (``/Script/Engine.PointLight``, a Blueprint's
+# ``..._C`` class) spawns through spawn_actor_from_class. Any other asset goes
+# through spawn_actor_from_object, the actor factory the editor uses when the
+# asset is dropped into the level: a StaticMesh becomes a StaticMeshActor
+# showing it, a Blueprint asset its actor. Spawn and label are one undoable
+# transaction. When the path loads nothing, or Unreal places no actor for it,
+# the script prints an error instead of an empty actor path.
+SPAWN_ACTOR = ACTOR_HELPERS + """
+def spawn(path, location, rotation, label):
+    source = unreal.load_object(None, path)
+    if source is None:
+        return {"success": False, "error_type": "NotFoundError",
+                "error": "No class or asset at " + repr(path) + ": pass an Actor class path "
+                         "such as /Script/Engine.PointLight or an asset path such as "
+                         "/Engine/BasicShapes/Cube.Cube"}
+    if isinstance(source, unreal.Actor):
+        return {"success": False, "error_type": "SpawnError",
+                "error": path + " is an actor in a level, not a class or asset"}
+    is_class = isinstance(source, unreal.Class)
+    if is_class and not unreal.MathLibrary.class_is_child_of(source, unreal.Actor.static_class()):
+        return {"success": False, "error_type": "SpawnError",
+                "error": path + " is a class but not an Actor class"}
+    subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    location = unreal.Vector(*location)
+    pitch, yaw, roll = rotation
+    rotation = unreal.Rotator(pitch=pitch, yaw=yaw, roll=roll)
+    with unreal.ScopedEditorTransaction("simul: spawn actor"):
+        if is_class:
+            actor = subsystem.spawn_actor_from_class(source, location, rotation)
+        else:
+            actor = subsystem.spawn_actor_from_object(source, location, rotation)
+        if actor is not None and label is not None:
+            actor.set_actor_label(label)
+    if actor is None:
+        return {"success": False, "error_type": "SpawnError",
+                "error": "Unreal placed no actor for " + path + " (a "
+                         + source.get_class().get_name() + "); pass an Actor class or an "
+                         "asset the editor can place, such as a StaticMesh or a Blueprint"}
+    transform = actor_transform(actor)
+    return {"actor_path": actor.get_path_name(), "actor_class": actor.get_class().get_name(),
+            "label": actor.get_actor_label(), "location": transform["location"],
+            "rotation": transform["rotation"]}
+
+print(json.dumps(spawn(**args)))
+"""
+
+# Expects ``args`` = {"label", "match_mode", "max_results"}. Semantic labels
+# are actor tags. Matching ignores case, as Unreal's tag comparison (FName)
+# does: "exact" compares whole tags, "contains" looks for the label inside a
+# tag and "regex" searches each tag for the regular expression. Every match is
+# counted; the first max_results are returned as actor_info entries.
+FIND_ACTORS_BY_TAG = ACTOR_HELPERS + """
+import re
+label, mode = args["label"], args["match_mode"]
+if mode == "regex":
+    pattern = re.compile(label, re.IGNORECASE)
+
+def matches(tag):
+    if mode == "regex":
+        return pattern.search(tag) is not None
+    if mode == "contains":
+        return label.lower() in tag.lower()
+    return tag.lower() == label.lower()
+
+actors = []
+total = 0
+for actor in unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors():
+    if any(matches(str(tag)) for tag in actor.get_editor_property("tags")):
+        total += 1
+        if len(actors) < args["max_results"]:
+            actors.append(actor_info(actor))
+print(json.dumps({"actors": actors, "total_matches": total,
+                  "truncated": total > len(actors), "label_searched": label}))
+"""
+
 # Scene digest in one round trip. Class keys are UClass path names
 # (``/Script/Engine.StaticMeshActor``), the same strings Remote Control's
 # ``/remote/object/describe`` reports as ``Class``.

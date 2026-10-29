@@ -131,7 +131,7 @@ Commands accept `-H/--host` and `-p/--port` for the Remote Control endpoint
 | `control ACTION [...]` | Named editor controls on the attached editor (`inspect`, `select_actor`, `set_property`, `move_cursor`, ...) |
 | `health`, `info`, `scene`, `map` | Inspection |
 | `list-actors [--class] [--tag] [-n]`, `actor-info`, `search`, `scene-graph` | Scene queries |
-| `spawn CLASS [--location x,y,z] [--rotation p,y,r] [--label]`, `delete`, `set-transform ACTOR [--location x,y,z] [--rotation p,y,r] [--scale x,y,z]` (an option left out keeps its value), `set-property`, `set-visibility` | Edit actors |
+| `spawn PATH [--location x,y,z] [--rotation p,y,r] [--label]` (an Actor class path or an asset path), `delete`, `set-transform ACTOR [--location x,y,z] [--rotation p,y,r] [--scale x,y,z]` (an option left out keeps its value), `set-property`, `set-visibility` | Edit actors |
 | `sim ACTION`, `sim-status` | Play-In-Editor: `start`, `stop`, `pause`, `resume`, `step` |
 | `capture [OUTPUT] [--width] [--height] [--format png\|jpeg]` | Viewport screenshot |
 | `materials` | Material information for an actor |
@@ -145,7 +145,8 @@ and the cross-host set `--bind`, `--allow-public`, `--passphrase`,
 ```bash
 simul unreal setup /abs/path/MyProject.uproject --yes
 simul unreal list-actors --class StaticMeshActor
-simul unreal spawn StaticMeshActor --location 0,0,100
+simul unreal spawn /Engine/BasicShapes/Cube.Cube --location 0,0,100 --label Crate
+simul unreal spawn /Script/Engine.PointLight --location 0,0,300
 simul unreal exec "import unreal; print(unreal.EditorLevelLibrary.get_all_level_actors())"
 simul unreal capture viewport.png --width 1920
 ```

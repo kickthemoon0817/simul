@@ -173,6 +173,72 @@ print(json.dumps({{'color': [color.r, color.g, color.b]}}))
     asyncio.run(run())
 
 
+def test_spawn_from_asset_and_class_paths_then_find_by_semantic_label():
+    """An asset path used to go to SpawnActorFromClass and come back as a
+    successful spawn with an empty actor path; the semantic label lookup
+    called an EditorLevelLibrary object UE 5.7 does not have (HTTP 400)."""
+
+    async def run():
+        client = session()
+        tag = f"simul_review_{uuid.uuid4().hex}"
+        spawned = []
+        try:
+            cube = await client.spawn_actor(
+                "/Engine/BasicShapes/Cube.Cube",
+                location=[100, 200, 300],
+                rotation=[0, 45, 0],
+                label="SimulReviewCube",
+            )
+            assert not cube.get("error"), cube
+            spawned.append(cube["actor_path"])
+            assert cube["actor_class"] == "StaticMeshActor", cube
+            assert cube["label"] == "SimulReviewCube", cube
+            assert cube["location"] == pytest.approx([100, 200, 300])
+            assert cube["rotation"] == pytest.approx([0, 45, 0], abs=1e-6)
+            light = await client.spawn_actor("/Script/Engine.PointLight")
+            assert not light.get("error"), light
+            spawned.append(light["actor_path"])
+            assert light["actor_class"] == "PointLight", light
+            readback = await client._execute_json_script(f"""
+import unreal, json
+c = unreal.load_object(None, {cube['actor_path']!r}).static_mesh_component
+print(json.dumps({{'mesh': c.static_mesh.get_path_name()}}))
+""")
+            assert readback == {"mesh": "/Engine/BasicShapes/Cube.Cube"}, readback
+            missing = await client.spawn_actor("/Game/SimulReview/Missing.Missing")
+            assert missing["success"] is False, missing
+            assert missing["error_type"] == "NotFoundError", missing
+
+            for path, label in (
+                (cube["actor_path"], tag),
+                (light["actor_path"], tag.upper() + "_light"),
+            ):
+                await client._execute_python(
+                    "import unreal\n"
+                    f"a = unreal.load_object(None, {path!r})\n"
+                    f"a.set_editor_property('tags', [unreal.Name({label!r})])"
+                )
+            exact = await client.get_actor_by_semantic_label(tag)
+            assert [a["path"] for a in exact["actors"]] == [cube["actor_path"]], exact
+            assert exact["actors"][0]["tags"] == [tag], exact
+            contains = await client.get_actor_by_semantic_label(
+                tag, match_mode="contains"
+            )
+            assert sorted(a["path"] for a in contains["actors"]) == sorted(
+                spawned
+            ), contains
+            regex = await client.get_actor_by_semantic_label(
+                f"^{tag}_LIGHT$", match_mode="regex"
+            )
+            assert [a["path"] for a in regex["actors"]] == [light["actor_path"]], regex
+        finally:
+            for path in spawned:
+                await destroy_actor(client, path)
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_simulation_lifecycle():
     async def run():
         client = session()
