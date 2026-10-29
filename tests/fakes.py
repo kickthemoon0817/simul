@@ -8,15 +8,18 @@ component keys so the server's own tool listing works against it.
 
 ``StrictBlenderSession`` stands in for a Blender session behind the registered
 tools; ``BlenderSessionAdapter`` hands it to the server.
-``FakeVector``, ``FakeMatrix`` and ``FakePropArray`` stand in for Blender's
-``mathutils`` types and ``bpy_prop_array``; ``fake_mathutils`` packages the
-first two as the module the Blender runtime imports.
+``FakeVector``, ``FakeMatrix``, ``FakeEuler`` and ``FakePropArray`` stand in
+for Blender's ``mathutils`` types and ``bpy_prop_array``; ``fake_mathutils``
+packages the first three as the module the Blender runtime imports.
+``FakeTransformObject`` is an object whose ``matrix_world`` follows its parent
+and rotation mode as a Blender object's does.
 """
 
 from __future__ import annotations
 
 import copy
 import inspect
+import math
 from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
 from typing import (
@@ -31,6 +34,8 @@ from typing import (
     Sequence,
     Tuple,
 )
+
+import numpy as np
 
 from simul.config import Settings
 
@@ -225,16 +230,143 @@ class FakePropArray(tuple):
     """``bpy_prop_array`` stand-in, such as an ``Object.bound_box`` corner: not a Vector."""
 
 
-class FakeMatrix:
-    """``mathutils.Matrix`` stand-in for a 4x4 affine transform.
+def _axis_rotation(axis: int, angle: float) -> np.ndarray:
+    """Right-handed rotation by ``angle`` radians about axis 0 (X), 1 (Y) or 2 (Z)."""
+    cos, sin = math.cos(angle), math.sin(angle)
+    first, second = (axis + 1) % 3, (axis + 2) % 3
+    matrix = np.eye(3)
+    matrix[first, first] = matrix[second, second] = cos
+    matrix[first, second], matrix[second, first] = -sin, sin
+    return matrix
 
-    Like mathutils, ``@`` multiplies only a Vector. Blender 5.0.1 raises
-    ``TypeError: Matrix multiplication: not supported between 'Matrix' and
-    'bpy_prop_array' types`` for a bare ``bound_box`` corner; a stand-in that
-    multiplied any sequence hid exactly that bug.
+
+def euler_matrix(angles: Sequence[float], order: str = "XYZ") -> np.ndarray:
+    """Rotation matrix of Euler angles (x, y, z) as Blender composes them.
+
+    The first axis of ``order`` turns first: XYZ is Rz @ Ry @ Rx, ZXY is
+    Ry @ Rx @ Rz. The angles are always given as (x, y, z).
+    """
+    matrix = np.eye(3)
+    for letter in order:
+        axis = "XYZ".index(letter)
+        matrix = _axis_rotation(axis, angles[axis]) @ matrix
+    return matrix
+
+
+def matrix_euler(matrix: np.ndarray, order: str = "XYZ") -> Tuple[float, float, float]:
+    """Euler angles (x, y, z) in ``order`` of a rotation matrix; inverts ``euler_matrix``."""
+    i, j, k = ("XYZ".index(letter) for letter in order)
+    # XYZ, YZX and ZXY are even permutations; the other three flip the signs.
+    sign = 1.0 if (j - i) % 3 == 1 else -1.0
+    angles = [0.0, 0.0, 0.0]
+    angles[j] = math.asin(max(-1.0, min(1.0, -sign * matrix[k, i])))
+    angles[i] = math.atan2(sign * matrix[k, j], matrix[k, k])
+    angles[k] = math.atan2(sign * matrix[j, i], matrix[i, i])
+    return angles[0], angles[1], angles[2]
+
+
+def quaternion_matrix(quaternion: Sequence[float]) -> np.ndarray:
+    """Rotation matrix of a quaternion (w, x, y, z), as ``rotation_quaternion`` stores it."""
+    w, x, y, z = np.asarray(quaternion, dtype=float) / np.linalg.norm(quaternion)
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
+
+
+def matrix_quaternion(matrix: np.ndarray) -> Tuple[float, float, float, float]:
+    """The quaternion (w, x, y, z) of a rotation matrix; inverts ``quaternion_matrix``."""
+    m = matrix
+    trace = m[0, 0] + m[1, 1] + m[2, 2]
+    if trace > 0:
+        s = 2 * math.sqrt(trace + 1)
+        return (
+            s / 4,
+            (m[2, 1] - m[1, 2]) / s,
+            (m[0, 2] - m[2, 0]) / s,
+            (m[1, 0] - m[0, 1]) / s,
+        )
+    if m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        s = 2 * math.sqrt(1 + m[0, 0] - m[1, 1] - m[2, 2])
+        return (
+            (m[2, 1] - m[1, 2]) / s,
+            s / 4,
+            (m[0, 1] + m[1, 0]) / s,
+            (m[0, 2] + m[2, 0]) / s,
+        )
+    if m[1, 1] > m[2, 2]:
+        s = 2 * math.sqrt(1 + m[1, 1] - m[0, 0] - m[2, 2])
+        return (
+            (m[0, 2] - m[2, 0]) / s,
+            (m[0, 1] + m[1, 0]) / s,
+            s / 4,
+            (m[1, 2] + m[2, 1]) / s,
+        )
+    s = 2 * math.sqrt(1 + m[2, 2] - m[0, 0] - m[1, 1])
+    return (
+        (m[1, 0] - m[0, 1]) / s,
+        (m[0, 2] + m[2, 0]) / s,
+        (m[1, 2] + m[2, 1]) / s,
+        s / 4,
+    )
+
+
+def axis_angle_matrix(axis_angle: Sequence[float]) -> np.ndarray:
+    """Rotation matrix of (angle, x, y, z), as ``rotation_axis_angle`` stores it."""
+    angle, *axis = axis_angle
+    direction = np.asarray(axis, dtype=float) / np.linalg.norm(axis)
+    return quaternion_matrix((math.cos(angle / 2), *(direction * math.sin(angle / 2))))
+
+
+def matrix_axis_angle(matrix: np.ndarray) -> Tuple[float, float, float, float]:
+    """The (angle, x, y, z) of a rotation matrix; inverts ``axis_angle_matrix``."""
+    w, x, y, z = matrix_quaternion(matrix)
+    angle = 2 * math.acos(max(-1.0, min(1.0, w)))
+    sin = math.sin(angle / 2)
+    if abs(sin) < 1e-12:
+        return 0.0, 0.0, 1.0, 0.0
+    return angle, x / sin, y / sin, z / sin
+
+
+class FakeEuler:
+    """``mathutils.Euler`` stand-in: angles (x, y, z) in radians and their order."""
+
+    def __init__(
+        self, angles: Iterable[float] = (0.0, 0.0, 0.0), order: str = "XYZ"
+    ) -> None:
+        self._angles = tuple(float(a) for a in angles)
+        self.order = order
+
+    def __iter__(self) -> Iterator[float]:
+        return iter(self._angles)
+
+    def __getitem__(self, index: int) -> float:
+        return self._angles[index]
+
+    def __len__(self) -> int:
+        return len(self._angles)
+
+    def __repr__(self) -> str:
+        return f"Euler({self._angles!r}, {self.order!r})"
+
+    def to_matrix(self) -> "FakeMatrix":
+        return FakeMatrix(euler_matrix(self._angles, self.order))
+
+
+class FakeMatrix:
+    """``mathutils.Matrix`` stand-in for a 3x3 or 4x4 transform.
+
+    Like mathutils, ``@`` multiplies only a Vector or a Matrix. Blender 5.0.1
+    raises ``TypeError: Matrix multiplication: not supported between 'Matrix'
+    and 'bpy_prop_array' types`` for a bare ``bound_box`` corner; a stand-in
+    that multiplied any sequence hid exactly that bug. ``to_euler`` likewise
+    stays near an Euler only, as mathutils does.
     """
 
-    def __init__(self, rows: Sequence[Sequence[float]]) -> None:
+    def __init__(self, rows: Any) -> None:
         self.rows = [tuple(float(v) for v in row) for row in rows]
 
     @classmethod
@@ -243,11 +375,84 @@ class FakeMatrix:
         x, y, z = offset
         return cls([(1, 0, 0, x), (0, 1, 0, y), (0, 0, 1, z), (0, 0, 0, 1)])
 
+    @classmethod
+    def Identity(cls, size: int) -> "FakeMatrix":  # noqa: N802
+        return cls(np.eye(size))
+
+    @classmethod
+    def Scale(  # noqa: N802
+        cls, factor: float, size: int, axis: Sequence[float]
+    ) -> "FakeMatrix":
+        """Scale by ``factor`` along ``axis`` (3x3 or 4x4), as ``mathutils.Matrix.Scale`` does."""
+        direction = np.asarray(axis, dtype=float) / np.linalg.norm(axis)
+        matrix = np.eye(size)
+        matrix[:3, :3] += (factor - 1.0) * np.outer(direction, direction)
+        return cls(matrix)
+
+    @classmethod
+    def LocRotScale(  # noqa: N802
+        cls, location: Any, rotation: Any, scale: Any
+    ) -> "FakeMatrix":
+        """Translation @ rotation @ scale, as ``mathutils.Matrix.LocRotScale`` builds it."""
+        matrix = np.eye(4)
+        if rotation is not None:
+            if isinstance(rotation, FakeEuler):
+                rotation = rotation.to_matrix()
+            matrix[:3, :3] = np.asarray(rotation.rows)[:3, :3]
+        if scale is not None:
+            matrix[:3, :3] = matrix[:3, :3] * np.asarray(list(scale))
+        if location is not None:
+            matrix[:3, 3] = list(location)
+        return cls(matrix)
+
     @property
     def translation(self) -> FakeVector:
         return FakeVector(row[3] for row in self.rows[:3])
 
-    def __matmul__(self, other: Any) -> FakeVector:
+    def __iter__(self) -> Iterator[Tuple[float, ...]]:
+        return iter(self.rows)
+
+    def __getitem__(self, index: int) -> Tuple[float, ...]:
+        return self.rows[index]
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def inverted(self) -> "FakeMatrix":
+        return FakeMatrix(np.linalg.inv(np.asarray(self.rows)))
+
+    @property
+    def is_negative(self) -> bool:
+        """Whether the matrix mirrors (a negative determinant), as mathutils reports it."""
+        return bool(np.linalg.det(np.asarray(self.rows)[:3, :3]) < 0)
+
+    def to_scale(self) -> FakeVector:
+        """The axes' lengths, as mathutils returns them: negative on every axis
+        for a mirroring matrix (Blender 5.0.1 gives (-1.5, -1.5, -1.5) for a
+        scale of (-1.5, 1.5, 1.5))."""
+        lengths = np.linalg.norm(np.asarray(self.rows)[:3, :3], axis=0)
+        return FakeVector(-lengths if self.is_negative else lengths)
+
+    def to_euler(self, order: str = "XYZ", compatible: Any = None) -> FakeEuler:
+        if compatible is not None and not isinstance(compatible, FakeEuler):
+            raise TypeError(
+                f"to_euler() argument 2 must be Euler, not {type(compatible).__name__}"
+            )
+        rotation = np.asarray(self.rows)[:3, :3]
+        angles: Sequence[float] = matrix_euler(
+            rotation / np.linalg.norm(rotation, axis=0), order
+        )
+        if compatible is not None:
+            # The equivalent angle nearest the compatible one: whole turns apart.
+            angles = [
+                a + 2 * math.pi * round((c - a) / (2 * math.pi))
+                for a, c in zip(angles, compatible)
+            ]
+        return FakeEuler(angles, order)
+
+    def __matmul__(self, other: Any) -> Any:
+        if isinstance(other, FakeMatrix):
+            return FakeMatrix(np.asarray(self.rows) @ np.asarray(other.rows))
         if not isinstance(other, FakeVector):
             raise TypeError(
                 "Matrix multiplication: not supported between 'Matrix' and "
@@ -259,9 +464,120 @@ class FakeMatrix:
         return FakeVector(product[: len(other)])
 
 
+class FakeTransformObject:
+    """A Blender object whose ``matrix_world`` follows its parent and rotation mode.
+
+    Reading ``matrix_world`` composes it as Blender evaluates the object: the
+    parent's world matrix, ``matrix_parent_inverse``, then the local
+    location, rotation and scale, the rotation read from ``rotation_euler`` in
+    the order ``rotation_mode`` names, from ``rotation_quaternion`` or from
+    ``rotation_axis_angle``. Assigning it does what bpy's setter does: it
+    solves the local transform through the parent and stores the rotation in
+    the property of the rotation mode only, a mirroring matrix as a rotation
+    and a scale negative on every axis. So a write to ``location`` or
+    ``rotation_euler`` lands where it does in Blender: relative to the parent,
+    and ignored by a QUATERNION or AXIS_ANGLE object.
+
+    With ``stored=True`` the object keeps ``matrix_world`` as Blender keeps
+    it for an original object: ``evaluate()`` (a depsgraph evaluation)
+    recomputes it, the parent's first, and assigning it stores the value
+    given. Writing location, rotation or scale, or moving the parent, leaves
+    it stale until then, as in background Blender and the bpy module, which
+    evaluate only on demand. By default it follows every write at once.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        object_type: str = "EMPTY",
+        data: Any = None,
+        location: Sequence[float] = (0.0, 0.0, 0.0),
+        rotation_euler: Sequence[float] = (0.0, 0.0, 0.0),
+        scale: Sequence[float] = (1.0, 1.0, 1.0),
+        rotation_mode: str = "XYZ",
+        parent: Optional["FakeTransformObject"] = None,
+        stored: bool = False,
+    ) -> None:
+        self.name = name
+        self.type = object_type
+        self.data = data
+        self.location: Any = FakeVector(location)
+        self.rotation_mode = rotation_mode
+        self.rotation_euler: Any = FakeEuler(rotation_euler)
+        self.rotation_quaternion: Any = FakeVector((1.0, 0.0, 0.0, 0.0))
+        self.rotation_axis_angle: Any = FakeVector((0.0, 0.0, 1.0, 0.0))
+        self.scale: Any = FakeVector(scale)
+        self.parent = parent
+        # What Blender's Parent (Keep Transform) sets.
+        self.matrix_parent_inverse = (
+            parent.matrix_world.inverted()
+            if parent is not None
+            else FakeMatrix.Identity(4)
+        )
+        self._stores_matrix = stored
+        self._stored: Optional[FakeMatrix] = None
+        self.evaluate()
+
+    def evaluate(self) -> None:
+        """Recompute a stored matrix_world, the parent's first, as a depsgraph evaluation does."""
+        if self.parent is not None:
+            self.parent.evaluate()
+        if self._stores_matrix:
+            self._stored = self._composed()
+
+    def _rotation(self) -> np.ndarray:
+        if self.rotation_mode == "QUATERNION":
+            return quaternion_matrix(list(self.rotation_quaternion))
+        if self.rotation_mode == "AXIS_ANGLE":
+            return axis_angle_matrix(list(self.rotation_axis_angle))
+        return euler_matrix(list(self.rotation_euler), self.rotation_mode)
+
+    def _parent_matrix(self) -> np.ndarray:
+        if self.parent is None:
+            return np.eye(4)
+        return np.asarray(self.parent.matrix_world.rows) @ np.asarray(
+            self.matrix_parent_inverse.rows
+        )
+
+    def _composed(self) -> FakeMatrix:
+        basis = np.eye(4)
+        basis[:3, :3] = self._rotation() * np.asarray(list(self.scale))
+        basis[:3, 3] = list(self.location)
+        return FakeMatrix(self._parent_matrix() @ basis)
+
+    @property
+    def matrix_world(self) -> FakeMatrix:
+        if self._stored is not None:
+            return FakeMatrix(self._stored.rows)
+        return self._composed()
+
+    @matrix_world.setter
+    def matrix_world(self, value: FakeMatrix) -> None:
+        local = np.linalg.inv(self._parent_matrix()) @ np.asarray(value.rows)
+        scale = np.linalg.norm(local[:3, :3], axis=0)
+        rotation = local[:3, :3] / scale
+        if np.linalg.det(rotation) < 0:
+            # mat4_to_loc_rot_size: a mirror becomes a rotation and a scale
+            # negative on every axis.
+            rotation, scale = -rotation, -scale
+        if self._stores_matrix:
+            self._stored = FakeMatrix(value.rows)
+        self.location = FakeVector(local[:3, 3])
+        self.scale = FakeVector(scale)
+        if self.rotation_mode == "QUATERNION":
+            self.rotation_quaternion = FakeVector(matrix_quaternion(rotation))
+        elif self.rotation_mode == "AXIS_ANGLE":
+            self.rotation_axis_angle = FakeVector(matrix_axis_angle(rotation))
+        else:
+            self.rotation_euler = FakeEuler(
+                matrix_euler(rotation, self.rotation_mode), self.rotation_mode
+            )
+
+
 def fake_mathutils() -> ModuleType:
     """Return a ``mathutils`` module made of the strict stand-ins above."""
     module = ModuleType("mathutils")
     module.Vector = FakeVector  # type: ignore[attr-defined]
     module.Matrix = FakeMatrix  # type: ignore[attr-defined]
+    module.Euler = FakeEuler  # type: ignore[attr-defined]
     return module

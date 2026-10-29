@@ -306,7 +306,10 @@ For a custom discovery directory, set the matching directory in both environment
 The GUI integration test runs in a new disposable process and never uses an
 existing user's editor. It checks preservation of unsaved work, main-thread
 execution, named UI actions with scripting disabled, object editing, a world-space
-bounding box, camera focus, a force field without a location, JPEG capture
+bounding box, camera focus that keeps the whole object in the frame and clip range
+(a 60 m cube included, and a camera parented to a moved rig with a quaternion
+rotation), world-space camera placement, refusal of an object-search pattern
+that can backtrack for hours, a force field without a location, JPEG capture
 of the 3D View in Edit Mode without a camera, a render through a temporary camera,
 explicit script-output truncation, multiple windows, scene/file changes,
 and detachment. A second disposable process checks glTF export and render from a script, the

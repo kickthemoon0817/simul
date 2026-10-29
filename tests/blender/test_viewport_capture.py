@@ -250,6 +250,7 @@ class FakeBlender:
                 area=self.area if with_view else None,
                 window=self.window if with_view else None,
                 temp_override=self._temp_override,
+                evaluated_depsgraph_get=lambda: "depsgraph",
             ),
             data=SimpleNamespace(
                 images=self.images,
@@ -282,6 +283,8 @@ class FakeBlender:
             clip_start=0.1,
             clip_end=100.0,
             ortho_scale=6.0,
+            shift_x=0.0,
+            shift_y=0.0,
         )
 
     @staticmethod

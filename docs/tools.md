@@ -145,6 +145,21 @@ Behaviour worth knowing:
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
   View, so its captures are renders. The per-mode table is in
   [blender-attachment.md](blender-attachment.md#capture-feedback).
+- `set_blender_camera_view` and `get_blender_camera_info` work in world space:
+  `location` and an XYZ Euler `rotation_euler` in radians, whatever the
+  camera's parent and rotation mode (glTF imports store quaternions).
+  `focus_blender_on_object` aims the camera from the front and above at the
+  object's bounding-box center, at the distance where the bounding sphere fits
+  the frame through the camera's field of view, the render aspect ratio, sensor
+  fit and lens shift (`distance_factor: 1.0`, the default; 2.0 shows the object
+  at half that size). An orthographic camera gets the `ortho_scale` that fits
+  instead. A clip range that would cut the object away is widened, and the
+  reply reports `distance`, `clip_start`, `clip_end` and `clip_adjusted`.
+- `search_blender_objects` refuses a `name_pattern` that repeats a group holding
+  a quantifier or alternatives, such as `(\w+)+`: Python's regex search
+  backtracks, and on a long object name such a pattern runs for hours on
+  Blender's main thread. `get_unreal_actor_by_semantic_label` refuses the same
+  patterns in regex mode.
 - `execute_blender_script` returns the first `max_output_chars` characters of
   printed output (default 32 000, at most 100 000). A longer output sets
   `output_truncated: true`, and `output_total_chars` gives its full length, so a

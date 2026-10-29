@@ -137,7 +137,7 @@ simul blender status
 ```
 
 Then start the server with `--blender-mode attached` (or set
-`BLENDER__MODE=attached`). The bridge uses protocol version 2: rebuild and
+`BLENDER__MODE=attached`). The bridge uses protocol version 4: rebuild and
 reinstall the add-on after upgrading simul. See [docs/blender-attachment.md](docs/blender-attachment.md).
 
 **Headless USD**
