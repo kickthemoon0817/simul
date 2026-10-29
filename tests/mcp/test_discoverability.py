@@ -96,7 +96,8 @@ class TestMCPDiscoverability:
             assert keyword not in text, f"Mentions an unregistered backend: {keyword}"
 
     # ------------------------------------------------------------------
-    # 3. Core tool listing (USD gated on its adapter, Isaac always registered)
+    # 3. Core tool listing (USD gated on its adapter; Isaac registered on a supported
+    #    platform, which tests/conftest.py reports for the whole session)
     # ------------------------------------------------------------------
     _CORE_USD_TOOLS: frozenset[str] = frozenset({
         "load_usd_file",
@@ -125,7 +126,7 @@ class TestMCPDiscoverability:
         leaked = self._CORE_USD_TOOLS & tool_names
         assert not leaked, f"USD tools registered without an adapter: {leaked}"
 
-    def test_isaac_tools_always_registered(
+    def test_isaac_tools_registered_on_supported_platform(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Isaac Sim tools register even when Isaac is unreachable."""

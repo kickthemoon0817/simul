@@ -59,8 +59,8 @@ ISAAC_PLATFORM_SKIP = (
 
 #: Skip reason of the Isaac tools when the configuration switches them off.
 ISAAC_DISABLED_SKIP = (
-    "isaac_sim.enabled is false (ISAAC_SIM__ENABLED); unset it or set it to true to "
-    "register the Isaac Sim tools"
+    "isaac_sim.enabled is false (ISAAC_SIM__ENABLED); set it to true to register the "
+    "Isaac Sim tools, or unset it to register them where Isaac Sim runs (Linux, Windows)"
 )
 
 
