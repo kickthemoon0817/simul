@@ -1,10 +1,12 @@
 """Every Unreal tool wrapper calls its session method with arguments the method accepts.
 
-The wrappers restate each ``UnrealRuntimeSession`` call by hand, so a renamed
-or removed session parameter used to surface only as a ``TypeError`` inside
-the envelope, on the first live call. Here every registered Unreal tool is
-invoked against a session double that binds each call to the real method
-signature and records the mismatch.
+The wrappers are built from the declarations in ``_unreal_tools``, which name
+each ``UnrealRuntimeSession`` method and the arguments it receives; a renamed
+or removed session parameter would surface only as a ``TypeError`` inside the
+envelope, on the first live call. ``test_tool_registry_drift.py`` checks the
+declarations statically; here every registered Unreal tool is invoked against
+a session double that binds each call to the real method signature and records
+the mismatch.
 """
 
 from __future__ import annotations

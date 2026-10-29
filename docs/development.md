@@ -64,9 +64,12 @@ wheels exist for Python 3.11 and 3.13 only.
   talks to the add-on bridge; headless USD calls `pxr` directly.
 - **Tools**: Isaac tools are methods on `IsaacTools` mixins carrying a
   `@tool_meta` decorator (name, description, hints); `_reg_isaac.py` builds
-  the MCP wrapper from each method's signature and docstring. The USD,
-  Blender and Unreal modules register their wrappers by hand over adapter
-  sessions. Every call goes through one shared envelope
+  the MCP wrapper from each method's signature and docstring. Unreal tools
+  are `UnrealTool` declarations in `registration/_unreal_tools.py` (name,
+  description, hints, parameters, response model, session method);
+  `_reg_unreal.py` builds each wrapper, its request model and the session
+  call from them. The USD and Blender modules register their wrappers by hand
+  over adapter sessions. Every call goes through one shared envelope
   (`SimulMCPServer._run_envelope`): the rate limit, the backend's admission
   hook (Isaac's claim enforcement and per-instance lock), request
   validation, the call, success normalisation, exactly one usage record and

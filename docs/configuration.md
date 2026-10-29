@@ -106,7 +106,9 @@ your data. Each refusal is a structured `RefusedOperation` error:
 
 `security.rate_limiting` limits calls per agent session and per tool
 (`SECURITY__REQUESTS_PER_MINUTE`, `SECURITY__BURST_SIZE`), with an overall
-per-agent cap across all tools.
+per-agent cap across all tools. Unreal tools validate their arguments inside
+the shared envelope, so an Unreal call refused for invalid arguments spends a
+token and is recorded in the usage log like any other failed call.
 
 ### Multi-agent claims
 

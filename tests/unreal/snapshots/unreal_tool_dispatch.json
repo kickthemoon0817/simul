@@ -4090,7 +4090,19 @@
    "arguments": {
     "format": "jpg"
    },
-   "envelope": [],
+   "envelope": [
+    {
+     "tool": "capture_unreal_viewport",
+     "label": "Unreal",
+     "response_model": "UnrealCaptureViewportResponse",
+     "params": {
+      "resolution_x": 1920,
+      "resolution_y": 1080,
+      "format": "jpg",
+      "inline": false
+     }
+    }
+   ],
    "session": [],
    "result": {
     "is_error": false,
@@ -4098,10 +4110,28 @@
      "success": false,
      "error": "Invalid format 'jpg'. Must be one of ['png']",
      "error_type": "ValidationError",
-     "details": null
+     "details": {
+      "input": {
+       "resolution_x": 1920,
+       "resolution_y": 1080,
+       "format": "jpg",
+       "inline": false
+      }
+     }
     }
    },
-   "usage": []
+   "usage": [
+    {
+     "success": false,
+     "params": {
+      "resolution_x": 1920,
+      "resolution_y": 1080,
+      "format": "jpg",
+      "inline": false
+     },
+     "error": "Invalid format 'jpg'. Must be one of ['png']"
+    }
+   ]
   },
   {
    "tool": "execute_unreal_script",
@@ -4110,7 +4140,17 @@
     "code": "print(1)",
     "mode": "Bogus"
    },
-   "envelope": [],
+   "envelope": [
+    {
+     "tool": "execute_unreal_script",
+     "label": "Unreal",
+     "response_model": "UnrealExecuteScriptResponse",
+     "params": {
+      "code_bytes": 8,
+      "mode": "Bogus"
+     }
+    }
+   ],
    "session": [],
    "result": {
     "is_error": false,
@@ -4118,10 +4158,24 @@
      "success": false,
      "error": "Invalid mode 'Bogus'. Must be one of ['EvaluateStatement', 'ExecuteFile', 'ExecuteStatement']",
      "error_type": "ValidationError",
-     "details": null
+     "details": {
+      "input": {
+       "code": "print(1)",
+       "mode": "Bogus"
+      }
+     }
     }
    },
-   "usage": []
+   "usage": [
+    {
+     "success": false,
+     "params": {
+      "code_bytes": 8,
+      "mode": "Bogus"
+     },
+     "error": "Invalid mode 'Bogus'. Must be one of ['EvaluateStatement', 'ExecuteFile', 'ExecuteStatement']"
+    }
+   ]
   },
   {
    "tool": "set_unreal_camera_view",
@@ -4130,7 +4184,14 @@
     "location_x": 1.0,
     "location_y": 2.0
    },
-   "envelope": [],
+   "envelope": [
+    {
+     "tool": "set_unreal_camera_view",
+     "label": "Unreal",
+     "response_model": "UnrealSetCameraViewResponse",
+     "params": null
+    }
+   ],
    "session": [],
    "result": {
     "is_error": false,
@@ -4138,10 +4199,24 @@
      "success": false,
      "error": "Give all three location components or none",
      "error_type": "ValidationError",
-     "details": null
+     "details": {
+      "input": {
+       "location_x": 1.0,
+       "location_y": 2.0,
+       "location_z": null,
+       "rotation_pitch": null,
+       "rotation_yaw": null,
+       "rotation_roll": null
+      }
+     }
     }
    },
-   "usage": []
+   "usage": [
+    {
+     "success": false,
+     "error": "Give all three location components or none"
+    }
+   ]
   },
   {
    "tool": "set_unreal_camera_view",
@@ -4152,7 +4227,14 @@
     "location_z": 3.0,
     "rotation_roll": 4.0
    },
-   "envelope": [],
+   "envelope": [
+    {
+     "tool": "set_unreal_camera_view",
+     "label": "Unreal",
+     "response_model": "UnrealSetCameraViewResponse",
+     "params": null
+    }
+   ],
    "session": [],
    "result": {
     "is_error": false,
@@ -4160,10 +4242,24 @@
      "success": false,
      "error": "Give all three rotation components or none",
      "error_type": "ValidationError",
-     "details": null
+     "details": {
+      "input": {
+       "location_x": 1.0,
+       "location_y": 2.0,
+       "location_z": 3.0,
+       "rotation_pitch": null,
+       "rotation_yaw": null,
+       "rotation_roll": 4.0
+      }
+     }
     }
    },
-   "usage": []
+   "usage": [
+    {
+     "success": false,
+     "error": "Give all three rotation components or none"
+    }
+   ]
   },
   {
    "tool": "control_unreal_ui",
@@ -4186,7 +4282,18 @@
      "success": false,
      "error": "1 validation error for UnrealUIRequest\nagent_control\n  Input should be 'inspect', 'select_actor', 'clear_selection', 'set_property', 'pilot_actor', 'eject_actor', 'set_game_view', 'move_cursor' or 'clear_cursor' [type=literal_error, input_value='bogus', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
      "error_type": "ValidationError",
-     "details": null
+     "details": {
+      "input": {
+       "agent_control": "bogus",
+       "target": null,
+       "property_name": null,
+       "value": null,
+       "enabled": null,
+       "agent_id": "agent",
+       "position": null,
+       "activity": null
+      }
+     }
     }
    },
    "usage": [
@@ -4223,7 +4330,22 @@
      "success": false,
      "error": "1 validation error for UnrealUIRequest\nproperty_name\n  Input should be 'location', 'rotation' or 'scale' [type=literal_error, input_value='color', input_type=str]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
      "error_type": "ValidationError",
-     "details": null
+     "details": {
+      "input": {
+       "agent_control": "set_property",
+       "target": null,
+       "property_name": "color",
+       "value": [
+        1.0,
+        2.0,
+        3.0
+       ],
+       "enabled": null,
+       "agent_id": "agent",
+       "position": null,
+       "activity": null
+      }
+     }
     }
    },
    "usage": [
