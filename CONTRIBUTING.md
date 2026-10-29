@@ -14,8 +14,8 @@ File bugs and feature requests at
 - **Environment**: `simul version`, the backend and its version (Isaac Sim,
   Unreal Engine, Blender), and your OS
 
-For a security problem, open an issue asking for a private contact and leave
-the details out of the public thread.
+For a security problem, don't open an issue: report it privately as described
+in [SECURITY.md](SECURITY.md).
 
 ## Development setup
 

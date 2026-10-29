@@ -247,8 +247,10 @@ none of the transports authenticate by default:
 - `SECURITY__ALLOW_SCRIPT_EXECUTION=false` removes the arbitrary-code tools
   from the MCP server. See [docs/configuration.md](docs/configuration.md#security).
 
-To report a vulnerability, open an issue asking for a private contact and
-leave the exploit details out of the public thread.
+To report a vulnerability, use GitHub's private
+[Report a vulnerability](https://github.com/kickthemoon0817/simul/security/advisories/new)
+form rather than a public issue; [SECURITY.md](SECURITY.md) covers what to
+include and what is in scope.
 
 ## Contributing
 
