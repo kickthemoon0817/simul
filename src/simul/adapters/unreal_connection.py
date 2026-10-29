@@ -68,7 +68,9 @@ async def probe_instance(settings: Settings, host: str, port: int) -> dict[str, 
     """Probe one Remote Control endpoint and read its editor's identity.
 
     ``GET /remote/info`` decides ``reachable`` and ``latency_ms``; when it
-    answers, the editor's Python reports the identity. Each step is bounded by
+    answers, the editor's Python reports the identity. An HTTP 401 also counts
+    as an answer: Remote Control refuses a missing or wrong passphrase, so the
+    editor is reachable without identity. Each step is bounded by
     ``unreal.ping_timeout``. A failed step does not raise: the identity fields
     stay null (lists empty) and ``error`` says why.
 
@@ -91,6 +93,15 @@ async def probe_instance(settings: Settings, host: str, port: int) -> dict[str, 
     session = UnrealRuntimeSession(_endpoint_settings(settings, host, port))
     try:
         ping = await session.ping()
+        if ping.get("status") == 401:
+            # Remote Control answered, so an editor is there; listing it with
+            # the reason beats a scan silently dropping it.
+            record["reachable"] = True
+            record["error"] = (
+                "Remote Control refused the request (HTTP 401): set "
+                "UNREAL__PASSPHRASE to the editor's passphrase"
+            )
+            return record
         if not ping.get("reachable"):
             record["error"] = ping.get("error") or f"No answer within {timeout}s"
             return record

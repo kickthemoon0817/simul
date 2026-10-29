@@ -624,7 +624,9 @@ class UnrealRuntimeSession(LoggerMixin):
 
         Returns:
             Dictionary with ``reachable``, ``address``, ``latency_ms``, and
-            optional ``error`` keys.
+            optional ``error`` keys, plus ``status`` when Remote Control
+            answered with an HTTP error (401: the editor enforces a passphrase
+            and ``UNREAL__PASSPHRASE`` is missing or wrong).
         """
         address = f"{self.host}:{self.port}"
         t0 = time.monotonic()
@@ -644,12 +646,15 @@ class UnrealRuntimeSession(LoggerMixin):
                 "latency_ms": latency_ms,
             }
         except Exception as exc:
-            return {
+            failure: Dict[str, Any] = {
                 "reachable": False,
                 "address": address,
                 "latency_ms": None,
                 "error": str(exc),
             }
+            if aiohttp is not None and isinstance(exc, aiohttp.ClientResponseError):
+                failure["status"] = exc.status
+            return failure
 
     # ------------------------------------------------------------------
     # Internal helpers — Remote Control wrappers

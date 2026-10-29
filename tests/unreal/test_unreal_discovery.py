@@ -57,11 +57,14 @@ class _FakeEditor:
         identity: Optional[Dict[str, Any]] = None,
         python_status: int = 200,
         delay: float = 0.0,
+        info_status: int = 200,
     ) -> None:
         self.sock = sock
         self.identity = identity
         self.python_status = python_status
         self.delay = delay
+        # Non-200 refuses every route, as Remote Control does without the passphrase.
+        self.info_status = info_status
         self.requests: List[Dict[str, Any]] = []
 
     def _record(self, request: web.Request) -> None:
@@ -73,12 +76,22 @@ class _FakeEditor:
             }
         )
 
+    def _refused(self) -> web.Response:
+        return web.json_response(
+            {"errorMessage": "Given Passphrase is not correct!"},
+            status=self.info_status,
+        )
+
     async def info(self, request: web.Request) -> web.Response:
         self._record(request)
+        if self.info_status != 200:
+            return self._refused()
         return web.json_response({"HttpRoutes": []})
 
     async def call(self, request: web.Request) -> web.Response:
         self._record(request)
+        if self.info_status != 200:
+            return self._refused()
         body = await request.json()
         assert body["functionName"] == "ExecutePythonCommandEx"
         if self.delay:
@@ -428,6 +441,33 @@ def test_every_probe_carries_the_configured_passphrase(
         "/remote/object/call",
     ]
     assert {request["headers"].get("Passphrase") for request in requests} == {header}
+
+
+@pytest.mark.parametrize("status,listed", [(401, True), (404, False)])
+def test_a_scan_lists_an_editor_that_refuses_the_passphrase(
+    tmp_path: Any, status: int, listed: bool
+) -> None:
+    """Remote Control answers 401 to a missing or wrong passphrase: an editor is
+    there, so a scan lists it with the reason instead of dropping it. Other
+    refusals need not come from Unreal and stay out of the scan."""
+    with _Editors([None, {"info_status": status}]) as editors:
+        settings = editors.settings(tmp_path, active=0)
+        payload = asyncio.run(discover_instances(settings))
+        requests = editors.by_port[editors.ports[1]].requests
+        if listed:
+            with pytest.raises(ValueError, match="UNREAL__PASSPHRASE"):
+                asyncio.run(UnrealAttachments(settings).attach())
+    # The refusal ends the probe; no identity script is sent.
+    assert {request["path"] for request in requests} == {"/remote/info"}
+    found = [item for item in payload["instances"] if item["port"] == editors.ports[1]]
+    assert payload["total_discovered"] == int(listed)
+    if not listed:
+        assert found == []
+        return
+    (refused,) = found
+    assert (refused["reachable"], refused["active"]) == (True, False)
+    assert refused["instance_id"] is None and refused["viewports"] == []
+    assert "HTTP 401" in refused["error"] and "UNREAL__PASSPHRASE" in refused["error"]
 
 
 def test_attach_explains_an_editor_without_identity(tmp_path: Any) -> None:

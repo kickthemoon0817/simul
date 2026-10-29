@@ -48,6 +48,8 @@ The identity fields come from the editor's Python. They are null (the lists
 empty) when it does not answer, for example with Python execution disabled or
 an editor too busy to answer within the timeout; `error` then gives the reason,
 the editor is still `reachable`, and it cannot be attached until it answers.
+An editor whose Remote Control refuses the request with HTTP 401 (it enforces a
+passphrase and `UNREAL__PASSPHRASE` is missing or wrong) is reported the same way.
 A scan leaves out ports where nothing answered, except the active endpoint.
 The payload also carries `active_instance` (the active entry's name),
 `total_discovered` (reachable instances) and `warnings`, which in attached mode
