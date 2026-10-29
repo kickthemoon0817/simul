@@ -135,5 +135,11 @@ Procedure for both: `docs/releasing.md`.
   its registration module under `mcp/registration/`, and add one
   `BackendSpec` to `mcp/backends.py`. The server, the CLI's `info` grouping,
   `get_capabilities` and the ROUTING instructions pick it up from there.
+  Import the backend's adapter and registration modules only inside the
+  spec's `adapter_factory` and `register_tools` (expose a probe or adapter
+  class through the module's lazy `__getattr__`), never at the top of
+  `backends.py` or a shared package `__init__`: a server built for another
+  backend must not import them. `tests/mcp/test_lazy_backend_imports.py`
+  checks each one-backend server in a fresh interpreter.
 - `src/simul/resources/skills.md` documents Isaac Sim 5.1 / 6.0 scripting patterns for
   `execute_isaac_script`; the server exposes it as the `simul://isaac-sim/skills` resource.

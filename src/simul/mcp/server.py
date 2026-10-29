@@ -307,8 +307,9 @@ class SimulMCPServer(LoggerMixin):
         self._instance_lock_timeout = float(self.settings.server.timeout)
 
         # One adapter per registered backend; None when its runtime is not
-        # importable in this process or the backend was not selected, so a
-        # disabled backend's runtime (bpy, pxr, aiohttp) is never probed.
+        # importable in this process or the backend was not selected. The
+        # factories import their backend's modules when called, so a disabled
+        # backend's runtime (bpy, pxr, aiohttp) is never probed or imported.
         # Isaac's adapter is always built: it owns the default client the
         # instance registry and IsaacTools hold, and building it dials nothing.
         self._adapters: Dict[str, Optional[BackendAdapter]] = {

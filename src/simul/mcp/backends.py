@@ -7,9 +7,18 @@ instructions say about it, and any gate on its tools beyond the runtime
 being present. Adding a backend is one entry here plus an adapter
 implementing ``BackendAdapter``.
 
+Nothing backend-specific is imported here. A spec's ``adapter_factory`` and
+``register_tools`` import the backend's adapter and registration modules
+when the server calls them, which it does only for the backends a
+``--backends`` selection enables, so a server for one backend never imports
+another's runtime (``pxr`` for USD, ``aiohttp`` for Unreal, ``bpy`` for
+Blender) or its tool modules.
+
 The availability probes and adapter classes are module attributes on
 purpose: a test that wants a runtime to look present or absent patches them
-here, in the one place the server reads them from. The probes cover the
+here, in the one place the server reads them from. They resolve from
+``simul.adapters`` on first access (PEP 562) and the factories read them
+through this module, so a patch is what a factory sees. The probes cover the
 runtime (``is_headless_available``, ``is_blender_available``,
 ``is_unreal_available``) and, for Isaac Sim, the operating system
 (``is_isaac_platform_supported``).
@@ -19,26 +28,10 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, AbstractSet, Callable, Optional, Tuple
+from typing import TYPE_CHECKING, AbstractSet, Any, Callable, List, Optional, Tuple
 
-from ..adapters import (
-    BlenderRuntimeAdapter,
-    HeadlessUSDAdapter,
-    IsaacRuntimeAdapter,
-    UnrealRuntimeAdapter,
-    is_blender_available,
-    is_headless_available,
-    is_unreal_available,
-)
 from ..adapters.base import BackendAdapter
 from ..config import Settings
-from .registration import (
-    register_blender_tools,
-    register_instance_tools,
-    register_isaac_tools,
-    register_unreal_tools,
-    register_usd_tools,
-)
 
 if TYPE_CHECKING:
     from .server import SimulMCPServer
@@ -75,8 +68,11 @@ class BackendSpec:
         settings_attribute: Attribute of ``Settings`` holding the backend's
             configuration section.
         adapter_factory: Builds the adapter from settings, or returns None
-            when the runtime is not importable in this process.
-        register_tools: Adds the backend's tools to the server.
+            when the runtime is not importable in this process. It imports
+            the backend's adapter module, so calling it is what loads that
+            runtime.
+        register_tools: Adds the backend's tools to the server, importing
+            the backend's registration module when called.
         routing_rule: The line the ROUTING instructions state for the
             backend, phrased in terms of the token inside tool names.
         summary: The sentence that introduces the backend's tools at the
@@ -138,39 +134,110 @@ def _isaac_skip_check(settings: Settings, named: bool) -> Optional[str]:
     return ISAAC_PLATFORM_SKIP
 
 
+#: The adapter classes and runtime probes this module exposes, resolved from
+#: ``simul.adapters`` (which imports each adapter's module) on first access.
+_ADAPTER_EXPORTS = frozenset(
+    {
+        "IsaacRuntimeAdapter",
+        "HeadlessUSDAdapter",
+        "is_headless_available",
+        "BlenderRuntimeAdapter",
+        "is_blender_available",
+        "UnrealRuntimeAdapter",
+        "is_unreal_available",
+    }
+)
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve an adapter class or runtime probe on first access and keep it.
+
+    Kept as a module attribute, so a test's patch of it replaces the value
+    the factories read and undoing the patch restores it.
+    """
+    if name not in _ADAPTER_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from .. import adapters
+
+    value = getattr(adapters, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> List[str]:
+    return sorted(set(globals()) | _ADAPTER_EXPORTS)
+
+
+def _export(name: str) -> Any:
+    """Return the adapter class or runtime probe ``name`` as this module holds it, patched or resolved."""
+    namespace = globals()
+    return namespace[name] if name in namespace else __getattr__(name)
+
+
+def _available(probe: str) -> bool:
+    """Call the runtime probe ``probe``."""
+    return bool(_export(probe)())
+
+
+def _build(adapter_class: str, settings: Settings) -> BackendAdapter:
+    """Construct the adapter class named ``adapter_class`` from settings."""
+    adapter: BackendAdapter = _export(adapter_class)(settings)
+    return adapter
+
+
+def _isaac_adapter(settings: Settings) -> BackendAdapter:
+    """Build the Isaac Sim adapter; its socket client needs no optional runtime and dials nothing."""
+    return _build("IsaacRuntimeAdapter", settings)
+
+
 def _headless_adapter(settings: Settings) -> Optional[BackendAdapter]:
     """Build the headless USD adapter when pxr imports."""
-    return HeadlessUSDAdapter(settings) if is_headless_available() else None
+    if not _available("is_headless_available"):
+        return None
+    return _build("HeadlessUSDAdapter", settings)
 
 
 def _blender_adapter(settings: Settings) -> Optional[BackendAdapter]:
     """Attached mode does not require bpy in the MCP server interpreter."""
-    if settings.blender.mode == "attached" or is_blender_available():
-        return BlenderRuntimeAdapter(settings)
+    if settings.blender.mode == "attached" or _available("is_blender_available"):
+        return _build("BlenderRuntimeAdapter", settings)
     return None
 
 
 def _unreal_adapter(settings: Settings) -> Optional[BackendAdapter]:
     """Build the Unreal adapter when its module imported and aiohttp (or the embedded module) is present."""
-    if UnrealRuntimeAdapter is None or not is_unreal_available():
+    if _export("UnrealRuntimeAdapter") is None or not _available("is_unreal_available"):
         return None
-    return UnrealRuntimeAdapter(settings)
+    return _build("UnrealRuntimeAdapter", settings)
 
 
 def _register_isaac(server: "SimulMCPServer") -> None:
     """Register the Isaac tools plus the instance routing tools and scripting references that serve them."""
+    from .registration import register_instance_tools, register_isaac_tools
+
     register_instance_tools(server)
     register_isaac_tools(server)
     server._register_isaac_resources()
 
 
+def _register_usd(server: "SimulMCPServer") -> None:
+    """Register the headless USD tools."""
+    from .registration import register_usd_tools
+
+    register_usd_tools(server)
+
+
 def _register_unreal(server: "SimulMCPServer") -> None:
     """Register the thin or the full Unreal surface, as ``unreal.tool_surface`` says."""
+    from .registration import register_unreal_tools
+
     register_unreal_tools(server, thin=server.settings.unreal.tool_surface == "thin")
 
 
 def _register_blender(server: "SimulMCPServer") -> None:
     """Register the thin or the full Blender surface, as ``blender.tool_surface`` says."""
+    from .registration import register_blender_tools
+
     register_blender_tools(server, thin=server.settings.blender.tool_surface == "thin")
 
 
@@ -200,7 +267,7 @@ BACKENDS: Tuple[BackendSpec, ...] = (
         name="isaac",
         label="Isaac Sim",
         settings_attribute="isaac_sim",
-        adapter_factory=IsaacRuntimeAdapter,
+        adapter_factory=_isaac_adapter,
         register_tools=_register_isaac,
         routing_rule="Tools containing 'isaac' → require a running Isaac Sim instance (TCP socket).",
         summary=(
@@ -216,7 +283,7 @@ BACKENDS: Tuple[BackendSpec, ...] = (
         label="USD / Headless",
         settings_attribute="usd",
         adapter_factory=_headless_adapter,
-        register_tools=register_usd_tools,
+        register_tools=_register_usd,
         routing_rule=(
             "Tools containing none of those names (load_usd_file, get_prim_info, "
             "create_prim, summarize_scene, etc.) → operate on local USD files via the "
