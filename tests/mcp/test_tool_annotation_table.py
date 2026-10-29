@@ -121,7 +121,7 @@ def registered() -> Dict[str, Dict[str, Any]]:
         )
         instance = server_module.SimulMCPServer(settings=settings)
     return {
-        tool.name: tool.kwargs["annotations"].model_dump(exclude_none=True)
+        tool.name: tool.kwargs["annotations"].model_dump(by_alias=True, exclude_none=True)
         for tool in instance.mcp.tools
     }
 

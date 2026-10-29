@@ -87,7 +87,7 @@ def test_inline_isaac_capture_is_an_image_block_plus_a_small_record(
 
     images, record = _split(result)
     assert len(images) == 1
-    assert images[0].mimeType == "image/png"
+    assert images[0].mime_type == "image/png"
     assert images[0].data == PNG_B64
     assert "image_base64" not in record
     assert "encoding" not in record
@@ -167,7 +167,7 @@ def test_unreal_capture_carries_the_declared_image_format(
 
     images, record = _split(result)
     assert len(images) == 1
-    assert images[0].mimeType == "image/jpeg"
+    assert images[0].mime_type == "image/jpeg"
     assert record["success"] is True
     assert record["resolution_x"] == 320
     assert "image_base64" not in record
@@ -209,7 +209,7 @@ def test_blender_jpeg_capture_is_labelled_jpeg(monkeypatch: pytest.MonkeyPatch) 
     )
 
     images, record = _split(result)
-    assert images[0].mimeType == "image/jpeg"
+    assert images[0].mime_type == "image/jpeg"
     assert record["format"] == "jpeg"
 
 
@@ -233,7 +233,7 @@ def test_image_mime_type_follows_the_bytes(
 
     images, _record = _split(instance._as_text_result(payload))
 
-    assert images[0].mimeType == expected
+    assert images[0].mime_type == expected
 
 
 @pytest.mark.parametrize("label", ["   ", "agent\x00", "tab\there", "x" * 65, ""])

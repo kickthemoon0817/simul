@@ -125,7 +125,7 @@ def test_registration_follows_the_table(
     assert [tool.name for tool in registered] == [spec.name for spec in BLENDER_TOOLS]
     for tool, spec in zip(registered, BLENDER_TOOLS):
         assert tool.kwargs["description"] == spec.description, spec.name
-        hints = tool.kwargs["annotations"].model_dump(exclude_none=True)
+        hints = tool.kwargs["annotations"].model_dump(by_alias=True, exclude_none=True)
         assert hints == {
             "readOnlyHint": spec.hints.read_only,
             **({"destructiveHint": True} if spec.hints.destructive else {}),

@@ -221,6 +221,13 @@ Hard rules for Claude:
   Sim's OS gate) is patched to `True` for the whole session by
   `tests/conftest.py`, so the suite registers the Isaac tools on macOS just
   as on Linux CI; patch it back per test to exercise the macOS default.
+- FastMCP 4 sits on the MCP Python SDK v2. A real `fastmcp.Client(server.mcp)`
+  negotiates the sessionless 2026-07-28 protocol by default; pass
+  `mode="legacy"` to test the initialize-handshake era, where each connection
+  is one session. SDK v2 models use snake_case attributes (`input_schema`,
+  `mime_type`, `read_only_hint`) and dump to the camelCase wire names only
+  with `model_dump(by_alias=True)`; camelCase attribute reads go through
+  FastMCP's deprecated compatibility bridge and warn.
 - Isaac tools are declared once: the `@tool_meta` decorator on the
   `IsaacTools` method carries the name, description and hints, and
   `_reg_isaac.py` builds the MCP wrapper from the method signature and

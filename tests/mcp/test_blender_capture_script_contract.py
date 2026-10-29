@@ -105,7 +105,7 @@ def _listed(instance: server_module.SimulMCPServer, tool: str) -> Any:
 
 
 def _input_schema(instance: server_module.SimulMCPServer, tool: str) -> Dict[str, Any]:
-    return _listed(instance, tool).inputSchema
+    return _listed(instance, tool).input_schema
 
 
 @pytest.fixture
@@ -184,7 +184,7 @@ def test_output_caps_fit_what_the_server_delivers() -> None:
 
 def test_the_cap_and_how_to_get_more_are_advertised() -> None:
     tool = _listed(_server(None), "execute_blender_script")
-    schema = tool.inputSchema["properties"]["max_output_chars"]
+    schema = tool.input_schema["properties"]["max_output_chars"]
     assert schema["default"] == 32_000
     assert "1 to 100000" in schema["description"]
     assert "output_truncated" in schema["description"]

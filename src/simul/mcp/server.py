@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import (
@@ -38,9 +39,10 @@ from typing import (
 
 from fastmcp import FastMCP
 from fastmcp.server.context import _current_context
-from fastmcp.server.tasks import TaskConfig
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
+from fastmcp.utilities.tasks import TaskConfig as _TaskConfig
 from mcp.types import ImageContent, TextContent, ToolAnnotations
+from mcp.types.version import MODERN_PROTOCOL_VERSIONS
 from pydantic import BaseModel
 
 from .. import __version__ as _source_version
@@ -131,6 +133,9 @@ def build_instructions(
 _FASTMCP_SUPPORTS_INSTRUCTIONS: bool = (
     "instructions" in inspect.signature(FastMCP).parameters
 )
+
+# The background task config FastMCP takes; None switches task support off.
+TaskConfig: Optional[Type[_TaskConfig]] = _TaskConfig
 
 # Tool key of the bucket that caps one agent's calls across every tool.
 _GLOBAL_RATE_BUCKET: str = "*"
@@ -277,6 +282,9 @@ class SimulMCPServer(LoggerMixin):
         self.usage_tracker = ToolUsageTracker()
         self.session_manager = SessionManager()
         self._session_routes: Dict[str, IsaacSessionRoute] = {}
+        # The one session every request on the sessionless MCP protocol
+        # (2026-07-28) belongs to; see _get_request_session_id.
+        self._sessionless_session_id = str(uuid.uuid4())
         self._read_only_tools: Dict[str, bool] = {}
         self._isaac_instance_locks: Dict[str, asyncio.Lock] = {}
         # Token buckets keyed by (agent, tool); the per-agent ceiling across
@@ -346,6 +354,8 @@ class SimulMCPServer(LoggerMixin):
         )
 
         self.mcp = FastMCP(name="simul", version=_PACKAGE_VERSION)
+        # Decided before registration, since _task_optional reads it.
+        self._tasks_enabled = self._register_tasks_extension()
 
         # Tag every CallTool request with a fresh correlation id and emit an
         # audit row. Done as FastMCP middleware (vs. wrapping each tool) so it
@@ -425,7 +435,7 @@ class SimulMCPServer(LoggerMixin):
         """Return every tool name currently registered on the FastMCP instance.
 
         Returns:
-            The names, read from FastMCP 3's local provider where components
+            The names, read from FastMCP's local provider where components
             are keyed ``tool:<name>@``; empty when the provider is absent.
         """
         provider = getattr(self.mcp, "local_provider", None)
@@ -519,11 +529,26 @@ class SimulMCPServer(LoggerMixin):
             return None
 
     def _get_request_session_id(self) -> Optional[str]:
-        """Return the current FastMCP session id when available."""
+        """Return the id of the MCP session the current request belongs to.
+
+        A connection opened with the ``initialize`` handshake (protocol
+        2025-11-25 and earlier) is one session, and FastMCP reports its id.
+        The 2026-07-28 protocol has no sessions: FastMCP gives each of its
+        requests a fresh id, which would make every call a new agent, rate
+        limit bucket and Isaac route. Those requests share one session per
+        server instead: a stdio server serves a single client, and without a
+        session nothing tells network clients apart.
+
+        Returns:
+            The session id, or None outside an MCP request.
+        """
         ctx = self._get_request_context()
         if ctx is None:
             return None
         try:
+            request = getattr(ctx, "request_context", None)
+            if getattr(request, "protocol_version", None) in MODERN_PROTOCOL_VERSIONS:
+                return self._sessionless_session_id
             return ctx.session_id
         except Exception:
             return None
@@ -735,7 +760,8 @@ class SimulMCPServer(LoggerMixin):
             if isinstance(annotations, dict):
                 read_only = bool(annotations.get("readOnlyHint"))
             else:
-                read_only = bool(getattr(annotations, "readOnlyHint", False))
+                # MCP SDK v2 field name; the wire keeps the camelCase alias.
+                read_only = bool(getattr(annotations, "read_only_hint", False))
         self._read_only_tools[tool_name] = read_only
         return read_only
 
@@ -1227,7 +1253,7 @@ class SimulMCPServer(LoggerMixin):
             mime_type = (
                 "image/jpeg" if image_format in ("jpg", "jpeg") else f"image/{image_format}"
             )
-            content.append(ImageContent(type="image", data=image, mimeType=mime_type))
+            content.append(ImageContent(type="image", data=image, mime_type=mime_type))
         text = encode_result_budget(payload)
         content.append(TextContent(type="text", text=text))
         return ToolResult(content=content)
@@ -1296,20 +1322,41 @@ class SimulMCPServer(LoggerMixin):
         """
         Return a TaskConfig for optional background task support.
 
-        FastMCP 3.x can import TaskConfig without the full 'tasks' extra
-        installed, but raises ImportError at tool-registration time when
-        the ``docket`` runtime (``fastmcp[tasks]``) is absent.  Check
-        for actual runtime availability before returning a config.
+        FastMCP 4 runs background tasks through its tasks extension and
+        refuses to start a server that has a task-enabled tool but no such
+        extension, so a tool opts in only when ``_register_tasks_extension``
+        registered it.
         """
-        if TaskConfig:
-            try:
-                from fastmcp.server.dependencies import is_docket_available
-
-                if is_docket_available():
-                    return TaskConfig(mode="optional")
-            except Exception:
-                pass
+        if TaskConfig and self._tasks_enabled:
+            return TaskConfig(mode="optional")
         return None
+
+    def _register_tasks_extension(self) -> bool:
+        """Register FastMCP's background tasks extension when it is installed.
+
+        The extension (``io.modelcontextprotocol/tasks``) ships in the
+        optional ``fastmcp-tasks`` package (``fastmcp[tasks]``). Without it
+        every tool runs in the foreground, as on FastMCP 3 without the docket
+        runtime; a broken install is logged and skipped rather than stopping
+        the server.
+
+        Returns:
+            True when the extension is registered.
+        """
+        if not TaskConfig:
+            return False
+        try:
+            from fastmcp_tasks import TasksExtension
+        except ImportError:
+            return False
+        try:
+            self.mcp.add_extension(TasksExtension())
+        except Exception as exc:
+            self.logger.warning(
+                "Background tasks disabled: fastmcp-tasks did not register: %s", exc
+            )
+            return False
+        return True
 
     def _register_isaac_resources(self) -> None:
         """Register the Isaac Sim scripting references as MCP resources.

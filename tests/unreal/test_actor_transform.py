@@ -390,7 +390,7 @@ def mcp(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     def schema(name: str) -> Dict[str, Any]:
         async def run() -> Any:
             async with Client(instance.mcp) as client:
-                return {tool.name: tool.inputSchema for tool in await client.list_tools()}
+                return {tool.name: tool.input_schema for tool in await client.list_tools()}
 
         return asyncio.run(run())[name]
 

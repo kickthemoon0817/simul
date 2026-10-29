@@ -190,7 +190,7 @@ def test_registered_wrappers_mirror_the_declarations(monkeypatch: pytest.MonkeyP
     for spec in UNREAL_TOOLS:
         tool = registered[spec.name]
         assert tool.kwargs["description"] == spec.description
-        hints = tool.kwargs["annotations"].model_dump(exclude_none=True)
+        hints = tool.kwargs["annotations"].model_dump(by_alias=True, exclude_none=True)
         assert hints["readOnlyHint"] is spec.read_only, spec.name
         assert hints.get("destructiveHint", False) is spec.destructive, spec.name
         assert hints.get("idempotentHint", False) is spec.idempotent, spec.name

@@ -3,7 +3,7 @@
 ``FakeFastMCP`` stands in for the real FastMCP instance when a test only needs
 to see what the server registered. It records every tool with the keyword
 arguments it was registered with, answers the handful of FastMCP calls the
-server makes during construction, and mirrors FastMCP 3's ``local_provider``
+server makes during construction, and mirrors FastMCP's ``local_provider``
 component keys so the server's own tool listing works against it.
 
 ``StrictBlenderSession`` stands in for a Blender session behind the registered
@@ -53,6 +53,7 @@ class FakeFastMCP:
         self.tools: List[SimpleNamespace] = []
         self.by_name: Dict[str, ToolFunction] = {}
         self.resources: List[str] = []
+        self.extensions: List[Any] = []
         self.local_provider = SimpleNamespace(_components={})
         self.run_calls: List[Dict[str, Any]] = []
 
@@ -99,6 +100,10 @@ class FakeFastMCP:
 
     def add_middleware(self, middleware: Any) -> None:
         """Accept the request-context middleware the server installs."""
+
+    def add_extension(self, extension: Any) -> None:
+        """Record a server extension (the background tasks one) the server registers."""
+        self.extensions.append(extension)
 
     async def run_async(self, **kwargs: Any) -> None:
         """Record how the server asked to be run instead of serving."""

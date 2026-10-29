@@ -134,7 +134,7 @@ def test_blender_capture_is_an_image_block_plus_the_documented_record() -> None:
     )
 
     assert len(images) == 1
-    assert images[0].mimeType == "image/jpeg"
+    assert images[0].mime_type == "image/jpeg"
     assert images[0].data == JPEG_B64
     assert record["image_attached"] is True
     assert record["format"] == "jpeg"
@@ -181,7 +181,7 @@ def test_unreal_inline_capture_matches_its_schema() -> None:
         _call("capture_unreal_viewport", {"resolution_x": 32, "resolution_y": 16, "inline": True})
     )
 
-    assert images[0].mimeType == "image/png"
+    assert images[0].mime_type == "image/png"
     assert record["image_attached"] is True
     _assert_matches_schema(record, UnrealCaptureViewportResponse)
 

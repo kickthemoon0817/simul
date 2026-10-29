@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 
 from ..schemas.common import ErrorResponse
 from ._helpers import with_param_descriptions
