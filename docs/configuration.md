@@ -106,7 +106,14 @@ your data. Each refusal is a structured `RefusedOperation` error:
 
 `security.rate_limiting` limits calls per agent session and per tool
 (`SECURITY__REQUESTS_PER_MINUTE`, `SECURITY__BURST_SIZE`), with an overall
-per-agent cap across all tools.
+per-agent cap across all tools. An Unreal tool's own argument checks (such as
+`capture_unreal_viewport`'s format, `execute_unreal_script`'s mode, the
+all-or-none camera groups of `set_unreal_camera_view` and `control_unreal_ui`'s
+control and property names) run inside the shared envelope, so a call they
+refuse spends a token and is recorded in the usage log like any other failed
+call. Arguments that do not match a tool's input schema (a wrong type, a
+missing required argument) are refused by the MCP layer before the call
+reaches the envelope: no token is spent and nothing is recorded.
 
 ### Multi-agent claims
 

@@ -9,6 +9,7 @@ import logging
 import os
 import re
 from functools import lru_cache
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union, cast
 
@@ -570,12 +571,13 @@ class NormalisedYamlSettingsSource(YamlConfigSettingsSource):
     environment.
     """
 
-    def _read_file(self, file_path: Path) -> Dict[str, Any]:
+    def _read_file(self, file_path: Union[Path, Traversable]) -> Dict[str, Any]:
         """Load one YAML file and return it in the Settings model shape.
 
         Args:
-            file_path: YAML file to read; pydantic-settings only calls this for
-                files that exist.
+            file_path: YAML file to read, a filesystem path or (from
+                pydantic-settings 2.15) a packaged resource; pydantic-settings
+                only calls this for files that exist.
 
         Returns:
             The normalised payload, or ``{}`` when the file is unreadable or

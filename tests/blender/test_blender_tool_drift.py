@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
+from pydantic import ValidationError
 
 from simul.adapters.blender_runtime import BlenderRuntimeSession
 from simul.config import Settings
@@ -239,3 +240,39 @@ def test_an_entry_naming_a_missing_operation_fails_to_build() -> None:
     )
     with pytest.raises(TypeError, match="not a BlenderRuntimeSession operation"):
         session_operation(spec)
+
+
+def test_advertised_defaults_pass_the_request_model(
+    blender_server: server_module.SimulMCPServer,
+) -> None:
+    """A caller who omits an optional parameter must get a valid call.
+
+    add_blender_force_field advertised ``location=None`` while its request
+    model required a list, so every call without a location failed validation.
+    """
+    for spec in BLENDER_TOOLS:
+        # Hand-written wrappers (``build``) may fill a default in before
+        # validating, e.g. the agent label; generated ones forward it as is.
+        if spec.request is None or spec.build is not None:
+            continue
+        for name, parameter in _advertised(blender_server, spec).items():
+            if parameter.default is parameter.empty:
+                continue
+            # Validate through the real model; other fields' "missing" errors
+            # are expected here, an error on this field is the bug.
+            try:
+                spec.request.model_validate({name: parameter.default})
+            except ValidationError as exc:
+                own = [error for error in exc.errors() if error["loc"][:1] == (name,)]
+                assert not own, f"{spec.name}.{name}: default {parameter.default!r} is invalid: {own}"
+
+
+def test_light_color_needs_exactly_three_components() -> None:
+    """``color=[]`` used to reach Blender, which then failed assigning an empty tuple."""
+    from simul.mcp.schemas.blender import BlenderSetLightParamsRequest
+
+    assert BlenderSetLightParamsRequest(light_name="Light", color=None).color is None
+    assert BlenderSetLightParamsRequest(light_name="Light", color=[1, 0.5, 0.25]).color == [1, 0.5, 0.25]
+    for bad in ([], [1, 0.5], [1, 0.5, 0.25, 1]):
+        with pytest.raises(ValidationError):
+            BlenderSetLightParamsRequest(light_name="Light", color=bad)

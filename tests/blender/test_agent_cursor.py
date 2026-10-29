@@ -2,6 +2,7 @@
 
 import importlib.util
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -118,3 +119,25 @@ def test_capture_hides_both_annotations_and_restores_after_failure(overlay):
             raise RuntimeError("capture failed")
     assert not pointers.suspended and not observations.suspended
     assert len(pointers.inspect(one)) == len(observations.inspect(one)) == 1
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["captured", "failed"])
+def test_annotations_are_redrawn_after_a_capture_hid_them(overlay, fails):
+    """Leaving a capture tags a redraw, so the hidden annotations come back.
+
+    A screen capture redraws its region without annotations, and that frame
+    stays on screen until the next redraw, also when the capture fails.
+    """
+    cursors, one, _, area, _ = overlay
+    namespace = cursors.update.__globals__
+    pointers = namespace["cursors"]
+    pointers.update(one, area, "builder", [0.2, 0.3], "Selected")
+    suspended_at_tag = []
+    area.tag_redraw.side_effect = lambda: suspended_at_tag.append(pointers.suspended)
+    with pytest.raises(RuntimeError) if fails else nullcontext():
+        with namespace["hide_annotations"]():
+            assert suspended_at_tag == []
+            if fails:
+                raise RuntimeError("capture failed")
+    # Tagged after the flags are restored, so the redraw paints the annotations.
+    assert suspended_at_tag and not any(suspended_at_tag)

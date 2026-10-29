@@ -7,11 +7,14 @@ Remote Control API (HTTP on port 30010) or the embedded ``unreal`` Python module
 
 import asyncio
 import base64
+import errno
 import hashlib
 import importlib
 import json
+import logging
 import math
 import re
+import socket
 import tempfile
 import textwrap
 import time
@@ -104,6 +107,60 @@ LOADED_MAP_EXPRESSION = (
 
 class UnrealScriptFailure(RuntimeError):
     """Python run inside the editor raised; the message is UE's traceback."""
+
+
+#: What ``ping``, ``health_check`` and discovery report when Remote Control
+#: answers HTTP 401: the editor enforces a passphrase and the request carried
+#: none or a wrong one (UE 5.7 checks loopback clients too). Remote Control
+#: answered, so the editor is reachable; this is an authentication error.
+PASSPHRASE_REFUSED_ERROR = (
+    "Remote Control refused the request (HTTP 401): set UNREAL__PASSPHRASE "
+    "to the editor's passphrase"
+)
+
+#: ``ping`` ``error_type`` for a request that never left this machine. Its
+#: endpoint was not tried, so the failure says nothing about an editor there.
+PROBE_NOT_SENT = "ProbeNotSent"
+
+# Socket errors this machine raises before a request leaves it: no free file
+# descriptor, buffer or local port, or local policy refused the connection.
+_LOCAL_SOCKET_ERRNOS = frozenset(
+    {
+        errno.EMFILE,
+        errno.ENFILE,
+        errno.ENOBUFS,
+        errno.ENOMEM,
+        errno.EADDRNOTAVAIL,
+        errno.EACCES,
+        errno.EPERM,
+    }
+)
+
+
+def _refusal(exc: BaseException) -> Optional[Dict[str, Any]]:
+    """The authentication-error fields when Remote Control answered 401, else None."""
+    if aiohttp is not None and isinstance(exc, aiohttp.ClientResponseError) and exc.status == 401:
+        return {
+            "status": 401,
+            "error": PASSPHRASE_REFUSED_ERROR,
+            "error_type": "AuthenticationError",
+        }
+    return None
+
+
+def _not_sent(exc: BaseException) -> Optional[str]:
+    """Why a request failed on this machine before reaching its endpoint, or None.
+
+    aiohttp keeps the socket error as ``ClientConnectorError.os_error``. A host
+    name that does not resolve, or a socket error from this machine's limits
+    or policy, means nothing was sent.
+    """
+    cause = getattr(exc, "os_error", None) or exc
+    if isinstance(cause, socket.gaierror) or (
+        isinstance(cause, OSError) and cause.errno in _LOCAL_SOCKET_ERRNOS
+    ):
+        return f"Probe not sent ({cause})"
+    return None
 
 
 # Close tasks scheduled by UnrealRuntimeSession.cleanup(). The event loop keeps
@@ -551,7 +608,9 @@ class UnrealRuntimeSession(LoggerMixin):
         """
         from ._unreal_attach_scripts import EDITOR_IDENTITY
 
-        return await self._execute_json_script(EDITOR_IDENTITY)
+        # An editor without identity is normal while it starts up, and
+        # discovery reports the reason with the instance: not an error here.
+        return await self._execute_json_script(EDITOR_IDENTITY, failure_log_level=logging.DEBUG)
 
     async def control_ui(
         self,
@@ -697,11 +756,19 @@ class UnrealRuntimeSession(LoggerMixin):
         """
         Lightweight reachability probe — short timeout, no retries.
 
+        ``reachable`` means Remote Control answered ``GET /remote/info``. A
+        refusal is an answer: on HTTP 401 the editor is reachable and the
+        payload reports an authentication error. Discovery
+        (``unreal_connection.probe_instance``) takes reachability from here.
+
         Returns:
-            Dictionary with ``reachable``, ``address``, ``latency_ms``, and
-            optional ``error`` keys, plus ``status`` when Remote Control
-            answered with an HTTP error (401: the editor enforces a passphrase
-            and ``UNREAL__PASSPHRASE`` is missing or wrong).
+            ``reachable``, ``address`` and ``latency_ms``, plus ``error``
+            when the probe failed or was refused; ``status`` when Remote
+            Control answered with an HTTP error; and ``error_type``
+            ``AuthenticationError`` (HTTP 401: ``UNREAL__PASSPHRASE`` is
+            missing or wrong) or ``ProbeNotSent`` (the request never left
+            this machine: out of file descriptors or local ports, or the host
+            name did not resolve).
         """
         address = f"{self.host}:{self.port}"
         t0 = time.monotonic()
@@ -714,22 +781,34 @@ class UnrealRuntimeSession(LoggerMixin):
                 timeout_override=self.ping_timeout,
                 max_retries=0,
             )
-            latency_ms = round((time.monotonic() - t0) * 1000, 1)
-            return {
-                "reachable": True,
-                "address": address,
-                "latency_ms": latency_ms,
-            }
         except Exception as exc:
+            refusal = _refusal(exc)
+            if refusal is not None:
+                return {
+                    "reachable": True,
+                    "address": address,
+                    "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+                    **refusal,
+                }
             failure: Dict[str, Any] = {
                 "reachable": False,
                 "address": address,
                 "latency_ms": None,
-                "error": str(exc),
+                # A timeout's text is empty.
+                "error": str(exc) or f"No answer within {self.ping_timeout}s",
             }
             if aiohttp is not None and isinstance(exc, aiohttp.ClientResponseError):
                 failure["status"] = exc.status
+            not_sent = _not_sent(exc)
+            if not_sent is not None:
+                failure["error"] = not_sent
+                failure["error_type"] = PROBE_NOT_SENT
             return failure
+        return {
+            "reachable": True,
+            "address": address,
+            "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+        }
 
     # ------------------------------------------------------------------
     # Internal helpers — Remote Control wrappers
@@ -787,11 +866,19 @@ class UnrealRuntimeSession(LoggerMixin):
             },
         )
 
-    async def _execute_json_script(self, code: str) -> Dict[str, Any]:
-        """Run a fixed tool script and preserve failures as error envelopes."""
+    async def _execute_json_script(
+        self, code: str, *, failure_log_level: int = logging.ERROR
+    ) -> Dict[str, Any]:
+        """Run a fixed tool script and preserve failures as error envelopes.
+
+        Args:
+            code: The script.
+            failure_log_level: Level a failure is logged at; lower it where a
+                failure is expected. The envelope carries the reason either way.
+        """
         result = self._parse_python_json(await self._execute_python(code))
         if result.get("error"):
-            self.logger.error("Unreal tool script failed: %s", result["error"])
+            self.logger.log(failure_log_level, "Unreal tool script failed: %s", result["error"])
             return {"success": False, "error_type": "ScriptError", **result}
         return result
 
@@ -986,19 +1073,30 @@ class UnrealRuntimeSession(LoggerMixin):
 
         Returns:
             Dictionary with a ``reachable`` boolean — the field every backend
-            ping shares — and ``connected``, its older name, kept as an alias
-            for one release. When reachable, also includes best-effort
-            ``engine_version``, ``project_name``, ``is_editor``, and per-probe
-            ``warnings`` (any non-fatal metadata-fetch errors).
+            ping shares, decided as in ``ping`` — and ``connected``, its older
+            name, kept for one release. When reachable, also includes
+            best-effort ``engine_version``, ``project_name``, ``is_editor``,
+            and per-probe ``warnings`` (any non-fatal metadata-fetch errors).
+            When Remote Control refuses the request (HTTP 401) it is
+            ``reachable`` but not ``connected``, with ``ping``'s
+            authentication error.
         """
         try:
             await self._http_get("/remote/info")
         except Exception as exc:
-            self.logger.warning("Health check connectivity failed: %s", exc)
+            refusal = _refusal(exc)
+            if refusal is not None:
+                self.logger.warning("Health check: %s", refusal["error"])
+                # Remote Control answered, so the editor is reachable; callers
+                # still reading ``connected`` must not take it as usable.
+                return {"reachable": True, "connected": False, **refusal}
+            # A timeout's text is empty; say what happened, as ping does.
+            error = str(exc) or f"No answer within {self.timeout}s"
+            self.logger.warning("Health check connectivity failed: %s", error)
             return {
                 "reachable": False,
                 "connected": False,
-                "error": str(exc),
+                "error": error,
             }
 
         # One script for all metadata: a single Remote Control round trip
@@ -1749,7 +1847,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             actor cannot be found, and a ``TransformNotApplied`` error, with
             the read-back values attached, naming each given component that
             reads back different from what was written (an actor without a
-            root component has no transform to set).
+            root component has no transform to set and reads back the
+            identity transform).
 
         Raises:
             ValueError: A given component is not three finite numbers.

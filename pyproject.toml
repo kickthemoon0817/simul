@@ -129,6 +129,9 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+# pytest-asyncio's documented future default, set so 1.4+ does not warn about
+# it at startup; the suite has no async fixtures, so nothing changes.
+asyncio_default_fixture_loop_scope = "function"
 addopts = [
     "--strict-markers",
     "--strict-config",

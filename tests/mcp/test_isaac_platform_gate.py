@@ -349,12 +349,18 @@ class TestServerRegistration:
 
 class TestInstructions:
     def test_full_registry_states_every_backend(self) -> None:
-        text = server_module.build_instructions(ALL_BACKEND_NAMES)
+        text = server_module.build_instructions(
+            ALL_BACKEND_NAMES,
+            {"apply_simready_metadata": "blender", "convert_to_simready": "unreal"},
+        )
         for spec in BACKENDS:
             assert spec.summary in text, spec.name
             assert spec.routing_rule in text, spec.name
             assert spec.guidance in text, spec.name
-        assert "simready" in text
+        assert (
+            "Tools containing 'simready' (SimReady asset helpers) belong to Blender or Unreal;"
+            in text
+        )
 
     def test_unregistered_backends_are_not_mentioned(self) -> None:
         text = server_module.build_instructions({"usd"})
@@ -367,7 +373,22 @@ class TestInstructions:
         text = server_module.build_instructions({"usd", "unreal"})
         assert "isaac" not in text.lower()
         assert "Tools containing 'unreal'" in text
-        assert "simready" in text
+
+    def test_the_simready_line_needs_a_registered_simready_tool(self) -> None:
+        """A registered backend is not enough: its thin surface has no SimReady helper."""
+        thin = server_module.build_instructions(
+            {"usd", "unreal"}, {"capture_unreal_viewport": "unreal"}
+        )
+        assert "simready" not in thin.lower()
+        full = server_module.build_instructions(
+            {"usd", "unreal"},
+            {"capture_unreal_viewport": "unreal", "convert_to_simready": "unreal"},
+        )
+        assert (
+            "Tools containing 'simready' (SimReady asset helpers) belong to Unreal;"
+            in full
+        )
+        assert "Blender" not in full
 
 
 # ---------------------------------------------------------------------------

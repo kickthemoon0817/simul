@@ -836,7 +836,9 @@ class BlenderSetLightParamsRequest(BaseModel):
 
     light_name: str = Field(..., description="Light object name")
     energy: Optional[float] = Field(None, description="Light energy/power")
-    color: Optional[List[float]] = Field(None, description="Light color RGB [r, g, b]")
+    color: Optional[List[float]] = Field(
+        None, min_length=3, max_length=3, description="Light color RGB [r, g, b]"
+    )
     use_shadow: Optional[bool] = Field(None, description="Enable shadow casting")
     spot_size: Optional[float] = Field(
         None, description="Spot cone angle radians (SPOT only)"
@@ -1220,9 +1222,11 @@ class BlenderAddForceFieldRequest(BaseModel):
         ),
     )
     strength: float = Field(1.0, description="Field strength")
-    location: List[float] = Field(
-        default_factory=lambda: [0.0, 0.0, 0.0],
-        description="World-space XYZ location",
+    # Optional, not a default list: the tool passes None when the caller omits
+    # the location, and a List[float] field rejects None.
+    location: Optional[List[float]] = Field(
+        None,
+        description="World-space XYZ location; the world origin when omitted",
         min_length=3,
         max_length=3,
     )

@@ -76,22 +76,33 @@ except Exception:
     _PACKAGE_VERSION = _source_version
 
 
-def build_instructions(backends: Iterable[str]) -> str:
+def build_instructions(
+    backends: Iterable[str], tool_backends: Optional[Mapping[str, str]] = None
+) -> str:
     """Write the server's MCP instructions for the backends whose tools it registers.
 
-    A backend that registers nothing is not mentioned, so the instructions
+    A backend that registers nothing is not mentioned, and neither are the
+    SimReady helpers unless one of them is registered, so the instructions
     never point an agent at a tool it cannot see. The text for each backend
     comes from its ``BackendSpec``: the summary sentence, its guidance
     paragraphs and its routing rule.
 
     Args:
         backends: Registry names of the backends whose tools are registered.
+        tool_backends: Each registered tool's name mapped to the backend that
+            registered it. The SimReady routing line names the backends that
+            registered a tool containing ``simready`` and is left out when
+            none did, which is also what omitting this argument means.
 
     Returns:
         The instructions text.
     """
     names = set(backends)
     specs = [spec for spec in BACKENDS if spec.name in names]
+    simready_owners = {
+        backend for tool, backend in (tool_backends or {}).items() if "simready" in tool
+    }
+    simready_labels = [spec.label for spec in specs if spec.name in simready_owners]
     intro = "Simul provides tools for interacting with 3D simulation and DCC applications."
     paragraphs = [
         " ".join([intro, *(spec.summary for spec in specs)]),
@@ -105,10 +116,11 @@ def build_instructions(backends: Iterable[str]) -> str:
         "infix (capture_<backend>_viewport):"
     ]
     routing += [f"  {spec.routing_rule}" for spec in specs if spec.name != "usd"]
-    if names & {"blender", "unreal"}:
+    if simready_labels:
         routing.append(
-            "  Tools containing 'simready' (SimReady asset helpers) belong to Blender or "
-            "Unreal; each one's description names the runtime it targets."
+            "  Tools containing 'simready' (SimReady asset helpers) belong to "
+            f"{' or '.join(simready_labels)}; each one's description names the runtime "
+            "it targets."
         )
     routing += [f"  {spec.routing_rule}" for spec in specs if spec.name == "usd"]
     routing.append("  get_tool_usage_stats is server metadata, not a backend.")
@@ -323,22 +335,12 @@ class SimulMCPServer(LoggerMixin):
             client_resolver=self._get_request_isaac_client,
         )
 
-        # Decided before FastMCP exists: the instructions describe exactly
-        # the backends whose tools register.
+        # Decided before registration: the backends whose tools register.
         self._registered_backends: Tuple[str, ...] = tuple(
             spec.name for spec in BACKENDS if self._registers(spec.name)
         )
 
-        mcp_kwargs: Dict[str, Any] = {
-            "name": "simul",
-            "version": _PACKAGE_VERSION,
-        }
-        if _FASTMCP_SUPPORTS_INSTRUCTIONS:
-            mcp_kwargs["instructions"] = build_instructions(self._registered_backends)
-
-        self.mcp = FastMCP(
-            **mcp_kwargs,
-        )
+        self.mcp = FastMCP(name="simul", version=_PACKAGE_VERSION)
 
         # Tag every CallTool request with a fresh correlation id and emit an
         # audit row. Done as FastMCP middleware (vs. wrapping each tool) so it
@@ -349,6 +351,14 @@ class SimulMCPServer(LoggerMixin):
         self.mcp.add_middleware(build_request_context_middleware())
 
         self._register_tools()
+
+        # Written once the tools exist, so the instructions describe exactly
+        # what tools/list shows: the registered backends, and the SimReady
+        # helpers only when one registered (the thin surfaces have none).
+        if _FASTMCP_SUPPORTS_INSTRUCTIONS:
+            self.mcp.instructions = build_instructions(
+                self._registered_backends, self._tool_backends
+            )
 
         self.logger.info("Simul 3D MCP Server initialized")
 
@@ -746,9 +756,15 @@ class SimulMCPServer(LoggerMixin):
         successful payload, the ``response_model`` schema; one usage record;
         then the result budget and single transmission. A refusal ends the
         call at its stage, and an exception from the call becomes an
-        ErrorResponse named after the exception, so every outcome, refusals
-        and invalid input included, is rate limited, recorded exactly once
-        and sent once.
+        ErrorResponse named after the exception, so every call that returns
+        a result, refusals and invalid input included, is rate limited,
+        recorded exactly once and sent once.
+
+        Two exits return no result and record nothing: cancellation (the
+        client gave up while the call ran or while it waited for Isaac's
+        instance lock), and an exception raised by the admission hook itself,
+        which propagates to FastMCP. ``discard`` runs on every exit before
+        ``call`` starts, a cancelled wait and an admission exception included.
 
         Args:
             tool_name: Registered tool name, for the rate limit, the logs and
@@ -765,14 +781,22 @@ class SimulMCPServer(LoggerMixin):
             params: Call parameters worth keeping in the usage log.
             script_sha256: Digest of the agent-authored source for script
                 tools, recorded in place of the source.
-            discard: Called when the call will not run (refused or invalid)
-                to release what the caller prepared for it.
+            discard: Called once when ``call`` never started (a refusal,
+                invalid input, a cancelled wait for admission, an exception
+                from the admission hook) to release what the caller prepared
+                for it.
 
         Returns:
             The payload as one JSON content block, plus an image block when it
             carries one.
         """
         agent_id = self._resolve_agent_id(None)
+        call_started = False
+
+        async def run(request: Optional[BaseModel]) -> Dict[str, Any]:
+            nonlocal call_started
+            call_started = True
+            return await call(request)
 
         def record(duration_ms: float, success: bool, error: Optional[str]) -> None:
             self.usage_tracker.record(
@@ -787,27 +811,33 @@ class SimulMCPServer(LoggerMixin):
 
         def refuse(refusal: Refusal) -> ToolResult:
             record(0.0, False, refusal.usage_error)
-            if discard is not None:
-                discard()
             return self._as_text_result(refusal.payload)
 
-        rate_error = self._check_rate_limit(tool_name, agent_id)
-        if rate_error is not None:
-            return refuse(Refusal(rate_error, "rate_limited"))
-        async with admission(tool_name) as refusal:
-            if refusal is not None:
-                return refuse(refusal)
-            started = time.monotonic()
-            payload = await self._call_outcome(
-                tool_name, call, request_model, request_kwargs, response_model, discard
-            )
-            error = payload.get("error")
-            record(
-                (time.monotonic() - started) * 1000,
-                payload.get("success") is not False and not error,
-                str(error) if error else None,
-            )
-        return self._as_text_result(payload)
+        try:
+            rate_error = self._check_rate_limit(tool_name, agent_id)
+            if rate_error is not None:
+                return refuse(Refusal(rate_error, "rate_limited"))
+            async with admission(tool_name) as refusal:
+                if refusal is not None:
+                    return refuse(refusal)
+                started = time.monotonic()
+                payload = await self._call_outcome(
+                    tool_name, run, request_model, request_kwargs, response_model
+                )
+                error = payload.get("error")
+                record(
+                    (time.monotonic() - started) * 1000,
+                    payload.get("success") is not False and not error,
+                    str(error) if error else None,
+                )
+            return self._as_text_result(payload)
+        finally:
+            # One place for every way a call can end before it starts. A
+            # cancelled wait for the instance lock raises CancelledError out
+            # of the admission hook, and would otherwise leave Isaac's tool
+            # coroutine unawaited, warning when it is collected.
+            if not call_started and discard is not None:
+                discard()
 
     async def _call_outcome(
         self,
@@ -816,7 +846,6 @@ class SimulMCPServer(LoggerMixin):
         request_model: Optional[Type[BaseModel]],
         request_kwargs: Optional[Mapping[str, Any]],
         response_model: Optional[Type[BaseModel]],
-        discard: Optional[Callable[[], None]],
     ) -> Dict[str, Any]:
         """Validate the request, run the call and normalise what it returns.
 
@@ -832,8 +861,6 @@ class SimulMCPServer(LoggerMixin):
         if request_model is not None:
             validated = self._validate_input(request_model, **(request_kwargs or {}))
             if isinstance(validated, dict):
-                if discard is not None:
-                    discard()
                 return validated
             request = validated
         try:
@@ -986,7 +1013,8 @@ class SimulMCPServer(LoggerMixin):
         Args:
             tool_name: Registered tool name.
             coro: The coroutine an IsaacTools method returned; closed unawaited
-                when the call is refused.
+                when the call never runs (refused, cancelled while it waits
+                for the instance lock, or stopped by an admission error).
             params: Call parameters worth keeping in the usage log.
             script_sha256: Digest of the agent-authored source for script tools.
             bypass_instance_lock: Skip the claim check and the instance lock.

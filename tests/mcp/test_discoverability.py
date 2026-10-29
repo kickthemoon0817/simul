@@ -6,10 +6,11 @@ server does without scanning individual tool signatures:
     server name → instructions field → tool listing → tool descriptions
 """
 
-from typing import List
+import asyncio
+from typing import List, Optional, Tuple
 
 import pytest
-
+from fastmcp import Client
 
 from simul.config import Settings
 from simul.mcp import backends as backends_module
@@ -264,6 +265,76 @@ class TestRoutingRuleMatchesRegistry:
         ]
         assert any("Blender" in desc for desc in descriptions)
         assert any("Unreal" in desc for desc in descriptions)
+
+
+def _macos_default_server(
+    monkeypatch: pytest.MonkeyPatch, unreal_surface: str, *, fake: bool = True
+) -> server_module.SimulMCPServer:
+    """The macOS default: no Isaac Sim (darwin), no bpy, headless USD, Unreal on ``unreal_surface``."""
+    if fake:
+        monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
+        monkeypatch.setattr(server_module, "TaskConfig", None)
+        monkeypatch.setattr(server_module, "_FASTMCP_SUPPORTS_INSTRUCTIONS", True)
+    monkeypatch.setattr(
+        backends_module, "is_isaac_platform_supported", lambda platform=None: False
+    )
+    monkeypatch.setattr(backends_module, "is_headless_available", lambda: True)
+    monkeypatch.setattr(backends_module, "is_blender_available", lambda: False)
+    monkeypatch.setattr(backends_module, "is_unreal_available", lambda: True)
+    monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", AvailableAdapter)
+    return server_module.SimulMCPServer(
+        settings=Settings(unreal={"tool_surface": unreal_surface})
+    )
+
+
+class TestSimReadyLine:
+    """The instructions route 'simready' tools only when one is in tools/list.
+
+    The line used to follow the registered backends, so the macOS default
+    (thin Unreal surface, no bpy) told agents about SimReady tools that the
+    thin surface never registers.
+    """
+
+    def test_macos_default_has_no_simready_tool_and_no_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        instance = _macos_default_server(monkeypatch, "thin")
+
+        assert "capture_unreal_viewport" in instance.mcp.by_name
+        assert [t.name for t in instance.mcp.tools if "simready" in t.name] == []
+        assert "simready" not in instance.mcp.instructions.lower()
+
+    def test_the_full_unreal_surface_states_the_line_for_unreal_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        instance = _macos_default_server(monkeypatch, "full")
+
+        assert "convert_to_simready" in instance.mcp.by_name
+        assert (
+            "Tools containing 'simready' (SimReady asset helpers) belong to Unreal;"
+            in instance.mcp.instructions
+        )
+        assert "Blender" not in instance.mcp.instructions
+
+    @pytest.mark.parametrize(("surface", "simready"), [("thin", False), ("full", True)])
+    def test_the_client_receives_the_instructions_written_after_registration(
+        self, monkeypatch: pytest.MonkeyPatch, surface: str, simready: bool
+    ) -> None:
+        """Over the real FastMCP protocol, initialize carries what tools/list matches."""
+        instance = _macos_default_server(monkeypatch, surface, fake=False)
+
+        async def handshake() -> Tuple[Optional[str], List[str]]:
+            async with Client(instance.mcp) as client:
+                names = [tool.name for tool in await client.list_tools()]
+                assert client.initialize_result is not None
+                return client.initialize_result.instructions, names
+
+        instructions, names = asyncio.run(handshake())
+
+        assert instructions is not None
+        assert instructions == instance.mcp.instructions
+        assert any("simready" in name for name in names) is simready
+        assert ("simready" in instructions.lower()) is simready
 
 
 class TestCapabilitiesReport:

@@ -989,7 +989,7 @@
           "location": {
             "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
             "default": null,
-            "description": "World-space XYZ location."
+            "description": "World-space XYZ location; the world origin when omitted."
           },
           "name": {
             "anyOf": [{"type": "string"}, {"type": "null"}],

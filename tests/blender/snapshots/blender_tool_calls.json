@@ -1273,13 +1273,13 @@
     "add_blender_force_field": {
       "minimal": {
         "arguments": {"field_type": "WIND"},
-        "session_calls": [],
-        "response": {
-          "success": false,
-          "error": "1 validation error for BlenderAddForceFieldRequest\nlocation\n  Input should be a valid list [type=list_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/<version>/v/list_type",
-          "error_type": "ValidationError",
-          "details": {"input": {"field_type": "WIND", "strength": 1.0, "location": null, "name": null}}
-        },
+        "session_calls": [
+          {
+            "method": "add_force_field",
+            "arguments": {"field_type": "'WIND'", "strength": "1.0", "location": "None", "name": "None"}
+          }
+        ],
+        "response": {"checked_against": "BlenderAddForceFieldResponse"},
         "usage": [{"tool": "add_blender_force_field", "success": false}]
       },
       "full": {
@@ -1303,7 +1303,7 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "2 validation errors for BlenderAddForceFieldRequest\nfield_type\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type\nlocation\n  Input should be a valid list [type=list_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/<version>/v/list_type",
+          "error": "1 validation error for BlenderAddForceFieldRequest\nfield_type\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
           "details": {"input": {"field_type": {"bogus": 1}, "strength": 1.0, "location": null, "name": null}}
         }

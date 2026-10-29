@@ -259,7 +259,7 @@ the summary is what matters to the parent conversation.
 - **Thin vs full registration.** This checklist targets the thin 6-tool
   surface that ships by default. If you've enabled the full ~50-tool
   registration, additional granular tools are available but this doc does
-  not enumerate them (see `src/simul/mcp/registration/_reg_unreal.py`).
+  not enumerate them (see `src/simul/mcp/registration/_unreal_tools.py`).
 - **macOS `open -a "Unreal Editor" --args`** is used only with
   `--no-headless` (and no `--engine-path`), and relies on LaunchServices
   having registered the app. Headless launches (the default) run the

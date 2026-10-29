@@ -70,8 +70,11 @@ wheels exist for Python 3.11 and 3.13 only.
   `BlenderRuntimeSession` operation it calls, whose signature and docstring
   supply the parameters. The table lives in the registration layer because
   `blender_runtime.py` ships in the Blender add-on, which must not import
-  `simul.mcp`. The USD and Unreal modules register their wrappers by hand over
-  adapter sessions. Every call goes through one shared envelope
+  `simul.mcp`. Unreal tools are `UnrealTool` declarations in
+  `registration/_unreal_tools.py` (name, description, hints, parameters,
+  response model, session method); `_reg_unreal.py` builds each wrapper, its
+  request model and the session call from them. The USD module registers its
+  wrappers by hand over its adapter session. Every call goes through one shared envelope
   (`SimulMCPServer._run_envelope`): the rate limit, the backend's admission
   hook (Isaac's claim enforcement and per-instance lock), request
   validation, the call, success normalisation, exactly one usage record and
