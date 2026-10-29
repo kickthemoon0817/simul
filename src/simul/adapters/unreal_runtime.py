@@ -461,6 +461,23 @@ class UnrealRuntimeSession(LoggerMixin):
             "viewport": target["viewport"],
         }
 
+    async def editor_identity(self) -> Dict[str, Any]:
+        """Read the editor's process, project, map and level-viewport identity.
+
+        Discovery and attachment use this. The first call installs a small
+        in-memory module and map-change listener in the editor; it changes no
+        scene data.
+
+        Returns:
+            ``instance_id``, ``document_id``, ``pid``, ``engine_version``,
+            ``project_name``, ``project_path``, ``map_path``, ``viewports``,
+            ``active_viewport`` and ``dirty_map_packages``, or a
+            ``ScriptError`` envelope when the editor's Python raised.
+        """
+        from ._unreal_attach_scripts import EDITOR_IDENTITY
+
+        return await self._execute_json_script(EDITOR_IDENTITY)
+
     async def control_ui(
         self,
         agent_control: str,
@@ -598,7 +615,7 @@ class UnrealRuntimeSession(LoggerMixin):
         )
 
     # ------------------------------------------------------------------
-    # Ping / discovery
+    # Ping (multi-editor discovery: unreal_connection.discover_instances)
     # ------------------------------------------------------------------
 
     async def ping(self) -> Dict[str, Any]:
@@ -630,110 +647,6 @@ class UnrealRuntimeSession(LoggerMixin):
             return {
                 "reachable": False,
                 "address": address,
-                "latency_ms": None,
-                "error": str(exc),
-            }
-
-    @staticmethod
-    async def probe_port(
-        host: str,
-        port: int,
-        timeout: float = 3.0,
-        *,
-        passphrase_md5: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Probe a single host:port for a running Remote Control API.
-
-        Creates an ephemeral aiohttp session so the caller does not need
-        a fully configured ``UnrealRuntimeSession``.
-
-        Args:
-            host: Target hostname or IP.
-            port: Target port.
-            timeout: Connection timeout in seconds.
-            passphrase_md5: Optional MD5 hex; when set, injects
-                ``Passphrase: <md5>`` so discovery against a
-                passphrase-enforcing editor still succeeds. Pass
-                ``self._passphrase_md5`` from a configured session,
-                or compute via ``_passphrase_to_md5(plaintext)``.
-
-        Returns:
-            Dictionary with ``reachable``, ``host``, ``port``, ``latency_ms``,
-            and optional ``engine_version`` / ``project_name``.
-        """
-        if not AIOHTTP_AVAILABLE:
-            return {"reachable": False, "host": host, "port": port, "error": "aiohttp not available"}
-
-        headers = {"Content-Type": "application/json"}
-        if passphrase_md5:
-            headers["Passphrase"] = passphrase_md5
-
-        base_url = f"http://{host}:{port}"
-        t0 = time.monotonic()
-        try:
-            timeout_cfg = aiohttp.ClientTimeout(total=timeout)
-            async with aiohttp.ClientSession(
-                base_url=base_url,
-                timeout=timeout_cfg,
-                headers=headers,
-            ) as session:
-                async with session.get("/remote/info") as resp:
-                    resp.raise_for_status()
-                    latency_ms = round((time.monotonic() - t0) * 1000, 1)
-
-                engine_version: Optional[str] = None
-                project_name: Optional[str] = None
-                try:
-                    async with session.put(
-                        "/remote/object/call",
-                        json={
-                            "objectPath": "/Script/Engine.Default__KismetSystemLibrary",
-                            "functionName": "GetEngineVersion",
-                        },
-                    ) as ver_resp:
-                        if ver_resp.status == 200:
-                            ver_data = await ver_resp.json()
-                            engine_version = ver_data.get("ReturnValue")
-                except Exception:
-                    pass
-
-                try:
-                    async with session.put(
-                        "/remote/object/call",
-                        json={
-                            "objectPath": "/Script/PythonScriptPlugin.Default__PythonScriptLibrary",
-                            "functionName": "ExecutePythonCommandEx",
-                            "parameters": {
-                                "PythonCommand": "unreal.SystemLibrary.get_game_name()",
-                                "ExecutionMode": "EvaluateStatement",
-                                "FileExecutionScope": "Public",
-                            },
-                        },
-                    ) as proj_resp:
-                        if proj_resp.status == 200:
-                            proj_data = await proj_resp.json()
-                            # A traceback in CommandResult is not a name.
-                            if proj_data.get("ReturnValue"):
-                                project_name = str(
-                                    proj_data.get("CommandResult", "")
-                                ).strip("'\"")
-                except Exception:
-                    pass
-
-                return {
-                    "reachable": True,
-                    "host": host,
-                    "port": port,
-                    "latency_ms": latency_ms,
-                    "engine_version": engine_version,
-                    "project_name": project_name,
-                }
-        except Exception as exc:
-            return {
-                "reachable": False,
-                "host": host,
-                "port": port,
                 "latency_ms": None,
                 "error": str(exc),
             }

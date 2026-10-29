@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import sys
 from contextlib import redirect_stdout
 from types import SimpleNamespace
@@ -52,7 +53,9 @@ def editor(monkeypatch):
             else SimpleNamespace(get_editor_world=lambda: world)
         ),
         Paths=SimpleNamespace(get_project_file_path=lambda: "/project/test.uproject"),
-        SystemLibrary=SimpleNamespace(get_engine_version=lambda: "5.7"),
+        SystemLibrary=SimpleNamespace(
+            get_engine_version=lambda: "5.7", get_game_name=lambda: "test"
+        ),
         EditorLoadingAndSavingUtils=SimpleNamespace(get_dirty_map_packages=lambda: []),
         events=events,
     )
@@ -94,7 +97,11 @@ async def serve_editor():
                 {"ReturnValue": False, "CommandResult": str(exc), "LogOutput": []}
             )
 
+    async def info(request):
+        return web.json_response({"HttpRoutes": []})
+
     application = web.Application()
+    application.router.add_get("/remote/info", info)
     application.router.add_put("/remote/object/call", handle)
     runner = web.AppRunner(application)
     await runner.setup()
@@ -115,6 +122,7 @@ async def test_guards_execute_on_editor_before_scripts_and_legacy_mutations(
         record = await manager.attach(port=port)
         assert not events
         assert record["viewport"] == "viewport-a"
+        assert (record["project_name"], record["pid"]) == ("test", os.getpid())
         assert read_attachment(manager.path)["port"] == port
         assert manager.path.stat().st_mode & 0o077 == 0
         result = await session._execute_python(
