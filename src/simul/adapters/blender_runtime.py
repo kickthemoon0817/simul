@@ -158,6 +158,54 @@ def _bpy_op(description: str, operator: Callable[..., Any], /, **properties: Any
         raise
 
 
+# Blender 4.4 introduced slotted actions: one action can animate several IDs,
+# each through its own slot, and keeps each slot's F-curves in a channelbag
+# inside the action's layers and strips. Blender 5.0 removed Action.fcurves,
+# the only way to read an action's F-curves before 4.4.
+SLOTTED_ACTIONS_VERSION = (4, 4, 0)
+
+
+def action_fcurves(
+    anim_data: Any, blender_version: Tuple[int, int, int]
+) -> Optional[List[Any]]:
+    """Return the F-curves through which an ID's action animates that ID.
+
+    On Blender 4.4 and later these are the F-curves of the action slot the ID
+    is assigned. An action shared with other IDs keeps theirs under other
+    slots, and the older ``Action.fcurves`` (removed in 5.0) shows only the
+    first slot's. Before 4.4 they are all of the action's F-curves.
+
+    Args:
+        anim_data: The ID's ``animation_data``; None when it has none.
+        blender_version: The running Blender version.
+
+    Returns:
+        The F-curves, empty when the action has none for the ID, or None when
+        no action animates the ID: it has no action or, on 4.4 and later, no
+        slot of it.
+    """
+    action = None if anim_data is None else anim_data.action
+    if action is None:
+        return None
+    if blender_version < SLOTTED_ACTIONS_VERSION:
+        return list(action.fcurves)
+    slot = anim_data.action_slot
+    if slot is None:
+        # Not only a shortcut: Blender 4.4.0's bpy_extras helper passes a
+        # missing slot on to ActionKeyframeStrip.channelbag, which dereferences
+        # it. 4.4.1 and later return None.
+        return None
+    from bpy_extras import anim_utils  # type: ignore[import-not-found]
+
+    channelbag = anim_utils.action_get_channelbag_for_slot(action, slot)
+    return [] if channelbag is None else list(channelbag.fcurves)
+
+
+def _channel_name(data_path: str, index: int) -> str:
+    """Name a keyframed property, or one element of it, as ``location[2]``."""
+    return data_path if index < 0 else f"{data_path}[{index}]"
+
+
 @dataclass
 class BlenderObjectEntry:
     """Serializable Blender object summary."""
@@ -1571,9 +1619,19 @@ class BlenderRuntimeSession:
 
         Returns:
             Dict confirming the keyframe insertion.
+
+        Raises:
+            RuntimeError: When Blender inserted no keyframe, e.g. into a
+                locked F-curve.
         """
         obj = self._get_object_or_raise(object_name)
-        obj.keyframe_insert(data_path=data_path, frame=frame, index=index)
+        # Blender reports refused keys by returning False, not by raising.
+        if not obj.keyframe_insert(data_path, index=index, frame=frame):
+            raise RuntimeError(
+                f"Blender inserted no keyframe on '{object_name}' "
+                f"{_channel_name(data_path, index)} at frame {frame}; its "
+                "F-curve may be locked or sampled"
+            )
         return {
             "object_name": object_name,
             "data_path": data_path,
@@ -1598,9 +1656,26 @@ class BlenderRuntimeSession:
 
         Returns:
             Dict confirming the keyframe deletion.
+
+        Raises:
+            ValueError: When no action animates the object, or no keyframe of
+                the property lies on that frame (or its F-curve is locked).
         """
         obj = self._get_object_or_raise(object_name)
-        obj.keyframe_delete(data_path=data_path, frame=frame, index=index)
+        # The same test as get_keyframes' has_animation.
+        if action_fcurves(obj.animation_data, self._blender_version) is None:
+            raise ValueError(
+                f"Object '{object_name}' is not animated, so it has no keyframe "
+                "to delete"
+            )
+        # Blender reports a frame without a deletable key by returning False.
+        if not obj.keyframe_delete(data_path, index=index, frame=frame):
+            raise ValueError(
+                f"Object '{object_name}' has no keyframe on "
+                f"{_channel_name(data_path, index)} at frame {frame} to delete, "
+                "or its F-curve is locked; get_blender_keyframes lists the keyed "
+                "channels"
+            )
         return {
             "object_name": object_name,
             "data_path": data_path,
@@ -1613,62 +1688,37 @@ class BlenderRuntimeSession:
 
         Returns summary data (channel data paths, keyframe counts, frame
         ranges) rather than full curve data to keep responses compact.
-        Version-aware: uses fcurves on Blender 3.6-4.x and channelbag
-        on Blender 5.0+.
+        On Blender 4.4 and later an action can animate several objects, and
+        only the channels of this object's action slot are listed
+        (``action_fcurves``).
 
         Args:
             object_name: Name of the object.
 
         Returns:
-            Dict with object_name, has_animation, and channels list.
+            Dict with object_name, has_animation (whether an action animates
+            the object) and channels list.
         """
         obj = self._get_object_or_raise(object_name)
-        anim_data = obj.animation_data
-        if anim_data is None or anim_data.action is None:
-            return {
-                "object_name": object_name,
-                "has_animation": False,
-                "channels": [],
-            }
-
-        action = anim_data.action
+        fcurves = action_fcurves(obj.animation_data, self._blender_version)
         channels: List[Dict[str, Any]] = []
-
-        if self._is_blender_5_plus and hasattr(action, "channelbags"):
-            # Blender 5.0+: channelbag API
-            for channelbag in action.channelbags:
-                for fcurve in channelbag.fcurves:
-                    kps = fcurve.keyframe_points
-                    if len(kps) == 0:
-                        continue
-                    frames = [int(kp.co[0]) for kp in kps]
-                    channels.append(
-                        {
-                            "data_path": fcurve.data_path,
-                            "array_index": fcurve.array_index,
-                            "keyframe_count": len(kps),
-                            "frame_range": [min(frames), max(frames)],
-                        }
-                    )
-        else:
-            # Blender 3.6 - 4.x: legacy fcurves API
-            for fcurve in action.fcurves:
-                kps = fcurve.keyframe_points
-                if len(kps) == 0:
-                    continue
-                frames = [int(kp.co[0]) for kp in kps]
-                channels.append(
-                    {
-                        "data_path": fcurve.data_path,
-                        "array_index": fcurve.array_index,
-                        "keyframe_count": len(kps),
-                        "frame_range": [min(frames), max(frames)],
-                    }
-                )
+        for fcurve in fcurves or []:
+            kps = fcurve.keyframe_points
+            if len(kps) == 0:
+                continue
+            frames = [int(kp.co[0]) for kp in kps]
+            channels.append(
+                {
+                    "data_path": fcurve.data_path,
+                    "array_index": fcurve.array_index,
+                    "keyframe_count": len(kps),
+                    "frame_range": [min(frames), max(frames)],
+                }
+            )
 
         return {
             "object_name": object_name,
-            "has_animation": True,
+            "has_animation": fcurves is not None,
             "channels": channels,
         }
 
