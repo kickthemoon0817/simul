@@ -468,7 +468,7 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
             server.blender_adapter,
             "Blender",
             BlenderBoundsCheckResponse,
-            lambda session: session.check_object_bounds(
+            lambda session: session.is_object_within_bounds(
                 input_data.object_name,
                 input_data.bounds_min,
                 input_data.bounds_max,
@@ -1028,7 +1028,7 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
             lambda session: session.set_light_params(
                 input_data.light_name,
                 input_data.energy,
-                col,
+                input_data.color,
                 input_data.use_shadow,
                 input_data.spot_size,
                 input_data.spot_blend,

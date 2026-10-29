@@ -8,12 +8,15 @@ change to how the tools are declared or registered cannot alter it unnoticed:
   order) for the full and the thin surface in attached and embedded mode, and
   for the full surface with script execution switched off.
 - ``blender_tool_calls.json``: what each tool does with its arguments, called
-  through the same real client against a session that records every call. For
+  through the same real client against ``StrictBlenderSession``, which offers
+  only the ``BlenderRuntimeSession`` operations and records every call. For
   a minimal and a full set of arguments: the ``BlenderRuntimeSession`` method
   the tool calls and the arguments that method receives (bound to its
   signature with defaults applied, each value as ``repr``), the response model
   the result is checked against, and the usage record the call leaves. For
-  invalid input: the error payload the caller receives.
+  invalid input: the error payload the caller receives. A call the strict
+  session refuses (a missing operation, arguments it does not take) fails
+  the suite outright rather than being snapshotted as an error payload.
 
 Both are compared as text, byte for byte. After an intended change run the
 module with ``SIMUL_UPDATE_SNAPSHOTS=1`` to rewrite them, and review the diff.
@@ -23,26 +26,28 @@ from __future__ import annotations
 
 import asyncio
 import difflib
-import inspect
 import json
 import os
 import re
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 from fastmcp import Client
 
 from simul.adapters import blender_runtime
 from simul.adapters.blender_connection import BlenderAttachments
-from simul.adapters.blender_runtime import BlenderRuntimeSession
 from simul.config import Settings
 from simul.mcp import backends as backends_module
 from simul.mcp import server as server_module
 from simul.mcp.usage_tracker import ToolUsageTracker
 from simul.tool_surfaces import THIN_BLENDER_TOOLS
-from tests.fakes import FakeFastMCP
+from tests.fakes import (
+    BlenderSessionAdapter,
+    FakeFastMCP,
+    SessionCall,
+    StrictBlenderSession,
+)
 
 SNAPSHOTS = Path(__file__).resolve().parent / "snapshots"
 LISTING_SNAPSHOT = SNAPSHOTS / "blender_tools_list.json"
@@ -508,64 +513,7 @@ def test_every_tool_registers_without_output_schema_and_with_optional_tasks(
 # ---------------------------------------------------------------------------
 
 
-class RecordingSession:
-    """Stands in for a Blender session and records each call bound to the real signature.
-
-    Like ``BlenderConnection``, it accepts only public ``BlenderRuntimeSession``
-    operations, so a tool that names a missing method fails as it would in
-    Blender.
-    """
-
-    def __init__(self) -> None:
-        self.calls: List[Dict[str, Any]] = []
-
-    def __getattr__(self, method: str) -> Any:
-        operation = getattr(BlenderRuntimeSession, method, None)
-        if method.startswith("_") or method == "cleanup" or not callable(operation):
-            raise AttributeError(method)
-
-        def invoke(*args: Any, **kwargs: Any) -> Dict[str, Any]:
-            bound = inspect.signature(operation).bind(None, *args, **kwargs)
-            bound.apply_defaults()
-            arguments = {
-                name: repr(value)
-                for name, value in bound.arguments.items()
-                if name != "self"
-            }
-            self.calls.append({"method": method, "arguments": arguments})
-            return dict(PROBE_PAYLOAD)
-
-        return invoke
-
-
-class RecordingAdapter:
-    """A Blender adapter whose every session is the one recording session."""
-
-    name = "blender"
-
-    def __init__(self, settings: Settings) -> None:
-        self.settings = settings
-        self.session = RecordingSession()
-
-    @property
-    def session_blocks_io(self) -> bool:
-        return self.settings.blender.mode == "attached"
-
-    def is_available(self) -> bool:
-        return True
-
-    def get_capabilities(self) -> List[str]:
-        return []
-
-    def close(self) -> None:
-        """Nothing to release."""
-
-    @contextmanager
-    def create_session(self) -> Iterator[RecordingSession]:
-        yield self.session
-
-
-def _recording_attach(calls: List[Dict[str, Any]]) -> Any:
+def _recording_attach(calls: List[SessionCall]) -> Any:
     """``BlenderAttachments.attach`` that records its arguments instead of attaching."""
 
     def attach(
@@ -574,19 +522,36 @@ def _recording_attach(calls: List[Dict[str, Any]]) -> Any:
         window_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         calls.append(
-            {
-                "method": "BlenderAttachments.attach",
-                "arguments": {
-                    "instance_id": repr(instance_id),
-                    "window_id": repr(window_id),
-                },
-            }
+            (
+                "BlenderAttachments.attach",
+                {"instance_id": instance_id, "window_id": window_id},
+            )
         )
         if instance_id is None:
             raise ValueError("Several Blender processes are running; pass instance_id")
         return dict(PROBE_PAYLOAD)
 
     return attach
+
+
+def _snapshot_calls(
+    calls: List[SessionCall], agent: Optional[str]
+) -> List[Dict[str, Any]]:
+    """Recorded calls with each argument as ``repr``; the session's own agent id is named, not spelled out."""
+    return [
+        {
+            "method": method,
+            "arguments": {
+                name: (
+                    SESSION_AGENT
+                    if agent is not None and value == agent
+                    else repr(value)
+                )
+                for name, value in arguments.items()
+            },
+        }
+        for method, arguments in calls
+    ]
 
 
 def _outcome(payload: Dict[str, Any], called: bool) -> Dict[str, Any]:
@@ -632,11 +597,24 @@ def _invalid_arguments(
     return arguments
 
 
+def _strict_adapter(settings: Settings) -> BlenderSessionAdapter:
+    """The adapter the server builds: every session is one strict, recording session."""
+    return BlenderSessionAdapter(
+        settings, StrictBlenderSession(default_response=PROBE_PAYLOAD)
+    )
+
+
 def _record_calls(tmp_path: Path, mode: str) -> Dict[str, Any]:
-    """Call every tool in every case; return the outcomes and which invalid calls were recorded."""
-    attach_calls: List[Dict[str, Any]] = []
+    """Call every tool in every case.
+
+    Returns:
+        ``outcomes`` per tool and case, ``recorded_invalid`` (usage records
+        left by each invalid call) and ``rejected`` (calls the strict session
+        refused).
+    """
+    attach_calls: List[SessionCall] = []
     with pytest.MonkeyPatch.context() as patcher:
-        patcher.setattr(backends_module, "BlenderRuntimeAdapter", RecordingAdapter)
+        patcher.setattr(backends_module, "BlenderRuntimeAdapter", _strict_adapter)
         patcher.setattr(backends_module, "is_blender_available", lambda: True)
         patcher.setattr(BlenderAttachments, "attach", _recording_attach(attach_calls))
         patcher.setattr(BlenderAttachments, "instances", lambda self: [])
@@ -645,10 +623,16 @@ def _record_calls(tmp_path: Path, mode: str) -> Dict[str, Any]:
         )
         instance.usage_tracker = ToolUsageTracker(log_dir=tmp_path / f"usage-{mode}")
         adapter = instance.blender_adapter
-        assert isinstance(adapter, RecordingAdapter)
+        assert isinstance(adapter, BlenderSessionAdapter)
         session = adapter.session
         outcomes: Dict[str, Dict[str, Any]] = {}
         recorded_invalid: Dict[str, int] = {}
+
+        def _calls(agent: Optional[str] = None) -> List[Dict[str, Any]]:
+            calls = _snapshot_calls(session.calls + attach_calls, agent)
+            session.calls.clear()
+            attach_calls.clear()
+            return calls
 
         async def _run() -> None:
             async with Client(instance.mcp) as client:
@@ -656,20 +640,13 @@ def _record_calls(tmp_path: Path, mode: str) -> Dict[str, Any]:
                 for name in [tool for tool in listed if tool in CALLS]:
                     tool_outcomes: Dict[str, Any] = {}
                     for case, arguments in CALLS[name].items():
-                        session.calls.clear()
-                        attach_calls.clear()
                         before = len(_usage_rows(instance))
                         result = await client.call_tool(
                             name, arguments, raise_on_error=False
                         )
                         payload = json.loads(result.content[-1].text)
                         rows = _usage_rows(instance)[before:]
-                        agent = rows[0]["agent_id"] if rows else None
-                        calls = session.calls + attach_calls
-                        for call in calls:
-                            for key, value in call["arguments"].items():
-                                if agent is not None and value == repr(agent):
-                                    call["arguments"][key] = SESSION_AGENT
+                        calls = _calls(rows[0]["agent_id"] if rows else None)
                         tool_outcomes[case] = {
                             "arguments": arguments,
                             "session_calls": calls,
@@ -683,15 +660,13 @@ def _record_calls(tmp_path: Path, mode: str) -> Dict[str, Any]:
                         CALLS[name]["minimal"], listed[name].inputSchema
                     )
                     if invalid is not None:
-                        session.calls.clear()
-                        attach_calls.clear()
                         before = len(_usage_rows(instance))
                         function = (await instance.mcp.get_tool(name)).fn
                         payload = json.loads(
                             (await function(**invalid)).content[-1].text
                         )
-                        calls = session.calls + attach_calls
                         recorded_invalid[name] = len(_usage_rows(instance)) - before
+                        calls = _calls()
                         tool_outcomes["invalid"] = {
                             "arguments": invalid,
                             "session_calls": calls,
@@ -700,7 +675,11 @@ def _record_calls(tmp_path: Path, mode: str) -> Dict[str, Any]:
                     outcomes[name] = tool_outcomes
 
         asyncio.run(_run())
-    return {"outcomes": outcomes, "recorded_invalid": recorded_invalid}
+    return {
+        "outcomes": outcomes,
+        "recorded_invalid": recorded_invalid,
+        "rejected": list(session.rejected),
+    }
 
 
 @pytest.fixture(scope="module")
@@ -754,3 +733,16 @@ def test_invalid_input_is_recorded_only_by_the_tools_validating_inside_the_envel
             "list_blender_scene_objects",
             "get_blender_object_info",
         }, mode
+
+
+def test_no_tool_calls_an_operation_the_session_lacks(
+    recorded: Dict[str, Dict[str, Any]],
+) -> None:
+    """Every call reaches a real BlenderRuntimeSession operation with arguments it takes.
+
+    The envelope turns the AttributeError of a missing operation into an error
+    payload, which a snapshot would otherwise just record (it did, for
+    check_blender_object_bounds calling check_object_bounds).
+    """
+    for mode, record in recorded.items():
+        assert record["rejected"] == [], mode

@@ -301,13 +301,17 @@
     "check_blender_object_bounds": {
       "minimal": {
         "arguments": {"object_name": "Cube", "bounds_min": [-1, -2, -3], "bounds_max": [1, 2, 3]},
-        "session_calls": [],
-        "response": {
-          "success": false,
-          "error": "check_object_bounds",
-          "error_type": "AttributeError",
-          "details": null
-        },
+        "session_calls": [
+          {
+            "method": "is_object_within_bounds",
+            "arguments": {
+              "object_name": "'Cube'",
+              "bounds_min": "[-1.0, -2.0, -3.0]",
+              "bounds_max": "[1.0, 2.0, 3.0]"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderBoundsCheckResponse"},
         "usage": [{"tool": "check_blender_object_bounds", "success": false}]
       },
       "invalid": {
@@ -864,13 +868,21 @@
     "set_blender_light_params": {
       "minimal": {
         "arguments": {"light_name": "Light"},
-        "session_calls": [],
-        "response": {
-          "success": false,
-          "error": "name 'col' is not defined",
-          "error_type": "NameError",
-          "details": null
-        },
+        "session_calls": [
+          {
+            "method": "set_light_params",
+            "arguments": {
+              "light_name": "'Light'",
+              "energy": "None",
+              "color": "None",
+              "use_shadow": "None",
+              "spot_size": "None",
+              "spot_blend": "None",
+              "shadow_soft_size": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderSetLightParamsResponse"},
         "usage": [{"tool": "set_blender_light_params", "success": false}]
       },
       "full": {
@@ -883,13 +895,21 @@
           "spot_blend": 0.2,
           "shadow_soft_size": 0.1
         },
-        "session_calls": [],
-        "response": {
-          "success": false,
-          "error": "name 'col' is not defined",
-          "error_type": "NameError",
-          "details": null
-        },
+        "session_calls": [
+          {
+            "method": "set_light_params",
+            "arguments": {
+              "light_name": "'Light'",
+              "energy": "500.0",
+              "color": "[1.0, 0.5, 0.25]",
+              "use_shadow": "False",
+              "spot_size": "0.8",
+              "spot_blend": "0.2",
+              "shadow_soft_size": "0.1"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderSetLightParamsResponse"},
         "usage": [{"tool": "set_blender_light_params", "success": false}]
       },
       "invalid": {
