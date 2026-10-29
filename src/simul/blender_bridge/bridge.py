@@ -295,7 +295,13 @@ class BlenderBridge:
             # Attached bpy must run inline on the main thread. The client bounds
             # waiting; it cannot safely interrupt an operation that already began.
             arguments.arguments["timeout"] = None
-        area = next((a for a in window.screen.areas if a.type == "VIEW_3D"), None)
+        # The largest 3D View is the one the user is most likely looking at:
+        # viewport captures draw it and the capture cue marks it.
+        area = max(
+            (a for a in window.screen.areas if a.type == "VIEW_3D"),
+            key=lambda a: a.width * a.height,
+            default=None,
+        )
         # Blender derives screen, scene and view layer from the window. Do not
         # pin scene/view_layer here: a script that loads a file (read_homefile,
         # open_mainfile) frees them, and a later operator in the same script

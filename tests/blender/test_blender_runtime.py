@@ -1,5 +1,6 @@
 """Tests for Blender runtime adapter functionality."""
 
+import json
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -1106,96 +1107,8 @@ class TestVisualObservationTools:
         with pytest.raises(ValueError, match="Object not found"):
             session.focus_on_object("NonExistent")
 
-    # -- capture_viewport --------------------------------------------------
-
-    def test_capture_viewport_gpu_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """capture_viewport uses GPU offscreen fast path when available."""
-        cam = self._make_camera_object()
-        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam])
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-
-        session = blender_runtime.BlenderRuntimeSession()
-
-        gpu_result = {
-            "image_base64": "AAAA",
-            "width": 512,
-            "height": 512,
-            "engine": "BLENDER_EEVEE_NEXT",
-            "capture_method": "gpu_offscreen",
-        }
-        monkeypatch.setattr(
-            session, "_capture_gpu_offscreen", lambda w, h, q, e: gpu_result
-        )
-
-        result = session.capture_viewport(width=512, height=512, jpeg_quality=85)
-        assert result["capture_method"] == "gpu_offscreen"
-        assert result["image_base64"] == "AAAA"
-
-    def test_capture_viewport_fallback_on_gpu_failure(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """capture_viewport falls back to render when GPU path raises."""
-        cam = self._make_camera_object()
-        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam])
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-
-        session = blender_runtime.BlenderRuntimeSession()
-
-        def _gpu_fail(w: int, h: int, q: int, e: str) -> Dict[str, Any]:
-            raise RuntimeError("No GPU context")
-
-        fallback_result = {
-            "image_base64": "BBBB",
-            "width": 512,
-            "height": 512,
-            "engine": "BLENDER_EEVEE_NEXT",
-            "capture_method": "render_fallback",
-        }
-        monkeypatch.setattr(session, "_capture_gpu_offscreen", _gpu_fail)
-        monkeypatch.setattr(
-            session, "_capture_render_fallback", lambda w, h, q, e: fallback_result
-        )
-
-        result = session.capture_viewport(width=512, height=512, jpeg_quality=85)
-        assert result["capture_method"] == "render_fallback"
-        assert result["image_base64"] == "BBBB"
-
-    def test_capture_viewport_force_render_fallback(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """capture_viewport with use_render_fallback=True bypasses GPU."""
-        cam = self._make_camera_object()
-        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam])
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-
-        session = blender_runtime.BlenderRuntimeSession()
-
-        gpu_called = False
-
-        def _gpu_spy(w: int, h: int, q: int, e: str) -> Dict[str, Any]:
-            nonlocal gpu_called
-            gpu_called = True
-            return {"image_base64": "GPU", "capture_method": "gpu_offscreen"}
-
-        fallback_result = {
-            "image_base64": "RENDER",
-            "width": 256,
-            "height": 256,
-            "engine": "CYCLES",
-            "capture_method": "render_fallback",
-        }
-        monkeypatch.setattr(session, "_capture_gpu_offscreen", _gpu_spy)
-        monkeypatch.setattr(
-            session, "_capture_render_fallback", lambda w, h, q, e: fallback_result
-        )
-
-        result = session.capture_viewport(use_render_fallback=True)
-        assert gpu_called is False
-        assert result["capture_method"] == "render_fallback"
-        assert result["image_base64"] == "RENDER"
+    # capture_viewport's method selection, viewport and render paths are
+    # covered against a fuller bpy stand-in in test_viewport_capture.py.
 
     # -- capture_viewport_sequence -----------------------------------------
 
@@ -2651,6 +2564,9 @@ class TestExecuteScript:
         assert result["error"].startswith("TimeoutError")
         assert "still running" in result["error"]
         assert result["output"] is None
+        # Discarded, not cut: there is no truncation to report.
+        assert result["output_truncated"] is False
+        assert result["output_total_chars"] == 0
         assert result["return_value"] is None
         assert result["duration_seconds"] == 0.2
 
@@ -2682,20 +2598,139 @@ class TestExecuteScript:
         assert "ZeroDivisionError" in result["error"]
         assert "timed_out" not in result
 
-    def test_execute_script_output_capped(
+    def test_execute_script_returns_6000_chars_whole(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Script output is capped at 4096 chars."""
+        """Issue #231: 6000 printed chars used to come back cut at 4096, silently."""
         fake_bpy = self._make_fake_bpy_for_script()
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        # Print >4096 chars
-        result = session.execute_script("print('A' * 10000)")
+        result = session.execute_script("print('x' * 6000)")
 
-        assert result["output"] is not None
-        assert len(result["output"]) == 4096
+        assert result["output"] == "x" * 6000 + "\n"
+        assert result["output_truncated"] is False
+        assert result["output_total_chars"] == 6001
+
+    def test_execute_script_reports_a_cut_at_the_default_cap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.execute_script("print('A' * 50000)")
+
+        cap = blender_runtime.DEFAULT_SCRIPT_OUTPUT_CHARS
+        assert cap == 32_000
+        assert result["output"] == "A" * cap
+        assert result["output_truncated"] is True
+        assert result["output_total_chars"] == 50001
+        assert "error" not in result
+
+    def test_execute_script_cap_is_per_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        small = session.execute_script("print('{\"k\": 1}' * 10)", max_output_chars=25)
+        large = session.execute_script(
+            "print('B' * 90000)", max_output_chars=blender_runtime.MAX_SCRIPT_OUTPUT_CHARS
+        )
+
+        assert small["output"] == ('{"k": 1}' * 10)[:25]
+        assert small["output_truncated"] is True and small["output_total_chars"] == 81
+        assert large["output"] == "B" * 90000 + "\n"
+        assert large["output_truncated"] is False
+
+    def test_execute_script_caps_output_before_an_exception(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.execute_script("print('C' * 500)\nraise ValueError('late')", max_output_chars=100)
+
+        assert result["error"] == "ValueError: late"
+        assert result["output"] == "C" * 100
+        assert result["output_truncated"] is True and result["output_total_chars"] == 501
+
+    @pytest.mark.parametrize(
+        "text",
+        ["가", "é", "\x00", "\U0001F600"],
+        ids=["hangul", "latin1", "control", "emoji"],
+    )
+    def test_execute_script_holds_escape_heavy_output_under_the_json_cap(
+        self, monkeypatch: pytest.MonkeyPatch, text: str
+    ) -> None:
+        """The server counts escaped JSON bytes (6 or 12 here) and replaces a field over 400 KB.
+
+        100000 such characters would be replaced whole, so the prefix stops at
+        the JSON byte cap instead, and the cut is reported like any other.
+        """
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        cap = blender_runtime.MAX_SCRIPT_OUTPUT_CHARS
+        result = session.execute_script(f"print({text!r} * {cap})", max_output_chars=cap)
+
+        output = result["output"]
+        limit = blender_runtime.MAX_SCRIPT_OUTPUT_JSON_BYTES
+        assert output == text * len(output) and 0 < len(output) < cap
+        # The longest prefix that fits: one more character would not.
+        assert len(json.dumps(output)) <= limit < len(json.dumps(output + text))
+        assert result["output_truncated"] is True
+        assert result["output_total_chars"] == cap + 1
+
+    def test_execute_script_json_cap_never_cuts_printable_ascii(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Escaped quotes cost 2 bytes each; even 100000 of them stay under the JSON cap."""
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        cap = blender_runtime.MAX_SCRIPT_OUTPUT_CHARS
+        result = session.execute_script(f"print('\"' * {cap})", max_output_chars=cap)
+
+        assert result["output"] == '"' * cap
+        assert result["output_truncated"] is True and result["output_total_chars"] == cap + 1
+
+    def test_script_output_prefix_is_the_longest_that_fits(self) -> None:
+        limit = blender_runtime.MAX_SCRIPT_OUTPUT_JSON_BYTES
+        # 6-byte, 1-byte and 12-byte characters: 299972 JSON bytes, then emoji.
+        head = "가" * 49_990 + "a" * 30
+        assert len(json.dumps(head)) == 299_972
+        output = head + "\U0001F600" * 5
+
+        prefix = blender_runtime.script_output_prefix(output, 100_000)
+
+        assert prefix == head + "\U0001F600" * 2
+        assert len(json.dumps(prefix)) <= limit < len(json.dumps(prefix + "\U0001F600"))
+        assert blender_runtime.script_output_prefix(output, 10) == "가" * 10
+
+    @pytest.mark.parametrize("bad", [0, -1, 100_001, True, 12.5, "32000"])
+    def test_execute_script_rejects_an_out_of_range_cap(
+        self, monkeypatch: pytest.MonkeyPatch, bad: Any
+    ) -> None:
+        """The add-on validates too: it may serve a client that skipped the schema."""
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        with pytest.raises(ValueError, match="max_output_chars"):
+            session.execute_script("print('never runs')", max_output_chars=bad)
 
 
 class TestCreateMeshFromData:

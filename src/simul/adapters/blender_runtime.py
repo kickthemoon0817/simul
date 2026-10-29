@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import math
 import os
 import re
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, overload
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional, Tuple, overload
 
 try:
     import bpy
@@ -44,6 +47,52 @@ CONTEXT_OVERRIDE_HINT = (
     "view_layer=win.view_layer, area=area, region=region): bpy.ops.export_scene.gltf(...)"
 )
 
+# execute_script returns at most this much printed output unless the caller
+# asks for more, up to the maximum (issue #231). BlenderExecuteScriptRequest
+# repeats both numbers: this module ships inside the Blender add-on and cannot
+# import the MCP schemas. The default keeps a typical printed result inside the
+# server's 40 KB result budget.
+DEFAULT_SCRIPT_OUTPUT_CHARS = 32_000
+MAX_SCRIPT_OUTPUT_CHARS = 100_000
+
+# The server measures a result as JSON text with non-ASCII escaped, and above
+# its 400 KB hard limit it replaces the whole field instead of passing this
+# prefix through. A character costs 1 to 12 bytes there: printable ASCII at most
+# 2 (an escaped quote or newline), control characters and other non-ASCII text 6,
+# an emoji 12. So the prefix is also held under this many JSON bytes, which
+# printable ASCII never reaches (2 * MAX_SCRIPT_OUTPUT_CHARS + 2 quotes), and
+# which leaves room for return_value and the rest of the reply. The MCP schemas
+# repeat it as SCRIPT_OUTPUT_JSON_BYTES_MAX.
+MAX_SCRIPT_OUTPUT_JSON_BYTES = 300_000
+
+# capture_viewport methods (issue #228). "auto" means "viewport" in attached
+# mode and "render" in embedded mode, which has no editor window.
+CAPTURE_METHODS = ("auto", "viewport", "render")
+
+# Engines the draw manager draws itself, so an offscreen redraw of a 3D View
+# shows them. An external engine (Cycles, third-party) draws its Rendered view
+# only into the on-screen editor; offscreen, only the overlays would appear.
+_DRAW_MANAGER_ENGINES = frozenset(
+    {"BLENDER_EEVEE", "BLENDER_EEVEE_NEXT", "BLENDER_WORKBENCH"}
+)
+
+# Object types without renderable bounds, left out when framing a temporary camera.
+_UNFRAMED_TYPES = frozenset({"CAMERA", "LIGHT", "LIGHT_PROBE", "SPEAKER", "EMPTY"})
+
+# A temporary framing camera looks at the objects from this side, the 3/4 view
+# of Blender's default camera.
+_FRAMING_DIRECTION = (0.68, -0.64, 0.46)
+
+# Output-format settings a capture changes and restores, in restore order:
+# media_type first, so that the saved file_format is valid again.
+_IMAGE_FORMAT_FIELDS = (
+    "media_type",
+    "file_format",
+    "color_mode",
+    "color_depth",
+    "quality",
+)
+
 
 def add_context_hint(error: Optional[str]) -> Optional[str]:
     """Append the context-override recipe to a missing ``bpy.context`` member error.
@@ -53,6 +102,35 @@ def add_context_hint(error: Optional[str]) -> Optional[str]:
     if not error or _CONTEXT_MEMBER_ERROR not in error or CONTEXT_OVERRIDE_HINT in error:
         return error
     return f"{error}. {CONTEXT_OVERRIDE_HINT}"
+
+
+def script_output_prefix(output: str, max_chars: int) -> str:
+    """Return the part of a script's printed output that execute_script sends back.
+
+    That is its first ``max_chars`` characters, cut further when their JSON
+    encoding exceeds MAX_SCRIPT_OUTPUT_JSON_BYTES, so that the server passes
+    the prefix through instead of replacing it whole.
+
+    Args:
+        output: The script's full printed output.
+        max_chars: The caller's character cap.
+
+    Returns:
+        The longest such prefix.
+    """
+    prefix = output[:max_chars]
+    if len(json.dumps(prefix)) <= MAX_SCRIPT_OUTPUT_JSON_BYTES:
+        return prefix
+    # json.dumps escapes each character on its own, so the encoded length
+    # grows with the prefix and a bisection finds the longest one that fits.
+    low, high = 0, len(prefix)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(json.dumps(prefix[:middle])) <= MAX_SCRIPT_OUTPUT_JSON_BYTES:
+            low = middle
+        else:
+            high = middle - 1
+    return prefix[:low]
 
 
 def _bpy_op(description: str, operator: Callable[..., Any], /, **properties: Any) -> Any:
@@ -601,36 +679,45 @@ class BlenderRuntimeSession:
         jpeg_quality: int = 85,
         use_render_fallback: bool = False,
         agent_id: str = "agent",
+        method: str = "auto",
     ) -> Dict[str, Any]:
         """
-        Capture the viewport as a base64-encoded JPEG image.
+        Capture the 3D View or a camera render as a base64-encoded JPEG image.
 
-        Fast path uses gpu.types.GPUOffScreen when available (EEVEE only).
-        Fallback renders via bpy.ops.render.render (supports Cycles).
+        ``viewport`` redraws the 3D View offscreen with its own view and
+        projection matrices and shading, so the image is what the user sees
+        without UI or popups, and needs no camera. A Rendered view of an
+        external engine such as Cycles exists only on screen, so it is read
+        from the screen instead (``viewport_screen``). ``render`` runs
+        ``bpy.ops.render.render``; a scene without a camera gets a temporary
+        one that is removed afterwards. Neither path falls back to the other.
 
         Args:
-            width: Output image width in pixels.
-            height: Output image height in pixels.
+            width: Maximum image width in pixels. A viewport capture, or a render
+                through a temporary camera aligned to the 3D View, keeps the view's
+                aspect ratio inside width x height; other renders are exactly width x height.
+            height: Maximum image height in pixels; see width.
             jpeg_quality: JPEG compression quality (1-100).
-            use_render_fallback: Force the render fallback path.
+            use_render_fallback: Deprecated; same as method="render".
             agent_id: Visible capture feedback label in attached mode; ignored in embedded mode.
+            method: "viewport": the 3D View as the user sees it (view angle, shading,
+                overlays, Edit Mode, unsaved changes); attached mode only.
+                "render": a render through the scene camera, or through a temporary
+                camera when the scene has none (aligned to the 3D View when attached,
+                framing the visible objects otherwise), removed afterwards.
+                "auto" (default): "viewport" when attached, "render" in embedded mode.
 
         Returns:
-            Dictionary with image_base64, dimensions, engine, capture_method.
+            Dictionary with image_base64, width, height, engine, format and
+            capture_method: viewport, viewport_screen, render,
+            render_temp_camera_view or render_temp_camera_framing.
         """
+        method = self._resolve_capture_method(method, use_render_fallback)
         blender_module: Any = bpy
-        scene = blender_module.context.scene
-        engine = scene.render.engine
-
-        if not use_render_fallback:
-            try:
-                return self._capture_gpu_offscreen(width, height, jpeg_quality, engine)
-            except Exception as exc:
-                logger.debug(
-                    "GPU offscreen capture failed, falling back to render: %s", exc
-                )
-
-        return self._capture_render_fallback(width, height, jpeg_quality, engine)
+        engine = blender_module.context.scene.render.engine
+        if method == "viewport":
+            return self._capture_view3d(width, height, jpeg_quality, engine)
+        return self._capture_render(width, height, jpeg_quality, engine)
 
     def set_camera_view(
         self,
@@ -762,6 +849,7 @@ class BlenderRuntimeSession:
         height: int = 512,
         jpeg_quality: int = 85,
         agent_id: str = "agent",
+        method: str = "auto",
     ) -> Dict[str, Any]:
         """
         Capture viewport at multiple frames as base64-encoded JPEGs.
@@ -770,20 +858,22 @@ class BlenderRuntimeSession:
             start_frame: First frame to capture.
             end_frame: Last frame to capture (inclusive).
             step: Frame step between captures.
-            width: Output image width.
-            height: Output image height.
+            width: Maximum image width, as for capture_blender_viewport.
+            height: Maximum image height, as for capture_blender_viewport.
             jpeg_quality: JPEG compression quality.
             agent_id: Visible capture feedback label in attached mode; ignored in embedded mode.
+            method: "viewport", "render" or "auto" (default), as for capture_blender_viewport.
 
         Returns:
             Dictionary with frames list, frame_count, capture_method.
         """
+        method = self._resolve_capture_method(method)
         blender_module: Any = bpy
         scene = blender_module.context.scene
         original_frame = scene.frame_current
 
         frames: List[Dict[str, Any]] = []
-        capture_method = "render_fallback"
+        capture_method = method
 
         try:
             for frame_num in range(start_frame, end_frame + 1, step):
@@ -792,6 +882,7 @@ class BlenderRuntimeSession:
                     width=width,
                     height=height,
                     jpeg_quality=jpeg_quality,
+                    method=method,
                 )
                 frames.append(
                     {
@@ -1974,6 +2065,7 @@ class BlenderRuntimeSession:
         self,
         script: str,
         timeout: Optional[float] = None,
+        max_output_chars: int = DEFAULT_SCRIPT_OUTPUT_CHARS,
     ) -> Dict[str, Any]:
         """
         Execute arbitrary Python code with access to bpy.
@@ -1982,8 +2074,12 @@ class BlenderRuntimeSession:
         ``bpy`` and the standard builtins.  If the script assigns a value to
         ``__result__``, its ``repr()`` is returned in *return_value*.
 
-        Captured ``print()`` output is returned in *output* (capped at 4 KiB
-        to keep response sizes agent-friendly).
+        Captured ``print()`` output is returned in *output*, cut to its first
+        ``max_output_chars`` characters, and further when those encode to
+        more than MAX_SCRIPT_OUTPUT_JSON_BYTES of JSON (non-ASCII or control
+        characters). A cut is never silent: ``output_truncated`` is true and
+        ``output_total_chars`` gives the full length, so a truncated JSON dump
+        is not mistaken for a script bug.
 
         With a ``timeout`` the script runs on a worker thread and this call
         returns a structured error once the budget is spent. Python offers
@@ -1996,14 +2092,34 @@ class BlenderRuntimeSession:
             script: Python source code to execute.
             timeout: Maximum wall-clock seconds to wait for the script;
                 ``None`` waits for it to finish.
+            max_output_chars: Most characters of printed output to return, 1 to 100000
+                (default 32000). Longer output is cut to its first max_output_chars
+                characters with output_truncated=true and output_total_chars set.
+                Output that JSON escapes heavily (non-ASCII text, control characters)
+                is cut earlier, at 300000 bytes of JSON, so the prefix always arrives.
+                Write larger results to a file and return its path instead.
 
         Returns:
-            Dict with output, return_value, duration_seconds, and
-            optionally error. A timeout adds ``timed_out: True``.
+            Dict with output, output_truncated, output_total_chars,
+            return_value, duration_seconds, and optionally error. A timeout
+            adds ``timed_out: True``.
+
+        Raises:
+            ValueError: If max_output_chars is not an integer from 1 to
+                MAX_SCRIPT_OUTPUT_CHARS.
         """
         import contextlib
         import threading
         import time
+
+        if (
+            isinstance(max_output_chars, bool)
+            or not isinstance(max_output_chars, int)
+            or not 1 <= max_output_chars <= MAX_SCRIPT_OUTPUT_CHARS
+        ):
+            raise ValueError(
+                f"max_output_chars must be an integer from 1 to {MAX_SCRIPT_OUTPUT_CHARS}"
+            )
 
         blender_module: Any = bpy
 
@@ -2013,7 +2129,15 @@ class BlenderRuntimeSession:
             "__builtins__": __builtins__,
             "__result__": None,
         }
-        max_output_bytes = 4096
+
+        def _captured_output() -> Dict[str, Any]:
+            raw_output = stdout_capture.getvalue()
+            output = script_output_prefix(raw_output, max_output_chars)
+            return {
+                "output": output or None,
+                "output_truncated": len(output) < len(raw_output),
+                "output_total_chars": len(raw_output),
+            }
 
         def _run() -> Dict[str, Any]:
             start = time.monotonic()
@@ -2022,23 +2146,17 @@ class BlenderRuntimeSession:
                     exec(script, namespace)  # noqa: S102
             except Exception as exc:
                 return {
-                    "output": stdout_capture.getvalue() or None,
+                    **_captured_output(),
                     "return_value": None,
                     "duration_seconds": round(time.monotonic() - start, 4),
                     "error": add_context_hint(f"{type(exc).__name__}: {exc}"),
                 }
             elapsed = time.monotonic() - start
-            raw_output = stdout_capture.getvalue()
-            output = (
-                raw_output[:max_output_bytes]
-                if len(raw_output) > max_output_bytes
-                else raw_output
-            ) or None
             return_value: Optional[str] = None
             if namespace.get("__result__") is not None:
                 return_value = repr(namespace["__result__"])
             return {
-                "output": output,
+                **_captured_output(),
                 "return_value": return_value,
                 "duration_seconds": round(elapsed, 4),
             }
@@ -2063,6 +2181,8 @@ class BlenderRuntimeSession:
         )
         return {
             "output": None,
+            "output_truncated": False,
+            "output_total_chars": 0,
             "return_value": None,
             "duration_seconds": round(float(timeout), 4),
             "timed_out": True,
@@ -2738,7 +2858,243 @@ class BlenderRuntimeSession:
             raise ValueError("No active camera in scene")
         return scene_cam
 
-    def _capture_gpu_offscreen(
+    def _resolve_capture_method(
+        self, method: str, use_render_fallback: bool = False
+    ) -> str:
+        """
+        Turn a requested capture method into ``viewport`` or ``render``.
+
+        Args:
+            method: One of CAPTURE_METHODS.
+            use_render_fallback: The deprecated spelling of ``method="render"``.
+
+        Returns:
+            ``viewport`` or ``render``.
+
+        Raises:
+            ValueError: For an unknown method, or use_render_fallback together
+                with method="viewport".
+        """
+        if method not in CAPTURE_METHODS:
+            raise ValueError(
+                f"method must be one of {', '.join(CAPTURE_METHODS)}, not {method!r}"
+            )
+        if use_render_fallback:
+            if method == "viewport":
+                raise ValueError(
+                    "use_render_fallback=True asks for a render; it contradicts method='viewport'"
+                )
+            return "render"
+        if method == "auto":
+            return "viewport" if self._scene_scope else "render"
+        return method
+
+    @staticmethod
+    def _fit_inside(
+        source_width: int, source_height: int, width: int, height: int
+    ) -> Tuple[int, int]:
+        """
+        Scale a source size to fit inside width x height, keeping its aspect ratio.
+
+        Args:
+            source_width: Width of the view being captured.
+            source_height: Height of the view being captured.
+            width: Largest output width.
+            height: Largest output height.
+
+        Returns:
+            The output (width, height), each at least one pixel.
+        """
+        scale = min(width / source_width, height / source_height)
+        return max(1, round(source_width * scale)), max(1, round(source_height * scale))
+
+    @staticmethod
+    def _view3d_target() -> Tuple[Any, Any, Any]:
+        """
+        Find the 3D View to capture: the context's, else the window's largest.
+
+        The attached bridge puts the window's largest 3D View in the context.
+        Embedded bpy runs in background mode: the startup file's windows and
+        areas exist there, but nothing was ever drawn in them.
+
+        Returns:
+            The (area, region, space) of the 3D View.
+
+        Raises:
+            RuntimeError: When no 3D View with a drawable region exists.
+        """
+        blender_module: Any = bpy
+        context = blender_module.context
+        window = getattr(context, "window", None)
+        area = None
+        if window is not None and not getattr(blender_module.app, "background", False):
+            area = getattr(context, "area", None)
+            if area is None or area.type != "VIEW_3D":
+                views = [a for a in window.screen.areas if a.type == "VIEW_3D"]
+                area = max(views, key=lambda a: a.width * a.height, default=None)
+        if area is None:
+            raise RuntimeError(
+                "No 3D View to capture: method='viewport' needs an attached Blender window "
+                "that shows a 3D View (embedded bpy has no editor window). Open a 3D View, "
+                "or pass method='render' to render through a camera."
+            )
+        space = area.spaces.active
+        regions = [r for r in area.regions if r.type == "WINDOW"]
+        # Quad view has four WINDOW regions; region_3d is the one not locked to an axis.
+        region = next((r for r in regions if r.data == space.region_3d), None) or max(
+            regions, key=lambda r: r.width * r.height, default=None
+        )
+        if (
+            region is None
+            or region.data is None
+            or region.width < 2
+            or region.height < 2
+        ):
+            raise RuntimeError("The 3D View has no drawable region to capture")
+        return area, region, space
+
+    @staticmethod
+    def _drawn_by_external_engine(space: Any, engine: str) -> bool:
+        """
+        Report whether the 3D View's image comes from an external render engine.
+
+        Such an engine (Cycles, third-party) draws only into the on-screen
+        editor; an offscreen redraw would show the overlays without the scene.
+
+        Args:
+            space: The SpaceView3D being captured.
+            engine: The scene's render engine identifier.
+
+        Returns:
+            True when the view must be read from the screen.
+        """
+        shading = space.shading.type
+        if engine in _DRAW_MANAGER_ENGINES or shading in ("WIREFRAME", "SOLID"):
+            return False
+        if shading == "RENDERED":
+            return True
+        # Material Preview draws with EEVEE unless the engine opts out of it.
+        blender_module: Any = bpy
+        engine_type = next(
+            (
+                cls
+                for cls in blender_module.types.RenderEngine.__subclasses__()
+                if getattr(cls, "bl_idname", None) == engine
+            ),
+            None,
+        )
+        return engine_type is not None and not getattr(
+            engine_type, "bl_use_eevee_viewport", False
+        )
+
+    @contextmanager
+    def _capture_workdir(self) -> Iterator[Path]:
+        """
+        Yield a scratch directory for capture files inside the sandbox.
+
+        Blender writes images only to files, so the encoded JPEG passes
+        through here; the directory is removed afterwards.
+
+        Yields:
+            The temporary directory.
+
+        Raises:
+            PermissionError: When the sandbox allows no writable capture directory.
+        """
+        capture_dir = self._path_policy.default_capture_dir()
+        if capture_dir is None:
+            raise PermissionError(
+                "No writable capture directory is allowed by the sandbox"
+            )
+        capture_dir = self._deny_outside_sandbox(capture_dir, write=True)
+        Path(capture_dir).mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="blender-", dir=capture_dir
+        ) as temporary:
+            yield Path(temporary)
+
+    @staticmethod
+    @contextmanager
+    def _image_format(settings: Any, file_format: str, **values: Any) -> Iterator[None]:
+        """
+        Set the scene's output image format for one capture, then restore it.
+
+        Blender 5.0 offers only video formats while ``media_type`` is VIDEO,
+        so an image format needs ``media_type`` IMAGE first; older versions
+        have no ``media_type``. Choosing JPEG also downgrades the color mode
+        and depth (RGBA to RGB, 16 to 8 bit), so those are restored as well.
+
+        Args:
+            settings: The scene's ImageFormatSettings.
+            file_format: Image format to use, such as JPEG or PNG.
+            **values: Further ImageFormatSettings attributes to set.
+
+        Yields:
+            Nothing; the format applies inside the block.
+        """
+        names = [
+            name
+            for name in dict.fromkeys((*_IMAGE_FORMAT_FIELDS, *values))
+            if hasattr(settings, name)
+        ]
+        saved = {name: getattr(settings, name) for name in names}
+        try:
+            if "media_type" in saved:
+                settings.media_type = "IMAGE"
+            settings.file_format = file_format
+            for name, value in values.items():
+                setattr(settings, name, value)
+            yield
+        finally:
+            for name in names:
+                try:
+                    setattr(settings, name, saved[name])
+                except (AttributeError, TypeError, ValueError):
+                    logger.exception("Could not restore render image setting %s", name)
+
+    @staticmethod
+    def _new_image(width: int, height: int, pixels: Any) -> Any:
+        """
+        Create a temporary byte image from RGBA float pixels.
+
+        Args:
+            width: Image width.
+            height: Image height.
+            pixels: Flat RGBA values in [0, 1], bottom row first.
+
+        Returns:
+            The new image; the caller removes it.
+        """
+        blender_module: Any = bpy
+        image = blender_module.data.images.new(
+            "simul_capture", width, height, alpha=False
+        )
+        try:
+            image.pixels.foreach_set(pixels)
+        except Exception:
+            blender_module.data.images.remove(image)
+            raise
+        return image
+
+    @staticmethod
+    def _save_jpeg(image: Any, jpeg_quality: int, workdir: Path) -> str:
+        """
+        Encode an image as JPEG with Blender's writer; Pillow is not in Blender.
+
+        Args:
+            image: The image to encode.
+            jpeg_quality: JPEG compression quality.
+            workdir: Scratch directory for the file Blender writes.
+
+        Returns:
+            The base64-encoded JPEG.
+        """
+        output = workdir / "capture.jpg"
+        image.file_format = "JPEG"
+        image.save(filepath=str(output), quality=jpeg_quality)
+        return base64.b64encode(output.read_bytes()).decode("ascii")
+
+    def _capture_view3d(
         self,
         width: int,
         height: int,
@@ -2746,68 +3102,158 @@ class BlenderRuntimeSession:
         engine: str,
     ) -> Dict[str, Any]:
         """
-        Capture viewport via gpu.types.GPUOffScreen (fast path, EEVEE only).
+        Capture the 3D View as the user sees it; see capture_viewport.
 
         Args:
-            width: Image width.
-            height: Image height.
+            width: Largest image width.
+            height: Largest image height.
             jpeg_quality: JPEG compression quality.
             engine: Render engine identifier.
 
         Returns:
             Dictionary with image_base64, dimensions, engine, capture_method.
         """
-        import gpu  # type: ignore[import-not-found]
-
         blender_module: Any = bpy
-        scene = blender_module.context.scene
-        cam_obj = scene.camera
-        if cam_obj is None:
-            raise ValueError("No active camera for GPU capture")
-
-        offscreen = gpu.types.GPUOffScreen(width, height)
-        try:
-            view_matrix = cam_obj.matrix_world.inverted()
-            projection_matrix = cam_obj.calc_matrix_camera(
-                blender_module.context.evaluated_depsgraph_get(),
-                x=width,
-                y=height,
-            )
-            offscreen.draw_view3d(
-                scene,
-                blender_module.context.view_layer,
-                blender_module.context.space_data,
-                blender_module.context.region,
-                view_matrix,
-                projection_matrix,
-                do_color_management=True,
-            )
-            buffer = offscreen.read_color(0, 0, width, height, 4, 0, "UBYTE")
-        finally:
-            offscreen.free()
-
-        import numpy as np
-
-        pixels = np.frombuffer(buffer, dtype=np.uint8).reshape(height, width, 4)
-        pixels = np.flipud(pixels)[:, :, :3]
-
-        from PIL import Image as PILImage
-
-        img = PILImage.fromarray(pixels, "RGB")
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=jpeg_quality)
-        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-
+        context = blender_module.context
+        area, region, space = self._view3d_target()
+        out_width, out_height = self._fit_inside(
+            region.width, region.height, width, height
+        )
+        with self._capture_workdir() as workdir:
+            if self._drawn_by_external_engine(space, engine):
+                image = self._read_view3d_screen(context.window, area, region, workdir)
+                capture_method = "viewport_screen"
+            else:
+                image = self._draw_view3d_offscreen(
+                    context.scene,
+                    context.view_layer,
+                    space,
+                    region,
+                    out_width,
+                    out_height,
+                )
+                capture_method = "viewport"
+            try:
+                if tuple(image.size) != (out_width, out_height):
+                    image.scale(out_width, out_height)
+                b64 = self._save_jpeg(image, jpeg_quality, workdir)
+            finally:
+                blender_module.data.images.remove(image)
         return {
             "image_base64": b64,
-            "width": width,
-            "height": height,
+            "width": out_width,
+            "height": out_height,
             "engine": engine,
-            "capture_method": "gpu_offscreen",
+            "capture_method": capture_method,
             "format": "jpeg",
         }
 
-    def _capture_render_fallback(
+    def _draw_view3d_offscreen(
+        self,
+        scene: Any,
+        view_layer: Any,
+        space: Any,
+        region: Any,
+        width: int,
+        height: int,
+    ) -> Any:
+        """
+        Redraw the 3D View offscreen with its own matrices, shading and overlays.
+
+        Python draw handlers do not run, so agent annotations stay out.
+
+        Args:
+            scene: The window's scene.
+            view_layer: The window's view layer.
+            space: The SpaceView3D to draw.
+            region: Its WINDOW region.
+            width: Image width; the region's aspect ratio.
+            height: Image height.
+
+        Returns:
+            A temporary image with the pixels; the caller removes it.
+        """
+        import gpu  # type: ignore[import-not-found]
+
+        view = region.data
+        # Blender refreshes view matrices on redraw; a view changed since the
+        # last one, or a window that is not redrawing, would be stale.
+        view.update()
+        offscreen = gpu.types.GPUOffScreen(width, height)
+        try:
+            offscreen.draw_view3d(
+                scene,
+                view_layer,
+                space,
+                region,
+                view.view_matrix,
+                view.window_matrix,
+                do_color_management=True,
+            )
+            with offscreen.bind():
+                pixels = gpu.state.active_framebuffer_get().read_color(
+                    0, 0, width, height, 4, 0, "FLOAT"
+                )
+        finally:
+            offscreen.free()
+        pixels.dimensions = width * height * 4
+        return self._new_image(width, height, pixels)
+
+    def _read_view3d_screen(
+        self, window: Any, area: Any, region: Any, workdir: Path
+    ) -> Any:
+        """
+        Read the 3D View's on-screen pixels, for views only an external engine draws.
+
+        The screenshot covers the whole editor, so overlapping UI (header,
+        toolbar, open popups) is included; it is cropped to the main region.
+
+        Args:
+            window: The window showing the 3D View.
+            area: The 3D View's area.
+            region: Its WINDOW region.
+            workdir: Scratch directory for the screenshot file.
+
+        Returns:
+            A temporary region-sized image; the caller scales and removes it.
+
+        Raises:
+            RuntimeError: When Blender cannot take the screenshot.
+        """
+        import numpy as np
+
+        blender_module: Any = bpy
+        shot = workdir / "view3d.png"
+        settings = blender_module.context.scene.render.image_settings
+        with self._image_format(settings, "PNG", color_mode="RGB", color_depth="8"):
+            with blender_module.context.temp_override(
+                window=window, area=area, region=region
+            ):
+                status = blender_module.ops.screen.screenshot_area(filepath=str(shot))
+        if "FINISHED" not in status or not shot.is_file():
+            raise RuntimeError("Blender could not read the 3D View from the screen")
+        source = blender_module.data.images.load(str(shot), check_existing=False)
+        try:
+            shot_width, shot_height = source.size
+            pixels = np.empty(shot_width * shot_height * 4, dtype=np.float32)
+            source.pixels.foreach_get(pixels)
+        finally:
+            blender_module.data.images.remove(source)
+        scale_x, scale_y = shot_width / area.width, shot_height / area.height
+        left = round((region.x - area.x) * scale_x)
+        bottom = round((region.y - area.y) * scale_y)
+        crop = pixels.reshape(shot_height, shot_width, 4)[
+            bottom : bottom + round(region.height * scale_y),
+            left : left + round(region.width * scale_x),
+        ]
+        crop_height, crop_width = crop.shape[:2]
+        if crop_width < 1 or crop_height < 1:
+            raise RuntimeError("The 3D View lies outside Blender's screenshot")
+        return self._new_image(
+            crop_width, crop_height, np.ascontiguousarray(crop).ravel()
+        )
+
+    def _capture_render(
         self,
         width: int,
         height: int,
@@ -2815,11 +3261,12 @@ class BlenderRuntimeSession:
         engine: str,
     ) -> Dict[str, Any]:
         """
-        Capture viewport via bpy.ops.render.render (slow path, all engines).
+        Capture via bpy.ops.render.render (all engines), through a camera.
 
         Temporarily adjusts render settings and lets Blender encode the JPEG.
         Render Result.pixels can be empty even after a successful render. Using
         save_render also avoids requiring Pillow inside the Blender add-on.
+        A scene without a camera gets a temporary one for this render only.
 
         Args:
             width: Image width.
@@ -2833,57 +3280,209 @@ class BlenderRuntimeSession:
         blender_module: Any = bpy
         scene = blender_module.context.scene
         render = scene.render
+        capture_method = "render"
+        with self._capture_workdir() as workdir:
+            saved = (
+                render.resolution_x,
+                render.resolution_y,
+                render.resolution_percentage,
+            )
+            camera = None
+            try:
+                if scene.camera is None:
+                    camera, capture_method, (width, height) = (
+                        self._add_temporary_camera(scene, width, height)
+                    )
+                render.resolution_x = width
+                render.resolution_y = height
+                render.resolution_percentage = 100
+                with self._image_format(
+                    render.image_settings, "JPEG", quality=jpeg_quality
+                ):
+                    blender_module.ops.render.render(write_still=False)
+                    result_image = blender_module.data.images.get("Render Result")
+                    if result_image is None:
+                        raise RuntimeError("Render Result image not available")
+                    output = workdir / "capture.jpg"
+                    result_image.save_render(filepath=str(output), scene=scene)
+                    b64 = base64.b64encode(output.read_bytes()).decode("ascii")
+            finally:
+                (
+                    render.resolution_x,
+                    render.resolution_y,
+                    render.resolution_percentage,
+                ) = saved
+                if camera is not None:
+                    self._remove_temporary_camera(scene, camera)
+        return {
+            "image_base64": b64,
+            "width": width,
+            "height": height,
+            "engine": engine,
+            "capture_method": capture_method,
+            "format": "jpeg",
+        }
 
-        orig_x = render.resolution_x
-        orig_y = render.resolution_y
-        orig_pct = render.resolution_percentage
-        orig_fmt = render.image_settings.file_format
-        orig_quality = render.image_settings.quality
+    def _add_temporary_camera(
+        self, scene: Any, width: int, height: int
+    ) -> Tuple[Any, str, Tuple[int, int]]:
+        """
+        Add and activate a camera for one render of a scene that has none.
 
+        Aligned to the 3D View when there is one, keeping its aspect ratio;
+        otherwise framing the visible objects at width x height.
+
+        Args:
+            scene: The scene to render.
+            width: Requested image width.
+            height: Requested image height.
+
+        Returns:
+            The camera object, the capture_method naming its placement, and
+            the render size.
+        """
+        blender_module: Any = bpy
+        data = blender_module.data.cameras.new("simul_temp_camera")
+        camera = blender_module.data.objects.new("simul_temp_camera", data)
         try:
-            render.resolution_x = width
-            render.resolution_y = height
-            render.resolution_percentage = 100
-            render.image_settings.file_format = "JPEG"
-            render.image_settings.quality = jpeg_quality
-
-            blender_module.ops.render.render(write_still=False)
-
-            result_image = blender_module.data.images.get("Render Result")
-            if result_image is None:
-                raise RuntimeError("Render Result image not available")
-
-            import tempfile
-            from pathlib import Path
-
-            capture_dir = self._path_policy.default_capture_dir()
-            if capture_dir is None:
-                raise PermissionError(
-                    "No writable capture directory is allowed by the sandbox"
+            scene.collection.objects.link(camera)
+            try:
+                _area, region, space = self._view3d_target()
+            except RuntimeError:
+                region = None
+            if region is not None:
+                width, height = self._fit_inside(
+                    region.width, region.height, width, height
                 )
-            capture_dir = self._deny_outside_sandbox(capture_dir, write=True)
-            Path(capture_dir).mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(
-                prefix="blender-", dir=capture_dir
-            ) as temporary:
-                output = Path(temporary) / "capture.jpg"
-                result_image.save_render(filepath=str(output), scene=scene)
-                b64 = base64.b64encode(output.read_bytes()).decode("ascii")
+                self._align_camera_to_view(camera, space, region.data, width, height)
+                capture_method = "render_temp_camera_view"
+            else:
+                self._frame_camera_on_objects(camera, scene, width, height)
+                capture_method = "render_temp_camera_framing"
+            scene.camera = camera
+        except Exception:
+            self._remove_temporary_camera(scene, camera)
+            raise
+        return camera, capture_method, (width, height)
 
-            return {
-                "image_base64": b64,
-                "width": width,
-                "height": height,
-                "engine": engine,
-                "capture_method": "render_fallback",
-                "format": "jpeg",
-            }
-        finally:
-            render.resolution_x = orig_x
-            render.resolution_y = orig_y
-            render.resolution_percentage = orig_pct
-            render.image_settings.file_format = orig_fmt
-            render.image_settings.quality = orig_quality
+    @staticmethod
+    def _remove_temporary_camera(scene: Any, camera: Any) -> None:
+        """
+        Delete a temporary camera and its data, leaving the scene without a camera again.
+
+        Args:
+            scene: The scene it was added to.
+            camera: The temporary camera object.
+        """
+        blender_module: Any = bpy
+        if scene.camera == camera:
+            scene.camera = None
+        data = camera.data
+        blender_module.data.objects.remove(camera, do_unlink=True)
+        blender_module.data.cameras.remove(data)
+
+    @staticmethod
+    def _align_camera_to_view(
+        camera: Any, space: Any, view: Any, width: int, height: int
+    ) -> None:
+        """
+        Give a camera the 3D View's position, orientation and field of view.
+
+        Args:
+            camera: The camera object.
+            space: The SpaceView3D, for its clip range.
+            view: The region's RegionView3D.
+            width: Render width; the view's aspect ratio.
+            height: Render height.
+        """
+        view.update()
+        data = camera.data
+        data.sensor_fit = "AUTO"
+        projection = view.window_matrix
+        # AUTO fit spreads the camera's field over the longer side.
+        scale = projection[0][0] if width >= height else projection[1][1]
+        view_to_world = view.view_matrix.inverted()
+        camera.matrix_world = view_to_world
+        if view.is_perspective:
+            data.type = "PERSP"
+            # From the projection, not space.lens: the 3D View shows the field
+            # of a camera with half its focal length.
+            data.angle = 2.0 * math.atan(1.0 / scale)
+            data.clip_start = space.clip_start
+            data.clip_end = space.clip_end
+            return
+        data.type = "ORTHO"
+        data.ortho_scale = 2.0 / scale
+        # An orthographic 3D View also shows what lies behind its eye point,
+        # half its clip range deep; back the camera off by that much.
+        depth = space.clip_end
+        backward = view_to_world.col[2]
+        camera.location = tuple(
+            origin + axis * depth / 2
+            for origin, axis in zip(view_to_world.translation, backward)
+        )
+        data.clip_start = 0.001
+        data.clip_end = depth
+
+    def _frame_camera_on_objects(
+        self, camera: Any, scene: Any, width: int, height: int
+    ) -> None:
+        """
+        Point a camera at the visible objects from Blender's default camera side.
+
+        Args:
+            camera: The camera object.
+            scene: The scene whose visible, renderable objects are framed.
+            width: Render width.
+            height: Render height.
+        """
+        corners: List[List[float]] = []
+        for obj in scene.objects:
+            if (
+                obj.type in _UNFRAMED_TYPES
+                or getattr(obj, "hide_render", False)
+                or not self._is_object_visible(obj)
+            ):
+                continue
+            # Matrix @ bound_box item raises TypeError in Blender (the item is
+            # not a Vector), so the corners are transformed element by element.
+            matrix = [list(row) for row in obj.matrix_world]
+            corners.extend(
+                [
+                    sum(matrix[row][col] * corner[col] for col in range(3))
+                    + matrix[row][3]
+                    for row in range(3)
+                ]
+                for corner in obj.bound_box
+            )
+        if corners:
+            low = [min(c[i] for c in corners) for i in range(3)]
+            high = [max(c[i] for c in corners) for i in range(3)]
+            center = [(lo + hi) / 2 for lo, hi in zip(low, high)]
+            radius = max(math.dist(low, high) / 2, 0.1)
+        else:
+            center, radius = [0.0, 0.0, 0.0], 1.0
+        data = camera.data
+        data.sensor_fit = "AUTO"
+        # AUTO fit spreads the field over the longer side, so the shorter side
+        # decides how far back the camera must stand to see the whole sphere.
+        half_angle = math.atan(
+            math.tan(data.angle / 2) * min(width, height) / max(width, height)
+        )
+        distance = radius / math.sin(half_angle) * 1.05
+        norm = math.sqrt(sum(v * v for v in _FRAMING_DIRECTION))
+        location = [c + v / norm * distance for c, v in zip(center, _FRAMING_DIRECTION)]
+        dx, dy, dz = (c - loc for c, loc in zip(center, location))
+        # A camera looks down its local -Z. Euler XYZ (x, 0, z) turns that into
+        # (-sin z sin x, cos z sin x, -cos x); solve for the look direction.
+        camera.location = tuple(location)
+        camera.rotation_euler = (
+            math.pi / 2 + math.atan2(dz, math.hypot(dx, dy)),
+            0.0,
+            math.atan2(-dx, dy),
+        )
+        data.clip_start = max(0.001, (distance - radius) / 2)
+        data.clip_end = distance + 2 * radius
 
 
 class BlenderRuntimeAdapter:

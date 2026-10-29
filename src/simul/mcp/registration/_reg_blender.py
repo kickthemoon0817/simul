@@ -480,11 +480,20 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
     @tool(
         name="capture_blender_viewport",
         description=(
-            "Capture the Blender viewport as a JPEG. The image arrives as an MCP "
-            "image content block, followed by a JSON block with success, width, "
-            "height, engine, capture_method, format and image_attached=true. "
-            "In attached mode, briefly show an agent eye badge and border pulse after success. "
-            "Agent annotations are excluded from the captured image."
+            "Capture Blender as a JPEG. In attached mode the default (method='auto') is the 3D "
+            "View the user sees: view angle, shading, overlays, Edit Mode and unsaved edits, "
+            "with no camera needed, keeping the view's aspect ratio within width x height "
+            "(capture_method viewport; an external engine's Rendered view, such as Cycles, is "
+            "read from the screen as viewport_screen and includes overlapping UI). Embedded "
+            "(headless bpy) mode has no 3D View, so 'auto' renders. method='render' renders "
+            "through the scene camera, or through a temporary camera removed afterwards: "
+            "aligned to the 3D View when attached, framing the visible objects when embedded "
+            "or when the window shows no 3D View "
+            "(render_temp_camera_view / render_temp_camera_framing). The image arrives as an MCP "
+            "image content block, followed by a JSON block with success, width, height, engine, "
+            "capture_method, format and image_attached=true. In attached mode, briefly show an "
+            "agent eye badge and border pulse after success. Agent annotations are excluded "
+            "from the captured image."
         ),
         annotations=server._tool_annotations(
             read_only=True,
@@ -499,6 +508,7 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
         width: int = 512,
         height: int = 512,
         jpeg_quality: int = 85,
+        method: BlenderCaptureMethod = "auto",
         use_render_fallback: bool = False,
         agent_id: Optional[str] = None,
     ) -> ToolResult:
@@ -507,11 +517,14 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
             width=width,
             height=height,
             jpeg_quality=jpeg_quality,
+            method=method,
             use_render_fallback=use_render_fallback,
             agent_id=server._resolve_agent_id(agent_id),
         )
         if isinstance(input_data, dict):
             return server._as_text_result(input_data)
+        assert isinstance(input_data, BlenderCaptureViewportRequest)
+        # The request model folded the deprecated use_render_fallback into method.
         return await server._exec_backend(
             "capture_blender_viewport",
             server.blender_adapter,
@@ -521,8 +534,8 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
                 input_data.width,
                 input_data.height,
                 input_data.jpeg_quality,
-                input_data.use_render_fallback,
                 agent_id=input_data.agent_id,
+                method=input_data.method,
             ),
         )
 
@@ -646,7 +659,9 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
     @tool(
         name="capture_blender_viewport_sequence",
         description=(
-            "Capture a sequence of viewport frames as base64-encoded JPEGs. "
+            "Capture a frame range as base64-encoded JPEGs, each made like "
+            "capture_blender_viewport with the same method (the 3D View when attached, a "
+            "camera render in embedded mode). "
             "In attached mode, briefly show an agent eye badge and border pulse after success. "
             "Agent annotations are excluded from the captured images."
         ),
@@ -667,6 +682,7 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
         height: int = 512,
         jpeg_quality: int = 85,
         agent_id: Optional[str] = None,
+        method: BlenderCaptureMethod = "auto",
     ) -> ToolResult:
         input_data = server._validate_input(
             BlenderCaptureSequenceRequest,
@@ -677,9 +693,11 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
             height=height,
             jpeg_quality=jpeg_quality,
             agent_id=server._resolve_agent_id(agent_id),
+            method=method,
         )
         if isinstance(input_data, dict):
             return server._as_text_result(input_data)
+        assert isinstance(input_data, BlenderCaptureSequenceRequest)
         return await server._exec_backend(
             "capture_blender_viewport_sequence",
             server.blender_adapter,
@@ -693,6 +711,7 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
                 input_data.height,
                 input_data.jpeg_quality,
                 agent_id=input_data.agent_id,
+                method=input_data.method,
             ),
         )
 
@@ -1736,7 +1755,13 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
         name="execute_blender_script",
         description=(
             "Execute arbitrary Python code inside Blender with access "
-            "to bpy. Assign to __result__ to return a value."
+            "to bpy. Assign to __result__ to return a value. Printed output "
+            "comes back in output, cut to its first max_output_chars characters "
+            f"(default {SCRIPT_OUTPUT_CHARS_DEFAULT}, at most {SCRIPT_OUTPUT_CHARS_MAX}), "
+            f"or earlier when they exceed {SCRIPT_OUTPUT_JSON_BYTES_MAX} bytes of JSON "
+            "(heavily non-ASCII output); "
+            "a cut sets output_truncated=true and output_total_chars to the full length. "
+            "Write larger results to a file and return its path instead."
         ),
         annotations=server._tool_annotations(
             read_only=False,
@@ -1751,14 +1776,17 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
     async def execute_blender_script(
         script: str,
         timeout: Optional[float] = None,
+        max_output_chars: int = SCRIPT_OUTPUT_CHARS_DEFAULT,
     ) -> ToolResult:
         input_data = server._validate_input(
             BlenderExecuteScriptRequest,
             script=script,
             timeout=timeout,
+            max_output_chars=max_output_chars,
         )
         if isinstance(input_data, dict):
             return server._as_text_result(input_data)
+        assert isinstance(input_data, BlenderExecuteScriptRequest)
         return await server._exec_backend(
             "execute_blender_script",
             server.blender_adapter,
@@ -1767,6 +1795,7 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
             lambda session: session.execute_script(
                 input_data.script,
                 input_data.timeout,
+                max_output_chars=input_data.max_output_chars,
             ),
         )
 
