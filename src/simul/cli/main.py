@@ -550,7 +550,7 @@ def info(
     not run on, or ISAAC_SIM__ENABLED=false); the row says why.
     """
     try:
-        from simul.adapters import is_blender_available, is_headless_available
+        from simul import adapters
         from simul.mcp.backends import NOT_SELECTED, backend_skip_reason
         from simul.mcp.server import SimulMCPServer
 
@@ -570,12 +570,14 @@ def info(
             if isaac_skipped is None
             else None
         )
+        # A probe imports its runtime (bpy, pxr) on first access, so only a
+        # selected backend's probe is looked up.
         blender_available: Optional[bool] = (
-            settings.blender.mode == "attached" or is_blender_available()
+            settings.blender.mode == "attached" or adapters.is_blender_available()
             if _is_enabled(backend_set, "blender") else None
         )
         usd_available: Optional[bool] = (
-            is_headless_available() if _is_enabled(backend_set, "usd") else None
+            adapters.is_headless_available() if _is_enabled(backend_set, "usd") else None
         )
 
         # Instantiate the server so the listing is what actually registered,
