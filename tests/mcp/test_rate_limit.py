@@ -145,7 +145,7 @@ def test_agent_identity_comes_from_the_mcp_session(
     _call_n(instance, "get_isaac_stage_info", None, BURST)  # type: ignore[arg-type]
     refused = instance._check_rate_limit("get_isaac_stage_info")
     assert refused is not None
-    assert refused["details"]["agent_id"] == "session-A"
+    assert refused["details"]["agent_id"] == server_module.default_agent_label("session-A")
 
     monkeypatch.setattr(instance, "_get_request_session_id", lambda: "session-B")
     assert instance._check_rate_limit("get_isaac_stage_info") is None

@@ -177,7 +177,9 @@ def test_sessionless_requests_share_one_session_per_stdio_server(
     protocols, _ = _connect(server, "auto", [PING, PING], [PING])
 
     assert protocols == [SESSIONLESS_PROTOCOL] * 2
-    assert _agents(server) == [server._sessionless_session_id] * 3
+    assert _agents(server) == [
+        server_module.default_agent_label(server._sessionless_session_id)
+    ] * 3
 
 
 def test_an_instance_switch_and_claim_last_across_sessionless_calls(
@@ -197,7 +199,9 @@ def test_an_instance_switch_and_claim_last_across_sessionless_calls(
     )
 
     switched, pinged, released = payloads[0]
-    assert switched["binding"]["agent_id"] == server._sessionless_session_id
+    assert switched["binding"]["agent_id"] == server_module.default_agent_label(
+        server._sessionless_session_id
+    )
     assert pinged["address"] == SECOND.address
     assert released["success"] is True
     assert released["binding_released"] == switched["binding"]["binding_id"]
@@ -209,7 +213,8 @@ def test_sessionless_calls_add_no_state_per_call(
     _connect(server, "auto", [PING] * 3, [PING] * 3)
 
     session = server._sessionless_session_id
-    assert set(server._rate_limiters) == {(session, "ping_isaac"), (session, "*")}
+    label = server_module.default_agent_label(session)
+    assert set(server._rate_limiters) == {(label, "ping_isaac"), (label, "*")}
     assert set(server._session_routes) == {session}
 
 
@@ -436,7 +441,36 @@ def test_authenticated_sessionless_requests_are_scoped_to_their_user(
     assert bob["address"] == DEFAULT.address
     alice_agent, bob_agent = _agents(server)
     assert alice_agent != bob_agent
-    # A digest short enough to be an agent label: the principal itself never
-    # becomes a label, a session record or a key.
+    # The principal itself never becomes a label, a session record or a key.
     for agent in (alice_agent, bob_agent):
-        assert re.fullmatch(r"user-[0-9a-f]{32}", agent), agent
+        assert re.fullmatch(r"session-[0-9a-f]{12}", agent), agent
+
+
+def test_the_default_agent_label_does_not_reveal_the_session_id(
+    claim_server: server_module.SimulMCPServer,
+) -> None:
+    """Over HTTP the session id is what a client presents to act in that session.
+
+    list_isaac_instances publishes every instance's session records, claim
+    holders included, so the default agent label must not be the session id.
+    """
+
+    async def run() -> Tuple[str, Dict[str, Any]]:
+        async with asgi_server(claim_server.mcp) as http:
+            async with http.client(mode="legacy") as alice:
+                await alice.call_tool(
+                    "set_active_isaac_instance", {"instance_name": "second"}
+                )
+                (alice_session,) = claim_server._session_routes
+                claimed = _payload(
+                    await alice.call_tool("claim_isaac_instance", {"purpose": "label test"})
+                )
+                return alice_session, claimed
+
+    alice_session, claimed = asyncio.run(run())
+
+    published = claim_server.session_manager.get_instance_session(SECOND._port).get_status()
+    label = claimed["binding"]["agent_id"]
+    assert re.fullmatch(r"session-[0-9a-f]{12}", label), label
+    assert label in json.dumps(published)
+    assert alice_session not in json.dumps(published)
