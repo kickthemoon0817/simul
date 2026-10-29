@@ -8,11 +8,92 @@ and headless USD operations.
 Every export is resolved on first access (PEP 562). The server pulls in
 fastmcp, and the schema models belong to one backend each, so importing a
 light submodule such as ``simul.mcp.tools`` (which the ``simul isaac`` CLI
-does) or a server for one backend does not pay for the rest.
+does) or a server for one backend does not pay for the rest. ``schemas``
+resolves as an attribute too, as when this file imported the schema modules.
+Type checkers read the ``TYPE_CHECKING`` imports instead of ``__getattr__``,
+so they see each export's type and reject a name the package does not export.
 """
 
 import importlib
-from typing import Any, Dict, List, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Tuple
+
+if TYPE_CHECKING:
+    from .schemas.blender import (
+        BlenderAddConstraintResponse,
+        BlenderAddForceFieldResponse,
+        BlenderAddModifierResponse,
+        BlenderAssignMaterialResponse,
+        BlenderBakeSimulationResponse,
+        BlenderBoundingBoxResponse,
+        BlenderBoundsCheckResponse,
+        BlenderCameraInfoResponse,
+        BlenderCaptureSequenceResponse,
+        BlenderCaptureViewportResponse,
+        BlenderClearParentResponse,
+        BlenderCreateMeshFromDataResponse,
+        BlenderCreateObjectResponse,
+        BlenderDeleteKeyframeResponse,
+        BlenderDeleteObjectResponse,
+        BlenderDistanceResponse,
+        BlenderExecuteScriptResponse,
+        BlenderExportFileResponse,
+        BlenderFileInfoResponse,
+        BlenderFocusOnObjectResponse,
+        BlenderFreeBakeResponse,
+        BlenderGetConstraintInfoResponse,
+        BlenderGetForceFieldInfoResponse,
+        BlenderGetFrameResponse,
+        BlenderGetKeyframesResponse,
+        BlenderGetPhysicsStateResponse,
+        BlenderGetTrajectoryResponse,
+        BlenderImportFileResponse,
+        BlenderInfoResponse,
+        BlenderInsertKeyframeResponse,
+        BlenderMaterialInfoResponse,
+        BlenderMeshInfoResponse,
+        BlenderObjectInfoResponse,
+        BlenderOpenFileResponse,
+        BlenderPlayAnimationResponse,
+        BlenderSaveFileResponse,
+        BlenderSceneObjectsRequest,
+        BlenderSceneObjectsResponse,
+        BlenderSceneSummaryResponse,
+        BlenderSearchObjectsResponse,
+        BlenderSetCameraViewResponse,
+        BlenderSetFrameRangeResponse,
+        BlenderSetFrameResponse,
+        BlenderSetLightParamsResponse,
+        BlenderSetParentResponse,
+        BlenderSetTransformResponse,
+        BlenderSetupRigidBodyResponse,
+        BlenderViewportInfoResponse,
+    )
+    from .schemas.common import (
+        BoundingBox,
+    )
+    from .schemas.simready import (
+        SimReadyApplyMetadataResponse,
+        SimReadyExportResponse,
+        SimReadyGetMetadataResponse,
+        SimReadyMetadata,
+        SimReadySemanticLabels,
+        SimReadySetupHierarchyResponse,
+        SimReadyValidateResponse,
+        SimReadyValidationIssue,
+    )
+    from .schemas.usd import (
+        MeshInfo,
+        PrimInfo,
+        SceneSummaryRequest,
+        SceneSummaryResponse,
+        StageInfo,
+        USDFileInfo,
+    )
+    from .server import (
+        SimulMCPServer,
+        create_server_instance,
+        start_mcp_server,
+    )
 
 # Submodule -> the names this package re-exports from it.
 _EXPORTS: Dict[str, Tuple[str, ...]] = {
@@ -93,14 +174,18 @@ _SOURCES: Dict[str, str] = {
 }
 
 
-def __getattr__(name: str) -> Any:
-    """Import an export from its submodule on first access and keep it."""
-    module_name = _SOURCES.get(name)
-    if module_name is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = getattr(importlib.import_module(f"{__name__}.{module_name}"), name)
-    globals()[name] = value
-    return value
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> Any:
+        """Import an export, or the ``schemas`` package, on first access and keep it."""
+        if name == "schemas":
+            return importlib.import_module(f"{__name__}.{name}")
+        module_name = _SOURCES.get(name)
+        if module_name is None:
+            raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+        value = getattr(importlib.import_module(f"{__name__}.{module_name}"), name)
+        globals()[name] = value
+        return value
 
 
 def __dir__() -> List[str]:

@@ -5,10 +5,20 @@ The package-level names (``from simul.mcp.schemas import PrimInfo``) still
 work, but are resolved on first use (PEP 562): any import of a
 ``simul.mcp.schemas.<module>`` runs this file first, so importing every
 module here made a server load each backend's models whatever it served.
+Type checkers read the ``TYPE_CHECKING`` imports instead of ``__getattr__``,
+so they see each model's type and reject a name the package does not export.
 """
 
 import importlib
-from typing import Any, List
+from typing import TYPE_CHECKING, Any, List
+
+if TYPE_CHECKING:
+    from .blender import *  # noqa: F401,F403
+    from .common import *  # noqa: F401,F403
+    from .instance import *  # noqa: F401,F403
+    from .simready import *  # noqa: F401,F403
+    from .unreal import *  # noqa: F401,F403
+    from .usd import *  # noqa: F401,F403
 
 # The modules whose names the package re-exports, in ``__all__`` order. They
 # share no names, so each package-level name has one source.
@@ -33,16 +43,20 @@ def _load_exports() -> List[str]:
     return names
 
 
-def __getattr__(name: str) -> Any:
-    """Resolve a schema module, or a package-level name, on first use."""
-    if name in _SUBMODULES:
-        return importlib.import_module(f"{__name__}.{name}")
-    namespace = globals()
-    if "__all__" not in namespace and (name == "__all__" or not name.startswith("__")):
-        _load_exports()
-        if name in namespace:
-            return namespace[name]
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> Any:
+        """Resolve a schema module, or a package-level name, on first use."""
+        if name in _SUBMODULES:
+            return importlib.import_module(f"{__name__}.{name}")
+        namespace = globals()
+        if "__all__" not in namespace and (
+            name == "__all__" or not name.startswith("__")
+        ):
+            _load_exports()
+            if name in namespace:
+                return namespace[name]
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def __dir__() -> List[str]:
