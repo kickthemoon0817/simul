@@ -154,9 +154,10 @@ the sessionless 2026-07-28 protocol by default;
 `Client(server.mcp, mode="legacy")` connects with the initialize handshake
 instead, and `tests/mcp/test_protocol_eras.py` covers both.
 `tests/mcp/test_tool_meta_drift.py` fails when an Isaac tool method lacks
-`@tool_meta` or its wrapper drifts from the implementation; `tests/blender/test_blender_tool_drift.py` fails when a
-`BLENDER_TOOLS` entry names a missing session operation or parameter, or its
-request model does not cover the advertised parameters.
+`@tool_meta` or its wrapper drifts from the implementation;
+`tests/blender/test_blender_tool_drift.py` fails when a `BLENDER_TOOLS` entry
+names a missing session operation or parameter, or its request model does not
+cover the advertised parameters.
 `tests/blender/test_blender_tool_snapshot.py` pins the Blender tools as a
 client lists them and what each one calls, against a `StrictBlenderSession`
 (`tests/fakes.py`) that refuses anything `BlenderRuntimeSession` lacks; after
