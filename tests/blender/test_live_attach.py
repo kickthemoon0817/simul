@@ -227,6 +227,32 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             assert wind["success"] is True, wind
             assert wind["location"] == [0.0, 0.0, 0.0]
             client.delete_object("ProbeWind")
+
+            # Both failed on every call from 70a3fbc on: the bounds check named a
+            # session method that does not exist, the light tool a dropped local.
+            inside = tool(
+                "check_blender_object_bounds",
+                object_name="AttachmentProbe",
+                bounds_min=[0, 1, 2],
+                bounds_max=[2, 3, 4],
+            )
+            assert inside["success"] is True and inside["within_bounds"] is True, inside
+            assert inside["object_location"] == [1, 2, 3]
+            outside = tool(
+                "check_blender_object_bounds",
+                object_name="AttachmentProbe",
+                bounds_min=[-1, -1, -1],
+                bounds_max=[0.5, 0.5, 0.5],
+            )
+            assert outside["success"] is True and outside["within_bounds"] is False
+            lit = tool(
+                "set_blender_light_params",
+                light_name="Light",
+                energy=750,
+                color=[1, 0.5, 0.25],
+            )
+            assert lit["success"] is True, lit
+            assert (lit["energy"], lit["color"]) == (750.0, [1.0, 0.5, 0.25])
             client.delete_object("AttachmentProbe")
             client.execute_script(
                 "bpy.context.view_layer.objects.active = bpy.data.objects['Cube']\n"
