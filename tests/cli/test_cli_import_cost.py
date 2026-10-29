@@ -4,7 +4,9 @@
 eagerly imported pxr/bpy/aiohttp and the CLI imported the MCP server (fastmcp)
 at module level — so ``simul --help`` paid for every backend. The adapters and
 registration packages now resolve their exports lazily, and the CLI imports the
-server only inside the commands that start or inspect it.
+server only inside the commands that start or inspect it. ``simul.utils``
+re-exports its numpy-backed math helpers lazily too, since every
+``simul.utils.<module>`` import runs the package first.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[2] / "src"
 
-_HEAVY = ("fastmcp", "pxr", "aiohttp", "bpy", "simul.mcp.server")
+_HEAVY = ("fastmcp", "pxr", "aiohttp", "bpy", "numpy", "simul.mcp.server")
 
 
 def _modules_after(statement: str) -> set:
