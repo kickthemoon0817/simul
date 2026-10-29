@@ -136,6 +136,22 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | SimReady | `get_simready_metadata`, `apply_simready_metadata`, `setup_simready_hierarchy`, `validate_simready_compliance`, `export_simready_usd` |
 | Scripting | `execute_blender_script` |
 
+Behaviour worth knowing:
+
+- `capture_blender_viewport` captures the 3D View the user sees in attached
+  mode and needs no camera; `method: "render"` renders through the scene camera,
+  or a temporary one when the scene has none. Embedded (headless) mode has no 3D
+  View, so its captures are renders. The per-mode table is in
+  [blender-attachment.md](blender-attachment.md#capture-feedback).
+- `execute_blender_script` returns the first `max_output_chars` characters of
+  printed output (default 32 000, at most 100 000). A longer output sets
+  `output_truncated: true`, and `output_total_chars` gives its full length, so a
+  cut JSON dump is reported rather than failing to parse later. The default
+  keeps a typical result inside the server's 40 KB result budget. The maximum
+  keeps escape-heavy output under the 400 KB hard limit, above which the server
+  replaces the whole field instead of returning a prefix. Write larger results
+  to a file and return its path.
+
 ## Server
 
 | Tool | Purpose |

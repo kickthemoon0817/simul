@@ -1,9 +1,26 @@
 """Blender MCP schemas."""
 
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
+
+# Printed-output cap of execute_blender_script. Mirrors DEFAULT_SCRIPT_OUTPUT_CHARS
+# and MAX_SCRIPT_OUTPUT_CHARS in simul.adapters.blender_runtime, which ships in the
+# Blender add-on and cannot import this module; a test keeps the two in step.
+SCRIPT_OUTPUT_CHARS_DEFAULT = 32_000
+SCRIPT_OUTPUT_CHARS_MAX = 100_000
+
+# How capture_blender_viewport produces its image; see BlenderRuntimeSession.capture_viewport.
+BlenderCaptureMethod = Literal["auto", "viewport", "render"]
+
+_CAPTURE_METHOD_RESULT = (
+    "How the image was made: viewport (the 3D View redrawn offscreen as the user sees it), "
+    "viewport_screen (the 3D View's on-screen pixels, used for Rendered shading of an "
+    "external engine such as Cycles), render (bpy.ops.render.render through the scene "
+    "camera), render_temp_camera_view or render_temp_camera_framing (a render through a "
+    "temporary camera aligned to the 3D View, or framing the visible objects, removed afterwards)"
+)
 
 
 def _printable_agent_label(value: str) -> str:
@@ -366,23 +383,47 @@ class BlenderBoundsCheckResponse(BaseModel):
 
 
 class BlenderCaptureViewportRequest(BaseModel):
-    """Request to capture the current viewport as a JPEG image."""
+    """Request to capture the 3D View or a camera render as a JPEG image."""
 
     agent_id: AgentLabel = "agent"
 
-    width: int = Field(512, description="Output image width in pixels", ge=64, le=4096)
+    width: int = Field(
+        512,
+        description="Maximum image width in pixels; a viewport capture keeps the 3D View's aspect ratio",
+        ge=64,
+        le=4096,
+    )
     height: int = Field(
-        512, description="Output image height in pixels", ge=64, le=4096
+        512,
+        description="Maximum image height in pixels; a viewport capture keeps the 3D View's aspect ratio",
+        ge=64,
+        le=4096,
     )
     jpeg_quality: int = Field(
         85, description="JPEG compression quality (1-100)", ge=1, le=100
     )
-    use_render_fallback: bool = Field(
-        False,
+    method: BlenderCaptureMethod = Field(
+        "auto",
         description=(
-            "Force bpy.ops.render.render path " "instead of GPUOffScreen fast path"
+            "viewport: the 3D View as the user sees it (attached mode); render: a render "
+            "through the scene camera or a temporary one; auto: viewport when attached, "
+            "render in embedded mode"
         ),
     )
+    use_render_fallback: bool = Field(
+        False, description="Deprecated; same as method='render'"
+    )
+
+    @model_validator(mode="after")
+    def _apply_render_alias(self) -> "BlenderCaptureViewportRequest":
+        """Fold the deprecated use_render_fallback flag into method."""
+        if self.use_render_fallback:
+            if self.method == "viewport":
+                raise ValueError(
+                    "use_render_fallback=True asks for a render; it contradicts method='viewport'"
+                )
+            self.method = "render"
+        return self
 
 
 class BlenderCaptureViewportResponse(BaseModel):
@@ -408,11 +449,13 @@ class BlenderCaptureViewportResponse(BaseModel):
     width: int = Field(..., description="Captured image width")
     height: int = Field(..., description="Captured image height")
     engine: str = Field(
-        ..., description="Render engine used (BLENDER_EEVEE, CYCLES, etc.)"
+        ...,
+        description=(
+            "Scene render engine (BLENDER_EEVEE, CYCLES, etc.); a viewport capture "
+            "shows the 3D View's own shading"
+        ),
     )
-    capture_method: str = Field(
-        ..., description="Method used: gpu_offscreen or render_fallback"
-    )
+    capture_method: str = Field(..., description=_CAPTURE_METHOD_RESULT)
     format: str = Field("jpeg", description="Encoded format of the attached image")
 
 
@@ -545,9 +588,12 @@ class BlenderCaptureSequenceRequest(BaseModel):
     start_frame: int = Field(..., description="First frame to capture")
     end_frame: int = Field(..., description="Last frame to capture")
     step: int = Field(1, description="Frame step between captures", ge=1)
-    width: int = Field(512, description="Output image width", ge=64, le=4096)
-    height: int = Field(512, description="Output image height", ge=64, le=4096)
+    width: int = Field(512, description="Maximum image width", ge=64, le=4096)
+    height: int = Field(512, description="Maximum image height", ge=64, le=4096)
     jpeg_quality: int = Field(85, description="JPEG compression quality", ge=1, le=100)
+    method: BlenderCaptureMethod = Field(
+        "auto", description="viewport, render or auto, as for capture_blender_viewport"
+    )
 
 
 class BlenderCaptureSequenceResponse(BaseModel):
@@ -561,7 +607,7 @@ class BlenderCaptureSequenceResponse(BaseModel):
         ..., description="Per-frame data: [{frame: int, image_base64: str}, ...]"
     )
     frame_count: int = Field(..., description="Number of frames captured")
-    capture_method: str = Field(..., description="Method used for capture")
+    capture_method: str = Field(..., description=_CAPTURE_METHOD_RESULT)
 
 
 # ---------------------------------------------------------------------------
@@ -1420,13 +1466,32 @@ class BlenderExecuteScriptRequest(BaseModel):
         description=("Maximum execution time in seconds. " "None means no timeout."),
         ge=0.1,
     )
+    max_output_chars: int = Field(
+        SCRIPT_OUTPUT_CHARS_DEFAULT,
+        description=(
+            "Most characters of printed output to return; longer output is cut and "
+            "reported with output_truncated"
+        ),
+        ge=1,
+        le=SCRIPT_OUTPUT_CHARS_MAX,
+    )
 
 
 class BlenderExecuteScriptResponse(BaseModel):
     """Response after executing a Blender script."""
 
     success: bool = Field(..., description="Whether the script executed without error")
-    output: Optional[str] = Field(None, description="Captured stdout from the script")
+    output: Optional[str] = Field(
+        None,
+        description="Captured stdout from the script, cut to its first max_output_chars characters",
+    )
+    output_truncated: bool = Field(
+        False,
+        description="True when output holds only the first max_output_chars characters",
+    )
+    output_total_chars: int = Field(
+        0, description="Length of the full captured stdout, in characters"
+    )
     return_value: Optional[str] = Field(
         None,
         description=(
@@ -1496,6 +1561,9 @@ class BlenderCreateMeshFromDataResponse(BaseModel):
     face_count: int = Field(..., description="Number of faces created")
 
 __all__ = [
+    "SCRIPT_OUTPUT_CHARS_DEFAULT",
+    "SCRIPT_OUTPUT_CHARS_MAX",
+    "BlenderCaptureMethod",
     "BlenderInfoResponse",
     "BlenderObjectInfo",
     "BlenderSceneObjectsRequest",

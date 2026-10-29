@@ -21,7 +21,7 @@ from simul.blender_bridge.protocol import PROTOCOL_VERSION, BridgeWire
 @pytest.fixture
 def bridge_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     area = SimpleNamespace(
-        type="VIEW_3D", regions=[SimpleNamespace(type="WINDOW")]
+        type="VIEW_3D", width=800, height=600, regions=[SimpleNamespace(type="WINDOW")]
     )
     window = SimpleNamespace(
         as_pointer=lambda: 4,
@@ -97,9 +97,14 @@ def test_stale_client_protocol_is_named_with_the_fix(
     assert "install-bridge" in reply["error"]
 
 
-def test_stale_addon_endpoint_is_refused_before_connecting() -> None:
-    """An add-on built before agent_id existed advertises protocol 1."""
-    endpoint = {"protocol": 1, "host": "127.0.0.1", "port": 1, "token": "t"}
+@pytest.mark.parametrize("protocol", [1, 2])
+def test_stale_addon_endpoint_is_refused_before_connecting(protocol: int) -> None:
+    """Add-ons built before agent_id (1) or capture method/script output cap (2).
+
+    An add-on that predates a keyword the server now sends would reject it
+    with a bare TypeError; the version check names the fix instead.
+    """
+    endpoint = {"protocol": protocol, "host": "127.0.0.1", "port": 1, "token": "t"}
     with pytest.raises(ValueError, match="protocol mismatch.*install-bridge"):
         BridgeWire.request(endpoint, {"request_id": "r"}, 0.1)
 
@@ -170,6 +175,46 @@ def test_capture_is_not_lost_to_an_undrawable_label(
     assert reply["success"] is True, reply
     assert reply["result"]["image_base64"] == "abc"
     assert captured == [label]
+
+
+def test_capture_targets_and_marks_the_largest_3d_view(
+    bridge_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #228: the capture draws the 3D View the user looks at, and the cue marks it.
+
+    Workspaces such as Animation put a small camera view before the main one.
+    """
+    small = SimpleNamespace(
+        type="VIEW_3D", width=300, height=200, regions=[SimpleNamespace(type="WINDOW")]
+    )
+    main = SimpleNamespace(
+        type="VIEW_3D", width=1600, height=900, regions=[SimpleNamespace(type="WINDOW")]
+    )
+    timeline = SimpleNamespace(type="DOPESHEET_EDITOR", width=1900, height=1000, regions=[])
+    window = bridge_module.test_window
+    monkeypatch.setattr(window.screen, "areas", [small, timeline, main])
+
+    class Session:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def capture_viewport(self, agent_id: str = "agent", method: str = "auto") -> Dict[str, Any]:
+            return {"image_base64": "abc", "format": "jpeg", "capture_method": "viewport"}
+
+    monkeypatch.setattr(bridge_module, "BlenderRuntimeSession", Session)
+    bridge = _bridge(bridge_module, tmp_path)
+    reply = bridge.dispatch(
+        _request(
+            bridge,
+            method="capture_viewport",
+            kwargs={"agent_id": "viewer", "method": "viewport"},
+            target={"document_id": bridge.document_id, "window_id": "4", "scene_id": "5"},
+            path_policy={"enabled": False, "allowed_paths": [], "project_root": str(tmp_path)},
+        )
+    )
+    assert reply["success"] is True, reply
+    assert bridge_module.test_overrides[-1]["area"] is main
+    bridge_module.test_observations.show.assert_called_once_with(window, main, "viewer")
 
 
 def _session_returning(result: Dict[str, Any]) -> Any:

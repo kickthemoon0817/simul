@@ -136,6 +136,21 @@ logs text or structured results has to read the image block to get the pixels.
 `capture_blender_viewport_sequence` is different: its frames stay inline in the
 JSON as `frames: [{frame, image_base64}, ...]`, with no image blocks.
 
+What the image shows depends on the mode and on `method` (`auto` by default);
+`capture_method` in the result names the path taken:
+
+| Mode | `method: "auto"` (default) or `"viewport"` | `method: "render"` |
+|---|---|---|
+| Attached | `viewport`: the window's largest 3D View, redrawn offscreen with that view's own matrices, shading and overlays. It is what the user sees, including the view angle, Edit Mode and unsaved edits, without UI chrome or popups and without needing a camera. Rendered shading of an external engine such as Cycles cannot be redrawn offscreen, so it is read from the screen (`viewport_screen`). That image includes overlapping UI such as the header, toolbar and open menus, and shows the render at whatever sample it has reached. | `render`: `bpy.ops.render.render` through the scene camera. In a scene without a camera, a temporary camera aligned to the 3D View is used and removed afterwards (`render_temp_camera_view`). |
+| Embedded (headless `bpy`) | `auto` renders, because there is no editor window; `viewport` fails with an error that suggests `render`. | `render` through the scene camera. In a scene without a camera, a temporary camera framing the visible objects is used and removed afterwards (`render_temp_camera_framing`). |
+
+Neither path falls back to the other. A viewport capture, and a render through
+a camera aligned to the 3D View, keep the view's aspect ratio inside
+`width` x `height`; `width` and `height` in the result give the image's actual
+size. A render temporarily changes the scene's resolution and output format,
+including Blender 5.0's video media type, and restores them afterwards.
+`use_render_fallback: true` is a deprecated alias for `method: "render"`.
+
 In attached mode, a successful `capture_blender_viewport` or
 `capture_blender_viewport_sequence` briefly pulses the captured editor's border
 and shows an eye badge labeled **agent · Viewing scene**. The cue fades after
@@ -290,7 +305,9 @@ For a custom discovery directory, set the matching directory in both environment
 
 The GUI integration test runs in a new disposable process and never uses an
 existing user's editor. It checks preservation of unsaved work, main-thread
-execution, named UI actions with scripting disabled, object editing, JPEG capture, multiple windows, scene/file changes,
+execution, named UI actions with scripting disabled, object editing, JPEG capture
+of the 3D View in Edit Mode without a camera, a render through a temporary camera,
+explicit script-output truncation, multiple windows, scene/file changes,
 and detachment. A second disposable process checks glTF export and render from a script, the
 context-loss recipe after `read_homefile`, recovery through `attach_blender_window`,
 `open_blender_file` re-attachment, and `AttachmentStale` after the process exits.
