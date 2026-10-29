@@ -71,8 +71,9 @@ def _required_ini_values(
     """Build the section-keyed values for ``DefaultRemoteControl.ini``.
 
     ``bind`` and ``websocket_port`` are written only when the caller supplies
-    them — passing ``None`` leaves the corresponding setting untouched so we
-    keep UE's default (loopback HTTP host, 30020 WebSocket port).
+    them — passing ``None`` leaves the corresponding setting untouched here
+    (UE's 30020 WebSocket port; the loopback WebSocket bind is pinned by
+    :func:`patch_remote_control_ini`).
 
     When ``passphrase_md5`` is supplied, also pin
     ``bEnforcePassphraseForRemoteClients=True`` so the gate is explicitly
@@ -130,6 +131,19 @@ def _section_has_entry(lines: List[str], section: str, entry: str) -> bool:
             inside = stripped == f"[{section}]"
         elif inside and stripped == entry:
             return True
+    return False
+
+
+def _section_has_key(lines: List[str], section: str, key: str) -> bool:
+    """Return True when ``section`` assigns ``key``, whatever its value."""
+    inside = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            inside = stripped == f"[{section}]"
+        elif inside and "=" in stripped and not stripped.startswith(";"):
+            if stripped.partition("=")[0].strip() == key:
+                return True
     return False
 
 
@@ -405,8 +419,10 @@ def patch_remote_control_ini(
     configured here — it lives in ``Config/DefaultEngine.ini`` under
     ``[HTTPServer.Listeners] DefaultBindAddress`` and is patched by
     :func:`patch_default_engine_ini`. ``websocket_port`` writes
-    ``RemoteControlWebSocketServerPort``. Either left as ``None`` means
-    the setting is not touched, preserving UE's default.
+    ``RemoteControlWebSocketServerPort``; left as ``None`` the port keeps
+    UE's default. ``bind`` left as ``None`` pins the WebSocket bind to
+    ``127.0.0.1`` when the ini doesn't set one, because UE's own default
+    (``0.0.0.0``) would expose remote Python on every interface.
 
     ``reset_public_bind`` (only acts with ``bind=None``) rewrites a
     non-loopback ``RemoteControlWebsocketServerBindAddress`` left by an
@@ -461,6 +477,22 @@ def patch_remote_control_ini(
             # would 401 the default client. The CLI never writes a passphrase
             # without a public bind, so it goes with the bind.
             out_lines = _drop_stale_simul_passphrases(out_lines, None, result)
+
+    # Without --bind the WebSocket server must still listen on loopback only.
+    # URemoteControlSettings defaults its bind to 0.0.0.0 and its client
+    # allowlist to every IP, so leaving the key unset exposes remote Python
+    # execution to the network even though the HTTP side stays on localhost.
+    if bind is None and not _section_has_key(out_lines, REMOTE_CONTROL_SECTION, WEBSOCKET_BIND_KEY):
+        _insert_ini_entries(
+            out_lines, REMOTE_CONTROL_SECTION, [f"{WEBSOCKET_BIND_KEY}={LOOPBACK_BIND}"]
+        )
+        result.added.append(WEBSOCKET_BIND_KEY)
+        if original_lines:
+            result.warnings.append(
+                f"{ini_path}: pinned {WEBSOCKET_BIND_KEY}={LOOPBACK_BIND}. Without it UE's "
+                "Remote Control WebSocket server listens on every interface (0.0.0.0) with "
+                "remote Python enabled; restart the editor to apply."
+            )
 
     # +Passphrases is a UE config-array entry, not a key=value setting, so
     # the standard rewriter doesn't touch it. Same hash on re-run is a no-op;
