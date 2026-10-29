@@ -5,9 +5,11 @@ The tools are declared in ``_unreal_tools.UNREAL_TOOLS``; this module builds
 one FastMCP tool per declaration. The wrapper advertises the declared
 parameters, from which FastMCP derives the input schema, and runs every call
 through the shared envelope (``SimulMCPServer._exec_backend``) with a request
-model built from the declaration. Arguments are therefore validated inside the
-envelope, the declaration's cross-parameter ``check`` included, so an invalid
-call is rate limited and recorded like any other failed call.
+model built from the declaration. The request model, the declaration's
+cross-parameter ``check`` included, is validated inside the envelope, so a call
+it refuses is rate limited and recorded like any other failed call. Arguments
+that do not fit the input schema never reach the wrapper: FastMCP refuses them
+first.
 """
 
 from __future__ import annotations

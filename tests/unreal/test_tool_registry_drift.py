@@ -9,9 +9,11 @@ every parameter is described, names are unique, the thin surface is a subset of
 the declared tools, and each registered wrapper advertises exactly the declared
 parameters with the declared hints.
 
-The last section covers what the generated tools do with invalid input: it is
-validated inside the envelope, so it is rate limited and recorded like any other
-failed call, and a declaration's own check reports its message as written.
+The last section covers what the generated tools do with input their request
+model refuses: it is validated inside the envelope, so it is rate limited and
+recorded like any other failed call, and a declaration's own check reports its
+message as written. (Input that does not fit the schema never reaches a wrapper;
+FastMCP refuses it first.)
 """
 
 from __future__ import annotations
@@ -93,6 +95,9 @@ def test_each_tool_dispatches_one_way() -> None:
             assert all(p.convert is None and p.target is None for p in spec.params), (
                 f"{spec.name}: convert and target are ignored when the tool builds its own arguments"
             )
+        assert spec.request is None or spec.check is None, (
+            f"{spec.name}: check is ignored when the tool brings its own request model"
+        )
 
 
 @pytest.mark.parametrize("spec", METHOD_SPECS, ids=lambda spec: spec.name)

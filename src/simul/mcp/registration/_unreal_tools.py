@@ -151,7 +151,9 @@ class UnrealTool:
         request: Model the arguments are validated against; None builds one
             from ``params``.
         check: Cross-parameter rule on the validated request, returning the
-            message the call fails with as a ValidationError, or None.
+            message the call fails with as a ValidationError, or None. It is
+            enforced by the model built from ``params``, so a tool with its
+            own ``request`` model puts the rule in that model instead.
         usage: Picks what the usage log keeps from the arguments; None keeps
             nothing.
     """
