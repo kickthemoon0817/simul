@@ -1141,7 +1141,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="get_unreal_actor_by_semantic_label",
-        description="Find actors by semantic tag or label.",
+        description="Find level actors whose actor tags match a label: exact, contains or regex, ignoring case.",
         response=UnrealGetActorBySemanticLabelResponse,
         read_only=True,
         idempotent=True,

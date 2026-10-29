@@ -30,6 +30,7 @@ from ._unreal_scripts import (
     ACTOR_HELPERS,
     CREATE_MATERIAL_INSTANCE,
     ENGINE_METADATA,
+    FIND_ACTORS_BY_TAG,
     INTERCHANGE_INFO,
     PLACE_BASIC_SHAPES,
     ROBOTICS_SCENE_ANALYSIS,
@@ -37,6 +38,7 @@ from ._unreal_scripts import (
     SET_ACTOR_TRANSFORM,
     SET_LIGHT_PARAMS,
     SIMULATION_STATUS,
+    SPAWN_ACTOR,
     USD_EXPORT,
     USD_IMPORT,
 )
@@ -220,6 +222,56 @@ def _vector3(name: str, value: Any, axes: str) -> List[float]:
     ):
         return [float(v) for v in value]
     raise ValueError(f"{name} must be three finite numbers [{axes}], got {value!r}")
+
+
+def _exponential_regex_construct(pattern: str) -> Optional[str]:
+    """Name a construct that can make a search for ``pattern`` take exponential time.
+
+    Python's ``re`` backtracks, and a search inside the editor runs on its
+    game thread, where nothing can interrupt it. A repeated group that can
+    match the same text in more than one way, as ``(\\w+)+`` or ``(a|ab)*``
+    can, makes a failing search try every way of splitting the tag between
+    its repetitions: hours for a 40-character tag. Such a group is one that
+    repeats and holds a quantifier of variable length, or alternatives. A
+    fixed count inside it (``(ab{2})+``) cannot split, and an optional group
+    (``(_\\d+)?``) does not repeat, so both are allowed.
+
+    Args:
+        pattern: A valid regular expression.
+
+    Returns:
+        A description of the first such construct, or None.
+    """
+    # The stdlib's own parser, private since 3.11 (formerly sre_parse).
+    from re import _constants as sre, _parser  # type: ignore[attr-defined]
+
+    repeats = (sre.MAX_REPEAT, sre.MIN_REPEAT, sre.POSSESSIVE_REPEAT)
+
+    def walk(items: Any, repeated: bool) -> Optional[str]:
+        for op, av in items:
+            found: Optional[str] = None
+            if op in repeats:
+                low, high, body = av
+                if repeated and low != high:
+                    return "a quantifier inside a repeated group, as in (\\w+)+"
+                found = walk(body, repeated or high > 1)
+            elif op in (sre.BRANCH, sre.GROUPREF_EXISTS):
+                if repeated:
+                    return "alternatives inside a repeated group, as in (a|ab)*"
+                branches = av[1] if op == sre.BRANCH else [av[1], av[2] or []]
+                for branch in branches:
+                    found = found or walk(branch, repeated)
+            elif op == sre.SUBPATTERN:
+                found = walk(av[3], repeated)
+            elif op in (sre.ASSERT, sre.ASSERT_NOT):
+                found = walk(av[1], repeated)
+            elif op == sre.ATOMIC_GROUP:
+                found = walk(av, repeated)
+            if found:
+                return found
+        return None
+
+    return walk(_parser.parse(pattern), False)
 
 
 def _rotator_quaternion(rotation: Sequence[float]) -> Tuple[float, float, float, float]:
@@ -1767,55 +1819,44 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Spawn an actor from a class or asset path.
+        Spawn an actor from an Actor class or from an asset.
 
-        Uses ``EditorActorSubsystem.SpawnActorFromClass`` via Remote Control.
+        A class path (``/Script/Engine.PointLight``, a Blueprint's
+        ``/Game/BP_Door.BP_Door_C``) spawns that class. Any other asset path
+        is placed the way the editor places an asset dropped into the level:
+        ``/Engine/BasicShapes/Cube.Cube`` becomes a StaticMeshActor showing
+        the cube, a Blueprint asset its actor. Spawn and label are one
+        undoable editor transaction, run as one editor script.
 
         Args:
-            asset_path: Asset or class path to spawn from.
+            asset_path: Actor class path or asset path to spawn from.
             location: Spawn location (X, Y, Z) in cm.
             rotation: Spawn rotation (Pitch, Yaw, Roll) in degrees.
             label: Optional actor label in the outliner.
 
         Returns:
-            Dictionary with actor_path, actor_class, location.
+            Dictionary with actor_path, actor_class (the spawned actor's
+            class), label, and the location and rotation read back from the
+            new actor. An error envelope, never an empty actor_path, when the
+            path loads nothing (``NotFoundError``) or names something Unreal
+            cannot place: a class that is not an Actor, an actor already in a
+            level, an asset no actor factory accepts (``SpawnError``).
+
+        Raises:
+            ValueError: location or rotation is not three finite numbers.
         """
-        data = await self._call_function(
-            "/Script/UnrealEd.Default__EditorActorSubsystem",
-            "SpawnActorFromClass",
-            {
-                "ActorClass": asset_path,
-                "Location": {
-                    "X": location[0],
-                    "Y": location[1],
-                    "Z": location[2],
-                },
-                "Rotation": {
-                    "Pitch": rotation[0],
-                    "Yaw": rotation[1],
-                    "Roll": rotation[2],
-                },
-            },
-        )
-        actor_path_result = data.get("ReturnValue", "")
-
-        if label and actor_path_result:
-            label_body: Dict[str, Any] = {
-                "objectPath": actor_path_result,
-                "propertyName": "ActorLabel",
-                "propertyValue": {"ActorLabel": label},
-                "access": "WRITE_TRANSACTION_ACCESS",
-            }
-            try:
-                await self._http_put("/remote/object/property", label_body)
-            except Exception:
-                pass  # Label is best-effort
-
-        return {
-            "actor_path": actor_path_result,
-            "actor_class": asset_path.split(".")[-1] if "." in asset_path else asset_path,
-            "location": location,
+        args = {
+            "path": asset_path,
+            "location": _vector3("location", location, "x, y, z"),
+            "rotation": _vector3("rotation", rotation, "pitch, yaw, roll"),
+            "label": label or None,
         }
+        result = await self._execute_json_script(f"args = {args!r}\n" + SPAWN_ACTOR)
+        if not result.get("error") and not result.get("actor_path"):
+            return self._script_error(
+                f"Unreal reported no spawned actor for {asset_path}"
+            )
+        return result
 
     async def delete_actor(self, actor_path: str) -> Dict[str, Any]:
         """
@@ -3152,59 +3193,60 @@ if component.is_simulating_physics() != {target!r}:
         max_results: int = 100,
     ) -> Dict[str, Any]:
         """
-        Find actors by semantic tag or label.
+        Find level actors whose actor tags match a semantic label.
+
+        Semantic labels are actor tags (Actor > Tags in the Details panel).
+        Matching ignores case, as Unreal's own tag comparison does. One editor
+        script reads every actor's tags.
 
         Args:
-            label: Semantic label to search for.
-            match_mode: Match mode (exact, contains, regex).
-            max_results: Maximum results.
+            label: Semantic label (actor tag) to search for.
+            match_mode: exact (a tag equals label), contains (a tag contains
+                label) or regex (label is a Python regular expression searched
+                for in each tag; a repeated group that holds a quantifier or
+                alternatives, as in (\\w+)+, is refused because it can run for
+                hours); every mode ignores case.
+            max_results: Maximum number of actors to return, 1 to 5000.
 
         Returns:
-            Dict with actors, total_matches, label_searched.
+            Dict with ``actors`` (each match as a ``list_unreal_actors``
+            entry, tags included), ``total_matches`` (every matching actor,
+            those past max_results too), ``truncated`` and ``label_searched``,
+            or a ``ScriptError`` envelope when the editor script failed.
+
+        Raises:
+            ValueError: match_mode is not exact, contains or regex; in regex
+                mode, label is not a valid regular expression or repeats a
+                group that holds a quantifier or alternatives (see
+                ``_exponential_regex_construct``); or max_results is out of
+                range.
         """
-        body: Dict[str, Any] = {
-            "objectPath": "/Script/UnrealEd.Default__EditorLevelLibrary",
-            "functionName": "GetAllLevelActors",
-            "parameters": {},
-        }
-        response = await self._http_put("/remote/object/call", body)
-        all_actors = response.get("ReturnValue", [])
-
-        matches: List[Dict[str, Any]] = []
-        for actor_path in all_actors:
-            if len(matches) >= max_results:
-                break
+        modes = ("exact", "contains", "regex")
+        if match_mode not in modes:
+            raise ValueError(
+                f"match_mode must be one of {', '.join(modes)}, got {match_mode!r}"
+            )
+        if not 1 <= max_results <= 5000:
+            raise ValueError("max_results must be between 1 and 5000")
+        if match_mode == "regex":
             try:
-                tag_body: Dict[str, Any] = {
-                    "objectPath": str(actor_path),
-                    "propertyName": "Tags",
-                }
-                tag_resp = await self._http_put(
-                    "/remote/object/property", tag_body
+                re.compile(label)
+            except re.error as exc:
+                raise ValueError(
+                    f"label is not a valid regular expression: {exc}"
+                ) from exc
+            construct = _exponential_regex_construct(label)
+            if construct is not None:
+                raise ValueError(
+                    f"label has {construct}: a failing search for it can freeze "
+                    "the editor for hours, since every way of splitting a tag "
+                    "between the repetitions is tried. Repeat a plain character "
+                    "class instead (\\w+ rather than (\\w+)+), or use contains mode"
                 )
-                tags = tag_resp.get("Tags", [])
-                tag_strings = [str(t) for t in tags]
-
-                matched = False
-                if match_mode == "exact":
-                    matched = label in tag_strings
-                elif match_mode == "contains":
-                    matched = any(label in t for t in tag_strings)
-
-                if matched:
-                    matches.append({
-                        "path": str(actor_path),
-                        "tags": tag_strings,
-                        "label": label,
-                    })
-            except Exception:
-                continue
-
-        return {
-            "actors": matches,
-            "total_matches": len(matches),
-            "label_searched": label,
-        }
+        args = {"label": label, "match_mode": match_mode, "max_results": max_results}
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + FIND_ACTORS_BY_TAG
+        )
 
     # ------------------------------------------------------------------
     # Phase 8: Geometry & Modeling (GeometryScript)
