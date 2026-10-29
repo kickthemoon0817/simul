@@ -499,7 +499,7 @@ def test_recover_from_file_loads_context_loss_and_exit(
             server = SimulMCPServer(settings, backends={"blender"})
             tools = {t.name: t for t in server.mcp.tools}
 
-            def call(name: str, **kwargs: Any) -> dict[str, Any]:
+            def call(name: str, /, **kwargs: Any) -> dict[str, Any]:
                 return json.loads(asyncio.run(tools[name].func(**kwargs)).content[0].text)
 
             # Recovery never needs a shell: the MCP tool selects the only window.
@@ -525,6 +525,83 @@ def test_recover_from_file_loads_context_loss_and_exit(
             )
             assert bad_enum["error_type"] == "TypeError", bad_enum
             assert 'enum "BOGUS" not found' in bad_enum["error"]
+
+            # Keyframes round trip. Blender 4.4+ keeps an action's F-curves per
+            # action slot; get_blender_keyframes failed on 5.0, which removed
+            # Action.fcurves.
+            ball = call("create_blender_object", object_type="SPHERE", name="Ball")
+            assert ball["success"] is True, ball
+            for frame, index in ((1, -1), (10, 2)):
+                keyed = call(
+                    "insert_blender_keyframe",
+                    object_name="Ball",
+                    data_path="location",
+                    frame=frame,
+                    index=index,
+                )
+                assert keyed["success"] is True, keyed
+            keys = call("get_blender_keyframes", object_name="Ball")
+            assert keys["success"] is True and keys["has_animation"] is True, keys
+            channels = [
+                (c["data_path"], c["array_index"], c["frame_range"])
+                for c in keys["channels"]
+            ]
+            assert channels == [
+                ("location", 0, [1, 1]),
+                ("location", 1, [1, 1]),
+                ("location", 2, [1, 10]),
+            ]
+            deleted = call(
+                "delete_blender_keyframe",
+                object_name="Ball",
+                data_path="location",
+                frame=10,
+                index=2,
+            )
+            assert deleted["success"] is True, deleted
+            # Nothing is left at frame 10, and the tool says so.
+            missing = call(
+                "delete_blender_keyframe",
+                object_name="Ball",
+                data_path="location",
+                frame=10,
+            )
+            assert missing["success"] is False, missing
+            assert missing["error_type"] == "ValueError", missing
+            keys = call("get_blender_keyframes", object_name="Ball")
+            assert [c["keyframe_count"] for c in keys["channels"]] == [1, 1, 1], keys
+            # Another object animated by the same action, through its own slot.
+            shared = call(
+                "execute_blender_script",
+                script=(
+                    "other = bpy.data.objects.new('Other', None)\n"
+                    "bpy.context.scene.collection.objects.link(other)\n"
+                    "ball = bpy.data.objects['Ball']\n"
+                    "other.animation_data_create().action = ball.animation_data.action\n"
+                ),
+            )
+            assert shared["success"] is True, shared
+            unslotted = call("get_blender_keyframes", object_name="Other")
+            assert unslotted["has_animation"] is False, unslotted
+            keyed = call(
+                "insert_blender_keyframe",
+                object_name="Other",
+                data_path="scale",
+                frame=5,
+            )
+            assert keyed["success"] is True, keyed
+            same_action = call(
+                "execute_blender_script",
+                script=(
+                    "__result__ = bpy.data.objects['Other'].animation_data.action"
+                    " == bpy.data.objects['Ball'].animation_data.action"
+                ),
+            )
+            assert same_action["return_value"] == "True", same_action
+            other_keys = call("get_blender_keyframes", object_name="Other")
+            assert {c["data_path"] for c in other_keys["channels"]} == {"scale"}
+            ball_keys = call("get_blender_keyframes", object_name="Ball")
+            assert {c["data_path"] for c in ball_keys["channels"]} == {"location"}
 
             # #215: exporter and render from a script in the attached GUI.
             glb, still = tmp_path / "cube.glb", tmp_path / "render.png"
