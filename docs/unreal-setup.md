@@ -29,7 +29,7 @@ and comments in the file are preserved verbatim.
 | `bRestrictServerAccess` | `True` | Hardcoded by simul; safe default |
 | `bEnableRemotePythonExecution` | `True` | Allows the Python script endpoint |
 | `bAllowConsoleCommandRemoteExecution` | `True` | Allows editor console commands over Remote Control |
-| `RemoteControlWebsocketServerBindAddress` | `--bind` (only when set) | WebSocket bind address. UE's C++ default is `0.0.0.0`. |
+| `RemoteControlWebsocketServerBindAddress` | `--bind`, else `127.0.0.1` | WebSocket bind address. Always written: UE's C++ default is `0.0.0.0` and its default client allowlist admits every IP, so leaving it unset would expose remote Python on every interface even though HTTP stays on localhost. |
 | `[HTTPServer.Listeners] DefaultBindAddress` (in `Config/DefaultEngine.ini`, **separate file**) | `--bind` (only when set) | HTTP bind address. **Not** a `URemoteControlSettings` field — UE's RemoteControl HTTP server delegates to `FHttpServerModule`, which reads its bind from `GEngineIni`'s `[HTTPServer.Listeners]` `DefaultBindAddress` (UE 5.x `HttpServerConfig.cpp` / `HttpListener.cpp`). |
 | `RemoteControlWebSocketServerPort` | `--websocket-port` (only when set) | Multi-instance disambiguation; default 30020 |
 | `bEnforcePassphraseForRemoteClients` | `--passphrase` (only when set) | Pins to `True`. UE's C++ default is `True` but writing it explicitly makes the operator's intent visible. |
@@ -40,7 +40,11 @@ and comments in the file are preserved verbatim.
 Setup is idempotent, and a plain re-run (no `--bind`) returns the project to
 the loopback default:
 
-- a non-loopback `RemoteControlWebsocketServerBindAddress` is reset to `127.0.0.1`;
+- a non-loopback `RemoteControlWebsocketServerBindAddress` is reset to `127.0.0.1`,
+  and a missing one is written as `127.0.0.1` (projects set up by simul
+  0.1.4 or earlier have none, so their WebSocket server listened on every
+  interface — re-run setup and restart the editor; setup warns when it
+  pins it);
 - a non-loopback `DefaultBindAddress` is removed from `DefaultEngine.ini`
   (the file is never created just for this);
 - every simul-identified `+Passphrases` entry is dropped.
