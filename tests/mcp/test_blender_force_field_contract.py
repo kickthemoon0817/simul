@@ -83,14 +83,29 @@ def _call(
     return json.loads(texts[-1].text)
 
 
-def test_location_is_listed_as_optional(fake_bpy: SimpleNamespace) -> None:
+def test_location_is_listed_as_optional_and_can_be_left_out(
+    fake_bpy: SimpleNamespace,
+) -> None:
+    """A caller who sends only what the listing requires gets a field at the origin.
+
+    The listing already marked location optional before the fix; what failed
+    was a call that took it at its word, so the call is the check.
+    """
+    instance = _server()
+
     async def _run() -> Any:
-        async with Client(_server().mcp) as client:
+        async with Client(instance.mcp) as client:
             tools = {t.name: t for t in await client.list_tools()}
             return tools["add_blender_force_field"].inputSchema
 
     schema = asyncio.run(_run())
     assert schema["required"] == ["field_type"]
+    assert schema["properties"]["location"]["default"] is None
+
+    result = _call(instance, {"field_type": "FORCE"})
+
+    assert result["success"] is True, result
+    assert result["location"] == [0.0, 0.0, 0.0]
 
 
 def test_a_field_without_location_is_added_at_the_origin(

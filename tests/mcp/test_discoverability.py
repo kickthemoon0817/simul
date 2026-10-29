@@ -336,6 +336,50 @@ class TestSimReadyLine:
         assert any("simready" in name for name in names) is simready
         assert ("simready" in instructions.lower()) is simready
 
+    @pytest.mark.parametrize(
+        ("blender_surface", "unreal_surface", "owners"),
+        [
+            ("thin", "full", ["Unreal"]),
+            ("full", "thin", ["Blender"]),
+            ("full", "full", ["Blender", "Unreal"]),
+        ],
+    )
+    def test_only_the_simready_line_routes_simready_tools(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        blender_surface: str,
+        unreal_surface: str,
+        owners: List[str],
+    ) -> None:
+        """One ROUTING line claims the 'simready' tools, naming the backends that registered them.
+
+        The Blender rule also claimed every tool containing 'simready', so with
+        the thin Blender surface (no SimReady tools) and the full Unreal one it
+        sent Unreal's convert_to_simready to Blender, contradicting the
+        SimReady line below it.
+        """
+        monkeypatch.setattr(server_module, "FastMCP", FakeFastMCP)
+        monkeypatch.setattr(server_module, "TaskConfig", None)
+        monkeypatch.setattr(server_module, "_FASTMCP_SUPPORTS_INSTRUCTIONS", True)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
+        monkeypatch.setattr(backends_module, "BlenderRuntimeAdapter", AvailableAdapter)
+        monkeypatch.setattr(backends_module, "is_unreal_available", lambda: True)
+        monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", AvailableAdapter)
+        instance = server_module.SimulMCPServer(
+            settings=Settings(
+                blender={"tool_surface": blender_surface},
+                unreal={"tool_surface": unreal_surface},
+            ),
+            backends={"blender", "unreal"},
+        )
+
+        routing = instance.mcp.instructions.split("ROUTING")[1]
+        claims = [line.strip() for line in routing.splitlines() if "'simready'" in line]
+        assert claims == [
+            "Tools containing 'simready' (SimReady asset helpers) belong to "
+            f"{' or '.join(owners)}; each one's description names the runtime it targets."
+        ]
+
 
 class TestCapabilitiesReport:
     """``get_capabilities`` must cover all four backends."""

@@ -97,12 +97,15 @@ def test_stale_client_protocol_is_named_with_the_fix(
     assert "install-bridge" in reply["error"]
 
 
-@pytest.mark.parametrize("protocol", [1, 2])
+@pytest.mark.parametrize("protocol", [1, 2, 3])
 def test_stale_addon_endpoint_is_refused_before_connecting(protocol: int) -> None:
-    """Add-ons built before agent_id (1) or capture method/script output cap (2).
+    """Add-ons built before agent_id (1), capture method/script output cap (2),
+    or focus framing and world-space camera tools (3).
 
     An add-on that predates a keyword the server now sends would reject it
-    with a bare TypeError; the version check names the fix instead.
+    with a bare TypeError; one built before 4 would read focus_on_object's
+    distance_factor as a multiple of the bounding-box diagonal. The version
+    check names the fix instead.
     """
     endpoint = {"protocol": protocol, "host": "127.0.0.1", "port": 1, "token": "t"}
     with pytest.raises(ValueError, match="protocol mismatch.*install-bridge"):

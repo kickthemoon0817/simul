@@ -18,7 +18,21 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional, Tuple, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    overload,
+)
+
+# The Blender add-on bundles this standard-library module next to this one.
+from ..utils.regex_guard import exponential_regex_construct
 
 try:
     import bpy
@@ -82,6 +96,18 @@ _UNFRAMED_TYPES = frozenset({"CAMERA", "LIGHT", "LIGHT_PROBE", "SPEAKER", "EMPTY
 # A temporary framing camera looks at the objects from this side, the 3/4 view
 # of Blender's default camera.
 _FRAMING_DIRECTION = (0.68, -0.64, 0.46)
+
+# focus_on_object places the camera on this side of the object: in front of and
+# above it, along the -Y +Z diagonal (Blender's front view side).
+_FOCUS_DIRECTION = (0.0, -math.sqrt(0.5), math.sqrt(0.5))
+
+# A framed bounding sphere fills about 1 / _FRAMING_MARGIN of the frame's
+# narrower side.
+_FRAMING_MARGIN = 1.05
+
+# Size framed for an object whose bounding box is a single point: an empty, a
+# light, a camera or a mesh without vertices. An empty's default display size.
+_POINT_RADIUS = 1.0
 
 # Output-format settings a capture changes and restores, in restore order:
 # media_type first, so that the saved file_format is valid again.
@@ -156,6 +182,16 @@ def _bpy_op(description: str, operator: Callable[..., Any], /, **properties: Any
     except Exception as exc:
         exc.add_note(description)
         raise
+
+
+def _mathutils() -> Any:
+    """Return Blender's math module; it is importable wherever bpy is.
+
+    Imported when used, as bpy-only code is, rather than with this module.
+    """
+    import mathutils  # type: ignore[import-not-found]
+
+    return mathutils
 
 
 # Blender 4.4 introduced slotted actions: one action can animate several IDs,
@@ -528,6 +564,9 @@ class BlenderRuntimeSession:
         obj = self._get_object_or_raise(object_name)
 
         if world_space:
+            # matrix_world lags a transform written by an earlier call until
+            # the depsgraph is evaluated (background Blender / embedded mode).
+            self._evaluate_transforms()
             corners = self._world_bound_box(obj)
         else:
             corners = [list(co) for co in obj.bound_box]
@@ -554,16 +593,38 @@ class BlenderRuntimeSession:
         Search for objects matching optional name pattern and type filter.
 
         Args:
-            name_pattern: Regex pattern for object name matching.
+            name_pattern: Python regular expression searched for in each object
+                name; a repeated group that holds a quantifier or alternatives,
+                as in (\\w+)+, is refused because it can run for hours.
             object_type: Blender object type filter (MESH, LIGHT, etc.).
             max_results: Maximum number of results.
 
         Returns:
             Dictionary with matched objects and truncation flag.
-        """
-        all_objects = self._resolve_object_source(None)
 
-        compiled_pattern = re.compile(name_pattern) if name_pattern else None
+        Raises:
+            ValueError: name_pattern is not a valid regular expression, or
+                repeats a group that holds a quantifier or alternatives (see
+                ``simul.utils.regex_guard``).
+        """
+        compiled_pattern = None
+        if name_pattern:
+            try:
+                compiled_pattern = re.compile(name_pattern)
+            except re.error as exc:
+                raise ValueError(
+                    f"name_pattern is not a valid regular expression: {exc}"
+                ) from exc
+            # The search runs on Blender's main thread, where nothing can stop it.
+            construct = exponential_regex_construct(name_pattern)
+            if construct is not None:
+                raise ValueError(
+                    f"name_pattern has {construct}: a failing search for it can "
+                    "freeze Blender for hours, since every way of splitting an "
+                    "object name between the repetitions is tried. Repeat a plain "
+                    "character class instead (\\w+ rather than (\\w+)+)"
+                )
+        all_objects = self._resolve_object_source(None)
         matches: List[Dict[str, Any]] = []
 
         for obj in all_objects:
@@ -773,41 +834,52 @@ class BlenderRuntimeSession:
         camera_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Set the active camera's location and rotation.
+        Place a camera at a world-space location and rotation.
+
+        Both are world space whatever the camera's parent, and the rotation is
+        an XYZ Euler whatever the camera's rotation mode: Blender stores it
+        relative to the parent, in the camera's own mode (another Euler order,
+        QUATERNION or AXIS_ANGLE). The camera's scale is kept, a mirror included.
 
         Args:
-            location: Camera location [x, y, z].
-            rotation_euler: Camera rotation [rx, ry, rz] in radians.
+            location: World-space camera location [x, y, z].
+            rotation_euler: World-space camera rotation [rx, ry, rz] in radians, as an XYZ Euler.
             camera_name: Target camera name. Uses active camera when None.
 
         Returns:
-            Dictionary with camera_name, location, rotation_euler.
+            Dictionary with camera_name and the camera's world-space location
+            and rotation_euler.
         """
         cam_obj = self._resolve_camera(camera_name)
-        cam_obj.location = tuple(location)
-        cam_obj.rotation_euler = tuple(rotation_euler)
+        self._evaluate_transforms()
+        self._place_in_world(cam_obj, location, rotation_euler)
+        world_location, world_rotation = self._world_placement(cam_obj, rotation_euler)
         return {
             "camera_name": cam_obj.name,
-            "location": list(cam_obj.location),
-            "rotation_euler": list(cam_obj.rotation_euler),
+            "location": world_location,
+            "rotation_euler": world_rotation,
         }
 
     def get_camera_info(self, camera_name: Optional[str] = None) -> Dict[str, Any]:
         """
-        Get active camera properties.
+        Get a camera's world-space placement and lens properties.
 
         Args:
             camera_name: Target camera name. Uses active camera when None.
 
         Returns:
-            Dictionary with lens, sensor, clip distances, camera type.
+            Dictionary with the world-space location and rotation_euler (XYZ
+            Euler radians, as set_camera_view takes them), lens, sensor, clip
+            distances and camera type.
         """
         cam_obj = self._resolve_camera(camera_name)
         cam_data = cam_obj.data
+        self._evaluate_transforms()
+        location, rotation = self._world_placement(cam_obj)
         return {
             "camera_name": cam_obj.name,
-            "location": list(cam_obj.location),
-            "rotation_euler": list(cam_obj.rotation_euler),
+            "location": location,
+            "rotation_euler": rotation,
             "lens": cam_data.lens,
             "sensor_width": cam_data.sensor_width,
             "clip_start": cam_data.clip_start,
@@ -818,48 +890,88 @@ class BlenderRuntimeSession:
     def focus_on_object(
         self,
         object_name: str,
-        distance_factor: float = 2.0,
+        distance_factor: float = 1.0,
         camera_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Position the camera to look at a specific object.
+        Frame an object with a camera.
 
-        The camera is placed in front of and above the object center (along
-        the -Y +Z diagonal, Blender's front view side) at a distance
-        proportional to the bounding box diagonal, and turned to face the
-        center.
+        The camera moves in front of and above the center of the object's
+        world-space bounding box (along the -Y +Z diagonal, Blender's front
+        view side) and turns level toward it. It stands where the box's
+        bounding sphere fits its frame: its field of view through the scene's
+        render aspect ratio, sensor fit and lens shift. An orthographic camera
+        gets the ortho_scale that fits the sphere instead. A clip range that
+        does not span the sphere is widened, so the object is not clipped
+        away. The transform is world space whatever the camera's parent and
+        rotation mode.
 
         Args:
             object_name: Object to focus on.
-            distance_factor: Distance multiplier from bbox diagonal.
+            distance_factor: Multiple of the framing distance (of ortho_scale for an
+                orthographic camera): 1.0 fits the object's bounding sphere in the
+                frame with 5% to spare, 2.0 shows the object at half that size, and
+                below 1.0 crops it.
             camera_name: Target camera name. Uses active camera when None.
 
         Returns:
-            Dictionary with camera_name, object_name, camera_location, look_at.
+            Dictionary with camera_name, object_name, camera_location (world
+            space), look_at, distance (camera to look_at), clip_start,
+            clip_end, clip_adjusted (whether the clip range was widened) and
+            ortho_scale (None unless the camera is orthographic).
+
+        Raises:
+            ValueError: When the camera's lens shift moves its frame off its
+                view axis, so no placement centers the object in it.
         """
         obj = self._get_object_or_raise(object_name)
         cam_obj = self._resolve_camera(camera_name)
+        blender_module: Any = bpy
+        render = blender_module.context.scene.render
+        data = cam_obj.data
 
-        bbox_corners = self._world_bound_box(obj)
-        center = [sum(c[i] for c in bbox_corners) / len(bbox_corners) for i in range(3)]
-        diag = math.sqrt(
-            sum(
-                (max(c[i] for c in bbox_corners) - min(c[i] for c in bbox_corners)) ** 2
-                for i in range(3)
+        self._evaluate_transforms()
+        center, radius = self._bounding_sphere(self._world_bound_box(obj))
+        if radius <= 0.0:
+            radius = _POINT_RADIUS
+        half = min(
+            self._frame_half_extents(
+                data,
+                render.resolution_x * render.pixel_aspect_x,
+                render.resolution_y * render.pixel_aspect_y,
             )
         )
-        offset_dist = max(diag * distance_factor, 1.0)
-        direction = [0.0, -0.7071, 0.7071]
-        cam_loc = [center[i] + direction[i] * offset_dist for i in range(3)]
-
-        cam_obj.location = tuple(cam_loc)
-        cam_obj.rotation_euler = self._look_at_rotation(cam_loc, center)
+        if half <= 0.0:
+            raise ValueError(
+                f"Camera {cam_obj.name!r} has a lens shift (shift_x {data.shift_x}, "
+                f"shift_y {data.shift_y}) that moves its frame off its view axis; "
+                "reduce the shift to focus it on an object"
+            )
+        ortho_scale: Optional[float] = None
+        if data.type == "ORTHO":
+            # The frame's size is ortho_scale; the distance only has to keep
+            # the camera in front of the sphere.
+            ortho_scale = radius * _FRAMING_MARGIN * distance_factor / half
+            data.ortho_scale = ortho_scale
+            distance = 2.0 * radius
+        else:
+            distance = self._fitting_distance(radius, half) * distance_factor
+        location = [c + v * distance for c, v in zip(center, _FOCUS_DIRECTION)]
+        self._place_in_world(
+            cam_obj, location, self._look_at_rotation(location, center)
+        )
+        clip_adjusted = self._clip_around(data, distance, radius)
 
         return {
             "camera_name": cam_obj.name,
             "object_name": object_name,
-            "camera_location": list(cam_obj.location),
+            "camera_location": list(cam_obj.matrix_world.translation),
             "look_at": center,
+            "distance": distance,
+            "clip_start": data.clip_start,
+            "clip_end": data.clip_end,
+            "clip_adjusted": clip_adjusted,
+            "ortho_scale": ortho_scale,
         }
 
     def get_viewport_info(self) -> Dict[str, Any]:
@@ -3493,6 +3605,7 @@ class BlenderRuntimeSession:
             width: Render width.
             height: Render height.
         """
+        self._evaluate_transforms()
         corners: List[List[float]] = []
         for obj in scene.objects:
             if (
@@ -3503,26 +3616,201 @@ class BlenderRuntimeSession:
                 continue
             corners.extend(self._world_bound_box(obj))
         if corners:
-            low = [min(c[i] for c in corners) for i in range(3)]
-            high = [max(c[i] for c in corners) for i in range(3)]
-            center = [(lo + hi) / 2 for lo, hi in zip(low, high)]
-            radius = max(math.dist(low, high) / 2, 0.1)
+            center, radius = self._bounding_sphere(corners)
+            radius = max(radius, 0.1)
         else:
             center, radius = [0.0, 0.0, 0.0], 1.0
         data = camera.data
         data.sensor_fit = "AUTO"
-        # AUTO fit spreads the field over the longer side, so the shorter side
-        # decides how far back the camera must stand to see the whole sphere.
-        half_angle = math.atan(
-            math.tan(data.angle / 2) * min(width, height) / max(width, height)
+        # The frame's narrower side decides how far back the camera must stand
+        # to see the whole sphere.
+        distance = self._fitting_distance(
+            radius, min(self._frame_half_extents(data, width, height))
         )
-        distance = radius / math.sin(half_angle) * 1.05
         norm = math.sqrt(sum(v * v for v in _FRAMING_DIRECTION))
         location = [c + v / norm * distance for c, v in zip(center, _FRAMING_DIRECTION)]
+        # A new camera has no parent and an XYZ Euler rotation, so these are
+        # its world transform.
         camera.location = tuple(location)
         camera.rotation_euler = self._look_at_rotation(location, center)
         data.clip_start = max(0.001, (distance - radius) / 2)
         data.clip_end = distance + 2 * radius
+
+    @staticmethod
+    def _bounding_sphere(points: List[List[float]]) -> Tuple[List[float], float]:
+        """
+        Return a sphere around points: centered in their axis-aligned box.
+
+        Args:
+            points: World-space points, such as bounding-box corners.
+
+        Returns:
+            The center, and the radius reaching the farthest point.
+        """
+        low = [min(p[i] for p in points) for i in range(3)]
+        high = [max(p[i] for p in points) for i in range(3)]
+        center = [(lo + hi) / 2 for lo, hi in zip(low, high)]
+        return center, max(math.dist(center, p) for p in points)
+
+    @staticmethod
+    def _frame_half_extents(
+        data: Any, aspect_x: float, aspect_y: float
+    ) -> Tuple[float, float]:
+        """
+        Return how far a camera's frame reaches from its view axis, across and up.
+
+        Per unit of depth for a perspective camera (the tangents of half the
+        field of view), per unit of ortho_scale for an orthographic one; a
+        panoramic camera counts as a perspective one with its lens.
+        Blender fits the sensor to one side of the frame, the field of view
+        ``data.angle`` spans that side: the width for sensor_fit HORIZONTAL,
+        the height for VERTICAL, the longer side for AUTO. The other side
+        follows the aspect ratio. A lens shift moves the frame off the axis by
+        a fraction of the fitted side; the nearer edge counts.
+
+        Args:
+            data: The camera's data (bpy.types.Camera).
+            aspect_x: Frame width: resolution times pixel aspect.
+            aspect_y: Frame height.
+
+        Returns:
+            The (horizontal, vertical) reach; not positive when the shift moves
+            that side of the frame past the axis.
+        """
+        fit = data.sensor_fit
+        if fit == "AUTO":
+            fit = "HORIZONTAL" if aspect_x >= aspect_y else "VERTICAL"
+        fitted = 0.5 if data.type == "ORTHO" else math.tan(data.angle / 2)
+        if fit == "HORIZONTAL":
+            across, up = fitted, fitted * aspect_y / aspect_x
+        else:
+            across, up = fitted * aspect_x / aspect_y, fitted
+        return (
+            across - 2 * fitted * abs(data.shift_x),
+            up - 2 * fitted * abs(data.shift_y),
+        )
+
+    @staticmethod
+    def _fitting_distance(radius: float, half_tangent: float) -> float:
+        """
+        Return how far a perspective camera stands to fit a sphere in its frame.
+
+        Args:
+            radius: The sphere's radius.
+            half_tangent: The frame's reach from the view axis per unit of
+                depth, on its narrower side.
+
+        Returns:
+            The distance from the camera to the sphere's center, with the
+            framing margin.
+        """
+        return radius * _FRAMING_MARGIN / math.sin(math.atan(half_tangent))
+
+    @staticmethod
+    def _clip_around(data: Any, distance: float, radius: float) -> bool:
+        """
+        Widen a camera's clip range to span a sphere ``distance`` ahead of it.
+
+        Args:
+            data: The camera's data.
+            distance: Depth of the sphere's center along the view axis.
+            radius: The sphere's radius.
+
+        Returns:
+            Whether the clip range changed.
+        """
+        near, far = distance - radius, distance + radius
+        changed = False
+        if far > data.clip_end:
+            data.clip_end = far + radius
+            changed = True
+        # A camera inside the sphere sees only part of it, whatever its clip_start.
+        if 0.0 < near < data.clip_start:
+            data.clip_start = near / 2
+            changed = True
+        return changed
+
+    @staticmethod
+    def _evaluate_transforms() -> None:
+        """
+        Bring every object's matrix_world up to date with its transform.
+
+        Blender recomputes matrix_world when it evaluates the depsgraph:
+        between events in a GUI, but only on demand in background Blender and
+        in the bpy module (embedded mode). There a location, scale or parent
+        written by an earlier call stays out of matrix_world until then. On
+        Blender 5.0.1 in the background, get_camera_info reported a camera
+        where it stood before set_object_transform moved it, focus_on_object
+        put back the scale just written, and set_camera_view missed by as much
+        as the camera's rig had just moved.
+        """
+        blender_module: Any = bpy
+        blender_module.context.evaluated_depsgraph_get()
+
+    @staticmethod
+    def _place_in_world(
+        obj: Any, location: List[float], rotation_euler: Sequence[float]
+    ) -> None:
+        """
+        Give an object a world-space location and XYZ Euler rotation, keeping its scale.
+
+        Assigning ``matrix_world`` makes Blender solve the local transform
+        through the parent and its inverse matrix, and store the rotation in
+        the object's rotation_mode. Writing ``location`` and ``rotation_euler``
+        instead places a parented object relative to its parent; a QUATERNION
+        or AXIS_ANGLE object ignores rotation_euler, and another Euler order
+        reads the angles in its own order.
+
+        A mirrored object (an odd number of negative scales, its own or its
+        parents') stays mirrored, on its X axis: a camera then still looks
+        down its -Z with +Y up as asked, and its image is flipped left to
+        right. ``Matrix.to_scale()`` of a mirrored matrix is negative on every
+        axis, which would turn the camera to look backward.
+
+        Args:
+            obj: The object to place.
+            location: World-space location [x, y, z].
+            rotation_euler: World-space rotation [rx, ry, rz] in radians, XYZ order.
+        """
+        mathutils = _mathutils()
+        current = obj.matrix_world
+        scale = [abs(s) for s in current.to_scale()]
+        if current.is_negative:
+            scale[0] = -scale[0]
+        obj.matrix_world = mathutils.Matrix.LocRotScale(
+            mathutils.Vector(location),
+            mathutils.Euler(rotation_euler, "XYZ"),
+            mathutils.Vector(scale),
+        )
+
+    @staticmethod
+    def _world_placement(
+        obj: Any, near: Optional[Sequence[float]] = None
+    ) -> Tuple[List[float], List[float]]:
+        """
+        Return an object's world-space location and rotation as an XYZ Euler.
+
+        Several Euler triples give the same rotation; the one nearest ``near``
+        (the object's own rotation_euler by default) is returned, so a
+        rotation set as given reads back as given. A mirrored object counts
+        as mirrored on its X axis, as _place_in_world places it.
+
+        Args:
+            obj: The object.
+            near: Euler angles the result stays close to.
+
+        Returns:
+            The location [x, y, z] and rotation [rx, ry, rz] in radians.
+        """
+        mathutils = _mathutils()
+        matrix = obj.matrix_world
+        if matrix.is_negative:
+            # Not a rotation: its Euler angles would describe no orientation.
+            matrix = matrix @ mathutils.Matrix.Scale(-1.0, 4, (1.0, 0.0, 0.0))
+        compatible = mathutils.Euler(
+            obj.rotation_euler if near is None else near, "XYZ"
+        )
+        return list(matrix.translation), list(matrix.to_euler("XYZ", compatible))
 
     @staticmethod
     def _world_bound_box(obj: Any) -> List[List[float]]:
@@ -3540,11 +3828,9 @@ class BlenderRuntimeSession:
         Returns:
             The corners as [x, y, z] lists, in ``bound_box`` order.
         """
-        # Blender's math module; it is importable wherever bpy is.
-        from mathutils import Vector  # type: ignore[import-not-found]
-
+        vector = _mathutils().Vector
         matrix = obj.matrix_world
-        return [list(matrix @ Vector(corner)) for corner in obj.bound_box]
+        return [list(matrix @ vector(corner)) for corner in obj.bound_box]
 
     @staticmethod
     def _look_at_rotation(

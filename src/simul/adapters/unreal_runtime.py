@@ -25,6 +25,9 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from ..config import Settings, get_settings
 from ..logging import LoggerMixin, get_logger
 from ..utils.paths import PathPolicy
+from ..utils.regex_guard import (
+    exponential_regex_construct as _exponential_regex_construct,
+)
 from ._unreal_procedural import plan_scene
 from ._unreal_scripts import (
     ACTOR_HELPERS,
@@ -222,56 +225,6 @@ def _vector3(name: str, value: Any, axes: str) -> List[float]:
     ):
         return [float(v) for v in value]
     raise ValueError(f"{name} must be three finite numbers [{axes}], got {value!r}")
-
-
-def _exponential_regex_construct(pattern: str) -> Optional[str]:
-    """Name a construct that can make a search for ``pattern`` take exponential time.
-
-    Python's ``re`` backtracks, and a search inside the editor runs on its
-    game thread, where nothing can interrupt it. A repeated group that can
-    match the same text in more than one way, as ``(\\w+)+`` or ``(a|ab)*``
-    can, makes a failing search try every way of splitting the tag between
-    its repetitions: hours for a 40-character tag. Such a group is one that
-    repeats and holds a quantifier of variable length, or alternatives. A
-    fixed count inside it (``(ab{2})+``) cannot split, and an optional group
-    (``(_\\d+)?``) does not repeat, so both are allowed.
-
-    Args:
-        pattern: A valid regular expression.
-
-    Returns:
-        A description of the first such construct, or None.
-    """
-    # The stdlib's own parser, private since 3.11 (formerly sre_parse).
-    from re import _constants as sre, _parser  # type: ignore[attr-defined]
-
-    repeats = (sre.MAX_REPEAT, sre.MIN_REPEAT, sre.POSSESSIVE_REPEAT)
-
-    def walk(items: Any, repeated: bool) -> Optional[str]:
-        for op, av in items:
-            found: Optional[str] = None
-            if op in repeats:
-                low, high, body = av
-                if repeated and low != high:
-                    return "a quantifier inside a repeated group, as in (\\w+)+"
-                found = walk(body, repeated or high > 1)
-            elif op in (sre.BRANCH, sre.GROUPREF_EXISTS):
-                if repeated:
-                    return "alternatives inside a repeated group, as in (a|ab)*"
-                branches = av[1] if op == sre.BRANCH else [av[1], av[2] or []]
-                for branch in branches:
-                    found = found or walk(branch, repeated)
-            elif op == sre.SUBPATTERN:
-                found = walk(av[3], repeated)
-            elif op in (sre.ASSERT, sre.ASSERT_NOT):
-                found = walk(av[1], repeated)
-            elif op == sre.ATOMIC_GROUP:
-                found = walk(av, repeated)
-            if found:
-                return found
-        return None
-
-    return walk(_parser.parse(pattern), False)
 
 
 def _rotator_quaternion(rotation: Sequence[float]) -> Tuple[float, float, float, float]:
@@ -3219,8 +3172,7 @@ if component.is_simulating_physics() != {target!r}:
             ValueError: match_mode is not exact, contains or regex; in regex
                 mode, label is not a valid regular expression or repeats a
                 group that holds a quantifier or alternatives (see
-                ``_exponential_regex_construct``); or max_results is out of
-                range.
+                ``simul.utils.regex_guard``); or max_results is out of range.
         """
         modes = ("exact", "contains", "regex")
         if match_mode not in modes:

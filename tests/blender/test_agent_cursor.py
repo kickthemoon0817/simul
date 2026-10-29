@@ -141,3 +141,29 @@ def test_annotations_are_redrawn_after_a_capture_hid_them(overlay, fails):
                 raise RuntimeError("capture failed")
     # Tagged after the flags are restored, so the redraw paints the annotations.
     assert suspended_at_tag and not any(suspended_at_tag)
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["captured", "failed"])
+def test_a_failing_redraw_neither_fails_a_capture_nor_replaces_its_error(
+    overlay, fails, caplog
+):
+    """Tagging the editors on exit is cosmetic and runs in a finally block.
+
+    An error from it used to escape: it turned a capture that worked into a
+    failure, and replaced a failed capture's own error with its own.
+    """
+    cursors, _, _, area, _ = overlay
+    namespace = cursors.update.__globals__
+    pointers, observations = namespace["cursors"], namespace["observations"]
+    area.tag_redraw.side_effect = ReferenceError(
+        "StructRNA of type Area has been removed"
+    )
+    with (
+        pytest.raises(RuntimeError, match="capture failed") if fails else nullcontext()
+    ):
+        with namespace["hide_annotations"]():
+            if fails:
+                raise RuntimeError("capture failed")
+    assert area.tag_redraw.called
+    assert not pointers.suspended and not observations.suspended
+    assert "Could not redraw the editors after a capture" in caplog.text

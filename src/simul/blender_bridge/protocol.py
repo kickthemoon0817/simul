@@ -10,13 +10,14 @@ from typing import Any
 # Re-exported: the Blender add-on and the CLI import BridgeFiles from here.
 from ..utils.private_files import BridgeFiles  # noqa: F401
 
-# Bump whenever the add-on and the server stop agreeing on a call shape. The
+# Bump whenever the add-on and the server stop agreeing on a call's shape or meaning. The
 # add-on is a separately installed ZIP that bundles its own copy of
 # BlenderRuntimeSession, so an upgraded server can otherwise send arguments
 # (e.g. capture ``agent_id``) that the stale add-on rejects with a bare
 # TypeError. Version 2: capture tools take ``agent_id``.
 # Version 3: capture tools take ``method``; execute_script takes ``max_output_chars``.
-PROTOCOL_VERSION = 3
+# Version 4: focus_on_object's distance_factor is a multiple of the fitting distance; camera tools report world space.
+PROTOCOL_VERSION = 4
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 

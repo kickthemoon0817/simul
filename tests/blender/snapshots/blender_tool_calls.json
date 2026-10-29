@@ -460,7 +460,7 @@
         "session_calls": [
           {
             "method": "focus_on_object",
-            "arguments": {"object_name": "'Cube'", "distance_factor": "2.0", "camera_name": "None"}
+            "arguments": {"object_name": "'Cube'", "distance_factor": "1.0", "camera_name": "None"}
           }
         ],
         "response": {"checked_against": "BlenderFocusOnObjectResponse"},
@@ -484,7 +484,7 @@
           "success": false,
           "error": "1 validation error for BlenderFocusOnObjectRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}, "distance_factor": 2.0, "camera_name": null}}
+          "details": {"input": {"object_name": {"bogus": 1}, "distance_factor": 1.0, "camera_name": null}}
         }
       }
     },
