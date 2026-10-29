@@ -127,10 +127,11 @@ def run_or_exit(
     any non-null ``*_error`` key without an explicit ``success`` counts as a
     failure, and so does an explicit ``success: false``.
 
-    On failure, JSON mode writes the ``emit_error`` envelope when the
-    payload has a top-level ``error``, otherwise the payload itself (it
-    already says ``success: false`` and keeps whatever partial data it
-    carries), then exits 1. Human mode prints the error in red.
+    On failure, JSON mode writes the whole payload with ``success: false``
+    (and ``error_type``, default ``Error``, beside a top-level ``error``),
+    so data a failure carries reaches the caller as the MCP envelope passes
+    it on: ``set-transform``'s read-back transform when Unreal did not apply
+    it, for one. Then it exits 1. Human mode prints the error in red.
 
     Args:
         coro: The coroutine to run.
@@ -172,7 +173,13 @@ def run_or_exit(
     if error:
         error_type = result.get("error_type", "Error")
         if is_json_mode():
-            emit_error(error, error_type, result.get("details"))
+            print(
+                json.dumps(
+                    {**result, "success": False, "error": error, "error_type": error_type},
+                    default=str,
+                )
+            )
+            raise typer.Exit(1)
         console.print(f"[red]{error_type}: {rich_escape(str(error))}[/red]")
         details = result.get("details")
         if show_traceback and isinstance(details, dict) and details.get("traceback"):

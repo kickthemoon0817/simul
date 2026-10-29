@@ -86,14 +86,17 @@ class _Actor:
         if self.root_component is not None:
             self.scale = scale
 
+    # Unreal's getters read the root component; without one they return the
+    # identity transform (AActor::GetActorLocation/Rotation/Scale3D), not a
+    # transform the actor held before.
     def get_actor_location(self) -> _Vector:
-        return self.location
+        return self.location if self.root_component is not None else _Vector()
 
     def get_actor_rotation(self) -> _Rotator:
-        return self.rotation
+        return self.rotation if self.root_component is not None else _Rotator()
 
     def get_actor_scale3d(self) -> _Vector:
-        return self.scale
+        return self.scale if self.root_component is not None else _Vector(1.0, 1.0, 1.0)
 
     def get_path_name(self) -> str:
         return self.path
@@ -231,9 +234,28 @@ def test_an_actor_without_a_root_component_reports_what_was_not_applied(
 
     assert result["success"] is False
     assert result["error_type"] == "TransformNotApplied"
-    # Scale already held the requested value, so only location is named.
+    assert result["error"] == "Unreal did not apply: location, scale"
+    # The read-back is Unreal's identity transform for a root-less actor (seen
+    # live on UE 5.7), reported with the error.
+    assert (result["location"], result["rotation"], result["scale"]) == (
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0],
+    )
+
+
+def test_a_root_less_actor_reads_back_identity_so_an_identity_request_matches(
+    editor: SimpleNamespace,
+) -> None:
+    """Only components that read back different are named: a scale of 1 reads
+    back as requested even though nothing stored it."""
+    editor.actor.root_component = None
+
+    result = asyncio.run(
+        editor.session.set_actor_transform(ACTOR, location=[500.0, 0.0, 0.0], scale=[1.0, 1.0, 1.0])
+    )
+
     assert result["error"] == "Unreal did not apply: location"
-    assert result["location"] == [10.0, 20.0, 30.0]
 
 
 def test_a_missing_actor_is_a_script_error(editor: SimpleNamespace) -> None:

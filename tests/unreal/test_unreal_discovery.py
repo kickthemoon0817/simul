@@ -9,25 +9,41 @@ released after binding, so connections to it are refused.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
+import logging
+import os
 import random
 import socket
 import threading
+from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional
 
+import aiohttp
 import pytest
 from aiohttp import web
 from typer.testing import CliRunner
 
+from simul.adapters import unreal_connection
 from simul.adapters.unreal_connection import (
     UnrealAttachments,
     discover_instances,
     probe_instance,
 )
+from simul.adapters.unreal_runtime import (
+    PASSPHRASE_REFUSED_ERROR,
+    PROBE_NOT_SENT,
+    UnrealRuntimeSession,
+)
 from simul.cli.main import app
 from simul.config import Settings
 from simul.mcp.schemas.unreal import UnrealListInstancesResponse
 from simul.utils.private_files import BridgeFiles
+
+try:
+    import resource
+except ImportError:  # Windows has no RLIMIT_NOFILE
+    resource = None  # type: ignore[assignment]
 
 VIEWPORTS = ["Layout.Viewport0", "Layout.Viewport1"]
 
@@ -263,12 +279,17 @@ def _cli(
     return json.loads(result.stdout)
 
 
-def _mcp(settings: Settings, **arguments: Any) -> Dict[str, Any]:
+def _tool(settings: Settings, name: str, **arguments: Any) -> Dict[str, Any]:
+    """Call an MCP tool registered on a server built over ``settings``."""
     from simul.mcp.server import SimulMCPServer
 
     server = SimulMCPServer(settings, backends={"unreal"})
-    response = asyncio.run(server.mcp.by_name["list_unreal_instances"](**arguments))
+    response = asyncio.run(server.mcp.by_name[name](**arguments))
     return json.loads(response.content[-1].text)
+
+
+def _mcp(settings: Settings, **arguments: Any) -> Dict[str, Any]:
+    return _tool(settings, "list_unreal_instances", **arguments)
 
 
 def test_scan_reports_identity_and_flags_and_skips_silent_ports(
@@ -500,4 +521,300 @@ def test_attach_selects_from_discovery_and_rechecks(
         True,
         False,
         False,
+    ]
+
+
+# ---------------------------------------------------------------------------
+# One definition of reachable: ping_unreal, unreal_health_check and discovery
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "spec,reachable",
+    [
+        ({"identity": _identity("ok", 5)}, True),
+        ({"info_status": 401}, True),
+        (None, False),
+    ],
+    ids=["answers", "refuses-the-passphrase", "nothing-listening"],
+)
+def test_ping_health_and_discovery_agree_on_reachable(
+    tmp_path: Any,
+    fake_fastmcp: Any,
+    spec: Optional[Dict[str, Any]],
+    reachable: bool,
+) -> None:
+    with _Editors([spec]) as editors:
+        settings = editors.settings(tmp_path, active=0, max_retries=0)
+        ping = _tool(settings, "ping_unreal")
+        health = _tool(settings, "unreal_health_check")
+        (instance,) = _tool(settings, "list_unreal_instances", scan=False)["instances"]
+    assert (ping["reachable"], health["reachable"], instance["reachable"]) == (
+        reachable,
+        reachable,
+        reachable,
+    )
+
+
+def test_a_refusal_is_reachable_with_the_same_authentication_error_everywhere(
+    tmp_path: Any, fake_fastmcp: Any
+) -> None:
+    """Remote Control answered 401: reachable, and every tool names the passphrase."""
+    with _Editors([{"info_status": 401}]) as editors:
+        settings = editors.settings(tmp_path, active=0)
+        ping = _tool(settings, "ping_unreal")
+        health = _tool(settings, "unreal_health_check")
+        (instance,) = _tool(settings, "list_unreal_instances", scan=False)["instances"]
+    for payload in (ping, health):
+        assert payload["success"] is False and payload["reachable"] is True
+        assert (payload["error_type"], payload["status"]) == (
+            "AuthenticationError",
+            401,
+        )
+    assert (
+        ping["error"]
+        == health["error"]
+        == instance["error"]
+        == PASSPHRASE_REFUSED_ERROR
+    )
+    assert isinstance(ping["latency_ms"], float) and isinstance(
+        instance["latency_ms"], float
+    )
+    # The deprecated alias keeps meaning "usable" for callers still gating on it.
+    assert health["connected"] is False
+
+
+# ---------------------------------------------------------------------------
+# A scan holds a bounded number of sockets and reports probes it never sent
+# ---------------------------------------------------------------------------
+
+
+def _scan_settings(tmp_path: Any, start: int, end: int, **unreal: Any) -> Settings:
+    base = Settings()
+    update = {
+        "mode": "endpoint",
+        "host": "127.0.0.1",
+        "port": start,
+        "scan_port_start": start,
+        "scan_port_end": end,
+        "attachment_path": str(tmp_path / "attachment.json"),
+        "passphrase": None,
+        **unreal,
+    }
+    return base.model_copy(update={"unreal": base.unreal.model_copy(update=update)})
+
+
+def test_a_scan_has_at_most_max_concurrent_probes_in_flight(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    in_flight = peak = 0
+
+    async def probe(settings: Settings, host: str, port: int) -> Any:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.005)
+        in_flight -= 1
+        record = {
+            "host": host,
+            "port": port,
+            "reachable": False,
+            "latency_ms": None,
+            "error": "refused",
+            **{key: None for key in unreal_connection._IDENTITY_KEYS},
+            **{key: [] for key in unreal_connection._IDENTITY_LISTS},
+        }
+        return record, {"reachable": False, "error": "refused"}
+
+    monkeypatch.setattr(unreal_connection, "_probe", probe)
+    payload = asyncio.run(discover_instances(_scan_settings(tmp_path, 40000, 40500)))
+
+    assert peak == unreal_connection.MAX_CONCURRENT_PROBES
+    assert [item["port"] for item in payload["instances"]] == [40000]
+
+
+@pytest.mark.skipif(
+    resource is None or not os.path.isdir("/dev/fd"),
+    reason="needs RLIMIT_NOFILE and /dev/fd",
+)
+def test_a_wide_scan_under_a_low_descriptor_limit_still_finds_the_editor(
+    tmp_path: Any,
+) -> None:
+    """Probing every port at once ran out of descriptors (macOS allows 256 by
+    default), and the failed connects hid an editor late in the range."""
+    with _Editors([None] * 299 + [{"identity": _identity("late", 3)}]) as editors:
+        settings = editors.settings(tmp_path, active=0)
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        # Room for the bounded probes, far fewer descriptors than ports.
+        resource.setrlimit(
+            resource.RLIMIT_NOFILE, (len(os.listdir("/dev/fd")) + 64, hard)
+        )
+        try:
+            payload = asyncio.run(discover_instances(settings))
+        finally:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+    found = {item["port"]: item for item in payload["instances"]}
+    assert found[editors.ports[-1]]["project_name"] == "late"
+    assert payload["warnings"] == []
+
+
+_KEY = SimpleNamespace(host="127.0.0.1", port=30010, ssl=True)
+_DNS_ERROR = getattr(aiohttp, "ClientConnectorDNSError", aiohttp.ClientConnectorError)
+
+
+@pytest.mark.parametrize(
+    "exc,not_sent",
+    [
+        (
+            aiohttp.ClientConnectorError(
+                _KEY, OSError(errno.EMFILE, "Too many open files")
+            ),
+            True,
+        ),
+        (
+            aiohttp.ClientConnectorError(
+                _KEY, OSError(errno.EADDRNOTAVAIL, "No local port")
+            ),
+            True,
+        ),
+        (
+            _DNS_ERROR(
+                _KEY, socket.gaierror(socket.EAI_NONAME, "Name does not resolve")
+            ),
+            True,
+        ),
+        (OSError(errno.ENFILE, "Too many open files in system"), True),
+        (
+            aiohttp.ClientConnectorError(
+                _KEY, ConnectionRefusedError(errno.ECONNREFUSED, "Refused")
+            ),
+            False,
+        ),
+        (asyncio.TimeoutError(), False),
+    ],
+    ids=["emfile", "no-local-port", "dns", "enfile", "refused", "timeout"],
+)
+def test_ping_says_when_its_request_never_left_this_machine(
+    exc: BaseException, not_sent: bool
+) -> None:
+    session = UnrealRuntimeSession(Settings())
+
+    async def http_get(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        raise exc
+
+    session._http_get = http_get  # type: ignore[method-assign]
+    result = asyncio.run(session.ping())
+
+    assert result["reachable"] is False and result["error"]
+    assert (result.get("error_type") == PROBE_NOT_SENT) is not_sent
+
+
+def test_ping_and_health_both_name_a_timeout() -> None:
+    """A timeout's text is empty: neither probe reports a blank error."""
+    session = UnrealRuntimeSession(Settings())
+
+    async def http_get(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        raise asyncio.TimeoutError()
+
+    session._http_get = http_get  # type: ignore[method-assign]
+    ping = asyncio.run(session.ping())
+    health = asyncio.run(session.health_check())
+
+    assert ping["error"] == f"No answer within {session.ping_timeout}s"
+    assert health == {
+        "reachable": False,
+        "connected": False,
+        "error": f"No answer within {session.timeout}s",
+    }
+
+
+def test_a_scan_names_the_ports_it_could_not_probe(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe that never left this machine says nothing about its port, so the
+    scan reports the port instead of dropping it like a silent one."""
+    start = 40000
+    unsent = {start + 1, start + 2, start + 4}
+
+    async def http_get(
+        self: UnrealRuntimeSession, *args: Any, **kwargs: Any
+    ) -> Dict[str, Any]:
+        key = SimpleNamespace(host=self.host, port=self.port, ssl=True)
+        if self.port in unsent:
+            raise aiohttp.ClientConnectorError(
+                key, OSError(errno.EMFILE, "Too many open files")
+            )
+        raise aiohttp.ClientConnectorError(
+            key, ConnectionRefusedError(errno.ECONNREFUSED, "Refused")
+        )
+
+    monkeypatch.setattr(UnrealRuntimeSession, "_http_get", http_get)
+    payload = asyncio.run(
+        discover_instances(_scan_settings(tmp_path, start, start + 6))
+    )
+
+    # The active endpoint is listed as ever; silent ports stay out.
+    assert [item["port"] for item in payload["instances"]] == [start]
+    (warning,) = payload["warnings"]
+    assert warning.startswith("Probe not sent ([Errno 24] Too many open files)")
+    assert f"127.0.0.1 port(s) {start + 1}-{start + 2}, {start + 4}" in warning
+    assert "missing from instances" in warning
+
+
+@pytest.fixture
+def runtime_log() -> Iterator[List[logging.LogRecord]]:
+    """Every record UnrealRuntimeSession logs.
+
+    Tests elsewhere call ``setup_logging``, whose dictConfig can disable this
+    logger and stop propagation to caplog's handler, so listen on it directly.
+    """
+    records: List[logging.LogRecord] = []
+
+    class _Handler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("simul.adapters.unreal_runtime.UnrealRuntimeSession")
+    handler = _Handler(level=logging.DEBUG)
+    saved = (logger.disabled, logger.level)
+    logger.disabled = False
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.disabled = saved[0]
+        logger.setLevel(saved[1])
+
+
+def test_an_editor_without_identity_is_logged_at_debug_with_the_reason_kept(
+    tmp_path: Any, runtime_log: List[logging.LogRecord]
+) -> None:
+    """Normal while an editor starts up: no error in the server log, and the
+    reason stays in the result."""
+    with _Editors([{}]) as editors:  # the identity script raises: no editor world yet
+        settings = editors.settings(tmp_path, active=0)
+        record = asyncio.run(probe_instance(settings, "127.0.0.1", editors.ports[0]))
+
+    assert record["reachable"] is True and record["instance_id"] is None
+    assert "No editor world is available" in record["error"]
+    logged = [r.levelno for r in runtime_log if "No editor world" in r.getMessage()]
+    assert logged == [logging.DEBUG]
+
+
+def test_other_tool_script_failures_are_still_logged_as_errors(
+    runtime_log: List[logging.LogRecord],
+) -> None:
+    session = UnrealRuntimeSession(Settings())
+
+    async def execute(code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
+        return {"ReturnValue": False, "CommandResult": "RuntimeError: boom"}
+
+    session._execute_python = execute  # type: ignore[method-assign]
+    result = asyncio.run(session._execute_json_script("raise RuntimeError('boom')"))
+
+    assert result["error_type"] == "ScriptError"
+    assert [r.levelno for r in runtime_log if "boom" in r.getMessage()] == [
+        logging.ERROR
     ]

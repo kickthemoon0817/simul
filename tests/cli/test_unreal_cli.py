@@ -999,6 +999,34 @@ def test_set_transform_sends_only_the_given_components(actor_stub: _ActorStub) -
     assert actor_stub.closed is True
 
 
+def test_set_transform_json_keeps_the_read_back_values_when_not_applied(
+    actor_stub: _ActorStub, monkeypatch
+) -> None:
+    """TransformNotApplied: exit 1, with the transform Unreal read back, as the MCP tool returns it."""
+    not_applied = {
+        "actor_path": ACTOR,
+        "location": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0],
+        "success": False,
+        "error": "Unreal did not apply: location, scale",
+        "error_type": "TransformNotApplied",
+    }
+
+    async def set_actor_transform(**kwargs):
+        return dict(not_applied)
+
+    monkeypatch.setattr(actor_stub, "set_actor_transform", set_actor_transform)
+    result = runner.invoke(
+        app,
+        ["--json", "unreal", "set-transform", ACTOR, "--location", "500,0,0", "--scale", "2,3,4"],
+    )
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == not_applied
+    assert actor_stub.closed is True
+
+
 @pytest.mark.parametrize(
     "option",
     [

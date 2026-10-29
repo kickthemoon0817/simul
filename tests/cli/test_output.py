@@ -97,7 +97,35 @@ def test_run_or_exit_error_with_success_true_still_fails() -> None:
     result = _invoke(lambda: output.run_or_exit(_returns({"success": True, "error": "contradiction"})))
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout)["error"] == "contradiction"
+    emitted = json.loads(result.stdout)
+    assert (emitted["success"], emitted["error"]) == (False, "contradiction")
+
+
+def test_run_or_exit_top_level_error_keeps_the_rest_of_the_payload() -> None:
+    """Data a failure carries reaches a JSON caller, as the MCP envelope passes it on."""
+    payload = {
+        "actor_path": "/Game/Map.Map:PersistentLevel.Actor_0",
+        "location": [0.0, 0.0, 0.0],
+        "success": False,
+        "error": "Unreal did not apply: location",
+        "error_type": "TransformNotApplied",
+    }
+    result = _invoke(lambda: output.run_or_exit(_returns(dict(payload))))
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == payload
+
+
+def test_run_or_exit_top_level_error_defaults_the_error_type() -> None:
+    result = _invoke(lambda: output.run_or_exit(_returns({"error": "boom", "partial": 1})))
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "success": False,
+        "error": "boom",
+        "error_type": "Error",
+        "partial": 1,
+    }
 
 
 def test_run_or_exit_passes_non_dict_results_through() -> None:
