@@ -902,31 +902,42 @@ class TestUnrealRuntimeSessionPhase3:
     # -- spawn_actor --
 
     def test_spawn_actor_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """spawn_actor returns actor path and class."""
+        """spawn_actor sends one editor script carrying the request and
+        returns what the script read back from the new actor."""
         session = self._make_session(monkeypatch)
+        sent: list = []
+        reply = {
+            "actor_path": "/Game/Maps/Test.Test:PersistentLevel.StaticMeshActor_0",
+            "actor_class": "StaticMeshActor",
+            "label": "TestCube",
+            "location": [100.0, 200.0, 300.0],
+            "rotation": [0.0, 45.0, 0.0],
+        }
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "SpawnActorFromClass":
-                return FakeResponse({
-                    "ReturnValue": "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
-                })
-            if path == "/remote/object/property":
-                return FakeResponse({})
-            return FakeResponse({}, 404)
+            sent.append(json)
+            return python_json_response(reply)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
-        result = asyncio.run(session.spawn_actor(
-            asset_path="/Script/Engine.StaticMeshActor",
-            location=(100.0, 200.0, 300.0),
-            rotation=(0.0, 45.0, 0.0),
-            label="TestCube",
-        ))
+        result = asyncio.run(
+            session.spawn_actor(
+                asset_path="/Engine/BasicShapes/Cube.Cube",
+                location=(100.0, 200.0, 300.0),
+                rotation=(0.0, 45.0, 0.0),
+                label="TestCube",
+            )
+        )
 
-        assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
-        assert "actor_class" in result
-        assert result["location"] == (100.0, 200.0, 300.0)
+        assert result == reply
+        (body,) = sent
+        assert body["functionName"] == "ExecutePythonCommandEx"
+        script = body["parameters"]["PythonCommand"]
+        assert script.startswith(
+            "args = {'path': '/Engine/BasicShapes/Cube.Cube', "
+            "'location': [100.0, 200.0, 300.0], 'rotation': [0.0, 45.0, 0.0], "
+            "'label': 'TestCube'}\n"
+        )
 
     # -- delete_actor --
 

@@ -520,10 +520,20 @@ class UnrealSpawnActorResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    actor_path: str = Field(..., description="Full path of the spawned actor")
-    actor_class: str = Field(..., description="Class of the spawned actor")
+    actor_path: str = Field(
+        ..., min_length=1, description="Full path of the spawned actor"
+    )
+    actor_class: str = Field(
+        ...,
+        description="Class of the spawned actor, e.g. StaticMeshActor for a mesh asset",
+    )
+    label: Optional[str] = Field(None, description="Actor label in the outliner")
     location: Tuple[float, float, float] = Field(
-        ..., description="Actual spawn location"
+        ..., description="World location [x, y, z] in cm, read back from the new actor"
+    )
+    rotation: Optional[Tuple[float, float, float]] = Field(
+        None,
+        description="World rotation [pitch, yaw, roll] in degrees, read back from the new actor",
     )
 
 
@@ -947,10 +957,15 @@ class UnrealGetActorBySemanticLabelResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    actors: List[Dict[str, Any]] = Field(
-        ..., description="Matching actors with paths and labels"
+    actors: List[UnrealActorEntry] = Field(
+        ..., description="Matching actors with their paths, transforms and tags"
     )
-    total_matches: int = Field(..., description="Number of matches found")
+    total_matches: int = Field(
+        ..., description="Number of matching actors, including any past max_results"
+    )
+    truncated: bool = Field(
+        False, description="Whether matches were left out by max_results"
+    )
     label_searched: str = Field(..., description="Label that was searched")
 
 
