@@ -144,6 +144,8 @@ class Actor:
         self.label = path.rsplit(".", 1)[-1]
         self.tags = list(tags)
         self.root_component = Component()
+        # The editor's event log once the actor is placed.
+        self.events: List[tuple] = []
 
     @staticmethod
     def static_class() -> Class:
@@ -159,6 +161,7 @@ class Actor:
         return self.label
 
     def set_actor_label(self, label: str) -> None:
+        self.events.append(("label", label))
         self.label = label
 
     def get_actor_location(self) -> Vector:
@@ -194,7 +197,8 @@ class Editor:
         }
         self.actors: List[Actor] = []
         self.spawn_calls: List[tuple] = []
-        self.transactions: List[str] = []
+        # Transactions, placements and label changes, in order.
+        self.events: List[tuple] = []
 
     def load_object(self, outer: Any, path: str) -> Any:
         found = self.objects.get(path)
@@ -210,6 +214,8 @@ class Editor:
             rotation,
             **kwargs,
         )
+        actor.events = self.events
+        self.events.append(("spawn", actor.path))
         self.actors.append(actor)
         return actor
 
@@ -242,8 +248,11 @@ class Editor:
 
     @contextmanager
     def transaction(self, description: str) -> Iterator[None]:
-        self.transactions.append(description)
-        yield
+        self.events.append(("begin", description))
+        try:
+            yield
+        finally:
+            self.events.append(("end", description))
 
     def module(self) -> SimpleNamespace:
         return SimpleNamespace(
@@ -388,7 +397,13 @@ async def test_spawn_from_an_asset_path_places_a_static_mesh_actor_showing_it(
     assert payload["rotation"] == [0.0, 30.0, 0.0]
     assert actor.mesh is CUBE
     assert editor.spawn_calls == [("object", "/Engine/BasicShapes/Cube.Cube")]
-    assert editor.transactions == ["simul: spawn actor"]
+    # The spawn and the label are one undoable transaction.
+    assert editor.events == [
+        ("begin", "simul: spawn actor"),
+        ("spawn", actor.path),
+        ("label", "Crate"),
+        ("end", "simul: spawn actor"),
+    ]
     assert objects_called(rc.requests) == {PYTHON_LIBRARY}
 
 
