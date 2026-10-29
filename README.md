@@ -249,8 +249,11 @@ Every backend can run agent-written Python inside the target application, and
 none of the transports authenticate by default:
 
 - Unreal Remote Control with remote Python execution has no authentication.
-  `simul unreal setup` keeps UE's default loopback binding. Binding to another
-  interface requires `--bind <host> --allow-public`, optionally with
+  `simul unreal setup` binds both Remote Control servers (HTTP and WebSocket)
+  to loopback; UE's own WebSocket default is every interface, so setup writes
+  `127.0.0.1` explicitly. Projects set up with simul 0.1.4 or earlier should
+  re-run setup. Binding to another interface requires
+  `--bind <host> --allow-public`, optionally with
   `--passphrase`; read [docs/unreal-setup.md](docs/unreal-setup.md) first.
 - The Isaac Sim bridge and Python socket bind to the local machine. Run
   `simul` on the same host; cross-host Isaac is not supported.
