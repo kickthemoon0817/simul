@@ -152,7 +152,10 @@ The FastMCP test double lives in `tests/fakes.py` and is installed by the
 `fake_fastmcp` fixture. A test that goes through a real `fastmcp.Client` gets
 the sessionless 2026-07-28 protocol by default;
 `Client(server.mcp, mode="legacy")` connects with the initialize handshake
-instead, and `tests/mcp/test_protocol_eras.py` covers both.
+instead. An in-memory client is scoped like stdio (one session per server);
+`fastmcp.utilities.tests.asgi_server` serves the real HTTP app in-process,
+where an unauthenticated sessionless client has no session.
+`tests/mcp/test_protocol_eras.py` covers each case.
 `tests/mcp/test_tool_meta_drift.py` fails when an Isaac tool method lacks
 `@tool_meta` or its wrapper drifts from the implementation;
 `tests/blender/test_blender_tool_drift.py` fails when a `BLENDER_TOOLS` entry

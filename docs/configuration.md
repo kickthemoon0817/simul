@@ -122,6 +122,19 @@ one agent holds a live claim, mutating Isaac tools from other agents fail
 with `InstanceClaimed` until the claim is released or expires after 120 s
 without activity. The default keeps claims advisory.
 
+A claim, an instance switch and a rate-limit budget belong to an MCP
+session. Over stdio the server has one client. Over `--transport http`, a
+client that connects with the initialize handshake (MCP protocol 2025-11-25
+or earlier) is its own session. A client on the sessionless 2026-07-28
+protocol has no session there, and the server cannot tell one such client
+from another. Every such client acts as the agent `anonymous`: it uses the
+default Isaac instance and finds every live claim held by someone else.
+`set_active_isaac_instance`, `claim_isaac_instance` and
+`release_isaac_instance` refuse it with `SessionRequired`, and all such
+clients share one rate-limit budget. Connect agents that need their own
+instance or claim with the handshake (for example `fastmcp.Client(url,
+mode="legacy")`) or over stdio.
+
 ## Usage statistics
 
 Every tool call is recorded in a persistent JSONL log. Agents read it with

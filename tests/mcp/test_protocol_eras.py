@@ -5,9 +5,14 @@ earlier) gets one session per connection. The 2026-07-28 protocol, which
 ``fastmcp.Client`` negotiates by default, has no sessions, and FastMCP hands
 each of its requests a fresh session id. Keyed on that id, every call would be
 a new agent: a new rate-limit bucket pair and Isaac route that are never used
-again, and an Isaac instance switch or claim forgotten by the next call. Those
-requests share one session per server instead, which these tests pin through
-real FastMCP clients of both eras.
+again, and an Isaac instance switch or claim forgotten by the next call.
+
+Those requests are scoped the way FastMCP scopes its own per-client state: an
+authenticated request to its user; over stdio (in memory here), where the
+server serves one client, to one session per server; and over unauthenticated
+HTTP to no session at all, because nothing tells one such client from another
+and sharing a session would let one client switch, claim or release for the
+others. These tests pin all of it through real FastMCP clients of both eras.
 """
 
 from __future__ import annotations
@@ -15,11 +20,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 from fastmcp import Client
+from fastmcp.utilities.tests import asgi_server
 
 from simul.config import Settings
 from simul.mcp import server as server_module
@@ -27,6 +34,7 @@ from simul.mcp.session_manager import SessionManager
 from simul.mcp.usage_tracker import ToolUsageTracker
 
 SESSIONLESS_PROTOCOL = "2026-07-28"
+HANDSHAKE_PROTOCOL = "2025-11-25"
 
 
 class _IsaacClient:
@@ -65,11 +73,17 @@ DEFAULT = _IsaacClient(8226, 8229)
 SECOND = _IsaacClient(8326, 8329)
 
 
-@pytest.fixture
-def server(tmp_path: Path) -> server_module.SimulMCPServer:
+def _isaac_server(
+    tmp_path: Path, enforce_claims: bool = False
+) -> server_module.SimulMCPServer:
     """A real FastMCP server with the Isaac tools over two reachable instances."""
     instance = server_module.SimulMCPServer(
-        Settings(isaac_sim={"discovery_dir": str(tmp_path / "discovery")}),
+        Settings(
+            isaac_sim={
+                "discovery_dir": str(tmp_path / "discovery"),
+                "enforce_claims": enforce_claims,
+            }
+        ),
         backends={"isaac"},
     )
     instance.session_manager = SessionManager(tmp_path / "sessions")
@@ -77,6 +91,17 @@ def server(tmp_path: Path) -> server_module.SimulMCPServer:
     instance._isaac_clients = {"default": DEFAULT, "second": SECOND}
     instance.client = DEFAULT
     return instance
+
+
+@pytest.fixture
+def server(tmp_path: Path) -> server_module.SimulMCPServer:
+    return _isaac_server(tmp_path)
+
+
+@pytest.fixture
+def claim_server(tmp_path: Path) -> server_module.SimulMCPServer:
+    """The same server with isaac_sim.enforce_claims on."""
+    return _isaac_server(tmp_path, enforce_claims=True)
 
 
 Call = Tuple[str, Dict[str, Any]]
@@ -146,7 +171,7 @@ def test_each_handshake_connection_is_its_own_session(
     assert payloads[1][0]["address"] == DEFAULT.address
 
 
-def test_sessionless_requests_share_one_session_per_server(
+def test_sessionless_requests_share_one_session_per_stdio_server(
     server: server_module.SimulMCPServer,
 ) -> None:
     protocols, _ = _connect(server, "auto", [PING, PING], [PING])
@@ -216,3 +241,202 @@ def test_each_tool_call_leaves_one_audit_record(
         "no_such_tool",
         "ping_isaac",
     ]
+
+
+# -- Over HTTP ---------------------------------------------------------------
+#
+# The server's real streamable HTTP app, served in-process by FastMCP's test
+# helper: the same session manager and request handling as `--transport http`.
+
+
+def _payload(result: Any) -> Dict[str, Any]:
+    return json.loads(result.content[-1].text)
+
+
+SESSION_TOOLS: List[Call] = [
+    ("set_active_isaac_instance", {"instance_name": "second"}),
+    ("claim_isaac_instance", {"purpose": "probe"}),
+    ("release_isaac_instance", {}),
+]
+
+
+def test_sessionless_http_clients_get_no_session_to_share(
+    server: server_module.SimulMCPServer,
+) -> None:
+    """Nothing tells unauthenticated sessionless HTTP clients apart, so none keeps per-client state."""
+
+    async def run() -> Tuple[List[str], List[List[Dict[str, Any]]]]:
+        async with asgi_server(server.mcp) as http:
+            async with (
+                http.client(mode="auto") as alice,
+                http.client(mode="auto") as bob,
+            ):
+                refused = [
+                    _payload(
+                        await alice.call_tool(name, arguments, raise_on_error=False)
+                    )
+                    for name, arguments in SESSION_TOOLS
+                ]
+                pings = [
+                    _payload(await client.call_tool(*PING))
+                    for client in (alice, bob, alice)
+                ]
+                protocols = [str(alice.protocol_version), str(bob.protocol_version)]
+                return protocols, [refused, pings]
+
+    protocols, (refused, pings) = asyncio.run(run())
+
+    assert protocols == [SESSIONLESS_PROTOCOL] * 2
+    assert [payload["error_type"] for payload in refused] == ["SessionRequired"] * 3
+    assert refused[0]["details"]["active_instance"] == "default"
+    assert 'mode="legacy"' in refused[0]["details"]["hint"]
+    # Every call reaches the server's default instance as the one anonymous agent.
+    assert [payload["address"] for payload in pings] == [DEFAULT.address] * 3
+    assert _agents(server) == [server_module._ANONYMOUS_AGENT] * 3
+    assert server._session_routes == {}
+    assert set(server._rate_limiters) == {
+        (server_module._ANONYMOUS_AGENT, "ping_isaac"),
+        (server_module._ANONYMOUS_AGENT, "*"),
+    }
+    assert server.session_manager.get_all_sessions() == []
+
+
+def test_handshake_http_clients_keep_their_own_sessions(
+    server: server_module.SimulMCPServer,
+) -> None:
+    async def run() -> List[Dict[str, Any]]:
+        async with asgi_server(server.mcp) as http:
+            async with (
+                http.client(mode="legacy") as alice,
+                http.client(mode="legacy") as bob,
+            ):
+                assert (
+                    alice.protocol_version == bob.protocol_version == HANDSHAKE_PROTOCOL
+                )
+                await alice.call_tool(
+                    "set_active_isaac_instance", {"instance_name": "second"}
+                )
+                return [
+                    _payload(await client.call_tool(*PING)) for client in (alice, bob)
+                ]
+
+    alice_ping, bob_ping = asyncio.run(run())
+
+    assert alice_ping["address"] == SECOND.address
+    assert bob_ping["address"] == DEFAULT.address
+    alice_agent, bob_agent = _agents(server)
+    assert alice_agent != bob_agent
+
+
+def test_a_sessionless_http_client_cannot_take_a_handshake_clients_claim(
+    claim_server: server_module.SimulMCPServer,
+) -> None:
+    """The #202 guarantee holds across eras: a label is not an identity."""
+
+    async def run() -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        async with asgi_server(claim_server.mcp) as http:
+            async with (
+                http.client(mode="legacy") as alice,
+                http.client(mode="auto") as bob,
+            ):
+                claimed = _payload(
+                    await alice.call_tool(
+                        "set_active_isaac_instance",
+                        {
+                            "instance_name": "default",
+                            "purpose": "alice builds",
+                            "agent_id": "alice",
+                        },
+                    )
+                )
+                attempts = [
+                    _payload(
+                        await bob.call_tool(name, {**arguments, "agent_id": "alice"})
+                    )
+                    for name, arguments in SESSION_TOOLS
+                ]
+                attempts.append(
+                    _payload(
+                        await bob.call_tool(
+                            "create_isaac_object",
+                            {"prim_path": "/World/Bob"},
+                            raise_on_error=False,
+                        )
+                    )
+                )
+                return claimed, attempts
+
+    claimed, attempts = asyncio.run(run())
+
+    assert claimed["success"] is True
+    assert [payload["error_type"] for payload in attempts] == [
+        "SessionRequired",
+        "SessionRequired",
+        "SessionRequired",
+        "InstanceClaimed",
+    ]
+    records = claim_server.session_manager.get_instance_session(
+        DEFAULT._port
+    ).get_status()
+    assert [
+        (record["agent_id"], record["purpose"]) for record in records["sessions"]
+    ] == [("alice", "alice builds")]
+
+
+def test_a_session_header_gives_a_sessionless_request_no_session(
+    server: server_module.SimulMCPServer,
+) -> None:
+    """FastMCP reads a sessionless request's session id from Mcp-Session-Id; simul never uses it."""
+
+    async def run() -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        async with asgi_server(server.mcp) as http:
+            async with http.client(mode="legacy") as alice:
+                await alice.call_tool(
+                    "set_active_isaac_instance", {"instance_name": "second"}
+                )
+                (alice_session,) = server._session_routes
+                async with http.client(
+                    mode="auto", headers={"Mcp-Session-Id": alice_session}
+                ) as bob:
+                    assert bob.protocol_version == SESSIONLESS_PROTOCOL
+                    ping = _payload(await bob.call_tool(*PING))
+                    switch = _payload(await bob.call_tool(*SESSION_TOOLS[0]))
+                    return ping, switch
+
+    ping, switch = asyncio.run(run())
+
+    assert ping["address"] == DEFAULT.address
+    assert switch["error_type"] == "SessionRequired"
+
+
+def test_authenticated_sessionless_requests_are_scoped_to_their_user(
+    server: server_module.SimulMCPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With auth, FastMCP's per-user identity tells sessionless HTTP clients apart."""
+    principal: Dict[str, Optional[str]] = {"current": None}
+    monkeypatch.setattr(
+        server_module, "_request_principal", lambda: principal["current"]
+    )
+
+    async def run() -> List[Dict[str, Any]]:
+        async with asgi_server(server.mcp) as http:
+            async with http.client(mode="auto") as client:
+                principal["current"] = '["alice-client","issuer","alice"]'
+                await client.call_tool(
+                    "set_active_isaac_instance", {"instance_name": "second"}
+                )
+                alice = _payload(await client.call_tool(*PING))
+                principal["current"] = '["bob-client","issuer","bob"]'
+                bob = _payload(await client.call_tool(*PING))
+                return [alice, bob]
+
+    alice, bob = asyncio.run(run())
+
+    assert alice["address"] == SECOND.address
+    assert bob["address"] == DEFAULT.address
+    alice_agent, bob_agent = _agents(server)
+    assert alice_agent != bob_agent
+    # A digest short enough to be an agent label: the principal itself never
+    # becomes a label, a session record or a key.
+    for agent in (alice_agent, bob_agent):
+        assert re.fullmatch(r"user-[0-9a-f]{32}", agent), agent

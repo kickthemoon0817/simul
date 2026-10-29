@@ -145,6 +145,27 @@ _GLOBAL_RATE_BUCKET: str = "*"
 NETWORK_TRANSPORTS: Tuple[str, ...] = ("http", "sse")
 TRANSPORTS: Tuple[str, ...] = ("stdio", *NETWORK_TRANSPORTS)
 
+# The network transports as FastMCP's ``Context.transport`` names them.
+_CONTEXT_NETWORK_TRANSPORTS: Tuple[str, ...] = ("streamable-http", "sse")
+
+# The agent a request without a client identity acts as (see
+# ``SimulMCPServer._request_is_anonymous``). Nothing tells such clients apart,
+# so they share this agent's rate-limit buckets and keep no per-client state.
+_ANONYMOUS_AGENT: str = "anonymous"
+
+
+def _request_principal() -> Optional[str]:
+    """Return the authenticated principal of the current request, or None.
+
+    FastMCP's own identity for per-user state on the sessionless protocol: the
+    access token's client, issuer and subject. Imported here because only a
+    sessionless request needs it.
+    """
+    from fastmcp.server.sessions import current_principal
+
+    return current_principal()
+
+
 # Leading bytes that identify an encoded image, whatever the payload claims.
 _IMAGE_SIGNATURES: Tuple[Tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", "png"),
@@ -282,8 +303,9 @@ class SimulMCPServer(LoggerMixin):
         self.usage_tracker = ToolUsageTracker()
         self.session_manager = SessionManager()
         self._session_routes: Dict[str, IsaacSessionRoute] = {}
-        # The one session every request on the sessionless MCP protocol
-        # (2026-07-28) belongs to; see _get_request_session_id.
+        # The one session that unauthenticated requests on the sessionless MCP
+        # protocol (2026-07-28) share over stdio, where this server serves a
+        # single client; see _get_request_session_id.
         self._sessionless_session_id = str(uuid.uuid4())
         self._read_only_tools: Dict[str, bool] = {}
         self._isaac_instance_locks: Dict[str, asyncio.Lock] = {}
@@ -534,25 +556,80 @@ class SimulMCPServer(LoggerMixin):
 
         A connection opened with the ``initialize`` handshake (protocol
         2025-11-25 and earlier) is one session, and FastMCP reports its id.
-        The 2026-07-28 protocol has no sessions: FastMCP gives each of its
-        requests a fresh id, which would make every call a new agent, rate
-        limit bucket and Isaac route. Those requests share one session per
-        server instead: a stdio server serves a single client, and without a
-        session nothing tells network clients apart.
+
+        The 2026-07-28 protocol has no sessions. FastMCP gives each of its
+        requests a fresh id, taken over HTTP from whatever ``Mcp-Session-Id``
+        header the client sends, so that id is never used: it would make every
+        call a new agent, and a client could name another's session. Such a
+        request is scoped the way FastMCP scopes its own per-client state: to
+        the authenticated user when it carries one; on stdio, where the
+        server serves a single client, to one session per server; and over
+        unauthenticated HTTP or SSE, where nothing tells one client from
+        another, to no session at all (see ``_request_is_anonymous``).
 
         Returns:
-            The session id, or None outside an MCP request.
+            The session id, or None outside an MCP request and for a request
+            without a client identity.
         """
         ctx = self._get_request_context()
         if ctx is None:
             return None
         try:
             request = getattr(ctx, "request_context", None)
-            if getattr(request, "protocol_version", None) in MODERN_PROTOCOL_VERSIONS:
-                return self._sessionless_session_id
-            return ctx.session_id
+            if getattr(request, "protocol_version", None) not in MODERN_PROTOCOL_VERSIONS:
+                return ctx.session_id
+            principal = _request_principal()
+            if principal is not None:
+                digest = hashlib.sha256(principal.encode("utf-8")).hexdigest()
+                return f"user-{digest[:32]}"
+            if ctx.transport in _CONTEXT_NETWORK_TRANSPORTS:
+                return None
+            return self._sessionless_session_id
         except Exception:
             return None
+
+    def _request_is_anonymous(self) -> bool:
+        """Report whether the current MCP request carries no client identity.
+
+        That is an unauthenticated request on the sessionless protocol over
+        HTTP or SSE (or one whose identity could not be read). The server
+        cannot tell its client from any other, so it keeps nothing per client
+        for it: the request targets the server's default Isaac instance,
+        cannot switch instance or claim one, finds every live claim held by
+        someone else, and spends the shared anonymous rate-limit buckets.
+        """
+        return self._get_request_context() is not None and self._get_request_session_id() is None
+
+    def _session_required_error(self, tool_name: str) -> Optional[Dict[str, Any]]:
+        """Refuse a tool that keeps state per client when the request has no client identity.
+
+        Args:
+            tool_name: The tool being called, for the message.
+
+        Returns:
+            The SessionRequired envelope when ``_request_is_anonymous``,
+            otherwise None.
+        """
+        if not self._request_is_anonymous():
+            return None
+        return ErrorResponse(
+            error=(
+                f"{tool_name} keeps state for the calling client, and this request "
+                "carries no client identity: an unauthenticated HTTP request on the "
+                "sessionless MCP protocol (2026-07-28) has no session, so the server "
+                "cannot tell its client from any other."
+            ),
+            error_type="SessionRequired",
+            details={
+                "active_instance": self._active_instance,
+                "hint": (
+                    "Connect with the initialize handshake (MCP protocol 2025-11-25 or "
+                    'earlier, e.g. fastmcp.Client(url, mode="legacy")) or over stdio. '
+                    "Until then the Isaac tools target the server's default instance, "
+                    "named in active_instance."
+                ),
+            },
+        ).model_dump()
 
     def _get_or_create_session_route(self, session_id: str) -> IsaacSessionRoute:
         """Return the per-session Isaac routing state."""
@@ -605,6 +682,9 @@ class SimulMCPServer(LoggerMixin):
         session_id = self._get_request_session_id()
         if session_id:
             return session_id
+        if self._get_request_context() is not None:
+            # A request without a client identity; see _request_is_anonymous.
+            return _ANONYMOUS_AGENT
         return f"agent-{id(self):x}"
 
     def _bind_request_session(
@@ -692,16 +772,19 @@ class SimulMCPServer(LoggerMixin):
             A claim is foreign when its ``agent_id`` differs from the caller's
             or when a different MCP session made it (its ``owner`` token
             differs), so passing another agent's ``agent_id`` does not inherit
-            that agent's claim. Expired claims are pruned by the session
-            manager, so a stale holder never blocks.
+            that agent's claim. A request without a client identity holds no
+            claim, so every live claim is foreign to it. Expired claims are
+            pruned by the session manager, so a stale holder never blocks.
         """
         if not self.settings.isaac_sim.enforce_claims:
             return None
         client = self._isaac_clients.get(instance_name)
         if client is None:
             return None
-        owner = self._claim_owner()
         sessions = self.session_manager.get_instance_session(client._port).get_status()["sessions"]
+        if self._request_is_anonymous():
+            return sessions[0] if sessions else None
+        owner = self._claim_owner()
         for session in sessions:
             if session.get("agent_id") != caller_agent_id:
                 return session
