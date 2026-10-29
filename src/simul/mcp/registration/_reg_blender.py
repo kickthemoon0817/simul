@@ -495,6 +495,7 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
             "(headless bpy) mode has no 3D View, so 'auto' renders. method='render' renders "
             "through the scene camera, or through a temporary camera removed afterwards: "
             "aligned to the 3D View when attached, framing the visible objects when embedded "
+            "or when the window shows no 3D View "
             "(render_temp_camera_view / render_temp_camera_framing). The image arrives as an MCP "
             "image content block, followed by a JSON block with success, width, height, engine, "
             "capture_method, format and image_attached=true. In attached mode, briefly show an "
@@ -1763,7 +1764,9 @@ def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None
             "Execute arbitrary Python code inside Blender with access "
             "to bpy. Assign to __result__ to return a value. Printed output "
             "comes back in output, cut to its first max_output_chars characters "
-            f"(default {SCRIPT_OUTPUT_CHARS_DEFAULT}, at most {SCRIPT_OUTPUT_CHARS_MAX}); "
+            f"(default {SCRIPT_OUTPUT_CHARS_DEFAULT}, at most {SCRIPT_OUTPUT_CHARS_MAX}), "
+            f"or earlier when they exceed {SCRIPT_OUTPUT_JSON_BYTES_MAX} bytes of JSON "
+            "(heavily non-ASCII output); "
             "a cut sets output_truncated=true and output_total_chars to the full length. "
             "Write larger results to a file and return its path instead."
         ),

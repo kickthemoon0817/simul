@@ -1,5 +1,6 @@
 """Tests for Blender runtime adapter functionality."""
 
+import json
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -2660,6 +2661,63 @@ class TestExecuteScript:
         assert result["error"] == "ValueError: late"
         assert result["output"] == "C" * 100
         assert result["output_truncated"] is True and result["output_total_chars"] == 501
+
+    @pytest.mark.parametrize(
+        "text",
+        ["가", "é", "\x00", "\U0001F600"],
+        ids=["hangul", "latin1", "control", "emoji"],
+    )
+    def test_execute_script_holds_escape_heavy_output_under_the_json_cap(
+        self, monkeypatch: pytest.MonkeyPatch, text: str
+    ) -> None:
+        """The server counts escaped JSON bytes (6 or 12 here) and replaces a field over 400 KB.
+
+        100000 such characters would be replaced whole, so the prefix stops at
+        the JSON byte cap instead, and the cut is reported like any other.
+        """
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        cap = blender_runtime.MAX_SCRIPT_OUTPUT_CHARS
+        result = session.execute_script(f"print({text!r} * {cap})", max_output_chars=cap)
+
+        output = result["output"]
+        limit = blender_runtime.MAX_SCRIPT_OUTPUT_JSON_BYTES
+        assert output == text * len(output) and 0 < len(output) < cap
+        # The longest prefix that fits: one more character would not.
+        assert len(json.dumps(output)) <= limit < len(json.dumps(output + text))
+        assert result["output_truncated"] is True
+        assert result["output_total_chars"] == cap + 1
+
+    def test_execute_script_json_cap_never_cuts_printable_ascii(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Escaped quotes cost 2 bytes each; even 100000 of them stay under the JSON cap."""
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        cap = blender_runtime.MAX_SCRIPT_OUTPUT_CHARS
+        result = session.execute_script(f"print('\"' * {cap})", max_output_chars=cap)
+
+        assert result["output"] == '"' * cap
+        assert result["output_truncated"] is True and result["output_total_chars"] == cap + 1
+
+    def test_script_output_prefix_is_the_longest_that_fits(self) -> None:
+        limit = blender_runtime.MAX_SCRIPT_OUTPUT_JSON_BYTES
+        # 6-byte, 1-byte and 12-byte characters: 299972 JSON bytes, then emoji.
+        head = "가" * 49_990 + "a" * 30
+        assert len(json.dumps(head)) == 299_972
+        output = head + "\U0001F600" * 5
+
+        prefix = blender_runtime.script_output_prefix(output, 100_000)
+
+        assert prefix == head + "\U0001F600" * 2
+        assert len(json.dumps(prefix)) <= limit < len(json.dumps(prefix + "\U0001F600"))
+        assert blender_runtime.script_output_prefix(output, 10) == "가" * 10
 
     @pytest.mark.parametrize("bad", [0, -1, 100_001, True, 12.5, "32000"])
     def test_execute_script_rejects_an_out_of_range_cap(

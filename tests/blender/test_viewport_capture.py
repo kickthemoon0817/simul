@@ -727,6 +727,22 @@ def test_embedded_render_without_a_camera_frames_the_visible_objects(
     assert fake.scene.camera is None and fake.removed == [camera]
 
 
+def test_attached_render_without_a_3d_view_frames_the_visible_objects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A window showing no 3D View has no view to align to; the camera frames instead."""
+    fake = FakeBlender(tmp_path, with_view=False, camera=None)
+    session = _session(monkeypatch, fake, tmp_path, attached=True)
+
+    result = session.capture_viewport(width=300, height=200, method="render")
+
+    assert result["capture_method"] == "render_temp_camera_framing"
+    assert (result["width"], result["height"]) == (300, 200)
+    (render,) = fake.renders
+    assert render["camera"].name == "simul_temp_camera"
+    assert fake.scene.camera is None and fake.removed == [render["camera"]]
+
+
 def test_temporary_camera_is_removed_when_placing_it_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

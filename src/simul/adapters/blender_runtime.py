@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import math
 import os
@@ -50,11 +51,19 @@ CONTEXT_OVERRIDE_HINT = (
 # asks for more, up to the maximum (issue #231). BlenderExecuteScriptRequest
 # repeats both numbers: this module ships inside the Blender add-on and cannot
 # import the MCP schemas. The default keeps a typical printed result inside the
-# server's 40 KB result budget; the maximum keeps even escape-heavy ASCII under
-# the server's 400 KB hard limit, above which the server would replace the
-# whole field instead of returning this prefix.
+# server's 40 KB result budget.
 DEFAULT_SCRIPT_OUTPUT_CHARS = 32_000
 MAX_SCRIPT_OUTPUT_CHARS = 100_000
+
+# The server measures a result as JSON text with non-ASCII escaped, and above
+# its 400 KB hard limit it replaces the whole field instead of passing this
+# prefix through. A character costs 1 to 12 bytes there: printable ASCII at most
+# 2 (an escaped quote or newline), control characters and other non-ASCII text 6,
+# an emoji 12. So the prefix is also held under this many JSON bytes, which
+# printable ASCII never reaches (2 * MAX_SCRIPT_OUTPUT_CHARS + 2 quotes), and
+# which leaves room for return_value and the rest of the reply. The MCP schemas
+# repeat it as SCRIPT_OUTPUT_JSON_BYTES_MAX.
+MAX_SCRIPT_OUTPUT_JSON_BYTES = 300_000
 
 # capture_viewport methods (issue #228). "auto" means "viewport" in attached
 # mode and "render" in embedded mode, which has no editor window.
@@ -93,6 +102,35 @@ def add_context_hint(error: Optional[str]) -> Optional[str]:
     if not error or _CONTEXT_MEMBER_ERROR not in error or CONTEXT_OVERRIDE_HINT in error:
         return error
     return f"{error}. {CONTEXT_OVERRIDE_HINT}"
+
+
+def script_output_prefix(output: str, max_chars: int) -> str:
+    """Return the part of a script's printed output that execute_script sends back.
+
+    That is its first ``max_chars`` characters, cut further when their JSON
+    encoding exceeds MAX_SCRIPT_OUTPUT_JSON_BYTES, so that the server passes
+    the prefix through instead of replacing it whole.
+
+    Args:
+        output: The script's full printed output.
+        max_chars: The caller's character cap.
+
+    Returns:
+        The longest such prefix.
+    """
+    prefix = output[:max_chars]
+    if len(json.dumps(prefix)) <= MAX_SCRIPT_OUTPUT_JSON_BYTES:
+        return prefix
+    # json.dumps escapes each character on its own, so the encoded length
+    # grows with the prefix and a bisection finds the longest one that fits.
+    low, high = 0, len(prefix)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(json.dumps(prefix[:middle])) <= MAX_SCRIPT_OUTPUT_JSON_BYTES:
+            low = middle
+        else:
+            high = middle - 1
+    return prefix[:low]
 
 
 @dataclass
@@ -2057,9 +2095,11 @@ class BlenderRuntimeSession:
         ``__result__``, its ``repr()`` is returned in *return_value*.
 
         Captured ``print()`` output is returned in *output*, cut to its first
-        ``max_output_chars`` characters. A cut is never silent:
-        ``output_truncated`` is true and ``output_total_chars`` gives the full
-        length, so a truncated JSON dump is not mistaken for a script bug.
+        ``max_output_chars`` characters, and further when those encode to
+        more than MAX_SCRIPT_OUTPUT_JSON_BYTES of JSON (non-ASCII or control
+        characters). A cut is never silent: ``output_truncated`` is true and
+        ``output_total_chars`` gives the full length, so a truncated JSON dump
+        is not mistaken for a script bug.
 
         With a ``timeout`` the script runs on a worker thread and this call
         returns a structured error once the budget is spent. Python offers
@@ -2075,6 +2115,8 @@ class BlenderRuntimeSession:
             max_output_chars: Most characters of printed output to return, 1 to 100000
                 (default 32000). Longer output is cut to its first max_output_chars
                 characters with output_truncated=true and output_total_chars set.
+                Output that JSON escapes heavily (non-ASCII text, control characters)
+                is cut earlier, at 300000 bytes of JSON, so the prefix always arrives.
                 Write larger results to a file and return its path instead.
 
         Returns:
@@ -2110,9 +2152,10 @@ class BlenderRuntimeSession:
 
         def _captured_output() -> Dict[str, Any]:
             raw_output = stdout_capture.getvalue()
+            output = script_output_prefix(raw_output, max_output_chars)
             return {
-                "output": raw_output[:max_output_chars] or None,
-                "output_truncated": len(raw_output) > max_output_chars,
+                "output": output or None,
+                "output_truncated": len(output) < len(raw_output),
                 "output_total_chars": len(raw_output),
             }
 

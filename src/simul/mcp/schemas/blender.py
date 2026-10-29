@@ -10,6 +10,8 @@ from pydantic.json_schema import SkipJsonSchema
 # Blender add-on and cannot import this module; a test keeps the two in step.
 SCRIPT_OUTPUT_CHARS_DEFAULT = 32_000
 SCRIPT_OUTPUT_CHARS_MAX = 100_000
+# Mirrors MAX_SCRIPT_OUTPUT_JSON_BYTES: output that JSON escapes heavily is cut here.
+SCRIPT_OUTPUT_JSON_BYTES_MAX = 300_000
 
 # How capture_blender_viewport produces its image; see BlenderRuntimeSession.capture_viewport.
 BlenderCaptureMethod = Literal["auto", "viewport", "render"]
@@ -1483,11 +1485,14 @@ class BlenderExecuteScriptResponse(BaseModel):
     success: bool = Field(..., description="Whether the script executed without error")
     output: Optional[str] = Field(
         None,
-        description="Captured stdout from the script, cut to its first max_output_chars characters",
+        description=(
+            "Captured stdout from the script, cut to its first max_output_chars characters, "
+            "or earlier for output that JSON escapes heavily (non-ASCII, control characters)"
+        ),
     )
     output_truncated: bool = Field(
         False,
-        description="True when output holds only the first max_output_chars characters",
+        description="True when output holds only a prefix of the captured stdout",
     )
     output_total_chars: int = Field(
         0, description="Length of the full captured stdout, in characters"
@@ -1563,6 +1568,7 @@ class BlenderCreateMeshFromDataResponse(BaseModel):
 __all__ = [
     "SCRIPT_OUTPUT_CHARS_DEFAULT",
     "SCRIPT_OUTPUT_CHARS_MAX",
+    "SCRIPT_OUTPUT_JSON_BYTES_MAX",
     "BlenderCaptureMethod",
     "BlenderInfoResponse",
     "BlenderObjectInfo",

@@ -134,6 +134,10 @@ def test_schema_mirrors_the_add_on_constants() -> None:
         == blender_runtime.MAX_SCRIPT_OUTPUT_CHARS
     )
     assert (
+        blender_schemas.SCRIPT_OUTPUT_JSON_BYTES_MAX
+        == blender_runtime.MAX_SCRIPT_OUTPUT_JSON_BYTES
+    )
+    assert (
         typing.get_args(blender_schemas.BlenderCaptureMethod)
         == blender_runtime.CAPTURE_METHODS
     )
@@ -143,10 +147,16 @@ def test_output_caps_fit_what_the_server_delivers() -> None:
     """A cap above the server's result limits would only move the cut elsewhere.
 
     The default keeps a typical printed JSON dump inside the 40 KB budget, so it
-    arrives unflagged. The maximum keeps even output made only of characters JSON
-    escapes (quotes, newlines) under the 400 KB hard limit, above which the server
-    replaces the whole field with a marker instead of passing a prefix through.
+    arrives unflagged. The maximum keeps even printable ASCII that JSON escapes
+    (quotes, newlines: 2 bytes each) under the JSON byte cap, which itself stays
+    under the 400 KB hard limit, above which the server replaces the whole field
+    with a marker instead of passing a prefix through.
     """
+    assert (
+        2 * blender_runtime.MAX_SCRIPT_OUTPUT_CHARS + 2
+        <= blender_runtime.MAX_SCRIPT_OUTPUT_JSON_BYTES
+        < HARD_RESULT_LIMIT_BYTES
+    )
     rows = [
         {"name": f"Cube.{i:03d}", "location": [1.25, -2.5, 0.125]} for i in range(2000)
     ]
@@ -208,6 +218,36 @@ def test_a_cut_is_reported_explicitly(embedded_bpy: SimpleNamespace) -> None:
     assert result["output"] == "x" * 4096
     assert result["output_truncated"] is True
     assert result["output_total_chars"] == 6001
+
+
+@pytest.mark.parametrize(
+    "text", ["가", "\x00", "\U0001F600"], ids=["hangul", "control", "emoji"]
+)
+def test_escape_heavy_output_at_the_maximum_still_arrives_as_a_prefix(
+    embedded_bpy: SimpleNamespace, text: str
+) -> None:
+    """At 6 or 12 JSON bytes a character, 100000 characters would pass 400 KB.
+
+    The server would then replace the whole field with a marker; the session
+    cuts the prefix at its JSON byte cap instead, so a prefix still arrives.
+    """
+    session = blender_runtime.BlenderRuntimeSession(settings=_settings())
+    cap = blender_runtime.MAX_SCRIPT_OUTPUT_CHARS
+    result = _call(
+        _server(session),
+        "execute_blender_script",
+        {"script": f"print({text!r} * {cap})", "max_output_chars": cap},
+    )
+
+    assert result["success"] is True
+    output = result["output"]
+    assert isinstance(output, str), output
+    assert output == text * len(output)
+    # The prefix fills the JSON byte cap to within one character.
+    limit = blender_runtime.MAX_SCRIPT_OUTPUT_JSON_BYTES
+    assert limit - 12 < len(json.dumps(output)) <= limit
+    assert result["output_truncated"] is True
+    assert result["output_total_chars"] == cap + 1
 
 
 @pytest.mark.parametrize("bad", [0, 100_001])

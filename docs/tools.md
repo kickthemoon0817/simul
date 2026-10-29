@@ -147,10 +147,13 @@ Behaviour worth knowing:
   printed output (default 32 000, at most 100 000). A longer output sets
   `output_truncated: true`, and `output_total_chars` gives its full length, so a
   cut JSON dump is reported rather than failing to parse later. The default
-  keeps a typical result inside the server's 40 KB result budget. The maximum
-  keeps escape-heavy output under the 400 KB hard limit, above which the server
-  replaces the whole field instead of returning a prefix. Write larger results
-  to a file and return its path.
+  keeps a typical result inside the server's 40 KB result budget. Above its
+  400 KB hard limit the server replaces the whole field instead of returning a
+  prefix, and it counts JSON bytes: at most 2 per printable ASCII character, 6
+  per control or other non-ASCII character and 12 per emoji. So output is also
+  cut at 300 000 bytes of JSON, which printable ASCII never reaches but heavily
+  non-ASCII output can, with the same report. Write larger results to a file
+  and return its path.
 
 ## Server
 
