@@ -12,7 +12,8 @@ conventions and runtime notes. `CLAUDE.md` holds Claude Code behavioral rules
 - MCP server: `src/simul/mcp/server.py`
 - Backend registry: `src/simul/mcp/backends.py` (one `BackendSpec` per
   backend; the server iterates it for adapters, tool registration, the
-  capability report and the ROUTING instructions)
+  capability report and the instructions, which cover only the backends
+  whose tools registered)
 - Adapter interface: `src/simul/adapters/base.py` (`BackendAdapter`);
   adapters: `src/simul/adapters/`
 - Isaac Sim tools: `src/simul/mcp/tools/isaac/` (per-domain mixins;
@@ -107,6 +108,14 @@ Procedure for both: `docs/releasing.md`.
   required. See `docs/blender-attachment.md`. `SIMUL_BLENDER_LIVE=1 pytest
   tests/blender/test_live_attach.py -m blender_live` launches and closes a disposable GUI.
 - Isaac Sim tools require a running Isaac Sim instance (5.1.0, 6.0.0, or 6.0.1) with the bridge on port 8229 or the stock Python socket on port 8226. `simul isaac launch` starts one with both enabled.
+- Isaac Sim runs only on Linux and Windows, so by default the server registers
+  the Isaac tools (plus the instance tools, the `simul://isaac-sim/*` resources
+  and the Isaac instructions) only there; on macOS `simul server`, `info` and
+  `tools` report them as skipped. `ISAAC_SIM__ENABLED=true` or
+  `--backends isaac` registers them on any OS (for unsupported setups such as
+  an SSH tunnel to an Isaac host); `ISAAC_SIM__ENABLED=false` never does. The
+  gate is `skip_check` on the Isaac `BackendSpec`, reading the
+  `is_isaac_platform_supported` probe; the `simul isaac` commands ignore it.
 - Headless USD tools work without Omniverse.
 - `tests/isaac/live/` is the `@pytest.mark.isaac` tier: ping, stage info,
   create/delete prim, viewport capture, AOV reads and the bridge extension

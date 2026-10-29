@@ -567,3 +567,28 @@ def test_addon_bundles_the_private_file_helpers(tmp_path: Path) -> None:
         check=True,
     )
     assert completed.stdout.strip() == "simul_blender_bridge.utils.private_files"
+
+
+def test_addon_bundles_the_error_message_helper(tmp_path: Path) -> None:
+    """The bridge renders exception notes with utils/errors.py, so the ZIP must carry it."""
+    import subprocess
+    import sys
+    import zipfile
+
+    addon = BlenderAttachments.build_addon(tmp_path / "addon.zip")
+    with zipfile.ZipFile(addon) as archive:
+        assert "simul_blender_bridge/utils/errors.py" in archive.namelist()
+        archive.extractall(tmp_path / "addons")
+    probe = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "from simul_blender_bridge.utils.errors import exception_message; "
+        "error = RuntimeError('poll() failed'); error.add_note('Failed to add rigid body'); "
+        "print(exception_message(error))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(tmp_path / "addons")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert completed.stdout.strip() == "Failed to add rigid body: poll() failed"

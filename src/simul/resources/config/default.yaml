@@ -13,6 +13,12 @@ server:
 
 # Isaac Sim Configuration
 isaac_sim:
+  # Register the Isaac Sim MCP tools. auto registers them on Linux and Windows,
+  # where Isaac Sim runs, and skips them elsewhere (macOS) unless --backends
+  # names isaac; true registers them on any OS; false never registers them.
+  # The `simul isaac` commands work either way.
+  enabled: auto
+
   # Path to Isaac Sim installation (can be overridden by environment variable)
   path: "${ISAAC_SIM_PATH}"
 

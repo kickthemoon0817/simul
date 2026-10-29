@@ -13,17 +13,12 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterator
 
 import pytest
-from pydantic import BaseModel
 
 from simul.adapters.blender_runtime import BlenderRuntimeAdapter
 from simul.config import Settings
 from simul.mcp import backends as backends_module
 from simul.mcp import server as server_module
 from tests.fakes import FakeFastMCP
-
-
-class _Ok(BaseModel):
-    success: bool = True
 
 
 class _Adapter:
@@ -55,9 +50,7 @@ def _thread_of_call(instance: server_module.SimulMCPServer, adapter: Any, label:
         return {"success": True}
 
     async def run() -> int:
-        await instance._run_backend_call(
-            "probe", adapter, label, _Ok, call
-        )
+        await instance._run_backend_call(adapter, label, call)
         return seen["thread"]
 
     return asyncio.run(run())

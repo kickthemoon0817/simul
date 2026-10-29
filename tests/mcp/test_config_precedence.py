@@ -33,6 +33,7 @@ _DOCUMENTED_OVERRIDES: tuple[tuple[str, str, tuple[str, str], object], ...] = (
     ("LOGGING__LEVEL", "DEBUG", ("logging", "level"), "DEBUG"),
     ("SERVER__PORT", "9911", ("server", "port"), 9911),
     ("ISAAC_SIM__BRIDGE_ENABLED", "false", ("isaac_sim", "bridge_enabled"), False),
+    ("ISAAC_SIM__ENABLED", "false", ("isaac_sim", "enabled"), False),
     ("ISAAC_SIM__SOCKET_PROTOCOL", "vscode", ("isaac_sim", "socket_protocol"), "vscode"),
     ("SECURITY__SANDBOX_ENABLED", "false", ("security", "sandbox_enabled"), False),
     ("SECURITY__ALLOW_SCRIPT_EXECUTION", "false", ("security", "allow_script_execution"), False),
@@ -100,6 +101,7 @@ def test_yaml_values_apply_when_no_env_var_is_set() -> None:
     settings = Settings.from_yaml(_DEFAULT_YAML)
 
     assert settings.isaac_sim.socket_protocol == "auto"
+    assert settings.isaac_sim.enabled is None  # "auto": by platform
     assert settings.logging.level == "INFO"
     assert settings.logging.components == {
         "usd": "INFO",

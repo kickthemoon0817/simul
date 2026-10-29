@@ -27,6 +27,8 @@ No running application needed. File arguments must be inside the sandbox
 
 Requires a running Isaac Sim 5.1.0, 6.0.0 or 6.0.1 reachable over the bridge
 (8229) or the stock Python socket (8226). See [isaac-sim.md](isaac-sim.md).
+Registered by default only on Linux and Windows, where Isaac Sim runs
+([Platforms](isaac-sim.md#platforms)).
 
 | Group | Tools |
 |---|---|

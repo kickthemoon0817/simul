@@ -106,6 +106,7 @@ class TestServerIteratesTheRegistry:
         assert list(report) == [spec.name for spec in BACKENDS]
         for entry in report.values():
             assert entry["enabled"] is True and entry["available"] is True
+            assert entry["skipped"] is None
 
     def test_tools_are_grouped_by_the_backend_that_registered_them(
         self, full_server: server_module.SimulMCPServer
@@ -129,6 +130,7 @@ class TestServerIteratesTheRegistry:
         groups = instance.tools_by_backend()
         assert set(groups) == {"USD / Headless", "Server"}
         assert instance.get_capabilities()["isaac"]["enabled"] is False
+        assert instance.get_capabilities()["isaac"]["skipped"] == "left out of --backends"
 
     def test_unavailable_adapter_registers_nothing(self, fake_fastmcp: Any, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(backends_module, "is_headless_available", lambda: False)
@@ -140,10 +142,30 @@ class TestServerIteratesTheRegistry:
         assert instance.unreal_adapter is None
         assert set(instance.tools_by_backend()) == {"Isaac Sim", "Server"}
 
-    def test_instructions_state_every_routing_rule(self, full_server: server_module.SimulMCPServer) -> None:
-        text = server_module._MCP_INSTRUCTIONS
+    def test_instructions_state_every_routing_rule(
+        self, fake_fastmcp: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(server_module, "_FASTMCP_SUPPORTS_INSTRUCTIONS", True)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: True)
+        monkeypatch.setattr(backends_module, "BlenderRuntimeAdapter", AvailableAdapter)
+        monkeypatch.setattr(backends_module, "UnrealRuntimeAdapter", AvailableAdapter)
+        monkeypatch.setattr(backends_module, "is_blender_available", lambda: True)
+        monkeypatch.setattr(backends_module, "is_unreal_available", lambda: True)
+        text = server_module.SimulMCPServer(settings=_full_settings()).mcp.instructions
         for spec in BACKENDS:
             assert spec.routing_rule in text, spec.name
+            assert spec.summary in text, spec.name
+
+    def test_instructions_cover_only_the_registered_backends(
+        self, fake_fastmcp: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(server_module, "_FASTMCP_SUPPORTS_INSTRUCTIONS", True)
+        monkeypatch.setattr(backends_module, "is_headless_available", lambda: True)
+        instance = server_module.SimulMCPServer(settings=Settings(), backends={"usd"})
+        assert instance._registered_backends == ("usd",)
+        assert instance.mcp.instructions == server_module.build_instructions({"usd"})
+        for spec in BACKENDS:
+            assert (spec.routing_rule in instance.mcp.instructions) is (spec.name == "usd"), spec.name
 
     def test_shutdown_closes_every_adapter(self, full_server: server_module.SimulMCPServer) -> None:
         closed: List[str] = []
@@ -245,4 +267,8 @@ def test_spec_fields_are_complete() -> None:
     for spec in BACKENDS:
         assert isinstance(spec, BackendSpec)
         assert spec.label and spec.routing_rule.startswith("Tools containing")
+        assert spec.summary.startswith("Use ")
         assert callable(spec.adapter_factory) and callable(spec.register_tools)
+        assert spec.skip_check is None or callable(spec.skip_check)
+    # Only Isaac Sim is gated beyond its runtime: on the OS it runs on.
+    assert [spec.name for spec in BACKENDS if spec.skip_check is not None] == ["isaac"]
