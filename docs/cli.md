@@ -127,7 +127,7 @@ Commands accept `-H/--host` and `-p/--port` for the Remote Control endpoint
 | Command | Purpose |
 |---|---|
 | `setup UPROJECT [--yes] ...` | Enable the plugins, write the Remote Control ini, launch the editor and wait for it. See [unreal-setup.md](unreal-setup.md) |
-| `instances`, `attach [--viewport KEY]`, `status`, `detach` | Select an existing editor, map and level viewport. See [unreal-attachment.md](unreal-attachment.md) |
+| `instances [--no-scan]`, `attach [--viewport KEY]`, `status`, `detach` | Discover editors (the `list_unreal_instances` payload) and select an existing editor, map and level viewport. See [unreal-attachment.md](unreal-attachment.md) |
 | `control ACTION [...]` | Named editor controls on the attached editor (`inspect`, `select_actor`, `set_property`, `move_cursor`, ...) |
 | `health`, `info`, `scene`, `map` | Inspection |
 | `list-actors [--class] [--tag] [-n]`, `actor-info`, `search`, `scene-graph` | Scene queries |

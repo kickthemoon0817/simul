@@ -75,7 +75,7 @@ Requires an editor with Remote Control and Python enabled; run
 |---|---|
 | `unreal_health_check` | Connectivity, engine version, project name |
 | `ping_unreal` | Reachability and latency |
-| `list_unreal_instances` | Editors reachable on the scanned ports |
+| `list_unreal_instances` | Editors on the scanned ports: identity, viewports, active and attached flags. Same payload as `simul unreal instances`; see [unreal-attachment.md](unreal-attachment.md#discover-and-select) |
 | `control_unreal_ui` | Named editor controls and per-agent viewport pointers in attached mode; works with script execution disabled. See [unreal-attachment.md](unreal-attachment.md) |
 | `capture_unreal_viewport` | Viewport screenshot (PNG) |
 | `execute_unreal_script` | Run Python inside the editor |

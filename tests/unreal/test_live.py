@@ -25,6 +25,7 @@ import json as _json
 
 import pytest
 
+from simul.adapters.unreal_connection import discover_instances, probe_instance
 from simul.adapters.unreal_runtime import UnrealRuntimeSession
 from simul.config import Settings
 
@@ -39,18 +40,17 @@ def _settings() -> Settings:
 def _skip_if_unreal_down() -> None:
     """Skip every test in this module if the configured UE port doesn't answer.
 
-    Uses ``probe_port`` (which creates a throwaway aiohttp session) so we
-    don't have to manage a long-lived session across multiple ``asyncio.run``
-    calls — each test owns its own event loop and session lifecycle.
+    ``probe_instance`` opens and closes its own session, so no session
+    outlives the ``asyncio.run`` call — each test owns its own event loop
+    and session lifecycle.
     """
-    cfg = _settings().unreal
-    probe = asyncio.run(
-        UnrealRuntimeSession.probe_port(cfg.host, cfg.port, timeout=3.0)
-    )
+    settings = _settings()
+    cfg = settings.unreal
+    probe = asyncio.run(probe_instance(settings, cfg.host, cfg.port))
     if not probe.get("reachable"):
         pytest.skip(
             f"Unreal Engine not reachable at {cfg.host}:{cfg.port} "
-            f"(probe: {probe})"
+            f"({probe['error']})"
         )
 
 
@@ -85,21 +85,31 @@ def test_c1_health_check_reports_connected_with_engine_and_project() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_c2_probe_port_finds_running_editor_with_matching_project() -> None:
-    """Probe identifies the same project that health_check reports — proves
-    discovery is real, not just "anything answered HTTP"."""
+def test_c2_discovery_finds_running_editor_with_matching_project() -> None:
+    """Discovery identifies the same project that health_check reports — proves
+    discovery is real, not just "anything answered HTTP". The scan and the
+    single-endpoint probe agree on the editor's identity."""
 
     async def body() -> None:
-        cfg = _settings().unreal
-        probe = await UnrealRuntimeSession.probe_port(cfg.host, cfg.port, timeout=3.0)
-        assert probe.get("reachable") is True, probe
-        session = UnrealRuntimeSession(_settings())
+        settings = _settings()
+        cfg = settings.unreal
+        scanned = await discover_instances(settings)
+        (active,) = [item for item in scanned["instances"] if item["active"]]
+        assert active["port"] == cfg.port and active["reachable"] is True, active
+        assert active["instance_id"] and active["pid"] and active["viewports"], active
+        assert active["error"] is None, active
+        (single,) = (await discover_instances(settings, scan=False))["instances"]
+        assert {k: v for k, v in single.items() if k != "latency_ms"} == {
+            k: v for k, v in active.items() if k != "latency_ms"
+        }
+        session = UnrealRuntimeSession(settings)
         try:
             health = await session.health_check()
-            assert probe.get("project_name") == health.get("project_name"), (
-                probe,
+            assert active["project_name"] == health.get("project_name"), (
+                active,
                 health,
             )
+            assert active["engine_version"] == health.get("engine_version")
         finally:
             await session.close()
 
