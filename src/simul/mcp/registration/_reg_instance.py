@@ -181,7 +181,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         if purpose:
             holder = server._foreign_claim(instance_name, _agent_id)
             if holder is not None:
-                return server._claimed_error(instance_name, holder, _agent_id)
+                return server._as_text_result(
+                    server._claimed_error(instance_name, holder, _agent_id)
+                )
             compat_info = server.session_manager.score_compatibility(purpose, port)
 
         server._set_request_active_instance(instance_name)
@@ -283,7 +285,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         _agent_id = server._resolve_agent_id(agent_id)
         holder = server._foreign_claim(instance_name, _agent_id)
         if holder is not None:
-            return server._claimed_error(instance_name, holder, _agent_id)
+            return server._as_text_result(
+                server._claimed_error(instance_name, holder, _agent_id)
+            )
         inst_session = server.session_manager.get_instance_session(port)
 
         compat = server.session_manager.score_compatibility(purpose, port)

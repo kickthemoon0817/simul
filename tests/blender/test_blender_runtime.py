@@ -11,34 +11,28 @@ import pytest
 
 from simul.adapters import blender_runtime
 from simul.config import SecurityConfig, Settings
+from tests.fakes import FakeMatrix, FakePropArray, FakeVector
 
 
-class FakeVector:
-    """Minimal 3-element vector that supports iteration and indexing."""
-
-    def __init__(self, values: tuple) -> None:
-        self._values = tuple(float(v) for v in values)
-
-    def __iter__(self):  # type: ignore[override]
-        return iter(self._values)
-
-    def __getitem__(self, idx: int) -> float:
-        return self._values[idx]
-
-    def __len__(self) -> int:
-        return len(self._values)
+def _box(low: float = -1.0, high: float = 1.0) -> List[FakePropArray]:
+    """Return a cube's eight bound_box corners, as Blender's bpy_prop_arrays."""
+    return [
+        FakePropArray((x, y, z))
+        for x in (low, high)
+        for y in (low, high)
+        for z in (low, high)
+    ]
 
 
-class FakeMatrix:
-    """Minimal 4×4 matrix mock with translation and matmul support."""
-
-    def __init__(self, translation: tuple = (0.0, 0.0, 0.0)) -> None:
-        self.translation = FakeVector(translation)
-
-    def __matmul__(self, other: Any) -> list:
-        """Identity-like transform: offset each corner by translation."""
-        t = self.translation
-        return [other[0] + t[0], other[1] + t[1], other[2] + t[2]]
+def _camera_forward(rotation_euler: Any) -> List[float]:
+    """Return where a camera with this XYZ Euler rotation looks: its local -Z."""
+    rx, ry, rz = rotation_euler
+    x, y, z = 0.0, 0.0, -1.0
+    # XYZ Euler applies X, then Y, then Z.
+    y, z = y * math.cos(rx) - z * math.sin(rx), y * math.sin(rx) + z * math.cos(rx)
+    x, z = x * math.cos(ry) + z * math.sin(ry), -x * math.sin(ry) + z * math.cos(ry)
+    x, y = x * math.cos(rz) - y * math.sin(rz), x * math.sin(rz) + y * math.cos(rz)
+    return [x, y, z]
 
 
 class FakeObject:
@@ -73,7 +67,7 @@ class FakeObject:
         self.modifiers = modifiers or []
         self.constraints = constraints or []
         self.material_slots = material_slots or []
-        self.matrix_world = matrix_world or FakeMatrix(location)
+        self.matrix_world = matrix_world or FakeMatrix.Translation(location)
         self.bound_box = bound_box or []
         self.data = data
 
@@ -450,27 +444,20 @@ class TestObservationTools:
     # -- get_bounding_box -------------------------------------------------
 
     def test_get_bounding_box_world_space(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
-        """Bounding box corners are transformed by matrix_world."""
-        # Unit cube local corners at (0,0,0)-(1,1,1)
-        local_corners = [
-            [0, 0, 0],
-            [1, 0, 0],
-            [1, 1, 0],
-            [0, 1, 0],
-            [0, 0, 1],
-            [1, 0, 1],
-            [1, 1, 1],
-            [0, 1, 1],
-        ]
-        matrix = FakeMatrix(translation=(10.0, 20.0, 30.0))
+        """Bounding box corners are transformed by matrix_world.
+
+        The corners are bpy_prop_arrays, which a mathutils Matrix does not
+        multiply (TypeError on Blender 5.0.1); each becomes a Vector first.
+        """
+        matrix = FakeMatrix.Translation((10.0, 20.0, 30.0))
         obj = FakeObject(
             name="Box",
             object_type="MESH",
             visible=True,
             matrix_world=matrix,
-            bound_box=local_corners,
+            bound_box=_box(0.0, 1.0),
         )
         fake_bpy = self._make_fake_bpy_with_objects([obj])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -481,28 +468,45 @@ class TestObservationTools:
 
         assert result["world_space"] is True
         assert len(result["corners"]) == 8
+        assert all(type(corner) is list for corner in result["corners"])
         assert result["bbox_min"] == [10.0, 20.0, 30.0]
         assert result["bbox_max"] == [11.0, 21.0, 31.0]
+
+    def test_get_bounding_box_world_space_applies_rotation_and_scale(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """The whole world matrix applies, not just its translation."""
+        # A quarter turn about Z, X scaled by 2, then moved to (5, 0, 1).
+        matrix = FakeMatrix(
+            [(0, -1, 0, 5.0), (2, 0, 0, 0.0), (0, 0, 1, 1.0), (0, 0, 0, 1)]
+        )
+        obj = FakeObject(
+            name="Turned",
+            object_type="MESH",
+            visible=True,
+            matrix_world=matrix,
+            bound_box=_box(-1.0, 1.0),
+        )
+        fake_bpy = self._make_fake_bpy_with_objects([obj])
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.get_bounding_box("Turned")
+
+        assert result["corners"][0] == [6.0, -2.0, 0.0]  # local (-1, -1, -1)
+        assert result["bbox_min"] == [4.0, -2.0, 0.0]
+        assert result["bbox_max"] == [6.0, 2.0, 2.0]
 
     def test_get_bounding_box_local_space(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Local-space bounding box skips matrix_world transform."""
-        local_corners = [
-            [-1, -1, -1],
-            [1, -1, -1],
-            [1, 1, -1],
-            [-1, 1, -1],
-            [-1, -1, 1],
-            [1, -1, 1],
-            [1, 1, 1],
-            [-1, 1, 1],
-        ]
         obj = FakeObject(
             name="Sphere",
             object_type="MESH",
             visible=True,
-            bound_box=local_corners,
+            bound_box=_box(-1.0, 1.0),
         )
         fake_bpy = self._make_fake_bpy_with_objects([obj])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -709,13 +713,13 @@ class TestObservationTools:
             name="A",
             object_type="MESH",
             visible=True,
-            matrix_world=FakeMatrix(translation=(0.0, 0.0, 0.0)),
+            matrix_world=FakeMatrix.Translation((0.0, 0.0, 0.0)),
         )
         obj_b = FakeObject(
             name="B",
             object_type="MESH",
             visible=True,
-            matrix_world=FakeMatrix(translation=(3.0, 4.0, 0.0)),
+            matrix_world=FakeMatrix.Translation((3.0, 4.0, 0.0)),
         )
         fake_bpy = self._make_fake_bpy_with_objects([obj_a, obj_b])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -738,7 +742,7 @@ class TestObservationTools:
             name="Ball",
             object_type="MESH",
             visible=True,
-            matrix_world=FakeMatrix(translation=(5.0, 5.0, 5.0)),
+            matrix_world=FakeMatrix.Translation((5.0, 5.0, 5.0)),
         )
         fake_bpy = self._make_fake_bpy_with_objects([obj])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -759,7 +763,7 @@ class TestObservationTools:
             name="Far",
             object_type="MESH",
             visible=True,
-            matrix_world=FakeMatrix(translation=(100.0, 0.0, 0.0)),
+            matrix_world=FakeMatrix.Translation((100.0, 0.0, 0.0)),
         )
         fake_bpy = self._make_fake_bpy_with_objects([obj])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -1023,25 +1027,16 @@ class TestVisualObservationTools:
 
     # -- focus_on_object ---------------------------------------------------
 
-    def test_focus_on_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_focus_on_object(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
         """focus_on_object positions camera based on object bounding box."""
-        # Unit cube at origin: 8 corners from (-1,-1,-1) to (1,1,1)
-        corners = [
-            (-1.0, -1.0, -1.0),
-            (1.0, -1.0, -1.0),
-            (1.0, 1.0, -1.0),
-            (-1.0, 1.0, -1.0),
-            (-1.0, -1.0, 1.0),
-            (1.0, -1.0, 1.0),
-            (1.0, 1.0, 1.0),
-            (-1.0, 1.0, 1.0),
-        ]
         mesh_obj = FakeObject(
             name="Cube",
             object_type="MESH",
             visible=True,
-            bound_box=corners,
-            matrix_world=FakeMatrix(translation=(0.0, 0.0, 0.0)),
+            bound_box=_box(-1.0, 1.0),
+            matrix_world=FakeMatrix.Translation((0.0, 0.0, 0.0)),
         )
         cam = self._make_camera_object()
         fake_bpy = self._make_fake_bpy_with_camera(objects=[cam, mesh_obj])
@@ -1058,30 +1053,58 @@ class TestVisualObservationTools:
         # Camera location should be offset from center
         cam_loc = result["camera_location"]
         assert len(cam_loc) == 3
-        # Camera should be placed along +Z +Y diagonal, i.e. negative Y and positive Z
+        # In front of and above the object: the -Y +Z diagonal.
         assert cam_loc[1] < 0.0  # -0.7071 direction
         assert cam_loc[2] > 0.0  # +0.7071 direction
 
+    @pytest.mark.parametrize(
+        "offset", [(0.0, 0.0, 0.0), (3.0, -2.0, 1.0), (-40.0, 25.0, -7.5)]
+    )
+    def test_focus_on_object_points_the_camera_at_the_object(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        offset: tuple,
+    ) -> None:
+        """The camera's -Z axis, where a Blender camera looks, runs through the center.
+
+        It used to point exactly away from the object: the object was behind
+        the camera and never in its view.
+        """
+        mesh_obj = FakeObject(
+            name="Cube",
+            object_type="MESH",
+            visible=True,
+            bound_box=_box(-1.0, 1.0),
+            matrix_world=FakeMatrix.Translation(offset),
+        )
+        cam = self._make_camera_object()
+        fake_bpy = self._make_fake_bpy_with_camera(objects=[cam, mesh_obj])
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.focus_on_object("Cube")
+
+        assert result["look_at"] == pytest.approx(list(offset))
+        to_center = [c - p for c, p in zip(offset, cam.location)]
+        distance = math.sqrt(sum(v * v for v in to_center))
+        assert _camera_forward(cam.rotation_euler) == pytest.approx(
+            [v / distance for v in to_center]
+        )
+        # Level: no roll, so the camera's right axis stays horizontal.
+        assert cam.rotation_euler[1] == 0.0
+
     def test_focus_on_object_custom_distance(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
         """focus_on_object with larger distance_factor pushes camera further."""
-        corners = [
-            (-1.0, -1.0, -1.0),
-            (1.0, -1.0, -1.0),
-            (1.0, 1.0, -1.0),
-            (-1.0, 1.0, -1.0),
-            (-1.0, -1.0, 1.0),
-            (1.0, -1.0, 1.0),
-            (1.0, 1.0, 1.0),
-            (-1.0, 1.0, 1.0),
-        ]
         mesh_obj = FakeObject(
             name="Box",
             object_type="MESH",
             visible=True,
-            bound_box=corners,
-            matrix_world=FakeMatrix(translation=(0.0, 0.0, 0.0)),
+            bound_box=_box(-1.0, 1.0),
+            matrix_world=FakeMatrix.Translation((0.0, 0.0, 0.0)),
         )
         cam = self._make_camera_object()
         fake_bpy = self._make_fake_bpy_with_camera(objects=[cam, mesh_obj])

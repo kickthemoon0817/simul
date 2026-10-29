@@ -5,12 +5,16 @@ to see what the server registered. It records every tool with the keyword
 arguments it was registered with, answers the handful of FastMCP calls the
 server makes during construction, and mirrors FastMCP 3's ``local_provider``
 component keys so the server's own tool listing works against it.
+
+``FakeVector``, ``FakeMatrix`` and ``FakePropArray`` stand in for Blender's
+``mathutils`` types and ``bpy_prop_array``; ``fake_mathutils`` packages the
+first two as the module the Blender runtime imports.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional
+from types import ModuleType, SimpleNamespace
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
 
 from simul.config import Settings
 
@@ -100,3 +104,68 @@ class AvailableAdapter:
 
     def close(self) -> None:
         self.closed = True
+
+
+class FakeVector:
+    """``mathutils.Vector`` stand-in: a float sequence a ``FakeMatrix`` multiplies."""
+
+    def __init__(self, values: Iterable[float] = (0.0, 0.0, 0.0)) -> None:
+        self._values = tuple(float(v) for v in values)
+
+    def __iter__(self) -> Iterator[float]:
+        return iter(self._values)
+
+    def __getitem__(self, index: int) -> float:
+        return self._values[index]
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __repr__(self) -> str:
+        return f"Vector({self._values!r})"
+
+
+class FakePropArray(tuple):
+    """``bpy_prop_array`` stand-in, such as an ``Object.bound_box`` corner: not a Vector."""
+
+
+class FakeMatrix:
+    """``mathutils.Matrix`` stand-in for a 4x4 affine transform.
+
+    Like mathutils, ``@`` multiplies only a Vector. Blender 5.0.1 raises
+    ``TypeError: Matrix multiplication: not supported between 'Matrix' and
+    'bpy_prop_array' types`` for a bare ``bound_box`` corner; a stand-in that
+    multiplied any sequence hid exactly that bug.
+    """
+
+    def __init__(self, rows: Sequence[Sequence[float]]) -> None:
+        self.rows = [tuple(float(v) for v in row) for row in rows]
+
+    @classmethod
+    def Translation(cls, offset: Sequence[float]) -> "FakeMatrix":  # noqa: N802
+        """Return a translation matrix, as ``mathutils.Matrix.Translation`` does."""
+        x, y, z = offset
+        return cls([(1, 0, 0, x), (0, 1, 0, y), (0, 0, 1, z), (0, 0, 0, 1)])
+
+    @property
+    def translation(self) -> FakeVector:
+        return FakeVector(row[3] for row in self.rows[:3])
+
+    def __matmul__(self, other: Any) -> FakeVector:
+        if not isinstance(other, FakeVector):
+            raise TypeError(
+                "Matrix multiplication: not supported between 'Matrix' and "
+                f"'{type(other).__name__}' types"
+            )
+        # A 3D vector is a point: mathutils extends it with w = 1.
+        point = (*other, 1.0) if len(other) == 3 else tuple(other)
+        product = [sum(a * b for a, b in zip(row, point)) for row in self.rows]
+        return FakeVector(product[: len(other)])
+
+
+def fake_mathutils() -> ModuleType:
+    """Return a ``mathutils`` module made of the strict stand-ins above."""
+    module = ModuleType("mathutils")
+    module.Vector = FakeVector  # type: ignore[attr-defined]
+    module.Matrix = FakeMatrix  # type: ignore[attr-defined]
+    return module

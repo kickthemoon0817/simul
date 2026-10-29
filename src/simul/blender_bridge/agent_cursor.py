@@ -354,10 +354,17 @@ observations = AgentObservations()
 
 @contextmanager
 def hide_annotations() -> Iterator[None]:
-    """Keep agent UI annotations out of captured images; restore even on failure."""
+    """Keep agent UI annotations out of captured images; restore even on failure.
+
+    The flag only changes what the next redraw paints: a capture that reads the
+    screen tags its region so the screenshot redraws it without annotations.
+    That redraw stays on screen, so the editors are tagged again on exit to
+    bring the annotations back, also when the capture fails.
+    """
     previous = cursors.suspended, observations.suspended
     cursors.suspended = observations.suspended = True
     try:
         yield
     finally:
         cursors.suspended, observations.suspended = previous
+        cursors.redraw()

@@ -480,8 +480,7 @@ class BlenderRuntimeSession:
         obj = self._get_object_or_raise(object_name)
 
         if world_space:
-            matrix = obj.matrix_world
-            corners = [list(matrix @ co) for co in obj.bound_box]
+            corners = self._world_bound_box(obj)
         else:
             corners = [list(co) for co in obj.bound_box]
 
@@ -777,8 +776,10 @@ class BlenderRuntimeSession:
         """
         Position the camera to look at a specific object.
 
-        Camera is placed along the +Z +Y diagonal from the object center
-        at a distance proportional to the bounding box diagonal.
+        The camera is placed in front of and above the object center (along
+        the -Y +Z diagonal, Blender's front view side) at a distance
+        proportional to the bounding box diagonal, and turned to face the
+        center.
 
         Args:
             object_name: Object to focus on.
@@ -791,7 +792,7 @@ class BlenderRuntimeSession:
         obj = self._get_object_or_raise(object_name)
         cam_obj = self._resolve_camera(camera_name)
 
-        bbox_corners = [list(obj.matrix_world @ corner) for corner in obj.bound_box]
+        bbox_corners = self._world_bound_box(obj)
         center = [sum(c[i] for c in bbox_corners) / len(bbox_corners) for i in range(3)]
         diag = math.sqrt(
             sum(
@@ -804,14 +805,7 @@ class BlenderRuntimeSession:
         cam_loc = [center[i] + direction[i] * offset_dist for i in range(3)]
 
         cam_obj.location = tuple(cam_loc)
-
-        dx = center[0] - cam_loc[0]
-        dy = center[1] - cam_loc[1]
-        dz = center[2] - cam_loc[2]
-        dist_xy = math.sqrt(dx * dx + dy * dy)
-        pitch = math.atan2(dz, dist_xy)
-        yaw = math.atan2(dx, -dy)
-        cam_obj.rotation_euler = (math.pi / 2 - pitch, 0.0, yaw)
+        cam_obj.rotation_euler = self._look_at_rotation(cam_loc, center)
 
         return {
             "camera_name": cam_obj.name,
@@ -1752,14 +1746,14 @@ class BlenderRuntimeSession:
         Args:
             field_type: Force field type (FORCE, WIND, VORTEX, etc.).
             strength: Field strength.
-            location: World-space XYZ location.
+            location: World-space XYZ location; the world origin when omitted.
             name: Optional name for the field object.
 
         Returns:
             Dict with name, field_type, strength, location.
         """
         blender_module: Any = bpy
-        loc = tuple(location or [0.0, 0.0, 0.0])
+        loc = (0.0, 0.0, 0.0) if location is None else tuple(location)
 
         blender_module.ops.object.effector_add(type=field_type.upper(), location=loc)
         field_obj = blender_module.context.active_object
@@ -3208,6 +3202,15 @@ class BlenderRuntimeSession:
         The screenshot covers the whole editor, so overlapping UI (header,
         toolbar, open popups) is included; it is cropped to the main region.
 
+        ``screenshot_area`` redraws the regions tagged for redraw and reads the
+        frame it drew. With nothing tagged it returns an older frame from the
+        window's swap chain instead (one to four draws old on Blender 5.0.1),
+        which can show agent annotations drawn before the bridge hid them for
+        this capture, or an outdated view. Tagging the region right before the
+        screenshot makes it draw the region now, without those annotations.
+        Writing the scene's image settings, as ``_image_format`` does here,
+        happens to cause that redraw as well; the tag does not rely on it.
+
         Args:
             window: The window showing the 3D View.
             area: The 3D View's area.
@@ -3229,6 +3232,10 @@ class BlenderRuntimeSession:
             with blender_module.context.temp_override(
                 window=window, area=area, region=region
             ):
+                # Nothing may draw between the tag and the screenshot: a redraw
+                # in between (bpy.ops.wm.redraw_timer, say) uses up the tag, and
+                # the screenshot reads a stale frame again.
+                region.tag_redraw()
                 status = blender_module.ops.screen.screenshot_area(filepath=str(shot))
         if "FINISHED" not in status or not shot.is_file():
             raise RuntimeError("Blender could not read the 3D View from the screen")
@@ -3444,17 +3451,7 @@ class BlenderRuntimeSession:
                 or not self._is_object_visible(obj)
             ):
                 continue
-            # Matrix @ bound_box item raises TypeError in Blender (the item is
-            # not a Vector), so the corners are transformed element by element.
-            matrix = [list(row) for row in obj.matrix_world]
-            corners.extend(
-                [
-                    sum(matrix[row][col] * corner[col] for col in range(3))
-                    + matrix[row][3]
-                    for row in range(3)
-                ]
-                for corner in obj.bound_box
-            )
+            corners.extend(self._world_bound_box(obj))
         if corners:
             low = [min(c[i] for c in corners) for i in range(3)]
             high = [max(c[i] for c in corners) for i in range(3)]
@@ -3472,17 +3469,57 @@ class BlenderRuntimeSession:
         distance = radius / math.sin(half_angle) * 1.05
         norm = math.sqrt(sum(v * v for v in _FRAMING_DIRECTION))
         location = [c + v / norm * distance for c, v in zip(center, _FRAMING_DIRECTION)]
-        dx, dy, dz = (c - loc for c, loc in zip(center, location))
-        # A camera looks down its local -Z. Euler XYZ (x, 0, z) turns that into
-        # (-sin z sin x, cos z sin x, -cos x); solve for the look direction.
         camera.location = tuple(location)
-        camera.rotation_euler = (
+        camera.rotation_euler = self._look_at_rotation(location, center)
+        data.clip_start = max(0.001, (distance - radius) / 2)
+        data.clip_end = distance + 2 * radius
+
+    @staticmethod
+    def _world_bound_box(obj: Any) -> List[List[float]]:
+        """
+        Return an object's eight bounding-box corners in world space.
+
+        ``bound_box`` items are ``bpy_prop_array``s, which ``mathutils.Matrix``
+        refuses to multiply (``TypeError: Matrix multiplication: not supported
+        between 'Matrix' and 'bpy_prop_array' types`` on Blender 5.0.1), so
+        each corner becomes a ``Vector`` first.
+
+        Args:
+            obj: The Blender object.
+
+        Returns:
+            The corners as [x, y, z] lists, in ``bound_box`` order.
+        """
+        # Blender's math module; it is importable wherever bpy is.
+        from mathutils import Vector  # type: ignore[import-not-found]
+
+        matrix = obj.matrix_world
+        return [list(matrix @ Vector(corner)) for corner in obj.bound_box]
+
+    @staticmethod
+    def _look_at_rotation(
+        location: List[float], target: List[float]
+    ) -> Tuple[float, float, float]:
+        """
+        Return the XYZ Euler rotation that turns a camera at ``location`` to ``target``.
+
+        A camera looks down its local -Z. Euler XYZ (x, 0, z) turns that into
+        (-sin z sin x, cos z sin x, -cos x); solving for the direction to the
+        target keeps the camera level, with no roll.
+
+        Args:
+            location: Camera position [x, y, z].
+            target: Point to look at [x, y, z].
+
+        Returns:
+            The (x, y, z) rotation in radians.
+        """
+        dx, dy, dz = (t - loc for t, loc in zip(target, location))
+        return (
             math.pi / 2 + math.atan2(dz, math.hypot(dx, dy)),
             0.0,
             math.atan2(-dx, dy),
         )
-        data.clip_start = max(0.001, (distance - radius) / 2)
-        data.clip_end = distance + 2 * radius
 
 
 class BlenderRuntimeAdapter:
