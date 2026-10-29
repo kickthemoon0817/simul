@@ -1220,9 +1220,11 @@ class BlenderAddForceFieldRequest(BaseModel):
         ),
     )
     strength: float = Field(1.0, description="Field strength")
-    location: List[float] = Field(
-        default_factory=lambda: [0.0, 0.0, 0.0],
-        description="World-space XYZ location",
+    # Optional, not a default list: the tool passes None when the caller omits
+    # the location, and a List[float] field rejects None.
+    location: Optional[List[float]] = Field(
+        None,
+        description="World-space XYZ location; the world origin when omitted",
         min_length=3,
         max_length=3,
     )
