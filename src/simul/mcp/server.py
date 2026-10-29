@@ -21,6 +21,7 @@ from typing import (
     Callable,
     Coroutine,
     Dict,
+    Iterable,
     List,
     Literal,
     Optional,
@@ -46,7 +47,7 @@ from ..logging import LoggerMixin, get_logger
 from ..resources import find_checkout_root, resource
 from ..utils.paths import PathPolicy, SandboxDenied, sandbox_error
 from ..utils.timing import RateLimiter
-from .backends import ALL_BACKEND_NAMES, BACKENDS
+from .backends import ALL_BACKEND_NAMES, BACKENDS, NOT_SELECTED, backend_skip_reason
 from .registration import register_stats_tools
 from .registration._helpers import apply_success_from_error
 from .result_budget import encode_result_budget
@@ -69,46 +70,46 @@ try:
 except Exception:
     _PACKAGE_VERSION = _source_version
 
-_MCP_INSTRUCTIONS: str = (
-    "Simul provides tools for interacting with 3D simulation "
-    "and DCC applications. Use Isaac Sim tools to control a running NVIDIA Isaac Sim "
-    "instance — granular tools for scene inspection, prim "
-    "manipulation, physics, simulation control, materials, "
-    "viewport/camera, rendering, and asset/stage operations. "
-    "Use USD tools to load, inspect, and edit Universal Scene "
-    "Description files. "
-    "Use Blender tools when a Blender runtime is connected. "
-    "Use Unreal tools when an Unreal Engine instance is connected.\n\n"
-    "TOOL SELECTION — prefer a granular tool when one covers the "
-    "operation; they are cheaper and return structured results. For GUI/app "
-    "state (windows, focus, selection, timeline) use get_isaac_ui_state; to "
-    "inspect one window's widget tree use get_isaac_ui_window. Reach for "
-    "execute_isaac_script when none does (custom extensions, replicator "
-    "workflows, robotics APIs, warp kernels). Read the "
-    "'simul://isaac-sim/skills' resource for scripting patterns and API "
-    "reference when writing scripts.\n"
-    "  Finding Isaac prims: get_isaac_scene_summary for counts first; "
-    "list_isaac_prims to browse a level; get_isaac_subtree for the structure "
-    "under one prim; search_isaac_prims by name or exact type anywhere below a "
-    "root; query_isaac_typed_prims by schema (subclasses too) with attribute "
-    "values; find_isaac_prims_in_area by position.\n\n"
-    "CONVENTIONS — Isaac Sim stages are Z-up with metersPerUnit=1, so "
-    "positions and distances are metres, gravity points along -Z, and "
-    "rotations are XYZ Euler degrees; get_isaac_stage_info reports the "
-    "up_axis and meters_per_unit of a loaded file when they differ. Every "
-    "tool parameter's units and conventions are in its schema description.\n\n"
-    "ROUTING — the backend name appears somewhere inside the tool name, "
-    "usually as an infix (create_isaac_prim, capture_unreal_viewport, "
-    "get_blender_info):\n"
-    + "".join(f"  {spec.routing_rule}\n" for spec in BACKENDS if spec.name != "usd")
-    + "  Tools containing 'simready' (SimReady asset helpers) exist for both "
-    "Blender and Unreal; each one's description names the runtime it targets.\n"
-    + "".join(f"  {spec.routing_rule}\n" for spec in BACKENDS if spec.name == "usd")
-    + "  The two *_tool_usage_stats tools are server metadata, not a backend.\n\n"
-    "MULTI-INSTANCE — list_isaac_instances, then set_active_isaac_instance; "
-    "later Isaac calls in this session go there. For containerized Isaac Sim use "
-    "the host-published ports, not the container-internal ones."
-)
+
+def build_instructions(backends: Iterable[str]) -> str:
+    """Write the server's MCP instructions for the backends whose tools it registers.
+
+    A backend that registers nothing is not mentioned, so the instructions
+    never point an agent at a tool it cannot see. The text for each backend
+    comes from its ``BackendSpec``: the summary sentence, its guidance
+    paragraphs and its routing rule.
+
+    Args:
+        backends: Registry names of the backends whose tools are registered.
+
+    Returns:
+        The instructions text.
+    """
+    names = set(backends)
+    specs = [spec for spec in BACKENDS if spec.name in names]
+    intro = "Simul provides tools for interacting with 3D simulation and DCC applications."
+    paragraphs = [
+        " ".join([intro, *(spec.summary for spec in specs)]),
+        "TOOL SELECTION — prefer a granular tool when one covers the operation; they are "
+        "cheaper and return structured results. Every tool parameter's units and "
+        "conventions are in its schema description.",
+    ]
+    paragraphs += [spec.guidance for spec in specs if spec.guidance]
+    routing = [
+        "ROUTING — the backend name appears somewhere inside the tool name, usually as an "
+        "infix (capture_<backend>_viewport):"
+    ]
+    routing += [f"  {spec.routing_rule}" for spec in specs if spec.name != "usd"]
+    if names & {"blender", "unreal"}:
+        routing.append(
+            "  Tools containing 'simready' (SimReady asset helpers) belong to Blender or "
+            "Unreal; each one's description names the runtime it targets."
+        )
+    routing += [f"  {spec.routing_rule}" for spec in specs if spec.name == "usd"]
+    routing.append("  get_tool_usage_stats is server metadata, not a backend.")
+    paragraphs.append("\n".join(routing))
+    return "\n\n".join(paragraphs)
+
 
 _FASTMCP_SUPPORTS_INSTRUCTIONS: bool = (
     "instructions" in inspect.signature(FastMCP).parameters
@@ -202,7 +203,9 @@ class SimulMCPServer(LoggerMixin):
         Args:
             settings: Configuration settings
             backends: Set of backend names to register MCP tools for.
-                      ``None`` (default) registers all available backends.
+                      ``None`` (default) registers all available backends,
+                      Isaac Sim only where it runs (``isaac_sim.enabled``
+                      overrides); naming ``isaac`` registers it on any OS.
                       Valid names: ``isaac``, ``unreal``, ``usd``, ``blender``.
             require_available: When False, register an enabled backend's
                 tools even if its runtime is missing here. Only for listing
@@ -282,12 +285,18 @@ class SimulMCPServer(LoggerMixin):
             client_resolver=self._get_request_isaac_client,
         )
 
+        # Decided before FastMCP exists: the instructions describe exactly
+        # the backends whose tools register.
+        self._registered_backends: Tuple[str, ...] = tuple(
+            spec.name for spec in BACKENDS if self._registers(spec.name)
+        )
+
         mcp_kwargs: Dict[str, Any] = {
             "name": "simul",
             "version": _PACKAGE_VERSION,
         }
         if _FASTMCP_SUPPORTS_INSTRUCTIONS:
-            mcp_kwargs["instructions"] = _MCP_INSTRUCTIONS
+            mcp_kwargs["instructions"] = build_instructions(self._registered_backends)
 
         self.mcp = FastMCP(
             **mcp_kwargs,
@@ -301,9 +310,7 @@ class SimulMCPServer(LoggerMixin):
 
         self.mcp.add_middleware(build_request_context_middleware())
 
-        # Register tools and resources
         self._register_tools()
-        self._register_resources()
 
         self.logger.info("Simul 3D MCP Server initialized")
 
@@ -1122,11 +1129,12 @@ class SimulMCPServer(LoggerMixin):
                 pass
         return None
 
-    def _register_resources(self) -> None:
-        """Register MCP resources for agent context.
+    def _register_isaac_resources(self) -> None:
+        """Register the Isaac Sim scripting references as MCP resources.
 
-        The documents ship inside the package (``simul/resources``) so a
-        wheel install serves them the same way an editable checkout does.
+        Registered with the Isaac tools, which they document. The documents
+        ship inside the package (``simul/resources``) so a wheel install
+        serves them the same way an editable checkout does.
         """
         register_resource = getattr(self.mcp, "resource", None)
         if not callable(register_resource):
@@ -1537,21 +1545,43 @@ class SimulMCPServer(LoggerMixin):
             info["reachable"] = True
         return info
 
+    def _skip_reason(self, name: str) -> Optional[str]:
+        """Return why backend *name* registers no tools whatever its runtime, or None.
+
+        Either the ``backends`` selection left it out or its spec's gate
+        (Isaac Sim's platform check) holds it back.
+        """
+        return backend_skip_reason(name, self.settings, self._backends)
+
     def _backend_enabled(self, name: str) -> bool:
-        """Return True if *name* is in the selected backends (or all when None)."""
-        return self._backends is None or name in self._backends
+        """Return True when *name* is selected and no gate holds its tools back."""
+        return self._skip_reason(name) is None
+
+    def _registers(self, name: str) -> bool:
+        """Return True when backend *name* gets its tools registered.
+
+        An enabled backend without an adapter, or whose runtime is not
+        available in this process, registers nothing: its tools would fail
+        on every call. ``require_available=False`` lists them anyway.
+        """
+        if not self._backend_enabled(name):
+            return False
+        if not self._require_available:
+            return True
+        adapter = self._adapters[name]
+        return adapter is not None and adapter.is_available()
 
     def _register_tools(self) -> None:
-        """Register the tools of every enabled backend whose adapter is available.
+        """Register the tools of the backends ``_registered_backends`` names, then the server's own.
 
-        A backend without an adapter, or whose runtime is not available in
-        this process, registers nothing: its tools would fail on every call.
+        A selected backend that a gate holds back (Isaac Sim on an OS it does
+        not run on) is logged with the reason, so the skip is not silent.
         """
         for spec in BACKENDS:
-            adapter = self._adapters[spec.name]
-            if not self._backend_enabled(spec.name):
-                continue
-            if self._require_available and (adapter is None or not adapter.is_available()):
+            if spec.name not in self._registered_backends:
+                reason = self._skip_reason(spec.name)
+                if reason is not None and reason != NOT_SELECTED:
+                    self.logger.info("%s tools skipped: %s", spec.label, reason)
                 continue
             before = self._registered_tool_names()
             spec.register_tools(self)
@@ -1618,10 +1648,13 @@ class SimulMCPServer(LoggerMixin):
 
         Returns:
             Mapping of every registered backend name to ``{"enabled": bool,
-            "available": bool, "capabilities": list[str]}``. ``enabled`` is
-            whether the backend was selected for tool registration; a
-            backend that is not enabled has no adapter and reports
-            ``available`` false (Isaac excepted, whose adapter always exists).
+            "available": bool, "capabilities": list[str], "skipped":
+            Optional[str]}``. ``enabled`` is whether the backend was selected
+            for tool registration and no gate held it back; ``skipped`` says
+            why it was not (left out of ``backends``, or Isaac Sim on an OS
+            it does not run on) and is None for an enabled backend. A backend
+            that is not enabled has no adapter and reports ``available``
+            false (Isaac excepted, whose adapter always exists).
         """
         return {
             spec.name: self._adapter_capabilities(spec.name, self._adapters[spec.name])
@@ -1633,10 +1666,12 @@ class SimulMCPServer(LoggerMixin):
     ) -> Dict[str, Any]:
         """Build one ``get_capabilities`` entry for a backend."""
         available = adapter is not None and adapter.is_available()
+        skipped = self._skip_reason(backend)
         return {
-            "enabled": self._backend_enabled(backend),
+            "enabled": skipped is None,
             "available": available,
             "capabilities": sorted(adapter.get_capabilities()) if available and adapter else [],
+            "skipped": skipped,
         }
 
 
