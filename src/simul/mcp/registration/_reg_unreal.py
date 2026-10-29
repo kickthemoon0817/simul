@@ -30,9 +30,8 @@ from typing import (
 from fastmcp.tools.tool import ToolResult
 from pydantic import BaseModel, Field, create_model, model_validator
 
-from ...tool_surfaces import THIN_UNREAL_TOOLS
 from ._helpers import describe_params
-from ._unreal_tools import REQUIRED, UNREAL_TOOLS, ToolParam, UnrealTool
+from ._unreal_tools import REQUIRED, ToolParam, UnrealTool, surface_tools
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -64,9 +63,7 @@ def register_unreal_tools(server: "SimulMCPServer", thin: bool = False) -> None:
     # and this module must import even where the Unreal backend is absent.
     from ...adapters.unreal_runtime import UnrealRuntimeSession
 
-    for spec in UNREAL_TOOLS:
-        if thin and spec.name not in THIN_UNREAL_TOOLS:
-            continue
+    for spec in surface_tools(thin):
         register = server._script_tool if spec.script else server.mcp.tool
         documented = describe_params(getattr(UnrealRuntimeSession, spec.method)) if spec.method else {}
         register(
@@ -137,6 +134,7 @@ def build_tool_wrapper(
             spec.usage(arguments) if spec.usage is not None else None,
             request_model=request_model,
             request_kwargs=arguments,
+            input_echo=spec.echo,
         )
 
     tool.__name__ = spec.name

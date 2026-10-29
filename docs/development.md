@@ -73,7 +73,9 @@ wheels exist for Python 3.11 and 3.13 only.
   `simul.mcp`. Unreal tools are `UnrealTool` declarations in
   `registration/_unreal_tools.py` (name, description, hints, parameters,
   response model, session method); `_reg_unreal.py` builds each wrapper, its
-  request model and the session call from them. The USD module registers its
+  request model and the session call from them, and
+  `UnrealRuntimeAdapter.get_capabilities` reports the names a configuration
+  registers from the same table. The USD module registers its
   wrappers by hand over its adapter session. Every call goes through one shared envelope
   (`SimulMCPServer._run_envelope`): the rate limit, the backend's admission
   hook (Isaac's claim enforcement and per-instance lock), request

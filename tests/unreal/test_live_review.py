@@ -278,3 +278,63 @@ print(json.dumps({'selection': [a.get_path_name() for a in subsystem.get_selecte
             await client.close()
 
     asyncio.run(run())
+
+
+def test_generate_and_analyze_a_procedural_scene():
+    """Both tools called /Script/UnrealEd.Default__EditorLevelLibrary, which
+    UE 5.7 does not have (HTTP 400), and the generator a function no Unreal
+    version has. The scene is spawned high above the level and removed."""
+    from simul.adapters._unreal_procedural import plan_scene
+
+    async def run():
+        client = session()
+        seed = uuid.uuid4().int % 100000
+        arguments = ("warehouse", {"seed": seed, "rows": 2, "props": 4}, [0, 0, 20000], [1500, 1200, 20400])
+        plan = plan_scene(*arguments)
+        tag = plan.tag
+        try:
+            scene = await client.generate_procedural_scene(*arguments)
+            assert not scene.get("error"), scene
+            assert (scene["tag"], scene["folder"]) == (tag, f"Simul/Warehouse_{seed}")
+            paths = scene["actors_spawned"]
+            assert len(paths) == len(plan.pieces) == 1 + 4 + 2 + 4
+            listed = await client.list_actors(tag_filter=tag, max_results=50)
+            by_path = {actor["path"]: actor for actor in listed["actors"]}
+            assert set(by_path) == set(paths), listed
+            for piece, path in zip(plan.pieces, paths):
+                assert by_path[path]["name"] == piece.label
+                assert by_path[path]["location"] == pytest.approx(list(piece.center), abs=0.01)
+                assert by_path[path]["scale"] == pytest.approx([s / 100 for s in piece.size], abs=1e-4)
+                assert by_path[path]["mobility"] == ("Movable" if piece.movable else "Static")
+
+            analysis = await client.analyze_scene_for_robotics(actor_filter="Warehouse_")
+            assert not analysis.get("error"), analysis
+            ours = set(paths)
+            floor = [entry for entry in analysis["traversable_surfaces"] if entry["path"] in ours]
+            assert [entry["path"] for entry in floor] == [paths[0]]
+            assert floor[0]["size"] == pytest.approx([1500, 1200, 10], abs=0.01)
+            assert floor[0]["top_z"] == pytest.approx(20010, abs=0.01)
+            graspable = {entry["path"]: entry for entry in analysis["graspable_objects"] if entry["path"] in ours}
+            expected = {
+                path for piece, path in zip(plan.pieces, paths) if piece.movable and max(piece.size) <= 60
+            }
+            assert set(graspable) == expected
+            assert all(entry["mass_kg"] > 0 for entry in graspable.values())
+            summary = analysis["collision_summary"]
+            assert summary["missing_simple_collision"] == 0
+            assert summary["static_mesh_components"] >= len(paths)
+
+            level = await client.analyze_scene_for_robotics()
+            assert not level.get("error"), level
+            assert level["total_actors_analyzed"] >= len(paths)
+        finally:
+            await client._execute_python(
+                "import unreal\n"
+                "subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)\n"
+                "for actor in subsystem.get_all_level_actors():\n"
+                f"    if {tag!r} in [str(t) for t in actor.tags]:\n"
+                "        subsystem.destroy_actor(actor)"
+            )
+            await client.close()
+
+    asyncio.run(run())

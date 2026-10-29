@@ -4161,7 +4161,9 @@
      "details": {
       "input": {
        "code": "print(1)",
-       "mode": "Bogus"
+       "code_bytes": 8,
+       "mode": "Bogus",
+       "code_truncated": false
       }
      }
     }

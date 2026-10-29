@@ -826,17 +826,17 @@ class TestUnrealRuntimeAdapter:
     def test_get_capabilities_available(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Capabilities include Phase 0 endpoints when available."""
+        """The full surface reports every declared tool (tests/unreal/test_unreal_capabilities.py covers the rest)."""
+        from simul.mcp.registration._unreal_tools import UNREAL_TOOLS
+
         monkeypatch.setattr(unreal_runtime, "UNREAL_AVAILABLE", True)
-        settings = Settings(unreal={"enabled": True})
+        settings = Settings(unreal={"enabled": True, "tool_surface": "full"})
         adapter = unreal_runtime.UnrealRuntimeAdapter(settings=settings)
 
         caps = adapter.get_capabilities()
 
-        assert "unreal_health_check" in caps
-        assert "get_unreal_engine_info" in caps
-        assert "get_unreal_loaded_map" in caps
-        assert len(caps) == 53
+        assert caps == [spec.name for spec in UNREAL_TOOLS]
+        assert {"ping_unreal", "list_unreal_instances", "control_unreal_ui"} <= set(caps)
 
     def test_get_capabilities_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1623,19 +1623,30 @@ class TestUnrealRuntimeSessionPhase7:
         assert result["failed"] == 1
 
     def test_generate_procedural_scene_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """generate_procedural_scene returns spawned actors."""
+        """generate_procedural_scene spawns the planned pieces in one editor script."""
         session = self._make_session(monkeypatch)
-        session._session = SmartFakeClientSession(put_responses={
-            "/remote/object/call": FakeResponse({
-                "ActorsSpawned": ["/Game/Maps/T.T:PersistentLevel.Shelf_0"],
-                "TotalSpawned": 1,
-            }),
-        })
+        sent = []
+        planned = 1 + 2 + 2  # floor, two walls and two props (tests/unreal/test_robotics_scene_tools.py covers more)
+        paths = [f"/Game/Maps/T.T:PersistentLevel.StaticMeshActor_{n}" for n in range(planned)]
 
-        result = asyncio.run(session.generate_procedural_scene(scene_type="warehouse"))
+        def put(path: str, json: Any = None) -> FakeResponse:
+            sent.append(json)
+            return python_json_response({"actors_spawned": paths})
 
-        assert result["scene_type"] == "warehouse"
-        assert result["total_spawned"] == 1
+        session._session = SmartFakeClientSession(put_fn=put)
+
+        result = asyncio.run(session.generate_procedural_scene(scene_type="Corridor", parameters={"props": 2}))
+
+        assert len(sent) == 1
+        assert "EditorLevelLibrary" not in json.dumps(sent)
+        assert result == {
+            "actors_spawned": paths,
+            "total_spawned": planned,
+            "scene_type": "corridor",
+            "seed": 42,
+            "tag": "simul_corridor_42",
+            "folder": "Simul/Corridor_42",
+        }
 
 
 # ---------------------------------------------------------------------------

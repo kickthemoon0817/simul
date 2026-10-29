@@ -2075,13 +2075,13 @@
   {
    "name": "analyze_unreal_scene_for_robotics",
    "title": null,
-   "description": "Analyze the scene for robotics use-cases (traversability, graspability, collision).",
+   "description": "Classify level actors for robotics from their collision setup: floor-like surfaces a robot can stand on, small Movable objects it can grasp, and collision counts and problems (static meshes with physics collision but no simple shapes). Uses the bounding box of each actor's collision-enabled components; the thresholds come back as criteria.",
    "inputSchema": {
     "additionalProperties": false,
     "properties": {
      "analysis_types": {
       "default": "",
-      "description": "Analyses to run (traversability, graspability, collision_complexity).",
+      "description": "Comma-separated analyses: traversability, graspability, collision_complexity. Empty runs all three.",
       "type": "string"
      },
      "actor_filter": {
@@ -2094,7 +2094,7 @@
        }
       ],
       "default": null,
-      "description": "Filter to specific actor subtree."
+      "description": "Only analyze actors whose label or object path contains this text, ignoring case; empty or null analyzes every actor."
      }
     },
     "type": "object"
@@ -2118,27 +2118,27 @@
   {
    "name": "generate_unreal_procedural_scene",
    "title": null,
-   "description": "Generate a procedural scene (warehouse, outdoor, room, corridor).",
+   "description": "Build a room, corridor, warehouse or outdoor test scene from Engine basic shapes inside the bounds, in one undoable transaction; the same arguments give the same scene. Returns the spawned actor paths and the tag and outliner folder that group them.",
    "inputSchema": {
     "additionalProperties": false,
     "properties": {
      "scene_type": {
-      "description": "Scene type (warehouse, outdoor, room, corridor).",
+      "description": "room, corridor, warehouse or outdoor.",
       "type": "string"
      },
      "parameters": {
       "default": "{}",
-      "description": "Generation params (size, density, seed, etc.).",
+      "description": "JSON object; lengths in cm, counts 0 to 200. Any type: seed (integer, 42). room: wall_thickness (20), wall_height (bounds top), door_width (100, 0 for none), props (one per 16 m2 of floor). corridor: wall_thickness, wall_height, props (one per 3 m). warehouse: wall_thickness, wall_height, rows (as many as fit), shelf_depth (100), shelf_height (300, capped by the bounds), aisle_width (250), props (one per 16 m2 of free floor). outdoor: trees (one per 20 m2), rocks (one per 10 m2). Props are Movable boxes; everything else is Static.",
       "type": "string"
      },
      "bounds_min": {
       "default": "",
-      "description": "Min bounds [x, y, z] in cm.",
+      "description": "Minimum corner as comma-separated x,y,z in cm; empty is 0,0,0.",
       "type": "string"
      },
      "bounds_max": {
       "default": "",
-      "description": "Max bounds [x, y, z] in cm.",
+      "description": "Maximum corner as comma-separated x,y,z in cm; empty is 1000,1000,500.",
       "type": "string"
      }
     },

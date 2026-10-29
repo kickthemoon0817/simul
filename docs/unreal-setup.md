@@ -90,6 +90,15 @@ enable them just because you're running simul.
   Remote Control runs without authentication and we enable Python
   execution by default — a public bind without acknowledgment would
   silently expose arbitrary Python execution to the network.
+- **Setup stops at a passphrase refusal.** If Remote Control answers HTTP 401
+  (the editor enforces a passphrase and the poll sent none or a wrong one),
+  setup stops polling at once instead of waiting out `--wait-timeout`, and
+  exits 1 with `error_type: AuthenticationError` and the `UNREAL__PASSPHRASE`
+  hint `unreal_health_check` reports. Set `UNREAL__PASSPHRASE` and re-run with
+  `--no-launch`; an editor started before its passphrase changed keeps the old
+  settings until it restarts. Whenever setup does not connect, its JSON has
+  `success: false` with `error` and `error_type` (`AuthenticationError`,
+  `EditorExited` or `TimeoutError`).
 
 ## Quick reference
 
