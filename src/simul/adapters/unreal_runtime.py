@@ -1090,11 +1090,13 @@ class UnrealRuntimeSession(LoggerMixin):
                 # Remote Control answered, so the editor is reachable; callers
                 # still reading ``connected`` must not take it as usable.
                 return {"reachable": True, "connected": False, **refusal}
-            self.logger.warning("Health check connectivity failed: %s", exc)
+            # A timeout's text is empty; say what happened, as ping does.
+            error = str(exc) or f"No answer within {self.timeout}s"
+            self.logger.warning("Health check connectivity failed: %s", error)
             return {
                 "reachable": False,
                 "connected": False,
-                "error": str(exc),
+                "error": error,
             }
 
         # One script for all metadata: a single Remote Control round trip

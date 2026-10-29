@@ -709,6 +709,25 @@ def test_ping_says_when_its_request_never_left_this_machine(
     assert (result.get("error_type") == PROBE_NOT_SENT) is not_sent
 
 
+def test_ping_and_health_both_name_a_timeout() -> None:
+    """A timeout's text is empty: neither probe reports a blank error."""
+    session = UnrealRuntimeSession(Settings())
+
+    async def http_get(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        raise asyncio.TimeoutError()
+
+    session._http_get = http_get  # type: ignore[method-assign]
+    ping = asyncio.run(session.ping())
+    health = asyncio.run(session.health_check())
+
+    assert ping["error"] == f"No answer within {session.ping_timeout}s"
+    assert health == {
+        "reachable": False,
+        "connected": False,
+        "error": f"No answer within {session.timeout}s",
+    }
+
+
 def test_a_scan_names_the_ports_it_could_not_probe(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
