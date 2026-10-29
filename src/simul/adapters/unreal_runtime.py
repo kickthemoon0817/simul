@@ -112,9 +112,12 @@ class UnrealScriptFailure(RuntimeError):
 _PENDING_CLOSES: Set["asyncio.Task[None]"] = set()
 
 # A transform component reads back as applied within these tolerances. Unreal
-# stores transforms as doubles, so the slack only absorbs conversion noise.
+# stores transforms as doubles, so the location and scale slack only absorbs
+# conversion noise. A rotation needs more: past |pitch| ~89.918 degrees
+# FQuat::Rotator crosses SINGULARITY_THRESHOLD and snaps the pitch to +-90,
+# which moves the orientation read back by up to ~0.115 degrees.
 _TRANSFORM_RELATIVE_TOLERANCE = 1e-3
-_ROTATION_TOLERANCE_DEGREES = 0.01
+_ROTATION_TOLERANCE_DEGREES = 0.2
 
 
 def _vector3(name: str, value: Any, axes: str) -> List[float]:
@@ -143,9 +146,10 @@ def _vector3(name: str, value: Any, axes: str) -> List[float]:
 def _rotator_quaternion(rotation: Sequence[float]) -> Tuple[float, float, float, float]:
     """Quaternion (x, y, z, w) of a [pitch, yaw, roll] rotator in degrees.
 
-    The same composition as ``FRotator::Quaternion``.
+    The same composition as ``FRotator::Quaternion``, which drops whole turns
+    first: converting a huge angle to radians directly loses its remainder.
     """
-    pitch, yaw, roll = (math.radians(angle) / 2 for angle in rotation)
+    pitch, yaw, roll = (math.radians(math.fmod(angle, 360.0)) / 2 for angle in rotation)
     sp, cp = math.sin(pitch), math.cos(pitch)
     sy, cy = math.sin(yaw), math.cos(yaw)
     sr, cr = math.sin(roll), math.cos(roll)
@@ -163,8 +167,9 @@ def _transform_component_applied(
     """Whether a read-back transform component matches the value written.
 
     Rotations are compared as orientations: Unreal reads a rotator back
-    normalised from a quaternion, so a yaw of 270 returns as -90 and a pitch
-    past 90 comes back with yaw and roll flipped.
+    normalised from a quaternion, so a yaw of 270 returns as -90, a pitch
+    past 90 comes back with yaw and roll flipped, and a pitch within ~0.08
+    degrees of +-90 comes back snapped to +-90.
     """
     if name == "rotation":
         dot = sum(a * b for a, b in zip(_rotator_quaternion(wanted), _rotator_quaternion(got)))
@@ -2535,11 +2540,14 @@ if component.is_simulating_physics() != {target!r}:
             f"component = actor_component(actor_at({actor_path!r}), unreal.PrimitiveComponent)"
         ]
         if collision_preset:
-            # Unreal renames an unknown preset to Custom instead of failing.
+            # Unreal renames an unknown preset to Custom instead of failing;
+            # put the previous preset back so the error leaves nothing changed.
             lines += [
+                "previous_preset = component.get_collision_profile_name()",
                 f"component.set_collision_profile_name({collision_preset!r})",
                 "if str(component.get_collision_profile_name()).lower() != "
                 f"{collision_preset.lower()!r}:",
+                "    component.set_collision_profile_name(previous_preset)",
                 f"    raise ValueError('Unknown collision preset: ' + {collision_preset!r})",
             ]
         if collision_enabled is not None:

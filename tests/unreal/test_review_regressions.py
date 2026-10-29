@@ -478,13 +478,18 @@ async def test_collision_reports_what_the_component_reads_back(script_session):
 
 
 @pytest.mark.asyncio
-async def test_unknown_collision_preset_is_an_error(script_session):
+async def test_unknown_collision_preset_is_an_error_that_changes_nothing(script_session):
+    """Unreal renames the component to Custom on an unknown preset; the
+    error puts the previous preset back and never reaches the mode write."""
     session, actor, _ = script_session
+    component = actor.root_component
+    await session.set_collision(actor.path, "OverlapAll")
 
-    result = await session.set_collision(actor.path, "NotAPreset")
+    result = await session.set_collision(actor.path, "NotAPreset", collision_enabled=False)
 
     assert result["success"] is False
     assert "Unknown collision preset: NotAPreset" in result["error"]
+    assert (component.profile, component.collision) == ("OverlapAll", 1)
 
 
 @pytest.mark.asyncio

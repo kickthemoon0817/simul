@@ -129,6 +129,9 @@ def test_transform_light_and_collision_keep_what_is_not_given():
             assert not turned.get("error"), turned
             assert turned["rotation"] == pytest.approx([0, -90, 0], abs=1e-6)
             assert turned["location"] == pytest.approx([500, 20, 30])
+            # Unreal reads a pitch this close to the pole back snapped to 90.
+            near_pole = await client.set_actor_transform(path, rotation=[89.95, 0, 0])
+            assert not near_pole.get("error"), near_pole
 
             overlap = await client.set_collision(path, "OverlapAll")
             assert overlap["collision_preset"] == "OverlapAll", overlap
@@ -140,6 +143,13 @@ print(json.dumps({{'mode': c.get_collision_enabled().name}}))
             assert mode["mode"] == "QUERY_ONLY", mode
             unknown = await client.set_collision(path, "NotAPreset")
             assert unknown["success"] is False, unknown
+            untouched = await client._execute_json_script(f"""
+import unreal, json
+c = unreal.load_object(None, {path!r}).static_mesh_component
+print(json.dumps({{'profile': str(c.get_collision_profile_name()),
+                   'mode': c.get_collision_enabled().name}}))
+""")
+            assert untouched == {"profile": "OverlapAll", "mode": "QUERY_ONLY"}, untouched
 
             spawned = await client.spawn_actor("/Script/Engine.PointLight")
             light = spawned["actor_path"]

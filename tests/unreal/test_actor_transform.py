@@ -290,7 +290,14 @@ def test_the_actor_path_is_data_not_python() -> None:
         ("rotation", [0, 270, 0], [0, -90, 0], True),
         ("rotation", [120, 0, 0], [60, 180, 180], True),
         ("rotation", [10, 20, 30], [9.999999999999998, 19.999999999999986, 29.999999999999996], True),
+        # Within ~0.08 degrees of the pole FQuat::Rotator snaps the pitch to 90
+        # (and re-derives yaw and roll); the actor did turn.
+        ("rotation", [89.95, 0, 0], [90.0, 0.0, 0.0], True),
+        ("rotation", [89.93, 45, 10], [90.0, 90.0, 55.049476], True),
+        # FRotator::Quaternion drops whole turns before converting.
+        ("rotation", [0, 1e17, 0], [0, -80, 0], True),
         ("rotation", [0, 0, 0], [0, 1, 0], False),
+        ("rotation", [0, 0, 0], [0, 0.5, 0], False),
         ("location", [1, 2, 3], [1, 2, 3.0000001], True),
         ("location", [500, 0, 0], [0, 0, 0], False),
         ("scale", [2, 3, 4], [1, 1, 1], False),
