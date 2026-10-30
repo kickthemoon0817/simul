@@ -552,7 +552,8 @@ print(json.dumps(place()))
 # See UnrealRuntimeSession.analyze_scene_for_robotics for the classification.
 # While PIE runs the editor world is read (level_actors) and pie_active says so;
 # StaticMeshEditorSubsystem then answers -1 and the default complexity for
-# every mesh (observed on UE 5.7.4), so the mesh collision counts are null.
+# every mesh (observed on UE 5.7.4), so the mesh collision counts are null, and
+# so is the list of actors missing simple collision, which those answers decide.
 ROBOTICS_SCENE_ANALYSIS = EDITOR_WORLD + """
 import math
 analyses = set(args["analyses"])
@@ -641,7 +642,8 @@ for actor in level_actors():
         graspable.append(entry(actor, size, simulate_physics=bool(simulated),
                                mass_kg=round(mass, 3) if mass > 0 else None))
 if pie:
-    for key in ("simple_shapes", "convex_hulls", "complex_collision", "missing_simple_collision"):
+    for key in ("simple_shapes", "convex_hulls", "complex_collision", "missing_simple_collision",
+                "missing_simple_collision_actors"):
         summary[key] = None
 print(json.dumps({"traversable_surfaces": traversable, "graspable_objects": graspable,
                   "collision_summary": summary if "collision_complexity" in analyses else {},

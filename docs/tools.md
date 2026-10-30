@@ -158,8 +158,9 @@ Behaviour worth knowing:
     world, not the running game. Because Unreal's level listing is withheld,
     the listings enumerate the editor world directly and can include the
     level's builder brush and engine helper actors the Outliner hides; the
-    robotics analysis reports its static mesh collision counts as `null`,
-    since Unreal does not report them during PIE.
+    robotics analysis reports its static mesh collision counts, and the list
+    of actors missing simple collision, as `null`, since Unreal does not
+    report mesh collision during PIE.
   - Editing actors already in the level by path (transform, lights, collision,
     physics settings, visibility, materials) keeps working and changes the
     editor world.

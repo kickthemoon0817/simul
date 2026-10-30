@@ -3132,9 +3132,10 @@ if component.is_simulating_physics() != {target!r}:
             (those that ran), criteria and pie_active (while Play In Editor
             runs, the editor world is read, as in ``list_actors``, and the
             static mesh collision counts simple_shapes, convex_hulls,
-            complex_collision and missing_simple_collision are null: Unreal's
-            StaticMeshEditorSubsystem reports none then); or a ScriptError
-            envelope when the editor script failed.
+            complex_collision and missing_simple_collision are null, as is
+            missing_simple_collision_actors: Unreal's StaticMeshEditorSubsystem
+            reports none then); or a ScriptError envelope when the editor
+            script failed.
 
         Raises:
             ValueError: An analysis type is not one of the three.

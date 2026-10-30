@@ -507,7 +507,10 @@ def test_mesh_collision_counts_are_null_while_pie_runs(monkeypatch: pytest.Monke
     summary = during["collision_summary"]
     mesh_counts = ("simple_shapes", "convex_hulls", "complex_collision", "missing_simple_collision")
     assert [summary[key] for key in mesh_counts] == [None] * 4
-    assert summary["missing_simple_collision_actors"] == []
+    # The list those answers decide is unknown too, not empty: outside PIE the
+    # same scene lists an actor missing simple collision.
+    assert outside["collision_summary"]["missing_simple_collision_actors"] == [LEVEL + "Statue"]
+    assert summary["missing_simple_collision_actors"] is None
     # Everything that does not come from the mesh asset is the same as outside PIE.
     for key in ("total_actors", "with_collision", "physics_collision", "static_mesh_components", "by_profile"):
         assert summary[key] == outside["collision_summary"][key], key

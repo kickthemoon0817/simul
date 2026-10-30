@@ -960,7 +960,8 @@ class UnrealAnalyzeSceneForRoboticsResponse(BaseModel):
         default_factory=dict,
         description=(
             "Collision counts and static mesh collision setup; empty unless collision_complexity ran. "
-            "While Play In Editor runs the static mesh collision counts are null"
+            "While Play In Editor runs the static mesh collision counts and "
+            "missing_simple_collision_actors are null"
         ),
     )
     total_actors_analyzed: int = Field(0, description="Number of actors analyzed")
