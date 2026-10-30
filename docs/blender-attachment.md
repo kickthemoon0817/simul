@@ -308,7 +308,10 @@ existing user's editor. It checks preservation of unsaved work, main-thread
 execution, named UI actions with scripting disabled, object editing, a world-space
 bounding box, camera focus that keeps the whole object in the frame and clip range
 (a 60 m cube included, and a camera parented to a moved rig with a quaternion
-rotation), world-space camera placement, refusal of an object-search pattern
+rotation), world-space camera placement, a camera whose Track To constraint
+overrides focus and placement (reported with the evaluated pose and the
+constraint, left unmuted, and held once the user mutes it), a Child Of camera
+whose scale placement no longer compounds, refusal of an object-search pattern
 that can backtrack for hours, a force field without a location, JPEG capture
 of the 3D View in Edit Mode without a camera, a render through a temporary camera,
 explicit script-output truncation, multiple windows, scene/file changes,
