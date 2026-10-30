@@ -126,12 +126,44 @@ Behaviour worth knowing:
 - `generate_unreal_procedural_scene` builds a room, corridor, warehouse or
   outdoor scene from Engine basic shapes inside the bounds. The layout is
   planned before anything is spawned, so one that does not fit fails without
-  touching the level, and the same arguments give the same scene. The actors
-  are spawned in one undoable transaction; if one fails, those already spawned
-  are removed. They are labelled `<Scene>_<Kind>_<n>`, filed in the outliner
-  folder `Simul/<Scene>_<seed>` and tagged `simul_procedural` and
-  `simul_<scene>_<seed>`, which `list_unreal_actors` filters on. Props are
-  Movable boxes; everything else is Static.
+  touching the level, and the same arguments give the same layout. The seed is
+  an integer from 0 to 4294967295 (2³² − 1), and each seed gives its own
+  layout. The actors are spawned in one undoable transaction. They are labelled
+  `<Scene>_<Kind>_<n>`, tagged `simul_procedural` and
+  `simul_<scene>_<seed>_<generation>`, and filed in the outliner folder
+  `Simul/<Scene>_<seed>_<generation>`, where `<generation>` is 8 hex digits
+  drawn fresh for every call: generating the same scene twice gives two groups
+  with their own tag and folder, and the tag is what `list_unreal_actors`
+  filters on. If a spawn fails, every actor already spawned is removed (one
+  Unreal refuses to remove is listed in `details.actors_left`) and the
+  transaction is cancelled. The actors are filed in their folder only once all
+  have spawned, because Unreal keeps an outliner folder, empty, after its
+  actors go and its Python API cannot delete one; a failed call therefore
+  leaves no folder behind. Props are Movable boxes; everything else is Static.
+- While Play In Editor (or Simulate In Editor) runs, Unreal's editor refuses
+  changes to the editor world: it spawns and destroys no actors, lists and
+  selects none, and hands out no editor world. The tools detect it:
+  - `spawn_unreal_actor`, `delete_unreal_actor`,
+    `generate_unreal_procedural_scene`, the mesh tools that create an actor
+    (`generate_unreal_mesh_primitive`, `compute_unreal_convex_hull`,
+    `decompose_unreal_convex_hull`, `convert_unreal_mesh_format` to
+    `dynamic_mesh`), `import_unreal_usd`, `export_unreal_usd` and, in attached
+    mode, every `control_unreal_ui` action except `inspect` and `clear_cursor`
+    return `error_type: "PIEActive"`, with `details.hint` naming the way out:
+    `control_unreal_simulation` with action `stop` (CLI: `simul unreal sim stop`).
+  - `list_unreal_actors`, `get_unreal_actor_by_semantic_label`,
+    `summarize_unreal_scene`, `analyze_unreal_scene_for_robotics`,
+    `get_unreal_actor_info`, `get_unreal_loaded_map` and
+    `get_unreal_engine_info` report `pie_active: true` and read the editor
+    world, not the running game. Because Unreal's level listing is withheld,
+    the listings enumerate the editor world directly and can include the
+    level's builder brush and engine helper actors the Outliner hides; the
+    robotics analysis reports its static mesh collision counts, and the list
+    of actors missing simple collision, as `null`, since Unreal does not
+    report mesh collision during PIE.
+  - Editing actors already in the level by path (transform, lights, collision,
+    physics settings, visibility, materials) keeps working and changes the
+    editor world.
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.

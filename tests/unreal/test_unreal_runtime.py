@@ -240,23 +240,26 @@ class TestUnrealRuntimeSession:
         assert any("boom" in w for w in result["warnings"])
 
     def test_get_loaded_map(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Loaded map returns the map path."""
+        """Loaded map returns the map path the editor-world script printed."""
         session = self._make_session(monkeypatch)
+        scripts = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
             fn = (json or {}).get("functionName", "")
             if fn == "ExecutePythonCommandEx":
-                return FakeResponse({
-                    "ReturnValue": True,
-                    "CommandResult": "'/Game/Maps/TestMap'",
-                })
+                scripts.append(json["parameters"])
+                return python_json_response({"map_path": "/Game/Maps/TestMap", "pie_active": False})
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
         result = asyncio.run(session.get_loaded_map())
 
-        assert result["map_path"] == "/Game/Maps/TestMap"
+        assert result == {"map_path": "/Game/Maps/TestMap", "pie_active": False}
+        # One script, which finds the editor world while PIE runs too.
+        (parameters,) = scripts
+        assert parameters["ExecutionMode"] == "ExecuteFile"
+        assert "editor_world()" in parameters["PythonCommand"]
 
     def test_close_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Session close shuts down the underlying HTTP client."""
@@ -1645,6 +1648,7 @@ class TestUnrealRuntimeSessionPhase7:
             return python_json_response({"actors_spawned": paths})
 
         session._session = SmartFakeClientSession(put_fn=put)
+        monkeypatch.setattr(unreal_runtime, "new_generation", lambda: "0badc0de")
 
         result = asyncio.run(session.generate_procedural_scene(scene_type="Corridor", parameters={"props": 2}))
 
@@ -1655,8 +1659,8 @@ class TestUnrealRuntimeSessionPhase7:
             "total_spawned": planned,
             "scene_type": "corridor",
             "seed": 42,
-            "tag": "simul_corridor_42",
-            "folder": "Simul/Corridor_42",
+            "tag": "simul_corridor_42_0badc0de",
+            "folder": "Simul/Corridor_42_0badc0de",
         }
 
 

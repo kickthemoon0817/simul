@@ -346,6 +346,17 @@ print(json.dumps({'selection': [a.get_path_name() for a in subsystem.get_selecte
     asyncio.run(run())
 
 
+def _remove_tagged(prefix):
+    """Editor Python removing every level actor with a tag starting with ``prefix``."""
+    return (
+        "import unreal\n"
+        "subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)\n"
+        "for actor in subsystem.get_all_level_actors():\n"
+        f"    if any(str(t).startswith({prefix!r}) for t in actor.tags):\n"
+        "        subsystem.destroy_actor(actor)"
+    )
+
+
 def test_generate_and_analyze_a_procedural_scene():
     """Both tools called /Script/UnrealEd.Default__EditorLevelLibrary, which
     UE 5.7 does not have (HTTP 400), and the generator a function no Unreal
@@ -357,11 +368,14 @@ def test_generate_and_analyze_a_procedural_scene():
         seed = uuid.uuid4().int % 100000
         arguments = ("warehouse", {"seed": seed, "rows": 2, "props": 4}, [0, 0, 20000], [1500, 1200, 20400])
         plan = plan_scene(*arguments)
-        tag = plan.tag
+        prefix = f"simul_warehouse_{seed}_"
         try:
             scene = await client.generate_procedural_scene(*arguments)
             assert not scene.get("error"), scene
-            assert (scene["tag"], scene["folder"]) == (tag, f"Simul/Warehouse_{seed}")
+            tag = scene["tag"]
+            generation = tag[len(prefix):]
+            assert tag.startswith(prefix) and len(generation) == 8, scene
+            assert scene["folder"] == f"Simul/Warehouse_{seed}_{generation}", scene
             paths = scene["actors_spawned"]
             assert len(paths) == len(plan.pieces) == 1 + 4 + 2 + 4
             listed = await client.list_actors(tag_filter=tag, max_results=50)
@@ -394,13 +408,135 @@ def test_generate_and_analyze_a_procedural_scene():
             assert not level.get("error"), level
             assert level["total_actors_analyzed"] >= len(paths)
         finally:
-            await client._execute_python(
-                "import unreal\n"
-                "subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)\n"
-                "for actor in subsystem.get_all_level_actors():\n"
-                f"    if {tag!r} in [str(t) for t in actor.tags]:\n"
-                "        subsystem.destroy_actor(actor)"
+            await client._execute_python(_remove_tagged(prefix))
+            await client.close()
+
+    asyncio.run(run())
+
+
+# Editor-side counts of outliner folder objects (World Partition levels file
+# folders as ActorFolder objects; others have none, and count 0) and of the
+# actors carrying a tag prefix.
+_LEVEL_STATE = """
+import json, unreal
+folders = 0
+for obj in unreal.ObjectIterator(unreal.Object):
+    try:
+        full = unreal.Object.get_full_name(obj)
+    except Exception:
+        continue
+    if full.startswith("ActorFolder ") and "Default__" not in full:
+        folders += 1
+actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors()
+tagged = [a for a in actors if any(str(t).startswith(args["prefix"]) for t in a.tags)]
+print(json.dumps({"folders": folders, "tagged": len(tagged),
+                  "in_folder": sorted({str(a.get_folder_path()) for a in tagged})}))
+"""
+
+
+def test_generating_a_scene_twice_files_each_call_apart():
+    """The same scene type and seed used to share one tag and outliner folder."""
+
+    async def run():
+        client = session()
+        seed = uuid.uuid4().int % 100000
+        prefix = f"simul_room_{seed}_"
+        arguments = ("room", {"seed": seed, "props": 1}, [0, 0, 21000], [600, 600, 21300])
+        try:
+            first = await client.generate_procedural_scene(*arguments)
+            second = await client.generate_procedural_scene(*arguments)
+            assert not first.get("error") and not second.get("error"), (first, second)
+            assert first["tag"] != second["tag"] and first["folder"] != second["folder"]
+            for scene in (first, second):
+                listed = await client.list_actors(tag_filter=scene["tag"], max_results=50)
+                assert sorted(a["path"] for a in listed["actors"]) == sorted(scene["actors_spawned"]), listed
+                state = await client._execute_json_script(f"args = {{'prefix': {scene['tag']!r}}}\n" + _LEVEL_STATE)
+                assert state["in_folder"] == [scene["folder"]], state
+        finally:
+            await client._execute_python(_remove_tagged(prefix))
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_failed_procedural_scene_leaves_no_actor_or_folder(monkeypatch):
+    """Rollback used to leave the scene's outliner folders behind, empty."""
+    import dataclasses
+
+    from simul.adapters import unreal_runtime
+
+    real_plan = unreal_runtime.plan_scene
+
+    def broken_plan(*args, **kwargs):
+        plan = real_plan(*args, **kwargs)
+        pieces = list(plan.pieces)
+        # Three pieces spawn before the fourth names a mesh that does not exist.
+        pieces[3] = dataclasses.replace(pieces[3], mesh="/Engine/BasicShapes/DoesNotExist.DoesNotExist")
+        return dataclasses.replace(plan, pieces=tuple(pieces))
+
+    monkeypatch.setattr(unreal_runtime, "plan_scene", broken_plan)
+
+    async def run():
+        client = session()
+        seed = uuid.uuid4().int % 100000
+        state_script = f"args = {{'prefix': 'simul_room_{seed}_'}}\n" + _LEVEL_STATE
+        try:
+            before = await client._execute_json_script(state_script)
+            result = await client.generate_procedural_scene(
+                "room", {"seed": seed, "props": 2}, [0, 0, 22000], [600, 600, 22300]
             )
+            after = await client._execute_json_script(state_script)
+            assert result["error_type"] == "SpawnError", result
+            missing = "/Engine/BasicShapes/DoesNotExist.DoesNotExist"
+            assert result["error"] == "Spawned nothing: no static mesh at " + missing
+            assert after == before == {"folders": before["folders"], "tagged": 0, "in_folder": []}, (before, after)
+        finally:
+            await client._execute_python(_remove_tagged(f"simul_room_{seed}_"))
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_play_in_editor_refuses_editor_changes_and_flags_reads():
+    """While PIE ran, spawn told the agent to pass another class or asset,
+    delete reported deleted false, the reads returned 0 actors and the
+    loaded map raised on a None editor world."""
+
+    async def run():
+        client = session()
+        path = await spawn_cube(client)
+        try:
+            map_before = (await client.get_loaded_map())["map_path"]
+            started = await client.control_simulation("start")
+            assert started.get("state") == "playing", started
+
+            spawned = await client.spawn_actor("/Engine/BasicShapes/Cube.Cube")
+            assert spawned["error_type"] == "PIEActive", spawned
+            assert "control_unreal_simulation" in spawned["details"]["hint"], spawned
+            scene = await client.generate_procedural_scene("room", {"props": 0}, [0, 0, 23000], [600, 600, 23300])
+            assert scene["error_type"] == "PIEActive", scene
+            deleted = await client.delete_actor(path)
+            assert deleted["error_type"] == "PIEActive", deleted
+
+            listed = await client.list_actors(tag_filter="simul_review")
+            assert listed["pie_active"] is True and path in [a["path"] for a in listed["actors"]], listed
+            found = await client.get_actor_by_semantic_label("simul_review")
+            assert found["pie_active"] is True and path in [a["path"] for a in found["actors"]], found
+            loaded = await client.get_loaded_map()
+            assert loaded == {"map_path": map_before, "pie_active": True}, loaded
+            summary = await client.summarize_scene()
+            assert summary["pie_active"] is True and summary["map_path"] == map_before, summary
+            assert summary["total_actors"] > 0, summary
+            info = await client.get_actor_info(path)
+            assert info["pie_active"] is True and info["tags"] == ["simul_review"], info
+
+            stopped = await client.control_simulation("stop")
+            assert stopped.get("state") == "stopped", stopped
+            assert (await client.get_actor_info(path))["pie_active"] is False
+            assert path in [a["path"] for a in (await client.list_actors(tag_filter="simul_review"))["actors"]]
+        finally:
+            await client.control_simulation("stop")
+            await destroy_actor(client, path)
             await client.close()
 
     asyncio.run(run())

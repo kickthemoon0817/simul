@@ -21,6 +21,7 @@ from __future__ import annotations
 import ast
 import io
 import json
+import logging
 import sys
 import traceback
 from contextlib import asynccontextmanager, contextmanager, redirect_stdout
@@ -199,6 +200,8 @@ class Editor:
         self.spawn_calls: List[tuple] = []
         # Transactions, placements and label changes, in order.
         self.events: List[tuple] = []
+        # LevelEditorSubsystem.is_in_play_in_editor; tests/unreal/test_pie.py covers PIE.
+        self.level_editor = SimpleNamespace(is_in_play_in_editor=lambda: False)
 
     def load_object(self, outer: Any, path: str) -> Any:
         found = self.objects.get(path)
@@ -262,9 +265,11 @@ class Editor:
             Vector=Vector,
             Rotator=Rotator,
             EditorActorSubsystem="EditorActorSubsystem",
-            get_editor_subsystem=lambda which: (
-                self if which == "EditorActorSubsystem" else None
-            ),
+            LevelEditorSubsystem="LevelEditorSubsystem",
+            get_editor_subsystem=lambda which: {
+                "EditorActorSubsystem": self,
+                "LevelEditorSubsystem": self.level_editor,
+            }.get(which),
             load_object=self.load_object,
             MathLibrary=SimpleNamespace(class_is_child_of=class_is_child_of),
             ScopedEditorTransaction=self.transaction,
@@ -458,6 +463,59 @@ async def test_a_spawn_that_places_nothing_is_an_error(
     assert message in payload["error"]
     assert not payload.get("actor_path")
     assert editor.actors == []
+
+
+def _runtime_log(caplog: pytest.LogCaptureFixture, message: str) -> List[str]:
+    """Levels of the Unreal session's log records that carry ``message``."""
+    return [
+        record.levelname
+        for record in caplog.records
+        if record.name.startswith("simul.adapters.unreal_runtime")
+        and message in record.getMessage()
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("asset_path", "error_type"),
+    [
+        ("/Game/Missing/Nope.Nope", "NotFoundError"),
+        ("/Script/Engine.StaticMesh", "SpawnError"),
+    ],
+)
+async def test_a_bad_spawn_path_is_logged_as_a_refusal_not_an_error(
+    editor: Editor, caplog: pytest.LogCaptureFixture, asset_path: str, error_type: str
+) -> None:
+    """The caller's mistake used to be logged at ERROR, like a server fault."""
+    caplog.set_level(logging.INFO, logger="simul")
+    async with remote_control(editor) as rc:
+        payload = await call_tool(
+            rc.settings, "spawn_unreal_actor", {"asset_path": asset_path}
+        )
+
+    assert payload["success"] is False and payload["error_type"] == error_type
+    assert _runtime_log(caplog, payload["error"]) == ["INFO"]
+
+
+@pytest.mark.asyncio
+async def test_a_spawn_script_that_raises_is_still_logged_as_an_error(
+    editor: Editor, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(outer: Any, path: str) -> Any:
+        raise RuntimeError("asset registry unavailable")
+
+    monkeypatch.setattr(editor, "load_object", broken)
+    monkeypatch.setitem(sys.modules, "unreal", editor.module())
+    caplog.set_level(logging.INFO, logger="simul")
+    async with remote_control(editor) as rc:
+        payload = await call_tool(
+            rc.settings,
+            "spawn_unreal_actor",
+            {"asset_path": "/Script/Engine.PointLight"},
+        )
+
+    assert payload["error_type"] == "ScriptError"
+    assert _runtime_log(caplog, "asset registry unavailable") == ["ERROR"]
 
 
 @pytest.mark.asyncio

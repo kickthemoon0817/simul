@@ -283,9 +283,14 @@ def _all_arguments(arguments: Mapping[str, Any]) -> Dict[str, Any]:
     return dict(arguments)
 
 
+def _utf8_bytes(text: str) -> int:
+    """Length of ``text`` encoded as UTF-8; a lone surrogate counts as its 3 bytes instead of raising."""
+    return len(text.encode("utf-8", "surrogatepass"))
+
+
 def _script_usage(arguments: Mapping[str, Any]) -> Dict[str, Any]:
-    """The script's size and mode; the source stays out of the log."""
-    return {"code_bytes": len(arguments["code"]), "mode": arguments["mode"]}
+    """The script's size in UTF-8 bytes and its mode; the source stays out of the log."""
+    return {"code_bytes": _utf8_bytes(str(arguments["code"])), "mode": arguments["mode"]}
 
 
 #: Characters of a refused script echoed back in front of its size.
@@ -293,7 +298,7 @@ SCRIPT_ECHO_CHARS = 200
 
 
 def _script_echo(arguments: Mapping[str, Any]) -> Dict[str, Any]:
-    """A refused script's opening characters, size and mode, not the whole source."""
+    """A refused script's opening characters, size in UTF-8 bytes and mode, not the whole source."""
     code = str(arguments["code"])
     return {
         "code": code[:SCRIPT_ECHO_CHARS],
@@ -863,7 +868,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     # -- Physics and simulation control ------------------------------------------
     UnrealTool(
         name="control_unreal_simulation",
-        description="Control Play-In-Editor: start, stop, pause or resume. Exact frame stepping is unsupported.",
+        description=(
+            "Control Play-In-Editor: start, stop, pause or resume. Exact frame stepping is unsupported. "
+            "While PIE runs, Unreal's editor spawns and deletes no actors, so those tools return "
+            "PIEActive until it stops; level reads keep working and report pie_active."
+        ),
         response=UnrealControlSimulationResponse,
         read_only=False,
         method="control_simulation",
@@ -1100,8 +1109,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="generate_unreal_procedural_scene",
         description=(
             "Build a room, corridor, warehouse or outdoor test scene from Engine basic shapes inside "
-            "the bounds, in one undoable transaction; the same arguments give the same scene. Returns "
-            "the spawned actor paths and the tag and outliner folder that group them."
+            "the bounds, in one undoable transaction; the same arguments give the same layout. Returns "
+            "the spawned actor paths and the tag and outliner folder that group them, both unique to "
+            "the call."
         ),
         response=UnrealGenerateProceduralSceneResponse,
         read_only=False,
@@ -1113,7 +1123,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 str,
                 "{}",
                 description=(
-                    "JSON object; lengths in cm, counts 0 to 200. Any type: seed (integer, 42). "
+                    "JSON object; lengths in cm, counts 0 to 200. Any type: seed (integer 0 to "
+                    "4294967295, 42). "
                     "room: wall_thickness (20), wall_height (bounds top), door_width (100, capped by the "
                     "side walls; 0 for none), "
                     "props (one per 16 m2 of floor). corridor: wall_thickness, wall_height, props (one "

@@ -93,8 +93,13 @@ with `SECURITY__ALLOW_SCRIPT_EXECUTION=false`, using a bounded list of actions:
 For actor actions, omit `target` to use the sole selected actor. Ambiguous labels,
 missing actors and stale attachments fail explicitly. Location uses centimeters;
 rotation uses Pitch/Yaw/Roll in degrees and returns Unreal's normalized angles.
-Transform editing participates in an editor undo transaction. Stop PIE before
-changing editor controls; inspection is available while PIE is running.
+Transform editing participates in an editor undo transaction. While Play In
+Editor runs, `inspect` and `clear_cursor` work (`selected_actors` is empty, as
+Unreal reports no selection during PIE) and every other action returns
+`error_type: "PIEActive"`; stop PIE with `control_unreal_simulation`, action
+`stop`. The attachment check before each call finds the editor world during
+PIE too, so the other Unreal tools keep working on the attached editor (see
+[tools.md](tools.md#unreal-engine) for how each behaves while PIE runs).
 
 CLI equivalents:
 

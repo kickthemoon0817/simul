@@ -6,12 +6,20 @@ at the centre), each with a size, a centre and a mobility. The editor script
 only spawns what the plan lists, so a layout that does not fit is a ValueError
 before anything is spawned, and the same arguments always give the same scene.
 Units are Unreal's: centimetres, Z up.
+
+The seed is an integer from 0 to ``MAX_SEED``, and each seed gives its own
+layout. (``random.Random`` seeds with the absolute value, so a negative seed
+would repeat the layout of its absolute value under another name.) The layout
+is the plan's; the names an actual scene is filed under are its generation's:
+every generation gets a fresh id (``new_generation``), so generating the same
+plan twice gives two scenes with their own tag and outliner folder.
 """
 
 from __future__ import annotations
 
 import math
 import random
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -24,6 +32,8 @@ SHAPE_SIZE = 100.0
 
 SCENE_TYPES: Tuple[str, ...] = ("room", "corridor", "warehouse", "outdoor")
 DEFAULT_SEED = 42
+#: Largest seed; seeds run from 0 to this.
+MAX_SEED = 2**32 - 1
 DEFAULT_BOUNDS_MIN: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 DEFAULT_BOUNDS_MAX: Tuple[float, float, float] = (1000.0, 1000.0, 500.0)
 
@@ -114,21 +124,32 @@ class Piece:
 
 @dataclass(frozen=True)
 class ScenePlan:
-    """A planned scene: what to spawn, and the names it is filed under."""
+    """A planned scene: what to spawn, and the names each generation of it is filed under."""
 
     scene_type: str
     seed: int
     pieces: Tuple[Piece, ...]
 
-    @property
-    def tag(self) -> str:
-        """Actor tag on every piece of this scene type and seed."""
-        return f"simul_{self.scene_type}_{self.seed}"
+    def tag(self, generation: str) -> str:
+        """Actor tag on every piece one generation of this plan spawns.
 
-    @property
-    def folder(self) -> str:
-        """Outliner folder the pieces are filed under."""
-        return f"Simul/{self.scene_type.title()}_{self.seed}"
+        Args:
+            generation: The generation's id (``new_generation``).
+        """
+        return f"simul_{self.scene_type}_{self.seed}_{generation}"
+
+    def folder(self, generation: str) -> str:
+        """Outliner folder one generation of this plan files its pieces under.
+
+        Args:
+            generation: The generation's id (``new_generation``).
+        """
+        return f"Simul/{self.scene_type.title()}_{self.seed}_{generation}"
+
+
+def new_generation() -> str:
+    """A fresh id for one generation of a scene: 8 random hex digits."""
+    return uuid.uuid4().hex[:8]
 
 
 @dataclass(frozen=True)
@@ -253,7 +274,8 @@ def plan_scene(
     Args:
         scene_type: room, corridor, warehouse or outdoor, in any case.
         parameters: The scene type's parameters (``SCENE_PARAMETERS``), and
-            ``seed`` (default 42) for the random sizes and positions.
+            ``seed`` (an integer from 0 to ``MAX_SEED``, default 42) for the
+            random sizes and positions.
         bounds_min: Minimum corner [x, y, z] in cm; default [0, 0, 0].
         bounds_max: Maximum corner [x, y, z] in cm; default [1000, 1000, 500].
 
@@ -278,8 +300,8 @@ def plan_scene(
             f"{kind} does not take {', '.join(map(repr, unknown))}; its parameters are {', '.join(allowed)}"
         )
     seed = parameters.get("seed", DEFAULT_SEED)
-    if isinstance(seed, bool) or not isinstance(seed, int):
-        raise ValueError(f"seed must be an integer, got {seed!r}")
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= MAX_SEED:
+        raise ValueError(f"seed must be an integer from 0 to {MAX_SEED}, got {seed!r}")
     lo = _corner("bounds_min", DEFAULT_BOUNDS_MIN if bounds_min is None else bounds_min)
     hi = _corner("bounds_max", DEFAULT_BOUNDS_MAX if bounds_max is None else bounds_max)
     if hi[0] - lo[0] < MIN_SIDE or hi[1] - lo[1] < MIN_SIDE or hi[2] - lo[2] < FLOOR_THICKNESS + MIN_HEADROOM:
