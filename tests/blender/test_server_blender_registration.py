@@ -322,3 +322,87 @@ def test_set_blender_light_params_forwards_every_parameter(
             },
         )
     ]
+
+
+# The camera tools' constraint report, as the add-on returns it (the geometry
+# fields are kept to what the response schemas require).
+_TRACK_TO_REPORT = {
+    "placement_overridden": True,
+    "constraints_applied": [{"name": "Track To", "type": "TRACK_TO"}],
+    "warning": "Constraints on camera 'Camera' override the requested placement",
+}
+_CAMERA_REPLIES = {
+    "set_blender_camera_view": (
+        "set_camera_view",
+        {"location": [7, -7, 5], "rotation_euler": [1.1, 0.25, 0.78]},
+        {
+            "camera_name": "Camera",
+            "location": [7.0, -7.0, 5.0],
+            "rotation_euler": [1.2, 0.0, 0.08],
+        },
+    ),
+    "focus_blender_on_object": (
+        "focus_on_object",
+        {"object_name": "Cube"},
+        {
+            "camera_name": "Camera",
+            "object_name": "Cube",
+            "camera_location": [0.0, -6.5, 6.5],
+            "look_at": [0.0, 0.0, 0.0],
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("tool", list(_CAMERA_REPLIES))
+@pytest.mark.parametrize("addon", ["current", "predating_the_report"])
+def test_camera_tools_relay_the_constraint_report_and_accept_an_older_addon(
+    monkeypatch: pytest.MonkeyPatch, tool: str, addon: str
+) -> None:
+    """The report reaches the caller; an add-on built before it still succeeds, with nulls.
+
+    The response schema drops undeclared fields, so the report has to be
+    declared there, and optional: the add-on is installed separately and can
+    be older than the server.
+    """
+    operation, arguments, reply = _CAMERA_REPLIES[tool]
+    current = addon == "current"
+    session = StrictBlenderSession(
+        responses={operation: {**reply, **(_TRACK_TO_REPORT if current else {})}}
+    )
+    instance = _strict_server(monkeypatch, session, "attached")
+
+    payload = _call_through_client(instance, tool, arguments)
+
+    assert session.rejected == []
+    assert payload["success"] is True
+    expected = _TRACK_TO_REPORT if current else dict.fromkeys(_TRACK_TO_REPORT)
+    assert {key: payload[key] for key in _TRACK_TO_REPORT} == expected
+
+
+@pytest.mark.parametrize("addon", ["current", "predating_the_report"])
+def test_get_blender_camera_info_relays_the_active_constraints(
+    monkeypatch: pytest.MonkeyPatch, addon: str
+) -> None:
+    constraints = [{"name": "Track To", "type": "TRACK_TO"}]
+    reply = {
+        "camera_name": "Camera",
+        "location": [7.0, -7.0, 5.0],
+        "rotation_euler": [1.2, 0.0, 0.08],
+        "lens": 50.0,
+        "sensor_width": 36.0,
+        "clip_start": 0.1,
+        "clip_end": 100.0,
+        "camera_type": "PERSP",
+    }
+    if addon == "current":
+        reply["constraints_applied"] = constraints
+    session = StrictBlenderSession(responses={"get_camera_info": reply})
+    instance = _strict_server(monkeypatch, session, "attached")
+
+    payload = _call_through_client(instance, "get_blender_camera_info", {})
+
+    assert payload["success"] is True
+    assert payload["constraints_applied"] == (
+        constraints if addon == "current" else None
+    )

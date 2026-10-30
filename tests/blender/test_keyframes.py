@@ -541,14 +541,23 @@ class TestInsertKeyframe:
     def test_reports_a_key_blender_refused(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A locked F-curve: keyframe_insert returns False instead of raising."""
+        """keyframe_insert returns False instead of raising, for a locked F-curve
+        or an NLA setup that cannot take the key; the error names both causes.
+
+        It named locked or sampled F-curves only. Blender 5.0.1 also refused a
+        key "due to the NLA stack setup": on an action at zero influence over
+        an NLA strip, or blended by Multiply over a strip that holds 0.
+        """
         ball = keyed_ball(BLENDER_5_0, FCurve("location", 0, 1), locked=True)
         session = session_on(monkeypatch, BLENDER_5_0, ball)
         with pytest.raises(
             RuntimeError,
             match=r"inserted no keyframe on 'Ball' location at frame 5; .* locked",
-        ):
+        ) as refused:
             session.insert_keyframe("Ball", "location", 5)
+        message = str(refused.value)
+        assert "sampled" in message and "F-modifier" in message
+        assert "NLA setup" in message and "zero influence" in message
 
     def test_object_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         session = session_on(monkeypatch, BLENDER_5_0)
