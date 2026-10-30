@@ -22,8 +22,13 @@ from simul.adapters.unreal_runtime import UnrealRuntimeSession
 from simul.config import Settings
 
 
+# A generous request timeout, so a slow CI runner never turns connection set-up
+# into a timeout the test did not ask for; only the timeout case shortens it.
+DEFAULT_TIMEOUT = 2.0
+
+
 @asynccontextmanager
-async def endpoint(handler):
+async def endpoint(handler, timeout: float = DEFAULT_TIMEOUT):
     app = web.Application()
     app.router.add_route("*", "/{tail:.*}", handler)
     runner = web.AppRunner(app)
@@ -35,7 +40,7 @@ async def endpoint(handler):
         update={
             "host": "127.0.0.1",
             "port": site._server.sockets[0].getsockname()[1],
-            "timeout": 0.03,
+            "timeout": timeout,
             "retry_base_delay": 0.001,
             "max_retries": 3,
         }
@@ -53,15 +58,19 @@ async def endpoint(handler):
 async def test_mutation_is_never_replayed_after_dispatch(failure):
     applied = []
 
+    # The timeout case answers well after the client gives up; the error case
+    # answers at once. Either way the mutation reached the editor exactly once.
+    timeout = 0.3 if failure == "timeout" else DEFAULT_TIMEOUT
+
     async def handler(request):
         applied.append(await request.json())
         if failure == "timeout":
-            await asyncio.sleep(0.08)
+            await asyncio.sleep(timeout * 3)
         return web.json_response(
             {"error": "response lost after applying mutation"}, status=503
         )
 
-    async with endpoint(handler) as session:
+    async with endpoint(handler, timeout=timeout) as session:
         with pytest.raises(Exception):
             await session.spawn_actor("/Script/Engine.StaticMeshActor")
     assert len(applied) == 1
