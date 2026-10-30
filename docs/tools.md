@@ -180,12 +180,15 @@ Behaviour worth knowing:
   `rotation_euler`, or `camera_location` and `camera_rotation_euler`). When
   that is not the placement, `placement_overridden` is `true`,
   `constraints_applied` lists the active constraints (not muted, influence
-  above 0, valid) and `warning` says how to disable them: mute them or set
-  their influence to 0, then place the camera again. Simul never mutes or
-  removes a constraint itself. `get_blender_camera_info` reports the evaluated
-  pose and `constraints_applied` too. Keys on the camera's transform take over
-  again at the next frame change. An add-on built before this report answers
-  without these fields, and the server returns them as `null`.
+  above 0, valid) and `warning` names the cause. For constraints it says how
+  to disable them: mute them or set their influence to 0, then place the
+  camera again. A driver on the camera's transform, or a parent with
+  non-uniform scale, is named instead when it moves the camera before the
+  constraints apply, and also when they leave that pose alone. Simul never
+  mutes or removes a constraint itself. `get_blender_camera_info` reports the
+  evaluated pose and `constraints_applied` too. Keys on the camera's transform
+  take over again at the next frame change. An add-on built before this report
+  answers without these fields, and the server returns them as `null`.
 - `search_blender_objects` refuses a `name_pattern` that repeats a group holding
   a quantifier or alternatives, such as `(\w+)+`: Python's regex search
   backtracks, and on a long object name such a pattern runs for hours on

@@ -111,9 +111,9 @@ _POINT_RADIUS = 1.0
 
 # A camera counts as evaluated where it was placed when its location is within
 # _PLACEMENT_LOCATION_TOLERANCE plus _PLACEMENT_LOCATION_PRECISION times the
-# farthest distance from the origin involved (Blender's matrices are single
-# precision: 6e-5 off for a camera 14 km out on Blender 5.0.1), and its view and
-# up axes within _PLACEMENT_ANGLE_TOLERANCE radians.
+# farthest distance from the origin involved (_placement_extent; Blender's
+# matrices are single precision: 6e-5 off for a camera 14 km out on Blender
+# 5.0.1), and its view and up axes within _PLACEMENT_ANGLE_TOLERANCE radians.
 _PLACEMENT_LOCATION_TOLERANCE = 1e-4
 _PLACEMENT_LOCATION_PRECISION = 1e-6
 _PLACEMENT_ANGLE_TOLERANCE = 1e-4
@@ -3852,18 +3852,37 @@ class BlenderRuntimeSession:
 
         Returns:
             The matrix; matrix_world when no constraint acts on the object, or
-            when it has a curve parent or a parent type other than OBJECT (a
-            bone or vertices, for instance), whose parent matrix only Blender
-            computes.
+            when only Blender computes its parent matrix
+            (_matrix_without_constraints).
         """
         if not cls._active_constraints(obj):
             return obj.matrix_world
+        own = cls._matrix_without_constraints(obj)
+        return obj.matrix_world if own is None else own
+
+    @staticmethod
+    def _matrix_without_constraints(obj: Any) -> Any:
+        """
+        Compose the world matrix an object has before its constraints apply.
+
+        That is its parent's matrix times its matrix_parent_inverse and
+        matrix_basis (location, rotation and scale, deltas included), or
+        matrix_basis alone without a parent.
+
+        Args:
+            obj: The object, its transforms evaluated.
+
+        Returns:
+            The matrix, or None when the object has a curve parent or a parent
+            type other than OBJECT (a bone or vertices, for instance), whose
+            parent matrix only Blender computes.
+        """
         parent = obj.parent
         if parent is None:
             return obj.matrix_basis
         if obj.parent_type == "OBJECT" and parent.type != "CURVE":
             return parent.matrix_world @ obj.matrix_parent_inverse @ obj.matrix_basis
-        return obj.matrix_world
+        return None
 
     @staticmethod
     def _active_constraints(obj: Any) -> List[Dict[str, str]]:
@@ -3908,39 +3927,123 @@ class BlenderRuntimeSession:
             Dictionary with placement_overridden (whether the evaluated
             location, view or up direction, or mirroring differs from the
             placement), constraints_applied (_active_constraints) and warning,
-            which explains an override and is None otherwise.
+            which explains an override (_override_warning) and is None
+            otherwise.
         """
         evaluated = camera.matrix_world
-        extent = max(
-            math.hypot(*placement.translation), math.hypot(*evaluated.translation)
-        )
-        if camera.parent is not None:
-            extent = max(extent, math.hypot(*camera.parent.matrix_world.translation))
+        extent = self._placement_extent(camera, placement, evaluated)
         overridden = not self._same_view(placement, evaluated, extent)
         constraints = self._active_constraints(camera)
-        warning: Optional[str] = None
-        if overridden and constraints:
-            names = ", ".join(f"'{c['name']}' ({c['type']})" for c in constraints)
-            warning = (
-                f"Constraints on camera {camera.name!r} override the requested placement: "
-                f"{names}. The reported pose is where Blender evaluates the camera; its "
-                "transform holds the placement and the constraints were left unchanged. "
-                "To place it exactly, mute them (the eye icon in Object Constraint "
-                "Properties, or constraint.mute = True) or set their influence to 0, then "
-                "place the camera again."
-            )
-        elif overridden:
-            warning = (
-                f"Blender evaluates camera {camera.name!r} away from the requested placement "
-                "although no constraint acts on it: a driver on its transform, or a parent "
-                "with non-uniform scale that cannot carry this rotation, changes it. The "
-                "reported pose is where Blender evaluates the camera."
-            )
+        warning = (
+            self._override_warning(camera, placement, extent, constraints)
+            if overridden
+            else None
+        )
         return {
             "placement_overridden": overridden,
             "constraints_applied": constraints,
             "warning": warning,
         }
+
+    @staticmethod
+    def _placement_extent(camera: Any, placement: Any, evaluated: Any) -> float:
+        """
+        Return the farthest distance from the origin that placing a camera computes with.
+
+        Blender's matrices and an object's location are single precision, so
+        the evaluated location is only as exact as the longest translation in
+        the arithmetic: the placement and the evaluated location, and between
+        them the parent's matrix, its product with matrix_parent_inverse and
+        the camera's own location. Those can be kilometres long while both
+        ends lie near the origin: a camera parented to a rig 27 km out, the
+        rig then moved back, keeps a 27 km own location, which single
+        precision rounds by up to a millimetre (by 2 cm 100 km out on Blender
+        5.0.1).
+
+        Args:
+            camera: The placed camera.
+            placement: The world matrix written (_place_in_world).
+            evaluated: The camera's evaluated world matrix.
+
+        Returns:
+            The distance, in world units.
+        """
+        lengths = [
+            math.hypot(*placement.translation),
+            math.hypot(*evaluated.translation),
+        ]
+        # How long one unit of the camera's own location is in the world.
+        reach = 1.0
+        parent = camera.parent
+        if parent is not None:
+            to_world = parent.matrix_world @ camera.matrix_parent_inverse
+            lengths.append(math.hypot(*parent.matrix_world.translation))
+            lengths.append(math.hypot(*to_world.translation))
+            reach = max(abs(s) for s in to_world.to_scale())
+        lengths.append(reach * math.hypot(*camera.location))
+        return max(lengths)
+
+    @classmethod
+    def _override_warning(
+        cls,
+        camera: Any,
+        placement: Any,
+        extent: float,
+        constraints: List[Dict[str, str]],
+    ) -> str:
+        """
+        Explain why Blender evaluates a placed camera away from the placement.
+
+        Constraints act on the camera's own transform (_matrix_without_constraints),
+        which misses the placement itself when a driver overwrote it or a
+        parent with non-uniform scale shears it. Comparing that transform with
+        the placement and with the evaluated matrix tells the causes apart, so
+        a constraint that leaves the pose alone (a Limit Distance it meets) is
+        not blamed for what a driver did. When only Blender knows the parent
+        matrix (a bone, vertices, a curve), the active constraints are named.
+
+        Args:
+            camera: The placed camera, its transforms evaluated.
+            placement: The world matrix written (_place_in_world).
+            extent: The farthest distance involved (_placement_extent).
+            constraints: The camera's active constraints (_active_constraints).
+
+        Returns:
+            The warning.
+        """
+        transform = (
+            "a driver on its transform, or a parent with non-uniform scale that "
+            "cannot carry this rotation, changes it"
+        )
+        if not constraints:
+            return (
+                f"Blender evaluates camera {camera.name!r} away from the requested "
+                f"placement although no constraint acts on it: {transform}. The "
+                "reported pose is where Blender evaluates the camera."
+            )
+        names = ", ".join(f"'{c['name']}' ({c['type']})" for c in constraints)
+        own = cls._matrix_without_constraints(camera)
+        moved = own is not None and not cls._same_view(placement, own, extent)
+        if moved and cls._same_view(own, camera.matrix_world, extent):
+            return (
+                f"Blender evaluates camera {camera.name!r} away from the requested "
+                f"placement before its constraints apply, and they ({names}) leave "
+                f"that pose as it is: {transform}. The reported pose is where Blender "
+                "evaluates the camera."
+            )
+        if moved:
+            held = f"before they apply, {transform} as well, and"
+            remedy = "and remove that driver or parent scale, "
+        else:
+            held = "its transform holds the placement and"
+            remedy = ""
+        return (
+            f"Constraints on camera {camera.name!r} override the requested placement: "
+            f"{names}. The reported pose is where Blender evaluates the camera; {held} "
+            "the constraints were left unchanged. To place it exactly, mute them (the "
+            "eye icon in Object Constraint Properties, or constraint.mute = True) or "
+            f"set their influence to 0, {remedy}then place the camera again."
+        )
 
     @staticmethod
     def _same_view(first: Any, second: Any, extent: float) -> bool:
@@ -3955,8 +4058,8 @@ class BlenderRuntimeSession:
         Args:
             first: A world matrix.
             second: The other world matrix.
-            extent: The farthest distance from the origin involved, which the
-                single precision of Blender's matrices blurs.
+            extent: The farthest distance from the origin involved
+                (_placement_extent), which single precision blurs.
 
         Returns:
             True when they agree within the placement tolerances.

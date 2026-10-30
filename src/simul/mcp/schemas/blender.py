@@ -507,8 +507,8 @@ _PLACEMENT_OVERRIDDEN = (
     "predates this check"
 )
 _PLACEMENT_WARNING = (
-    "Why the camera is not where it was placed and how to disable its constraints; "
-    "null when it is"
+    "Why the camera is not where it was placed: its constraints, with how to disable "
+    "them, or a driver on its transform or a non-uniformly scaled parent; null when it is"
 )
 
 

@@ -171,6 +171,32 @@ def _evaluated_rotation(obj: Any) -> np.ndarray:
     return world / np.linalg.norm(world, axis=0)
 
 
+class _DrivenCamera(FakeTransformObject):
+    """A camera with a driver on location[0] (stored, as in background Blender).
+
+    Each evaluation writes the driver's value into the camera's location
+    before composing matrix_world, as Blender's active depsgraph writes a
+    driver's result back to the original object.
+    """
+
+    def __init__(self, driven_x: float, **kwargs: Any) -> None:
+        self._driven_x = driven_x
+        super().__init__("Camera", "CAMERA", FakeCameraData(), stored=True, **kwargs)
+
+    def evaluate(self) -> None:
+        self.location = FakeVector((self._driven_x, *list(self.location)[1:]))
+        super().evaluate()
+
+
+class _SinglePrecisionCamera(FakeTransformObject):
+    """A camera whose location is single precision, as Blender's Object.location is."""
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "location":
+            value = FakeVector(np.asarray(list(value), dtype=np.float32).tolist())
+        super().__setattr__(name, value)
+
+
 def _world_axes(obj: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """An object's local X, Y and -Z axes in world space, unit length."""
     rotation = np.asarray(obj.matrix_world.rows)[:3, :3]
@@ -1758,9 +1784,9 @@ class TestVisualObservationTools:
         return blender_runtime.BlenderRuntimeSession()
 
     def _constrained_camera(
-        self, *constraints: FakeConstraint, setup: str = "unparented"
+        self, *constraints: FakeConstraint, setup: str = "unparented", **camera: Any
     ) -> FakeTransformObject:
-        cam = self._make_camera_object(setup=setup, stored=True)
+        cam = self._make_camera_object(setup=setup, stored=True, **camera)
         cam.constraints.extend(constraints)
         cam.evaluate()
         return cam
@@ -1858,9 +1884,22 @@ class TestVisualObservationTools:
         assert result["constraints_applied"] == []
         assert result["warning"] is None
 
-    @pytest.mark.parametrize("setup", ["unparented", "parented"])
+    @pytest.mark.parametrize(
+        ("setup", "scale"),
+        [
+            ("unparented", (1.0, 1.0, 1.0)),
+            ("parented", (1.0, 1.0, 1.0)),
+            # A scale of the camera's own stays as it was, not reset to 1.
+            ("unparented", (0.5, 0.5, 0.5)),
+        ],
+        ids=["unparented", "parented", "own_scale"],
+    )
     def test_set_camera_view_keeps_the_scale_of_a_camera_its_child_of_scales(
-        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, setup: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        setup: str,
+        scale: Tuple[float, float, float],
     ) -> None:
         """Each call doubled the scale of a camera whose Child Of target had
         been scaled by 2 after the constraint was set up.
@@ -1868,10 +1907,11 @@ class TestVisualObservationTools:
         The placement kept the evaluated scale, the constraint's included, in
         the camera's own scale, where the constraint applied it again: 2, 4
         and 8 on Blender 5.0.1, the camera evaluated at (14, -14, 10) each
-        time and the reply at (7, -7, 5).
+        time and the reply at (7, -7, 5). A camera of scale 0.5 kept 0.5 on
+        Blender 5.0.1.
         """
         cam = self._constrained_camera(
-            _child_of(np.diag([2.0, 2.0, 2.0, 1.0])), setup=setup
+            _child_of(np.diag([2.0, 2.0, 2.0, 1.0])), setup=setup, scale=scale
         )
         own_scale = list(cam.scale)
         session = self._session_on(monkeypatch, cam)
@@ -1931,6 +1971,96 @@ class TestVisualObservationTools:
         assert result["constraints_applied"] == []
         assert "no constraint acts on it" in result["warning"]
         assert "non-uniform scale" in result["warning"]
+
+    @staticmethod
+    def _sheared_camera() -> FakeTransformObject:
+        """A camera under a rig scaled (1, 3, 1), its scale reaching the camera."""
+        rig = FakeTransformObject("Rig", scale=(1.0, 3.0, 1.0), stored=True)
+        cam = FakeTransformObject(
+            "Camera", "CAMERA", FakeCameraData(), parent=rig, stored=True
+        )
+        cam.matrix_parent_inverse = FakeMatrix.Identity(4)
+        return cam
+
+    @pytest.mark.parametrize("cause", ["driver", "sheared_parent"])
+    def test_set_camera_view_blames_no_constraint_that_leaves_the_pose_alone(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, cause: str
+    ) -> None:
+        """A driver, or a parent scaled unevenly, moved the camera; its Limit
+        Distance, met, changed nothing.
+
+        The warning named the Limit Distance as the override and said to mute
+        it, which leaves the camera where it was. On Blender 5.0.1 a camera
+        with a driver of 3 on location.x was evaluated at x = 3, its Limit
+        Distance (1000 m) met, and the warning named only the Limit Distance.
+        """
+        cam = _DrivenCamera(3.0) if cause == "driver" else self._sheared_camera()
+        cam.constraints.append(_satisfied())
+        cam.evaluate()
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view([7.0, -7.0, 5.0], [1.1, 0.25, 0.78])
+
+        if cause == "driver":
+            assert result["location"] == pytest.approx([3.0, -7.0, 5.0])
+        assert result["placement_overridden"] is True
+        assert result["constraints_applied"] == [
+            {"name": "Limit Distance", "type": "LIMIT_DISTANCE"}
+        ]
+        warning = result["warning"]
+        assert "before its constraints apply" in warning
+        assert "a driver on its transform" in warning and "non-uniform scale" in warning
+        assert "mute" not in warning and "override the requested placement" not in warning
+
+    def test_set_camera_view_names_constraints_and_a_driver_that_both_move_the_camera(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Muting the Copy Location alone would leave the camera where its driver puts it."""
+        cam = _DrivenCamera(3.0)
+        cam.constraints.append(_copy_location((5.0, 5.0, 0.0)))
+        cam.evaluate()
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view([7.0, -7.0, 5.0], [1.1, 0.25, 0.78])
+
+        assert result["location"] == pytest.approx([5.0, 5.0, 0.0])
+        assert result["placement_overridden"] is True
+        warning = result["warning"]
+        assert "override the requested placement: 'Copy Location' (COPY_LOCATION)" in warning
+        assert "mute" in warning and "influence to 0" in warning
+        assert "a driver on its transform" in warning and "as well" in warning
+        assert "its transform holds the placement" not in warning
+
+    def test_set_camera_view_tolerates_single_precision_through_a_far_parent_inverse(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """A camera parented to a rig 27 km out, and the rig then moved back.
+
+        The camera's own location is 27 km long, and single precision rounds
+        it by up to a millimetre, so Blender evaluates the camera that far
+        from the placement although nothing overrides it. The tolerance
+        followed the placed, evaluated and parent locations only, all near the
+        origin, and reported an override with a warning blaming a driver or
+        the parent's scale: on Blender 5.0.1, for 273 of 300 such placements,
+        which missed by up to 2 cm with the rig 100 km out.
+        """
+        rig = FakeTransformObject("Rig", location=(27000.0, 0.0, 0.0), stored=True)
+        cam = _SinglePrecisionCamera(
+            "Camera", "CAMERA", FakeCameraData(), parent=rig, stored=True
+        )
+        rig.location = FakeVector((0.0, 0.0, 0.0))
+        cam.evaluate()
+        session = self._session_on(monkeypatch, cam)
+        location = [7.3, -7.1, 5.2]
+
+        result = session.set_camera_view(location, [1.1, 0.25, 0.78])
+
+        assert list(cam.location)[0] == pytest.approx(27007.3, abs=1e-3)
+        # Single precision put the camera a little off the placement...
+        assert math.dist(result["location"], location) > 1e-4
+        # ...which is no override.
+        assert result["placement_overridden"] is False
+        assert result["warning"] is None
 
     def test_focus_on_object_reports_a_track_to_that_turns_the_camera_away(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
