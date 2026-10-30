@@ -37,6 +37,18 @@ ColorRGB = Annotated[
     Field(min_length=3, max_length=3),
 ]
 
+
+def _pie_active_field() -> Any:
+    """The ``pie_active`` field of the responses that read the editor world."""
+    return Field(
+        False,
+        description=(
+            "Whether Play In Editor (or Simulate) was running. The values are the editor "
+            "world's, not the running game's; Unreal's editor lists no level actors then, so "
+            "actor listings read the editor world directly"
+        ),
+    )
+
 # ---------------------------------------------------------------------------
 # Unreal Engine schemas -- Phase 0
 # ---------------------------------------------------------------------------
@@ -223,6 +235,7 @@ class UnrealEngineInfoResponse(BaseModel):
         description="Platform the editor runs on, as UGameplayStatics::GetPlatformName "
         "reports it (Mac, Windows, Linux)",
     )
+    pie_active: bool = _pie_active_field()
 
 
 class UnrealLoadedMapResponse(BaseModel):
@@ -233,6 +246,7 @@ class UnrealLoadedMapResponse(BaseModel):
         None, description="Error message when success is False"
     )
     map_path: str = Field(..., description="Currently loaded persistent level path")
+    pie_active: bool = _pie_active_field()
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +284,7 @@ class UnrealListActorsResponse(BaseModel):
     truncated: bool = Field(
         False, description="Whether results were truncated by max_results"
     )
+    pie_active: bool = _pie_active_field()
 
 
 class UnrealActorComponentInfo(BaseModel):
@@ -303,6 +318,7 @@ class UnrealGetActorInfoResponse(BaseModel):
     tags: List[str] = Field(default_factory=list, description="Actor tags")
     mobility: str = Field("Static", description="Mobility (Static/Stationary/Movable)")
     is_hidden: bool = Field(False, description="Whether actor is hidden in game")
+    pie_active: bool = _pie_active_field()
 
 
 class UnrealAssetEntry(BaseModel):
@@ -396,6 +412,7 @@ class UnrealSceneSummaryResponse(BaseModel):
     summary_text: str = Field(
         "", description="Human-readable scene summary for LLM consumption"
     )
+    pie_active: bool = _pie_active_field()
 
 
 # ---------------------------------------------------------------------------
@@ -941,7 +958,10 @@ class UnrealAnalyzeSceneForRoboticsResponse(BaseModel):
     )
     collision_summary: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Collision counts and static mesh collision setup; empty unless collision_complexity ran",
+        description=(
+            "Collision counts and static mesh collision setup; empty unless collision_complexity ran. "
+            "While Play In Editor runs the static mesh collision counts are null"
+        ),
     )
     total_actors_analyzed: int = Field(0, description="Number of actors analyzed")
     analysis_types: List[str] = Field(
@@ -950,6 +970,7 @@ class UnrealAnalyzeSceneForRoboticsResponse(BaseModel):
     criteria: Dict[str, float] = Field(
         default_factory=dict, description="Thresholds the analyses applied"
     )
+    pie_active: bool = _pie_active_field()
 
 
 class UnrealGenerateProceduralSceneResponse(BaseModel):
@@ -963,8 +984,16 @@ class UnrealGenerateProceduralSceneResponse(BaseModel):
     total_spawned: int = Field(..., description="Number of actors spawned")
     scene_type: str = Field(..., description="Generated scene type")
     seed: int = Field(..., description="Random seed used")
-    tag: str = Field(..., description="Actor tag on every actor of this scene type and seed")
-    folder: str = Field(..., description="Outliner folder the actors are filed under")
+    tag: str = Field(
+        ...,
+        description="Actor tag on every actor this call spawned, simul_<scene_type>_<seed>_<generation>; "
+        "unique to the call",
+    )
+    folder: str = Field(
+        ...,
+        description="Outliner folder this call filed its actors under, Simul/<Scene>_<seed>_<generation>; "
+        "unique to the call",
+    )
 
 
 class UnrealGetActorBySemanticLabelResponse(BaseModel):
@@ -984,6 +1013,7 @@ class UnrealGetActorBySemanticLabelResponse(BaseModel):
         False, description="Whether matches were left out by max_results"
     )
     label_searched: str = Field(..., description="Label that was searched")
+    pie_active: bool = _pie_active_field()
 
 
 # ----------------------------------------------------------------------

@@ -28,13 +28,16 @@ from ..utils.paths import PathPolicy
 from ..utils.regex_guard import (
     exponential_regex_construct as _exponential_regex_construct,
 )
-from ._unreal_procedural import plan_scene
+from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_scripts import (
     ACTOR_HELPERS,
     CREATE_MATERIAL_INSTANCE,
+    EDITOR_WORLD,
     ENGINE_METADATA,
     FIND_ACTORS_BY_TAG,
     INTERCHANGE_INFO,
+    LOADED_MAP,
+    PIE_ACTIVE,
     PLACE_BASIC_SHAPES,
     ROBOTICS_SCENE_ANALYSIS,
     SCENE_SUMMARY,
@@ -44,6 +47,7 @@ from ._unreal_scripts import (
     SPAWN_ACTOR,
     USD_EXPORT,
     USD_IMPORT,
+    pie_refusal,
 )
 
 #: ``ExecutionMode`` values UE's ``PythonScriptLibrary.ExecutePythonCommandEx``
@@ -126,14 +130,33 @@ _CAPTURE_POLL_SECONDS = 0.1
 _CAPTURE_CHUNK_BYTES = 2 * 1024 * 1024
 
 
-LOADED_MAP_EXPRESSION = (
-    "unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)"
-    ".get_editor_world().get_path_name()"
-)
+#: Prints whether Play In Editor runs, as ``{"pie_active": bool}``.
+PIE_STATE = EDITOR_WORLD + "print(json.dumps({'pie_active': pie_active()}))\n"
 
 
-class UnrealScriptFailure(RuntimeError):
-    """Python run inside the editor raised; the message is UE's traceback."""
+def _outside_pie(script: str, action: str) -> str:
+    """``script``, run only while Play In Editor is stopped.
+
+    While PIE runs the wrapped script prints the PIEActive refusal for
+    ``action`` instead (``_unreal_scripts.pie_refusal``). For scripts whose
+    editor calls Unreal refuses during PIE, such as EditorActorSubsystem
+    spawns, which return None then. ``script`` holds no multi-line string
+    literal, which the indentation would change.
+
+    Args:
+        script: Editor Python, run at the top level.
+        action: What PIE prevents, completing "cannot ...": "spawn actors".
+
+    Returns:
+        The wrapped script.
+    """
+    return (
+        EDITOR_WORLD
+        + "if pie_active():\n"
+        + f"    print(json.dumps(pie_refusal({action!r})))\n"
+        + "else:\n"
+        + textwrap.indent(script, "    ")
+    )
 
 
 #: What ``ping``, ``health_check`` and discovery report when Remote Control
@@ -894,20 +917,55 @@ class UnrealRuntimeSession(LoggerMixin):
         )
 
     async def _execute_json_script(
-        self, code: str, *, failure_log_level: int = logging.ERROR
+        self,
+        code: str,
+        *,
+        failure_log_level: int = logging.ERROR,
+        expected_errors: Sequence[str] = (),
     ) -> Dict[str, Any]:
         """Run a fixed tool script and preserve failures as error envelopes.
 
+        A failure whose ``error_type`` is PIEActive or one of
+        ``expected_errors`` is the editor refusing the request as asked (Play
+        In Editor running, a path that names nothing it can use): the
+        caller's to fix, not a fault, so it is logged at INFO.
+
         Args:
             code: The script.
-            failure_log_level: Level a failure is logged at; lower it where a
-                failure is expected. The envelope carries the reason either way.
+            failure_log_level: Level any other failure is logged at; lower it
+                where a failure is expected. The envelope carries the reason
+                either way.
+            expected_errors: Further ``error_type`` values the script reports
+                for a request it refused as asked.
         """
         result = self._parse_python_json(await self._execute_python(code))
         if result.get("error"):
-            self.logger.log(failure_log_level, "Unreal tool script failed: %s", result["error"])
+            error_type = result.get("error_type")
+            if error_type == PIE_ACTIVE or error_type in expected_errors:
+                self.logger.info("Unreal refused the request (%s): %s", error_type, result["error"])
+            else:
+                self.logger.log(failure_log_level, "Unreal tool script failed: %s", result["error"])
             return {"success": False, "error_type": "ScriptError", **result}
         return result
+
+    async def _pie_active(self) -> bool:
+        """Whether Play In Editor runs; False when the editor cannot say.
+
+        A probe that explains a refusal after the fact: when it fails, the
+        caller reports the refusal as it was rather than this failure.
+        """
+        try:
+            state = await self._execute_json_script(PIE_STATE, failure_log_level=logging.DEBUG)
+        except Exception as exc:
+            self.logger.debug("Could not read the Play In Editor state: %s", exc)
+            return False
+        return state.get("pie_active") is True
+
+    def _refused_during_pie(self, action: str) -> Dict[str, Any]:
+        """The PIEActive envelope for ``action``, logged as a refusal."""
+        refusal = pie_refusal(action)
+        self.logger.info("Unreal refused the request (%s): %s", PIE_ACTIVE, refusal["error"])
+        return refusal
 
     async def _component_operation(
         self,
@@ -927,23 +985,28 @@ class UnrealRuntimeSession(LoggerMixin):
         )
         return await self._execute_json_script(script)
 
-    async def _run_mesh_script(self, body: str, **actors: str) -> Dict[str, Any]:
+    async def _run_mesh_script(
+        self, body: str, *, pie_action: Optional[str] = None, **actors: str
+    ) -> Dict[str, Any]:
         """Run a GeometryScript body against actors resolved by path.
 
         Each keyword binds a script variable to ``actor_at(path)`` from
         ``ACTOR_HELPERS`` -- a direct object load instead of a scan over every
         level actor. ``body`` is the mesh op's block, indented one level; it
         is dedented here. A missing actor raises inside the editor and comes
-        back as a ``ScriptError`` envelope.
+        back as a ``ScriptError`` envelope. With ``pie_action`` (a body that
+        spawns actors), the body runs only while Play In Editor is stopped
+        and the call is otherwise refused as PIEActive (``_outside_pie``).
         """
         lookups = "".join(f"{name} = actor_at({path!r})\n" for name, path in actors.items())
-        script = (
-            ACTOR_HELPERS
-            + "subsys = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)\n"
+        operation = (
+            "subsys = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)\n"
             + lookups
             + textwrap.dedent(body)
         )
-        return await self._execute_json_script(script)
+        if pie_action is not None:
+            operation = _outside_pie(operation, pie_action)
+        return await self._execute_json_script(ACTOR_HELPERS + operation)
 
     @staticmethod
     def _script_execution_denied() -> Dict[str, Any]:
@@ -1010,18 +1073,6 @@ class UnrealRuntimeSession(LoggerMixin):
     @staticmethod
     def _script_error(message: str) -> Dict[str, Any]:
         return {"success": False, "error": message, "error_type": "ScriptError"}
-
-    async def _evaluate(self, expression: str) -> str:
-        """Evaluate one Python expression and return its value, unquoted.
-
-        Raises:
-            UnrealScriptFailure: The expression raised inside the editor.
-        """
-        result = await self._execute_python(expression, mode="EvaluateStatement")
-        failure = self._python_failure(result)
-        if failure is not None:
-            raise UnrealScriptFailure(failure)
-        return str(result.get("CommandResult", "")).strip("'\"")
 
     async def execute_script(self, code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
         """Run caller-supplied Python and report what it produced.
@@ -1162,9 +1213,11 @@ class UnrealRuntimeSession(LoggerMixin):
 
         Returns:
             Dictionary with engine version, project name, absolute project
-            directory, loaded map, the platform the editor runs on
-            (``UGameplayStatics::GetPlatformName``: Mac, Windows, Linux) and
-            editor state, or a ``ScriptError`` envelope when a probe raised.
+            directory, loaded map (the editor world's, also while Play In
+            Editor runs), the platform the editor runs on
+            (``UGameplayStatics::GetPlatformName``: Mac, Windows, Linux),
+            editor state and ``pie_active``, or a ``ScriptError`` envelope
+            when a probe raised.
         """
         info = await self._execute_json_script(ENGINE_METADATA)
         if info.get("error"):
@@ -1177,6 +1230,7 @@ class UnrealRuntimeSession(LoggerMixin):
             "is_editor": True,
             "is_game": False,
             "platform": info["platform"],
+            "pie_active": bool(info.get("pie_active")),
         }
 
     async def get_loaded_map(self) -> Dict[str, Any]:
@@ -1184,13 +1238,11 @@ class UnrealRuntimeSession(LoggerMixin):
         Return the currently loaded persistent level path.
 
         Returns:
-            Dictionary with ``map_path`` string, or a ``ScriptError``
-            envelope when the editor world could not be read.
+            Dictionary with ``map_path``, the editor world's persistent level
+            (also while Play In Editor runs), and ``pie_active``; or a
+            ``ScriptError`` envelope when the editor world could not be read.
         """
-        try:
-            return {"map_path": await self._evaluate(LOADED_MAP_EXPRESSION)}
-        except UnrealScriptFailure as exc:
-            return self._script_error(str(exc))
+        return await self._execute_json_script(LOADED_MAP)
 
     # ------------------------------------------------------------------
     # Phase 1 session methods — Scene Read Operations
@@ -1202,15 +1254,22 @@ class UnrealRuntimeSession(LoggerMixin):
         tag_filter: Optional[str] = None,
         max_results: int = 200,
     ) -> Dict[str, Any]:
-        """List actors with actual world transforms, class names and actor tags."""
+        """List actors with actual world transforms, class names and actor tags.
+
+        While Play In Editor runs, Unreal's editor lists no level actors, so
+        the editor world is read directly (``_unreal_scripts.EDITOR_WORLD``'s
+        ``level_actors``) and ``pie_active`` is True: the same actors, as
+        they are in the editor rather than in the running game, and possibly
+        the builder brush and helper actors the Outliner hides.
+        """
         if not 1 <= max_results <= 5000:
             raise ValueError("max_results must be between 1 and 5000")
-        code = ACTOR_HELPERS + f"""
+        code = ACTOR_HELPERS + EDITOR_WORLD + f"""
 class_filter = {class_filter!r}
 tag_filter = {tag_filter!r}
 actors = []
 truncated = False
-for actor in unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors():
+for actor in level_actors():
     cls = actor.get_class()
     if class_filter and class_filter not in (cls.get_name(), cls.get_path_name()):
         continue
@@ -1220,14 +1279,17 @@ for actor in unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_le
         truncated = True
         break
     actors.append(actor_info(actor))
-print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncated}}))
+print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncated,
+                  "pie_active": pie_active()}}))
 """
         return await self._execute_json_script(code)
 
     async def get_actor_info(self, actor_path: str) -> Dict[str, Any]:
-        """Read an actor's world transform, components, tags and visibility."""
+        """Read an actor's world transform, components, tags and visibility, and ``pie_active``."""
         return await self._execute_json_script(
-            ACTOR_HELPERS + f"\nprint(json.dumps(actor_info(actor_at({actor_path!r}))))"
+            ACTOR_HELPERS
+            + EDITOR_WORLD
+            + f"\nprint(json.dumps(dict(actor_info(actor_at({actor_path!r})), pie_active=pie_active())))"
         )
 
     async def search_assets(
@@ -1341,7 +1403,8 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
 
         Returns:
             Dictionary with map_path, total_actors, actor_class_counts,
-            and summary_text.
+            summary_text and pie_active (while Play In Editor runs, the
+            editor world is read directly, as in ``list_actors``).
         """
         # Count classes inside the editor in one script rather than one
         # ``/remote/object/describe`` round trip per actor.
@@ -1361,7 +1424,10 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
         lights = sum(v for k, v in class_counts.items() if "Light" in k)
         cameras = sum(v for k, v in class_counts.items() if "Camera" in k)
 
+        pie_active = bool(scene.get("pie_active"))
         parts: list = [f"Map: {map_path}", f"Total actors: {total_actors}"]
+        if pie_active:
+            parts.append("Play In Editor is running; these are the editor world's actors")
         for cls, cnt in sorted(class_counts.items(), key=lambda x: -x[1])[:10]:
             parts.append(f"  {cls}: {cnt}")
 
@@ -1373,6 +1439,7 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
             "lights": lights,
             "cameras": cameras,
             "summary_text": "\n".join(parts),
+            "pie_active": pie_active,
         }
 
     # ------------------------------------------------------------------
@@ -1793,7 +1860,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             new actor. An error envelope, never an empty actor_path, when the
             path loads nothing (``NotFoundError``) or names something Unreal
             cannot place: a class that is not an Actor, an actor already in a
-            level, an asset no actor factory accepts (``SpawnError``).
+            level, an asset no actor factory accepts (``SpawnError``); and
+            ``PIEActive`` while Play In Editor runs, when Unreal's editor
+            spawns nothing. Those are logged as refusals, not failures.
 
         Raises:
             ValueError: location or rotation is not three finite numbers.
@@ -1804,7 +1873,10 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             "rotation": _vector3("rotation", rotation, "pitch, yaw, roll"),
             "label": label or None,
         }
-        result = await self._execute_json_script(f"args = {args!r}\n" + SPAWN_ACTOR)
+        result = await self._execute_json_script(
+            f"args = {args!r}\n" + SPAWN_ACTOR,
+            expected_errors=("NotFoundError", "SpawnError"),
+        )
         if not result.get("error") and not result.get("actor_path"):
             return self._script_error(
                 f"Unreal reported no spawned actor for {asset_path}"
@@ -1821,18 +1893,22 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             actor_path: Full actor path to delete.
 
         Returns:
-            Dictionary with actor_path, deleted status.
+            Dictionary with actor_path, deleted status. When Unreal destroyed
+            nothing because Play In Editor runs (DestroyActor refuses then), a
+            ``PIEActive`` error envelope instead.
         """
         data = await self._call_function(
             "/Script/UnrealEd.Default__EditorActorSubsystem",
             "DestroyActor",
             {"ActorToDestroy": actor_path},
         )
-        deleted = data.get("ReturnValue", False)
+        deleted = bool(data.get("ReturnValue", False))
+        if not deleted and await self._pie_active():
+            return self._refused_during_pie("delete actors")
 
         return {
             "actor_path": actor_path,
-            "deleted": bool(deleted),
+            "deleted": deleted,
         }
 
     async def set_actor_transform(
@@ -3053,8 +3129,12 @@ if component.is_simulating_physics() != {target!r}:
             name, path, class_name and size [x, y, z] in cm; surfaces add
             top_z, area_m2 and tilt_degrees), collision_summary (empty unless
             collision_complexity ran), total_actors_analyzed, analysis_types
-            (those that ran) and criteria; or a ScriptError envelope when the
-            editor script failed.
+            (those that ran), criteria and pie_active (while Play In Editor
+            runs, the editor world is read, as in ``list_actors``, and the
+            static mesh collision counts simple_shapes, convex_hulls,
+            complex_collision and missing_simple_collision are null: Unreal's
+            StaticMeshEditorSubsystem reports none then); or a ScriptError
+            envelope when the editor script failed.
 
         Raises:
             ValueError: An analysis type is not one of the three.
@@ -3093,34 +3173,43 @@ if component.is_simulating_physics() != {target!r}:
         fit fails before anything is spawned and the same arguments always
         give the same scene. One editor script then spawns each piece as a
         StaticMeshActor inside one undoable transaction, labelled
-        ``<Scene>_<Kind>_<n>``, filed in the outliner folder
-        ``Simul/<Scene>_<seed>`` and tagged ``simul_procedural`` and
-        ``simul_<scene_type>_<seed>``. When a spawn fails, the actors already
-        spawned are removed.
+        ``<Scene>_<Kind>_<n>``, tagged ``simul_procedural`` and with this
+        call's own tag, ``simul_<scene_type>_<seed>_<generation>``, and filed
+        in this call's own outliner folder, ``Simul/<Scene>_<seed>_<generation>``,
+        where ``<generation>`` is fresh for every call
+        (``_unreal_procedural.new_generation``): generating a scene twice
+        gives two groups that never mix. When a spawn fails, rollback removes
+        every actor spawned and cancels the transaction, and no folder is
+        made (actors are filed only once all have spawned).
 
         Args:
             scene_type: room, corridor, warehouse or outdoor.
-            parameters: The scene type's parameters, plus ``seed`` (default
-                42) for the random sizes and positions.
+            parameters: The scene type's parameters, plus ``seed`` (an
+                integer from 0 to 2**32 - 1, default 42) for the random sizes
+                and positions.
             bounds_min: Minimum corner [x, y, z] in cm; default [0, 0, 0].
             bounds_max: Maximum corner [x, y, z] in cm; default
                 [1000, 1000, 500].
 
         Returns:
             Dict with actors_spawned (actor paths in spawn order),
-            total_spawned, scene_type, seed, tag (the scene's own tag) and
-            folder; or a SpawnError envelope, with nothing left in the level,
-            when a spawn failed.
+            total_spawned, scene_type, seed, tag (this call's own tag) and
+            folder; a SpawnError envelope, with nothing left in the level, when
+            a spawn failed (``details.actors_left`` lists any actor rollback
+            could not remove); or a PIEActive envelope while Play In Editor
+            runs, when Unreal's editor spawns nothing.
 
         Raises:
             ValueError: An unknown scene type or parameter, a value out of
                 range, or a layout that does not fit the bounds.
         """
         plan = plan_scene(scene_type, parameters, bounds_min, bounds_max)
+        generation = new_generation()
+        tag, folder = plan.tag(generation), plan.folder(generation)
         args = {
             "pieces": [piece.spawn_args() for piece in plan.pieces],
-            "folder": plan.folder,
-            "tags": ["simul_procedural", plan.tag],
+            "folder": folder,
+            "tags": ["simul_procedural", tag],
             "transaction": f"simul: generate {plan.scene_type} scene",
         }
         result = await self._execute_json_script(f"args = {args!r}\n" + PLACE_BASIC_SHAPES)
@@ -3136,8 +3225,8 @@ if component.is_simulating_physics() != {target!r}:
             "total_spawned": len(spawned),
             "scene_type": plan.scene_type,
             "seed": plan.seed,
-            "tag": plan.tag,
-            "folder": plan.folder,
+            "tag": tag,
+            "folder": folder,
         }
 
     async def get_actor_by_semantic_label(
@@ -3165,8 +3254,10 @@ if component.is_simulating_physics() != {target!r}:
         Returns:
             Dict with ``actors`` (each match as a ``list_unreal_actors``
             entry, tags included), ``total_matches`` (every matching actor,
-            those past max_results too), ``truncated`` and ``label_searched``,
-            or a ``ScriptError`` envelope when the editor script failed.
+            those past max_results too), ``truncated``, ``label_searched`` and
+            ``pie_active`` (while Play In Editor runs, the editor world is
+            searched, as in ``list_actors``), or a ``ScriptError`` envelope
+            when the editor script failed.
 
         Raises:
             ValueError: match_mode is not exact, contains or regex; in regex
@@ -3313,7 +3404,7 @@ if component.is_simulating_physics() != {target!r}:
             "'vertex_count': verts"
             "}))\n"
         )
-        result = await self._execute_python(code)
+        result = await self._execute_python(_outside_pie(code, "spawn actors"))
         return self._parse_python_json(result)
 
     async def apply_mesh_boolean(
@@ -3404,7 +3495,7 @@ if component.is_simulating_physics() != {target!r}:
             "'source_triangle_count': s_tris"
             "}))\n"
         )
-        return await self._run_mesh_script(code, src=mesh_path)
+        return await self._run_mesh_script(code, pie_action="spawn actors", src=mesh_path)
 
     async def decompose_convex_hull(
         self,
@@ -3458,7 +3549,7 @@ if component.is_simulating_physics() != {target!r}:
             "'total_vertices': d_verts"
             "}))\n"
         )
-        return await self._run_mesh_script(code, src=mesh_path)
+        return await self._run_mesh_script(code, pie_action="spawn actors", src=mesh_path)
 
     async def edit_mesh_topology(
         self,
@@ -3861,7 +3952,8 @@ if component.is_simulating_physics() != {target!r}:
                 "error": f"Unsupported target format: {target_format}",
             }
 
-        result = await self._execute_python(code)
+        # Only dynamic_mesh gets here; it spawns the DynamicMeshActor.
+        result = await self._execute_python(_outside_pie(code, "spawn actors"))
         return self._parse_python_json(result)
 
     async def remesh_mesh(

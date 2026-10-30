@@ -88,6 +88,33 @@ def test_other_tools_still_echo_their_arguments(tmp_path: Any) -> None:
     assert outcome["payload"]["details"] == {"input": arguments}
 
 
+NON_ASCII_SCRIPT = "print('héllo wörld ✓')"  # 22 characters, 26 bytes in UTF-8
+
+
+def test_code_bytes_is_the_utf8_size_in_the_echo_and_the_usage_record(tmp_path: Any) -> None:
+    """code_bytes used to count characters, so a non-ASCII script was under-reported."""
+    assert (len(NON_ASCII_SCRIPT), len(NON_ASCII_SCRIPT.encode("utf-8"))) == (22, 26)
+    instance = _server(tmp_path)
+
+    refused = _call(instance, "execute_unreal_script", {"code": NON_ASCII_SCRIPT, "mode": "Bogus"})
+    # A valid call is recorded with the same size (the stub adapter then fails the call).
+    _call(instance, "execute_unreal_script", {"code": NON_ASCII_SCRIPT})
+
+    assert refused["payload"]["details"]["input"]["code_bytes"] == 26
+    records = list(reversed(instance.usage_tracker.get_recent(tool_name="execute_unreal_script")))
+    assert [record["params"] for record in records] == [
+        {"code_bytes": 26, "mode": "Bogus"},
+        {"code_bytes": 26, "mode": "ExecuteFile"},
+    ]
+
+
+def test_code_bytes_counts_a_lone_surrogate_instead_of_raising() -> None:
+    """JSON text can carry an unpaired surrogate, which strict UTF-8 cannot encode."""
+    echo = _script_echo({"code": "x = '\ud800'", "mode": "ExecuteFile"})
+
+    assert echo["code_bytes"] == len("x = ''") + 3
+
+
 @pytest.mark.parametrize("size", [0, SCRIPT_ECHO_CHARS, SCRIPT_ECHO_CHARS + 1])
 def test_script_echo_cuts_only_past_the_limit(size: int) -> None:
     code = "x" * size

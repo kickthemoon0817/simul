@@ -1,7 +1,11 @@
 """Fixed editor identity and named-control scripts, using supported UE APIs."""
 
+from ._unreal_scripts import EDITOR_WORLD, EDITOR_WORLD_FUNCTION
+
 # Keep callbacks in their own module: Remote Control's public Python globals are
 # shared with arbitrary user scripts. Do not keep references to UWorld objects.
+# The module is installed once per editor process and keeps the identity state
+# and the map listener for the editor's lifetime.
 STATE_MODULE = """
 import os, uuid, unreal
 instance_id = uuid.uuid4().hex
@@ -14,9 +18,16 @@ def map_changed(flags):
         document_id = uuid.uuid4().hex
 
 unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).on_map_changed.add_callable(map_changed)
+"""
 
+# Defined in that module again on every call, so an editor whose module an
+# older simul installed still runs the current identity() and verify(). The
+# world comes from editor_world(), which finds the editor world while Play In
+# Editor runs: UnrealEditorSubsystem.get_editor_world() returns None then, and
+# every attached call used to fail with "No editor world is available".
+STATE_FUNCTIONS = "import os, re, unreal\n" + EDITOR_WORLD_FUNCTION + """
 def identity():
-    world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+    world = editor_world()
     if world is None:
         raise RuntimeError("No editor world is available")
     level = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
@@ -46,18 +57,19 @@ EDITOR_STATE = (
     f"    exec({STATE_MODULE!r}, _simul_new.__dict__)\n"
     "    sys.modules['_simul_unreal_attachment_v1'] = _simul_new\n"
     "_simul_editor = sys.modules['_simul_unreal_attachment_v1']\n"
+    f"exec({STATE_FUNCTIONS!r}, _simul_editor.__dict__)\n"
 )
 
-# Identity for discovery and attachment, plus the project name. The name is read
-# here rather than in STATE_MODULE.identity(): an editor keeps the module an
-# earlier simul installed for its whole lifetime, so new fields go outside it.
+# Identity for discovery and attachment, plus the project name, which
+# verify() does not compare.
 EDITOR_IDENTITY = EDITOR_STATE + (
     "print(json.dumps(dict(_simul_editor.identity(),"
     " project_name=unreal.SystemLibrary.get_game_name())))\n"
 )
 
-CONTROL_UI = """
-import json, unreal
+# While PIE runs, inspect and clear_cursor work and every other action is
+# refused with the PIEActive envelope (pie_refusal, from EDITOR_WORLD).
+CONTROL_UI = EDITOR_WORLD + """
 level = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
 actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
 action = args["action"]
@@ -82,9 +94,9 @@ if action == "inspect":
     result["agent_cursors"] = json.loads(overlay.inspect_cursors(viewport))["agent_cursors"] if overlay else []
 elif action == "clear_cursor":
     result["removed"] = overlay.clear_cursor(viewport, args["agent_id"])
+elif pie_active():
+    result = pie_refusal("change editor controls")
 else:
-    if level.is_in_play_in_editor():
-        raise ValueError("Stop PIE before changing editor controls")
     actor = None
     if action in ("select_actor", "set_property", "pilot_actor"):
         target = args["target"]

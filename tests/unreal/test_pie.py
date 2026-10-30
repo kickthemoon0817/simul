@@ -1,0 +1,810 @@
+"""Unreal tools while Play In Editor (PIE) runs.
+
+Observed on UE 5.7.4 while ``control_unreal_simulation`` had PIE running:
+EditorActorSubsystem spawns nothing (``spawn_actor_from_class`` and
+``spawn_actor_from_object`` return None), destroys nothing (``DestroyActor``
+returns False), lists no level actors and selects none, and
+``UnrealEditorSubsystem.get_editor_world()`` returns None. So
+``spawn_unreal_actor`` told the agent to pass a different class or asset,
+``delete_unreal_actor`` reported ``deleted: false`` with no reason, the level
+reads returned 0 actors, ``get_unreal_loaded_map`` raised on None, and in
+attached mode every call (``control_unreal_simulation`` stop included) failed
+with "No editor world is available". The editor world itself stays loaded,
+under the PIE world's package name minus its ``UEDPIE_<n>_`` prefix.
+
+Now an editor-world change Unreal refuses comes back as a ``PIEActive`` error
+whose hint names the tool that stops PIE, the reads find the editor world and
+report ``pie_active``, and the attachment check finds it too. The fake editor
+below answers the editor scripts the way UE 5.7.4 did, in and out of PIE.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import io
+import json
+import logging
+import sys
+from contextlib import contextmanager, redirect_stdout
+from types import SimpleNamespace
+from typing import Any, Dict, Iterator, List, Optional
+
+import pytest
+from fastmcp import Client
+
+from simul.adapters import _unreal_attach_scripts as attach_scripts
+from simul.adapters import unreal_runtime
+from simul.adapters._unreal_scripts import PIE_ACTIVE, PIE_STOP_HINT, pie_refusal
+from simul.config import Settings
+from simul.mcp import server as server_module
+from simul.mcp.usage_tracker import ToolUsageTracker
+from tests.fakes import AvailableAdapter
+
+LEVEL = "/Game/Maps/Lab.Lab:PersistentLevel."
+VIEWPORT = "FourPanes2x2.Viewport 1.Viewport1"
+ATTACHMENT_MODULE = "_simul_unreal_attachment_v1"
+
+
+# ---------------------------------------------------------------------------
+# A fake editor with UE 5.7.4's answers in and out of PIE
+# ---------------------------------------------------------------------------
+
+
+class _Class:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def get_name(self) -> str:
+        return self.name
+
+    def get_path_name(self) -> str:
+        return "/Script/Engine." + self.name
+
+
+class _Vector:
+    def __init__(self, x: float = 0.0, y: float = 0.0, z: float = 0.0) -> None:
+        self.x, self.y, self.z = x, y, z
+
+
+class Actor:
+    """The fields ``actor_info`` and the listings read."""
+
+    def __init__(
+        self,
+        name: str,
+        class_name: str = "StaticMeshActor",
+        tags: tuple = (),
+        editable: bool = True,
+    ) -> None:
+        self.name, self.cls, self.tags, self.editable = (
+            name,
+            _Class(class_name),
+            list(tags),
+            editable,
+        )
+        self.root_component = SimpleNamespace(mobility=SimpleNamespace(name="STATIC"))
+        self.world: Any = None
+
+    def get_actor_label(self) -> str:
+        return self.name
+
+    def get_path_name(self) -> str:
+        return LEVEL + self.name
+
+    def get_class(self) -> _Class:
+        return self.cls
+
+    def get_actor_location(self) -> _Vector:
+        return _Vector(1.0, 2.0, 3.0)
+
+    def get_actor_rotation(self) -> SimpleNamespace:
+        return SimpleNamespace(pitch=0.0, yaw=0.0, roll=0.0)
+
+    def get_actor_scale3d(self) -> _Vector:
+        return _Vector(1.0, 1.0, 1.0)
+
+    def get_editor_property(self, name: str) -> Any:
+        return {"tags": list(self.tags), "hidden": False}[name]
+
+    def get_components_by_class(self, cls: Any) -> List[Any]:
+        return []
+
+    def actor_has_tag(self, tag: str) -> bool:
+        return tag in self.tags
+
+    def is_editable(self) -> bool:
+        return self.editable
+
+    def get_world(self) -> Any:
+        return self.world
+
+
+class WorldSettings(Actor):
+    def __init__(self) -> None:
+        super().__init__("WorldSettings", "WorldSettings")
+
+
+class World:
+    def __init__(self, package: str, name: str) -> None:
+        self.package, self.name = package, name
+
+    def get_outermost(self) -> SimpleNamespace:
+        return SimpleNamespace(get_name=lambda: self.package)
+
+    def get_name(self) -> str:
+        return self.name
+
+    def get_path_name(self) -> str:
+        return self.package + "." + self.name
+
+
+class Editor:
+    """The level and the editor subsystems, with ``pie`` switching their answers."""
+
+    def __init__(self) -> None:
+        self.pie = False
+        self.editor_world = World("/Game/Maps/Lab", "Lab")
+        self.pie_world = World("/Game/Maps/UEDPIE_0_Lab", "Lab")
+        self.level = [
+            Actor("Floor", tags=("floor",)),
+            Actor("Crate", tags=("prop", "crate")),
+            Actor("Lamp", "PointLight"),
+        ]
+        # Actors of the editor world Unreal's level listing leaves out.
+        self.unlisted = [
+            WorldSettings(),
+            Actor("DefaultPhysicsVolume_0", "DefaultPhysicsVolume", editable=False),
+        ]
+        for actor in self.level + self.unlisted:
+            actor.world = self.editor_world
+        self.spawn_calls: List[str] = []
+        self.transactions: List[str] = []
+        self.calls: List[str] = []
+
+    # EditorActorSubsystem: refuses everything during PIE.
+    def get_all_level_actors(self) -> List[Actor]:
+        return [] if self.pie else list(self.level)
+
+    def spawn_actor_from_class(
+        self, cls: Any, location: Any, rotation: Any = None
+    ) -> Optional[Actor]:
+        self.spawn_calls.append(getattr(cls, "name", str(cls)))
+        if self.pie:
+            return None
+        actor = Actor(f"Spawned_{len(self.spawn_calls)}")
+        self.level.append(actor)
+        return actor
+
+    spawn_actor_from_object = spawn_actor_from_class
+
+    def destroy_actor(self, actor: Actor) -> bool:
+        return False if self.pie else True
+
+    def get_selected_level_actors(self) -> List[Actor]:
+        return []
+
+    @contextmanager
+    def transaction(self, description: str) -> Iterator[SimpleNamespace]:
+        self.transactions.append(description)
+        yield SimpleNamespace(cancel=lambda: None)
+
+    def module(self) -> SimpleNamespace:
+        editor = self
+        level_editor = SimpleNamespace(
+            is_in_play_in_editor=lambda: editor.pie,
+            on_map_changed=SimpleNamespace(add_callable=lambda callback: None),
+            get_viewport_config_keys=lambda: [VIEWPORT],
+            get_active_viewport_config_key=lambda: VIEWPORT,
+            editor_get_game_view=lambda viewport: False,
+            get_pilot_level_actor=lambda viewport: None,
+        )
+        unreal_editor = SimpleNamespace(
+            get_editor_world=lambda: None if editor.pie else editor.editor_world,
+            get_game_world=lambda: editor.pie_world if editor.pie else None,
+        )
+        subsystems = {
+            "EditorActorSubsystem": editor,
+            "LevelEditorSubsystem": level_editor,
+            "UnrealEditorSubsystem": unreal_editor,
+            "StaticMeshEditorSubsystem": SimpleNamespace(),
+        }
+
+        def get_all_actors_of_class(world: Any, cls: Any) -> List[Actor]:
+            editor.calls.append("GameplayStatics.get_all_actors_of_class")
+            assert world is editor.editor_world, "the editor world, not the PIE world"
+            return list(editor.level) + list(editor.unlisted)
+
+        def find_object(outer: Any, path: str) -> Any:
+            return (
+                editor.editor_world
+                if path == editor.editor_world.get_path_name()
+                else None
+            )
+
+        def load_object(outer: Any, path: str) -> Any:
+            editor.calls.append("load_object " + path)
+            if path == "/Engine/BasicShapes/Cube.Cube":
+                return SimpleNamespace(get_class=lambda: _Class("StaticMesh"))
+            return next((a for a in editor.level if a.get_path_name() == path), None)
+
+        return SimpleNamespace(
+            Actor=Actor,
+            ActorComponent=object,
+            PrimitiveComponent=object,
+            WorldSettings=WorldSettings,
+            Class=_Class,
+            Vector=_Vector,
+            Rotator=lambda **kwargs: SimpleNamespace(**kwargs),
+            StaticMeshActor=_Class("StaticMeshActor"),
+            StaticMesh=type("StaticMesh", (), {}),
+            EditorActorSubsystem="EditorActorSubsystem",
+            LevelEditorSubsystem="LevelEditorSubsystem",
+            UnrealEditorSubsystem="UnrealEditorSubsystem",
+            StaticMeshEditorSubsystem="StaticMeshEditorSubsystem",
+            get_editor_subsystem=subsystems.__getitem__,
+            GameplayStatics=SimpleNamespace(
+                get_all_actors_of_class=get_all_actors_of_class,
+                get_platform_name=lambda: "Mac",
+            ),
+            SystemLibrary=SimpleNamespace(
+                get_engine_version=lambda: "5.7.4", get_game_name=lambda: "Lab"
+            ),
+            Paths=SimpleNamespace(
+                project_dir=lambda: "../../Lab/",
+                convert_relative_path_to_full=lambda path: "/Projects/Lab/",
+                get_project_file_path=lambda: "/Projects/Lab/Lab.uproject",
+            ),
+            EditorLoadingAndSavingUtils=SimpleNamespace(
+                get_dirty_map_packages=lambda: []
+            ),
+            ScopedEditorTransaction=editor.transaction,
+            MathLibrary=SimpleNamespace(class_is_child_of=lambda cls, parent: True),
+            find_object=find_object,
+            load_object=load_object,
+            load_asset=lambda path: None,
+            UsdStageImportFactory=object,
+            LevelExporterUSD=object,
+        )
+
+    def run(self, code: str) -> Dict[str, Any]:
+        """``ExecutePythonCommandEx`` in ExecuteFile mode."""
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out):
+                exec(code, {})
+        except Exception as exc:
+            return {"ReturnValue": False, "CommandResult": repr(exc)}
+        return {
+            "ReturnValue": True,
+            "LogOutput": [
+                {"Type": "Info", "Output": line} for line in out.getvalue().splitlines()
+            ],
+        }
+
+
+@pytest.fixture
+def editor(monkeypatch: pytest.MonkeyPatch) -> Editor:
+    level = Editor()
+    monkeypatch.setitem(sys.modules, "unreal", level.module())
+    # The attachment scripts install a module in sys.modules; start without
+    # one and remove the one a test installs.
+    monkeypatch.setitem(sys.modules, ATTACHMENT_MODULE, None)
+    monkeypatch.delitem(sys.modules, ATTACHMENT_MODULE)
+    return level
+
+
+def _session(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, settings: Optional[Settings] = None
+) -> Any:
+    session = unreal_runtime.UnrealRuntimeSession(settings or Settings())
+    session.scripts = []  # type: ignore[attr-defined]
+
+    async def execute(code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
+        session.scripts.append(code)  # type: ignore[attr-defined]
+        return editor.run(code)
+
+    monkeypatch.setattr(session, "_execute_python", execute)
+    return session
+
+
+def _errors(caplog: pytest.LogCaptureFixture) -> List[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.ERROR
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Editor-world changes Unreal refuses during PIE
+# ---------------------------------------------------------------------------
+
+
+def test_the_refusal_names_the_tool_that_stops_pie() -> None:
+    refusal = pie_refusal("spawn actors")
+
+    assert refusal == {
+        "success": False,
+        "error_type": PIE_ACTIVE,
+        "error": "Play In Editor is running, and Unreal's editor cannot spawn actors until it stops",
+        "details": {"hint": PIE_STOP_HINT},
+    }
+    assert "control_unreal_simulation" in PIE_STOP_HINT and "'stop'" in PIE_STOP_HINT
+    assert "simul unreal sim stop" in PIE_STOP_HINT
+
+
+def test_spawn_during_pie_is_refused_before_the_path_is_resolved(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """It used to be a SpawnError telling the agent to pass another class or asset."""
+    editor.pie = True
+    caplog.set_level(logging.INFO, logger="simul")
+
+    result = asyncio.run(
+        _session(editor, monkeypatch).spawn_actor("/Engine/BasicShapes/Cube.Cube")
+    )
+
+    assert result == pie_refusal("spawn actors")
+    assert editor.spawn_calls == [] and not any(
+        call.startswith("load_object") for call in editor.calls
+    )
+    # A refusal the caller can act on, not a server fault.
+    assert _errors(caplog) == []
+    assert any(
+        "Unreal refused the request (PIEActive)" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_spawn_outside_pie_still_spawns(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = asyncio.run(
+        _session(editor, monkeypatch).spawn_actor("/Engine/BasicShapes/Cube.Cube")
+    )
+
+    assert result["actor_path"] == LEVEL + "Spawned_1"
+    assert len(editor.spawn_calls) == 1 and editor.transactions == [
+        "simul: spawn actor"
+    ]
+
+
+def test_a_procedural_scene_during_pie_is_refused_before_its_transaction(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    editor.pie = True
+
+    result = asyncio.run(
+        _session(editor, monkeypatch).generate_procedural_scene("room")
+    )
+
+    assert result == pie_refusal("spawn actors")
+    assert editor.transactions == [] and editor.spawn_calls == []
+
+
+def test_delete_during_pie_is_refused_instead_of_reporting_deleted_false(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    editor.pie = True
+    session = _session(editor, monkeypatch)
+    calls: List[str] = []
+
+    async def call_function(
+        object_path: str, function_name: str, parameters: Any = None
+    ) -> Dict[str, Any]:
+        calls.append(function_name)
+        return {"ReturnValue": False}  # DestroyActor refuses during PIE
+
+    monkeypatch.setattr(session, "_call_function", call_function)
+    caplog.set_level(logging.INFO, logger="simul")
+
+    result = asyncio.run(session.delete_actor(LEVEL + "Crate"))
+
+    assert calls == ["DestroyActor"]
+    assert result == pie_refusal("delete actors")
+    assert _errors(caplog) == []
+
+
+@pytest.mark.parametrize("reply", [{"ReturnValue": False}, {"ReturnValue": True}])
+def test_delete_outside_pie_reports_what_unreal_did(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, reply: Dict[str, Any]
+) -> None:
+    session = _session(editor, monkeypatch)
+
+    async def call_function(
+        object_path: str, function_name: str, parameters: Any = None
+    ) -> Dict[str, Any]:
+        return reply
+
+    monkeypatch.setattr(session, "_call_function", call_function)
+
+    result = asyncio.run(session.delete_actor(LEVEL + "Crate"))
+
+    assert result == {"actor_path": LEVEL + "Crate", "deleted": reply["ReturnValue"]}
+    # The PIE state is read only to explain a delete Unreal refused.
+    assert len(session.scripts) == (0 if reply["ReturnValue"] else 1)
+
+
+def test_delete_reports_deleted_false_when_the_pie_state_cannot_be_read(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _session(editor, monkeypatch)
+
+    async def call_function(
+        object_path: str, function_name: str, parameters: Any = None
+    ) -> Dict[str, Any]:
+        return {"ReturnValue": False}
+
+    async def unreachable(code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
+        raise ConnectionError("editor went away")
+
+    monkeypatch.setattr(session, "_call_function", call_function)
+    monkeypatch.setattr(session, "_execute_python", unreachable)
+
+    assert asyncio.run(session.delete_actor(LEVEL + "Crate")) == {
+        "actor_path": LEVEL + "Crate",
+        "deleted": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("method", "kwargs"),
+    [
+        ("generate_mesh_primitive", {"primitive_type": "box"}),
+        ("compute_convex_hull", {"mesh_path": LEVEL + "Crate"}),
+        ("decompose_convex_hull", {"mesh_path": LEVEL + "Crate"}),
+        (
+            "convert_mesh_format",
+            {"mesh_path": "/Game/Meshes/SM_Crate", "target_format": "dynamic_mesh"},
+        ),
+    ],
+)
+def test_mesh_tools_that_spawn_actors_are_refused_during_pie(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, method: str, kwargs: Dict[str, Any]
+) -> None:
+    """Each spawns its result with EditorActorSubsystem, which returns None during PIE."""
+    session = _session(editor, monkeypatch)
+
+    editor.pie = True
+    refused = asyncio.run(getattr(session, method)(**kwargs))
+    editor.pie = False
+    ran = asyncio.run(getattr(session, method)(**kwargs))
+
+    assert refused["success"] is False and refused["error_type"] == PIE_ACTIVE
+    assert refused["error"] == pie_refusal("spawn actors")["error"]
+    # Outside PIE the body runs: the fake editor has no GeometryScript, so it raises.
+    assert "GeometryScript" in ran["error"] or "EditorAssetLibrary" in ran["error"]
+
+
+@pytest.mark.parametrize(
+    ("method", "kwargs", "action"),
+    [
+        ("import_usd", {"usd_path": "examples/whale.usd"}, "import USD into the level"),
+        (
+            "export_usd",
+            {
+                "actor_paths": [LEVEL + "Crate"],
+                "output_path": "/tmp/simul-work/pie.usda",
+            },
+            "export actors to USD",
+        ),
+    ],
+)
+def test_usd_import_and_export_are_refused_during_pie(
+    editor: Editor,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    kwargs: Dict[str, Any],
+    action: str,
+) -> None:
+    """Import finds its actors in the level listing and export selects them and
+    exports the editor world, none of which Unreal allows during PIE."""
+    editor.pie = True
+
+    result = asyncio.run(getattr(_session(editor, monkeypatch), method)(**kwargs))
+
+    assert result["error_type"] == PIE_ACTIVE
+    assert result["error"] == pie_refusal(action)["error"]
+
+
+# ---------------------------------------------------------------------------
+# Reads during PIE: the editor world, flagged
+# ---------------------------------------------------------------------------
+
+
+def test_list_actors_during_pie_reads_the_editor_world(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It used to return 0 actors without saying why."""
+    session = _session(editor, monkeypatch)
+
+    editor.pie = True
+    during = asyncio.run(session.list_actors())
+    editor.pie = False
+    outside = asyncio.run(session.list_actors())
+
+    assert during["pie_active"] is True and outside["pie_active"] is False
+    # The same actors either way: the WorldSettings and the non-editable
+    # helper Unreal's listing leaves out stay out.
+    assert [a["path"] for a in during["actors"]] == [
+        a["path"] for a in outside["actors"]
+    ]
+    assert [a["name"] for a in during["actors"]] == ["Floor", "Crate", "Lamp"]
+    assert editor.calls.count("GameplayStatics.get_all_actors_of_class") == 1
+
+
+def test_list_actors_filters_apply_during_pie(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    editor.pie = True
+    session = _session(editor, monkeypatch)
+
+    tagged = asyncio.run(session.list_actors(tag_filter="prop"))
+    lights = asyncio.run(session.list_actors(class_filter="PointLight"))
+
+    assert [a["name"] for a in tagged["actors"]] == ["Crate"]
+    assert [a["name"] for a in lights["actors"]] == ["Lamp"]
+
+
+def test_semantic_label_lookup_during_pie_finds_editor_actors(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    editor.pie = True
+
+    result = asyncio.run(
+        _session(editor, monkeypatch).get_actor_by_semantic_label("crate")
+    )
+
+    assert [a["path"] for a in result["actors"]] == [LEVEL + "Crate"]
+    assert result["total_matches"] == 1 and result["pie_active"] is True
+
+
+def test_scene_summary_during_pie_names_the_editor_map(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    editor.pie = True
+
+    result = asyncio.run(_session(editor, monkeypatch).summarize_scene())
+
+    assert result["map_path"] == "/Game/Maps/Lab.Lab"
+    assert result["total_actors"] == 3
+    assert result["pie_active"] is True
+    assert "Play In Editor is running" in result["summary_text"]
+
+
+def test_robotics_analysis_during_pie_reads_the_editor_world(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    editor.pie = True
+
+    result = asyncio.run(
+        _session(editor, monkeypatch).analyze_scene_for_robotics(["graspability"])
+    )
+
+    assert result["total_actors_analyzed"] == 3
+    assert result["pie_active"] is True
+
+
+def test_loaded_map_engine_info_and_actor_info_during_pie(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """get_unreal_loaded_map used to raise on the None editor world, and
+    get_unreal_engine_info reported an empty loaded_map."""
+    editor.pie = True
+    session = _session(editor, monkeypatch)
+
+    loaded = asyncio.run(session.get_loaded_map())
+    info = asyncio.run(session.get_engine_info())
+    actor = asyncio.run(session.get_actor_info(LEVEL + "Crate"))
+
+    assert loaded == {"map_path": "/Game/Maps/Lab.Lab", "pie_active": True}
+    assert info["loaded_map"] == "/Game/Maps/Lab.Lab" and info["pie_active"] is True
+    assert actor["name"] == "Crate" and actor["pie_active"] is True
+
+
+def test_reads_outside_pie_report_pie_active_false(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _session(editor, monkeypatch)
+
+    assert asyncio.run(session.get_loaded_map()) == {
+        "map_path": "/Game/Maps/Lab.Lab",
+        "pie_active": False,
+    }
+    assert asyncio.run(session.get_engine_info())["pie_active"] is False
+    assert asyncio.run(session.summarize_scene())["pie_active"] is False
+    assert "GameplayStatics.get_all_actors_of_class" not in editor.calls
+
+
+# ---------------------------------------------------------------------------
+# Attached mode during PIE
+# ---------------------------------------------------------------------------
+
+
+def _attached_run(editor: Editor, code: str) -> Dict[str, Any]:
+    result = editor.run(code)
+    assert result["ReturnValue"], result.get("CommandResult")
+    return json.loads(result["LogOutput"][-1]["Output"])
+
+
+def test_the_attachment_identity_and_check_work_during_pie(editor: Editor) -> None:
+    """Every attached call verifies the attachment first, and the check read
+    get_editor_world(): during PIE each call, stop included, failed with "No
+    editor world is available"."""
+    before = _attached_run(editor, attach_scripts.EDITOR_IDENTITY)
+    editor.pie = True
+    during = _attached_run(editor, attach_scripts.EDITOR_IDENTITY)
+    target = {
+        key: before[key]
+        for key in ("instance_id", "document_id", "project_path", "map_path")
+    }
+    verified = _attached_run(
+        editor,
+        attach_scripts.EDITOR_STATE
+        + f"_simul_editor.verify({dict(target, viewport=VIEWPORT)!r})\nprint(json.dumps({{'verified': True}}))\n",
+    )
+
+    assert during == before
+    assert during["map_path"] == "/Game/Maps/Lab.Lab"
+    assert verified == {"verified": True}
+
+
+def test_an_editor_with_an_older_attachment_module_gets_the_current_identity(
+    editor: Editor,
+) -> None:
+    """An editor keeps the module the first simul to attach installed; its
+    identity() and verify() are replaced on every call, its ids are kept."""
+    old = SimpleNamespace(
+        instance_id="old-instance",
+        document_id="old-document",
+        identity=lambda: (_ for _ in ()).throw(
+            RuntimeError("No editor world is available")
+        ),
+    )
+    module = type(sys)(ATTACHMENT_MODULE)
+    module.__dict__.update(vars(old))
+    sys.modules[ATTACHMENT_MODULE] = module
+    editor.pie = True
+
+    identity = _attached_run(editor, attach_scripts.EDITOR_IDENTITY)
+
+    assert (identity["instance_id"], identity["document_id"]) == (
+        "old-instance",
+        "old-document",
+    )
+    assert identity["map_path"] == "/Game/Maps/Lab.Lab"
+
+
+@pytest.mark.parametrize(
+    "action", ["select_actor", "set_property", "set_game_view", "clear_selection"]
+)
+def test_named_controls_are_refused_during_pie_but_inspect_works(
+    editor: Editor, action: str
+) -> None:
+    """They raised a ValueError, which arrived as a traceback; now the PIEActive envelope."""
+    args = {
+        "action": action,
+        "target": None,
+        "property_name": None,
+        "value": None,
+        "enabled": None,
+        "viewport": VIEWPORT,
+        "actions": [],
+        "agent_id": "agent",
+        "position": None,
+        "activity": None,
+    }
+    script = (
+        attach_scripts.EDITOR_STATE + f"args = {args!r}\n" + attach_scripts.CONTROL_UI
+    )
+    editor.pie = True
+
+    refused = _attached_run(editor, script)
+    inspected = _attached_run(
+        editor, script.replace(f"'action': '{action}'", "'action': 'inspect'")
+    )
+
+    assert refused == pie_refusal("change editor controls")
+    assert (
+        inspected["is_playing"] is True
+        and inspected["map_path"] == "/Game/Maps/Lab.Lab"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Through the MCP envelope
+# ---------------------------------------------------------------------------
+
+
+class _Adapter(AvailableAdapter):
+    def __init__(self, session: Any) -> None:
+        super().__init__(session.settings)
+        self.session = session
+
+    @contextmanager
+    def create_session(self) -> Iterator[Any]:
+        yield self.session
+
+
+def _call(
+    editor: Editor,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    tool: str,
+    arguments: Dict[str, Any],
+) -> Any:
+    settings = Settings(
+        unreal={
+            "tool_surface": "full",
+            "attachment_path": str(tmp_path / "attachment.json"),
+        },
+        security={"rate_limiting_enabled": False},
+    )
+    instance = server_module.SimulMCPServer(settings, backends={"unreal"})
+    instance.usage_tracker = ToolUsageTracker(log_dir=tmp_path / "usage")
+    instance.unreal_adapter = _Adapter(_session(editor, monkeypatch, settings))
+
+    async def run() -> Any:
+        async with Client(instance.mcp) as client:
+            return await client.call_tool(tool, arguments, raise_on_error=False)
+
+    result = asyncio.run(run())
+    return json.loads(
+        [
+            block.text
+            for block in result.content
+            if getattr(block, "type", None) == "text"
+        ][-1]
+    )
+
+
+def test_an_agent_sees_the_refusal_and_the_hint(
+    editor: Editor,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    editor.pie = True
+    caplog.set_level(logging.INFO, logger="simul")
+
+    payload = _call(
+        editor,
+        monkeypatch,
+        tmp_path,
+        "spawn_unreal_actor",
+        {"asset_path": "/Script/Engine.PointLight"},
+    )
+
+    assert payload == pie_refusal("spawn actors")
+    assert _errors(caplog) == []
+
+
+def test_an_agent_sees_pie_active_on_the_reads(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    editor.pie = True
+
+    listing = _call(editor, monkeypatch, tmp_path, "list_unreal_actors", {})
+    found = _call(
+        editor,
+        monkeypatch,
+        tmp_path,
+        "get_unreal_actor_by_semantic_label",
+        {"label": "floor"},
+    )
+    loaded = _call(editor, monkeypatch, tmp_path, "get_unreal_loaded_map", {})
+
+    assert (
+        listing["success"] is True
+        and listing["pie_active"] is True
+        and listing["count"] == 3
+    )
+    assert found["pie_active"] is True and [a["name"] for a in found["actors"]] == [
+        "Floor"
+    ]
+    assert loaded == {
+        "success": True,
+        "error": None,
+        "map_path": "/Game/Maps/Lab.Lab",
+        "pie_active": True,
+    }

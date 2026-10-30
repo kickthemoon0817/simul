@@ -150,6 +150,9 @@ class FakeActor:
     def get_actor_up_vector(self) -> SimpleNamespace:
         return _vector(0.0, math.sqrt(1 - self.up_z**2), self.up_z)
 
+    def is_editable(self) -> bool:
+        return True
+
 
 # Mesh collision as StaticMeshEditorSubsystem reports it: (simple, convex, complexity).
 MESHES: Dict[str, Tuple[int, int, str]] = {
@@ -222,6 +225,13 @@ class FakeEditor:
         self.destroyed: List[str] = []
         self.transactions: List[Dict[str, Any]] = []
         self.spawn_returns_none_after: Optional[int] = None
+        # Spawn indices whose destroy_actor raises, or returns False.
+        self.destroy_raises: Tuple[int, ...] = ()
+        self.destroy_refuses: Tuple[int, ...] = ()
+        # Spawn index whose set_folder_path raises.
+        self.folder_raises: Optional[int] = None
+        # LevelEditorSubsystem.is_in_play_in_editor; tests/unreal/test_pie.py covers PIE.
+        self.pie = False
 
     def module(self) -> SimpleNamespace:
         editor = self
@@ -247,6 +257,7 @@ class FakeEditor:
 
         class SpawnedActor:
             def __init__(self, index: int, location: SimpleNamespace) -> None:
+                self.index = index
                 self.record: Dict[str, Any] = {
                     "path": f"{LEVEL}StaticMeshActor_{index}",
                     "location": [location.x, location.y, location.z],
@@ -273,6 +284,8 @@ class FakeEditor:
                 self.record["label"] = label
 
             def set_folder_path(self, folder: str) -> None:
+                if self.index == editor.folder_raises:
+                    raise RuntimeError("folder refused")
                 self.record["folder"] = folder
 
             def set_editor_property(self, name: str, value: Any) -> None:
@@ -288,6 +301,10 @@ class FakeEditor:
             return actor
 
         def destroy_actor(actor: Any) -> bool:
+            if actor.index in editor.destroy_raises:
+                raise RuntimeError("destroy refused")
+            if actor.index in editor.destroy_refuses:
+                return False
             editor.destroyed.append(actor.get_path_name())
             return True
 
@@ -295,23 +312,50 @@ class FakeEditor:
             return None if path in editor.missing_meshes else StaticMesh(path)
 
         def collision(index: int) -> Any:
-            return lambda mesh: MESHES[mesh.get_path_name()][index]
+            # During PIE, StaticMeshEditorSubsystem refuses: -1 and the default complexity.
+            refused = (-1, -1, "CTF_USE_DEFAULT")[index]
+            return lambda mesh: refused if editor.pie else MESHES[mesh.get_path_name()][index]
+
+        def world(package: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                get_outermost=lambda: SimpleNamespace(get_name=lambda: package),
+                get_name=lambda: "Test",
+                get_path_name=lambda: package + ".Test",
+            )
+
+        editor_world, pie_world = world("/Game/Maps/Test"), world("/Game/Maps/UEDPIE_0_Test")
+
+        def all_actors_of_class(in_world: Any, cls: Any) -> List[FakeActor]:
+            assert in_world is editor_world, "the editor world, not the PIE world"
+            return list(editor.actors)
 
         subsystems = {
+            # During PIE, EditorActorSubsystem lists nothing and the editor world is None.
             "EditorActorSubsystem": SimpleNamespace(
-                get_all_level_actors=lambda: list(editor.actors),
+                get_all_level_actors=lambda: [] if editor.pie else list(editor.actors),
                 spawn_actor_from_class=spawn_actor_from_class,
                 destroy_actor=destroy_actor,
+            ),
+            "LevelEditorSubsystem": SimpleNamespace(is_in_play_in_editor=lambda: editor.pie),
+            "UnrealEditorSubsystem": SimpleNamespace(
+                get_editor_world=lambda: None if editor.pie else editor_world,
+                get_game_world=lambda: pie_world if editor.pie else None,
             ),
             "StaticMeshEditorSubsystem": SimpleNamespace(
                 get_simple_collision_count=collision(0),
                 get_convex_collision_count=collision(1),
-                get_collision_complexity=lambda mesh: _Named(MESHES[mesh.get_path_name()][2]),
+                get_collision_complexity=lambda mesh: _Named(collision(2)(mesh)),
             ),
         }
         return SimpleNamespace(
             EditorActorSubsystem="EditorActorSubsystem",
+            LevelEditorSubsystem="LevelEditorSubsystem",
+            UnrealEditorSubsystem="UnrealEditorSubsystem",
             StaticMeshEditorSubsystem="StaticMeshEditorSubsystem",
+            GameplayStatics=SimpleNamespace(get_all_actors_of_class=all_actors_of_class),
+            Actor=FakeActor,
+            WorldSettings=type("WorldSettings", (FakeActor,), {}),
+            find_object=lambda outer, path: editor_world if path == "/Game/Maps/Test.Test" else None,
             get_editor_subsystem=subsystems.__getitem__,
             PrimitiveComponent=PrimitiveComponent,
             StaticMeshComponent=StaticMeshComponent,
@@ -449,6 +493,28 @@ def test_collision_summary_lists_a_bounded_number_of_actors(monkeypatch: pytest.
     assert summary["missing_simple_collision_actors"] == [LEVEL + "Statue0", LEVEL + "Statue1"]
 
 
+def test_mesh_collision_counts_are_null_while_pie_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """While PIE runs, the editor world is read directly, and StaticMeshEditorSubsystem
+    answers -1 and the default complexity for every mesh (UE 5.7.4): those used to
+    be summed as counts once the level could be read."""
+    outside = _analyze(monkeypatch, FakeEditor(_scene()))
+    editor = FakeEditor(_scene())
+    editor.pie = True
+
+    during = _analyze(monkeypatch, editor)
+
+    assert (outside["pie_active"], during["pie_active"]) == (False, True)
+    summary = during["collision_summary"]
+    mesh_counts = ("simple_shapes", "convex_hulls", "complex_collision", "missing_simple_collision")
+    assert [summary[key] for key in mesh_counts] == [None] * 4
+    assert summary["missing_simple_collision_actors"] == []
+    # Everything that does not come from the mesh asset is the same as outside PIE.
+    for key in ("total_actors", "with_collision", "physics_collision", "static_mesh_components", "by_profile"):
+        assert summary[key] == outside["collision_summary"][key], key
+    assert during["traversable_surfaces"] == outside["traversable_surfaces"]
+    assert during["graspable_objects"] == outside["graspable_objects"]
+
+
 def test_an_unknown_analysis_type_is_refused_before_the_editor_is_asked(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _session(monkeypatch, FakeEditor(_scene()))
 
@@ -473,7 +539,12 @@ def test_a_failed_analysis_script_is_a_script_error(monkeypatch: pytest.MonkeyPa
 # ---------------------------------------------------------------------------
 
 
+#: The generation id the tests pin; production draws a fresh one per call.
+GENERATION = "0badc0de"
+
+
 def _generate(monkeypatch: pytest.MonkeyPatch, editor: FakeEditor, *args: Any, **kwargs: Any) -> Any:
+    monkeypatch.setattr(unreal_runtime, "new_generation", lambda: GENERATION)
     session = _session(monkeypatch, editor)
     return session, asyncio.run(session.generate_procedural_scene(*args, **kwargs))
 
@@ -490,8 +561,8 @@ def test_generation_spawns_the_planned_pieces_in_one_transaction(monkeypatch: py
         "total_spawned": len(plan.pieces),
         "scene_type": "room",
         "seed": 7,
-        "tag": "simul_room_7",
-        "folder": "Simul/Room_7",
+        "tag": f"simul_room_7_{GENERATION}",
+        "folder": f"Simul/Room_7_{GENERATION}",
     }
     assert editor.transactions == [{"description": "simul: generate room scene", "cancelled": False, "open": False}]
     assert editor.destroyed == []
@@ -504,8 +575,8 @@ def test_generation_spawns_the_planned_pieces_in_one_transaction(monkeypatch: py
             "mobility": "MOVABLE" if piece.movable else "STATIC",
             "scale": spec["scale"],
             "label": piece.label,
-            "folder": "Simul/Room_7",
-            "tags": ["simul_procedural", "simul_room_7"],
+            "folder": f"Simul/Room_7_{GENERATION}",
+            "tags": ["simul_procedural", f"simul_room_7_{GENERATION}"],
         }
 
 
@@ -522,9 +593,76 @@ def test_a_failed_spawn_removes_what_was_spawned(monkeypatch: pytest.MonkeyPatch
     assert result["success"] is False
     assert result["error_type"] == "SpawnError"
     assert result["error"].startswith("Spawned nothing: ")
+    assert "folder" not in result["error"]
     assert editor.destroyed == [record["path"] for record in editor.spawned]
     assert editor.spawned, "the failure came after some pieces were spawned"
     assert editor.transactions[0]["cancelled"] is True
+    # Unreal makes an outliner folder the first time an actor is filed in it
+    # and keeps it, empty, after the actors go (observed on UE 5.7.4); actors
+    # are filed only once every piece has spawned, so this failure made none.
+    assert not any("folder" in record for record in editor.spawned)
+
+
+def test_rollback_destroys_every_actor_and_cancels_when_a_destroy_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A raising destroy_actor used to skip the rest of the rollback and the cancel."""
+    editor = FakeEditor([])
+    editor.spawn_returns_none_after = 4
+    editor.destroy_raises = (1,)
+    editor.destroy_refuses = (2,)
+
+    _, result = _generate(monkeypatch, editor, "outdoor")
+
+    paths = [record["path"] for record in editor.spawned]
+    assert len(paths) == 4
+    assert editor.destroyed == [paths[0], paths[3]], "the actors after the failing destroys were still removed"
+    assert editor.transactions[0]["cancelled"] is True
+    assert result["success"] is False
+    assert result["error_type"] == "SpawnError"
+    assert result["error"] == (
+        "Unreal spawned no actor for Outdoor_Crown_1; rollback could not remove 2 of the 4 actors spawned: "
+        f"{paths[1]}, {paths[2]}"
+    )
+    assert result["details"] == {"actors_left": [paths[1], paths[2]]}
+
+
+def test_a_failure_while_filing_the_actors_is_rolled_back_and_names_the_folder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    editor = FakeEditor([])
+    editor.folder_raises = 2
+
+    _, result = _generate(monkeypatch, editor, "room", {"seed": 7, "props": 0}, [0, 0, 0], [800, 600, 300])
+
+    assert editor.destroyed == [record["path"] for record in editor.spawned]
+    assert editor.transactions[0]["cancelled"] is True
+    assert result["error_type"] == "SpawnError"
+    assert result["error"] == (
+        f"Spawned nothing: folder refused; the outliner folder Simul/Room_7_{GENERATION} may remain empty, "
+        "as Unreal's Python API cannot delete outliner folders"
+    )
+
+
+def test_generating_the_same_scene_twice_gives_each_call_its_own_tag_and_folder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both calls used to share simul_room_9 and Simul/Room_9, so a tag lookup mixed them."""
+    editor = FakeEditor([])
+    session = _session(monkeypatch, editor)
+
+    first = asyncio.run(session.generate_procedural_scene("room", {"seed": 9, "props": 1}))
+    second = asyncio.run(session.generate_procedural_scene("room", {"seed": 9, "props": 1}))
+
+    assert first["tag"] != second["tag"] and first["folder"] != second["folder"]
+    for result in (first, second):
+        assert result["tag"].startswith("simul_room_9_")
+        assert result["folder"].startswith("Simul/Room_9_")
+        assert result["tag"].rsplit("_", 1)[1] == result["folder"].rsplit("_", 1)[1]
+    spawned = editor.spawned
+    half = len(spawned) // 2
+    assert {record["tags"][1] for record in spawned[:half]} == {first["tag"]}
+    assert {record["tags"][1] for record in spawned[half:]} == {second["tag"]}
+    # The layout is the plan's: the same arguments place the same pieces.
+    assert [record["location"] for record in spawned[:half]] == [record["location"] for record in spawned[half:]]
 
 
 def test_the_editor_reporting_a_different_count_is_a_script_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -561,8 +699,8 @@ def test_the_script_receives_the_plan_as_a_literal(monkeypatch: pytest.MonkeyPat
     plan = plan_scene("warehouse", {"rows": 1, "props": 2, "seed": 3})
     assert args == {
         "pieces": [piece.spawn_args() for piece in plan.pieces],
-        "folder": "Simul/Warehouse_3",
-        "tags": ["simul_procedural", "simul_warehouse_3"],
+        "folder": f"Simul/Warehouse_3_{GENERATION}",
+        "tags": ["simul_procedural", f"simul_warehouse_3_{GENERATION}"],
         "transaction": "simul: generate warehouse scene",
     }
 
@@ -636,6 +774,33 @@ def test_the_same_arguments_plan_the_same_scene() -> None:
 
     assert plan_scene("warehouse", {"seed": 11}, [0, 0, 0], [2000, 1500, 600]) == first
     assert plan_scene("Warehouse ", {"seed": 12}, [0, 0, 0], [2000, 1500, 600]).pieces != first.pieces
+
+
+@pytest.mark.parametrize("seed", [-1, -9, procedural.MAX_SEED + 1, 10**40])
+def test_a_seed_outside_0_to_max_is_refused(seed: int) -> None:
+    """random.Random seeds with the absolute value, so -9 used to plan seed 9's
+    layout under the name simul_room_-9."""
+    with pytest.raises(ValueError, match=rf"seed must be an integer from 0 to 4294967295, got {seed}$"):
+        plan_scene("room", {"seed": seed})
+
+
+def test_every_seed_from_0_to_max_plans_its_own_layout() -> None:
+    plans = [plan_scene("room", {"seed": seed, "props": 3}) for seed in (0, 1, 9, procedural.MAX_SEED)]
+
+    assert [plan.seed for plan in plans] == [0, 1, 9, procedural.MAX_SEED]
+    assert len({plan.pieces for plan in plans}) == len(plans)
+
+
+def test_each_generation_names_its_own_tag_and_folder() -> None:
+    plan = plan_scene("outdoor", {"seed": 5})
+    first, second = procedural.new_generation(), procedural.new_generation()
+
+    assert first != second
+    for generation in (first, second):
+        assert len(generation) == 8 and int(generation, 16) >= 0 and generation == generation.lower()
+    assert plan.tag(first) == f"simul_outdoor_5_{first}"
+    assert plan.folder(first) == f"Simul/Outdoor_5_{first}"
+    assert plan.tag(first) != plan.tag(second) and plan.folder(first) != plan.folder(second)
 
 
 def test_spawn_args_scale_the_basic_shapes() -> None:
@@ -881,6 +1046,7 @@ def test_the_analysis_tool_returns_criteria_and_analyses(monkeypatch: pytest.Mon
 
 def test_the_generator_tool_returns_its_tag_and_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     editor = FakeEditor([])
+    monkeypatch.setattr(unreal_runtime, "new_generation", lambda: GENERATION)
 
     payload = _call(
         monkeypatch,
@@ -897,8 +1063,8 @@ def test_the_generator_tool_returns_its_tag_and_folder(monkeypatch: pytest.Monke
         "total_spawned": 4,
         "scene_type": "corridor",
         "seed": 9,
-        "tag": "simul_corridor_9",
-        "folder": "Simul/Corridor_9",
+        "tag": f"simul_corridor_9_{GENERATION}",
+        "folder": f"Simul/Corridor_9_{GENERATION}",
     }
 
 
