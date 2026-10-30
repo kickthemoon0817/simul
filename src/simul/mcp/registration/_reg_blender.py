@@ -771,7 +771,13 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         name="set_blender_camera_view",
         description=(
             "Place a Blender camera (the active one by default) at a world-space location "
-            "and XYZ Euler rotation, whatever its parent and rotation mode."
+            "and XYZ Euler rotation, whatever its parent and rotation mode. Success means "
+            "the placement is in the camera's transform; its constraints (Track To, Copy "
+            "Location, Child Of, ...) still apply and are never muted. location and "
+            "rotation_euler report where Blender evaluates the camera; placement_overridden "
+            "is true when that is not the request, with constraints_applied and a warning "
+            "on how to disable them. Keys on the camera's transform take over at the next "
+            "frame change."
         ),
         hints=IDEMPOTENT,
         operation="set_camera_view",
@@ -781,8 +787,9 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="get_blender_camera_info",
         description=(
-            "Get a Blender camera's world-space location and XYZ Euler rotation, lens and "
-            "clip range (the active camera by default)."
+            "Get a Blender camera's world-space location and XYZ Euler rotation where "
+            "Blender evaluates it (constraints included), the constraints that act on it "
+            "(constraints_applied), lens and clip range (the active camera by default)."
         ),
         hints=READ_ONLY,
         operation="get_camera_info",
@@ -794,7 +801,11 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Frame a Blender object with a camera (the active one by default): aim it from "
             "the front and above at the object's bounding-box center, at the distance where "
             "the object fits the frame (an orthographic camera gets the ortho_scale that fits "
-            "it), widening the clip range when it would cut the object away."
+            "it), widening the clip range when it would cut the object away. As with "
+            "set_blender_camera_view, success means the framing is in the camera's "
+            "transform and its constraints still apply: camera_location and "
+            "camera_rotation_euler report where Blender evaluates the camera, and "
+            "placement_overridden is true when constraints or drivers moved it off the framing."
         ),
         hints=IDEMPOTENT,
         operation="focus_on_object",

@@ -235,6 +235,21 @@ def test_attach_existing_gui_and_refuse_changed_targets(
                 assert seen.get("error") is None, seen
                 return ast.literal_eval(seen["return_value"])
 
+            def evaluated_as_reported(
+                camera: str, location: list[float], rotation: list[float]
+            ) -> tuple[bool, bool]:
+                """Whether Blender evaluates the camera at the reported location and rotation."""
+                seen = client.execute_script(
+                    "from mathutils import Euler, Vector\n"
+                    "depsgraph = bpy.context.evaluated_depsgraph_get()\n"
+                    f"world = bpy.data.objects[{camera!r}].evaluated_get(depsgraph).matrix_world\n"
+                    f"turn = world.to_quaternion().rotation_difference(Euler({tuple(rotation)!r}).to_quaternion())\n"
+                    f"__result__ = ((world.translation - Vector({tuple(location)!r})).length < 1e-4,"
+                    " turn.angle < 1e-4)"
+                )
+                assert seen.get("error") is None, seen
+                return ast.literal_eval(seen["return_value"])
+
             whole = {"center": (0.5, 0.5), "in_frame": True, "in_clip": True}
             # The focused camera faces the object (it used to face away), and
             # the whole object fits its frame (corners of the default cube fell
@@ -242,6 +257,8 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             focused = tool("focus_blender_on_object", object_name="AttachmentProbe")
             assert focused["success"] is True, focused
             assert framing("Camera", "AttachmentProbe") == whole
+            assert focused["placement_overridden"] is False, focused
+            assert focused["constraints_applied"] == [] and focused["warning"] is None
             # A 60 m cube landed beyond the 100 m clip_end, out of sight.
             big = tool(
                 "create_blender_object",
@@ -295,13 +312,109 @@ def test_attach_existing_gui_and_refuse_changed_targets(
                 " turn.angle < 1e-4)"
             )
             assert world["return_value"] == "(True, True)", world
+            # Single precision through the rig is not mistaken for an override.
+            assert placed["placement_overridden"] is False, placed
             camera_info = tool("get_blender_camera_info", camera_name="ProbeCamera")
             assert camera_info["location"] == pytest.approx([7, -7, 5], abs=1e-4)
             assert camera_info["rotation_euler"] == pytest.approx(
                 [1.1, 0.25, 0.78], abs=1e-4
             )
+            assert camera_info["constraints_applied"] == []
             client.delete_object("ProbeCamera")
             client.delete_object("ProbeRig")
+            # A Track To on the camera turned it to another object after the
+            # placement, while the replies gave the requested pose. They now
+            # report the evaluated pose and the constraint, which stays as it was.
+            tracked = client.execute_script(
+                "scene = bpy.context.scene\n"
+                "decoy = bpy.data.objects.new('ProbeDecoy', None)\n"
+                "scene.collection.objects.link(decoy)\n"
+                "decoy.location = (-10, 10, 0)\n"
+                "camera = bpy.data.objects.new('TrackedCamera', bpy.data.cameras.new('TrackedCamera'))\n"
+                "scene.collection.objects.link(camera)\n"
+                "camera.constraints.new('TRACK_TO').target = decoy\n"
+            )
+            assert tracked.get("error") is None, tracked
+            track_to = [{"name": "Track To", "type": "TRACK_TO"}]
+            focused = tool(
+                "focus_blender_on_object",
+                object_name="AttachmentProbe",
+                camera_name="TrackedCamera",
+            )
+            assert focused["success"] is True, focused
+            assert focused["placement_overridden"] is True, focused
+            assert focused["constraints_applied"] == track_to
+            assert "'Track To' (TRACK_TO)" in focused["warning"]
+            assert framing("TrackedCamera", "AttachmentProbe")["in_frame"] is False
+            assert evaluated_as_reported(
+                "TrackedCamera",
+                focused["camera_location"],
+                focused["camera_rotation_euler"],
+            ) == (True, True)
+            placed = tool(
+                "set_blender_camera_view",
+                location=[7, -7, 5],
+                rotation_euler=[1.1, 0.25, 0.78],
+                camera_name="TrackedCamera",
+            )
+            assert placed["success"] is True and placed["placement_overridden"] is True
+            assert placed["constraints_applied"] == track_to
+            assert placed["location"] == pytest.approx([7, -7, 5], abs=1e-4)
+            assert placed["rotation_euler"] != pytest.approx(
+                [1.1, 0.25, 0.78], abs=1e-3
+            )
+            assert evaluated_as_reported(
+                "TrackedCamera", placed["location"], placed["rotation_euler"]
+            ) == (True, True)
+            camera_info = tool("get_blender_camera_info", camera_name="TrackedCamera")
+            assert camera_info["constraints_applied"] == track_to
+            untouched = client.execute_script(
+                "track = bpy.data.objects['TrackedCamera'].constraints['Track To']\n"
+                "__result__ = (track.mute, track.influence)"
+            )
+            assert untouched["return_value"] == "(False, 1.0)", untouched
+            # Muted by the user, the constraint no longer overrides the framing.
+            client.execute_script(
+                "bpy.data.objects['TrackedCamera'].constraints['Track To'].mute = True"
+            )
+            focused = tool(
+                "focus_blender_on_object",
+                object_name="AttachmentProbe",
+                camera_name="TrackedCamera",
+            )
+            assert focused["placement_overridden"] is False, focused
+            assert focused["constraints_applied"] == [] and focused["warning"] is None
+            assert framing("TrackedCamera", "AttachmentProbe") == whole
+            client.delete_object("TrackedCamera")
+            client.delete_object("ProbeDecoy")
+            # Each placement doubled the scale of a camera whose Child Of target
+            # was scaled after the constraint was set up (1, 2, 4, ...).
+            held = client.execute_script(
+                "scene = bpy.context.scene\n"
+                "holder = bpy.data.objects.new('ProbeHolder', None)\n"
+                "scene.collection.objects.link(holder)\n"
+                "camera = bpy.data.objects.new('HeldCamera', bpy.data.cameras.new('HeldCamera'))\n"
+                "scene.collection.objects.link(camera)\n"
+                "camera.constraints.new('CHILD_OF').target = holder\n"
+                "bpy.context.view_layer.update()\n"
+                "holder.scale = (2, 2, 2)\n"
+            )
+            assert held.get("error") is None, held
+            for _ in range(2):
+                placed = tool(
+                    "set_blender_camera_view",
+                    location=[7, -7, 5],
+                    rotation_euler=[1.1, 0.25, 0.78],
+                    camera_name="HeldCamera",
+                )
+            assert placed["placement_overridden"] is True, placed
+            assert placed["location"] == pytest.approx([14, -14, 10], abs=1e-3)
+            own_scale = client.execute_script(
+                "__result__ = tuple(round(v, 4) for v in bpy.data.objects['HeldCamera'].scale)"
+            )
+            assert own_scale["return_value"] == "(1.0, 1.0, 1.0)", own_scale
+            client.delete_object("HeldCamera")
+            client.delete_object("ProbeHolder")
             # A pattern that can backtrack for hours is refused before it
             # runs on Blender's main thread; a plain one still searches.
             refused = tool("search_blender_objects", name_pattern=r"^(\w+)+_x$")

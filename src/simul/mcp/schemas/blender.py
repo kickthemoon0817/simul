@@ -485,26 +485,72 @@ class BlenderSetCameraViewRequest(BaseModel):
     )
 
 
+class BlenderActiveConstraint(BaseModel):
+    """An object constraint that Blender applies when it evaluates the object."""
+
+    name: str = Field(..., description="Constraint name")
+    type: str = Field(
+        ..., description="Constraint type, such as TRACK_TO, COPY_LOCATION or CHILD_OF"
+    )
+
+
+# The camera tools' constraint report. Optional: an add-on built before it
+# still answers, without these fields.
+_CONSTRAINTS_APPLIED = (
+    "The camera's constraints that Blender applies (not muted, influence above 0, valid), "
+    "in stack order; null from a Blender add-on that predates this report"
+)
+_PLACEMENT_OVERRIDDEN = (
+    "True when Blender evaluates the camera away from the requested placement: its "
+    "constraints, a driver on its transform or a non-uniformly scaled parent changed it. "
+    "The placement is still in the camera's transform. Null from a Blender add-on that "
+    "predates this check"
+)
+_PLACEMENT_WARNING = (
+    "Why the camera is not where it was placed: its constraints, with how to disable "
+    "them, or a driver on its transform or a non-uniformly scaled parent; null when it is"
+)
+
+
 class BlenderSetCameraViewResponse(BaseModel):
     """Result of setting a camera view."""
 
-    success: bool = Field(..., description="Whether operation succeeded")
+    success: bool = Field(
+        ...,
+        description=(
+            "Whether the placement was written to the camera's transform; see "
+            "placement_overridden for whether the camera ends up there"
+        ),
+    )
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     camera_name: str = Field(..., description="Name of the camera that was updated")
     location: List[float] = Field(
         ...,
-        description="The camera's world-space location [x, y, z]",
+        description=(
+            "World-space location [x, y, z] where Blender evaluates the camera, "
+            "constraints included: the requested one unless placement_overridden"
+        ),
         min_length=3,
         max_length=3,
     )
     rotation_euler: List[float] = Field(
         ...,
-        description="The camera's world-space rotation [rx, ry, rz] in radians, XYZ Euler",
+        description=(
+            "World-space rotation [rx, ry, rz] in radians, XYZ Euler, where Blender "
+            "evaluates the camera: the requested one unless placement_overridden"
+        ),
         min_length=3,
         max_length=3,
     )
+    placement_overridden: Optional[bool] = Field(
+        None, description=_PLACEMENT_OVERRIDDEN
+    )
+    constraints_applied: Optional[List[BlenderActiveConstraint]] = Field(
+        None, description=_CONSTRAINTS_APPLIED
+    )
+    warning: Optional[str] = Field(None, description=_PLACEMENT_WARNING)
 
 
 class BlenderCameraInfoResponse(BaseModel):
@@ -517,7 +563,10 @@ class BlenderCameraInfoResponse(BaseModel):
     camera_name: str = Field(..., description="Active camera name")
     location: List[float] = Field(
         ...,
-        description="World-space camera location [x, y, z]",
+        description=(
+            "World-space camera location [x, y, z] where Blender evaluates the camera, "
+            "constraints included"
+        ),
         min_length=3,
         max_length=3,
     )
@@ -525,10 +574,13 @@ class BlenderCameraInfoResponse(BaseModel):
         ...,
         description=(
             "World-space camera rotation [rx, ry, rz] in radians, XYZ Euler, "
-            "whatever the camera's parent and rotation mode"
+            "whatever the camera's parent and rotation mode, constraints included"
         ),
         min_length=3,
         max_length=3,
+    )
+    constraints_applied: Optional[List[BlenderActiveConstraint]] = Field(
+        None, description=_CONSTRAINTS_APPLIED
     )
     lens: float = Field(..., description="Focal length in mm")
     sensor_width: float = Field(..., description="Sensor width in mm")
@@ -559,7 +611,13 @@ class BlenderFocusOnObjectRequest(BaseModel):
 class BlenderFocusOnObjectResponse(BaseModel):
     """Result of focusing camera on an object."""
 
-    success: bool = Field(..., description="Whether focus operation succeeded")
+    success: bool = Field(
+        ...,
+        description=(
+            "Whether the framing placement was written to the camera's transform; see "
+            "placement_overridden for whether the camera ends up there"
+        ),
+    )
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
@@ -567,19 +625,31 @@ class BlenderFocusOnObjectResponse(BaseModel):
     object_name: str = Field(..., description="Object that was focused on")
     camera_location: List[float] = Field(
         ...,
-        description="The camera's new world-space location [x, y, z]",
+        description=(
+            "World-space location [x, y, z] where Blender evaluates the camera, "
+            "constraints included: the framing placement unless placement_overridden"
+        ),
         min_length=3,
         max_length=3,
     )
     look_at: List[float] = Field(
         ...,
-        description="Point the camera is aimed at [x, y, z]",
+        description="The object's bounding-box center [x, y, z], which the placement aims at",
         min_length=3,
         max_length=3,
     )
     # Optional: an add-on built before these were reported still answers.
+    camera_rotation_euler: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World-space rotation [rx, ry, rz] in radians, XYZ Euler, where Blender "
+            "evaluates the camera: level toward look_at unless placement_overridden"
+        ),
+        min_length=3,
+        max_length=3,
+    )
     distance: Optional[float] = Field(
-        None, description="Distance from the camera to look_at"
+        None, description="Distance from the framing placement to look_at"
     )
     clip_start: Optional[float] = Field(
         None, description="The camera's near clip distance after the call"
@@ -595,6 +665,13 @@ class BlenderFocusOnObjectResponse(BaseModel):
         None,
         description="The ortho_scale set to fit the object; null unless the camera is orthographic",
     )
+    placement_overridden: Optional[bool] = Field(
+        None, description=_PLACEMENT_OVERRIDDEN
+    )
+    constraints_applied: Optional[List[BlenderActiveConstraint]] = Field(
+        None, description=_CONSTRAINTS_APPLIED
+    )
+    warning: Optional[str] = Field(None, description=_PLACEMENT_WARNING)
 
 
 class BlenderViewportInfoResponse(BaseModel):
@@ -1191,7 +1268,14 @@ class BlenderGetKeyframesResponse(BaseModel):
     )
     object_name: str = Field(..., description="Object name")
     has_animation: bool = Field(
-        ..., description="Whether the object has animation data"
+        ...,
+        description=(
+            "Whether an action animates the object: on Blender 4.4 and later its "
+            "action through the action slot the object is assigned, before 4.4 any "
+            "action it has. False for animation data without an action (NLA strips "
+            "or drivers only) and for an action without the object's slot; true for "
+            "an action whose keys were all deleted"
+        ),
     )
     channels: List[BlenderKeyframeSummaryEntry] = Field(
         default_factory=list, description="Keyframe summary per channel"
@@ -1632,6 +1716,7 @@ __all__ = [
     "BlenderCaptureViewportRequest",
     "BlenderCaptureViewportResponse",
     "BlenderSetCameraViewRequest",
+    "BlenderActiveConstraint",
     "BlenderSetCameraViewResponse",
     "BlenderCameraInfoResponse",
     "BlenderFocusOnObjectRequest",

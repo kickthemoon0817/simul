@@ -13,6 +13,7 @@ import pytest
 from simul.adapters import blender_runtime
 from simul.config import SecurityConfig, Settings
 from tests.fakes import (
+    FakeConstraint,
     FakeEuler,
     FakeMatrix,
     FakePropArray,
@@ -116,6 +117,84 @@ CAMERA_SETUPS = {
     "zxy_euler": (False, "ZXY"),
     "parented_quaternion": (True, "QUATERNION"),
 }
+
+
+def _track_to(
+    target: Sequence[float], name: str = "Track To", **state: Any
+) -> FakeConstraint:
+    """A Track To as Blender sets one up on a camera: its -Z toward ``target``, +Y up."""
+
+    def solve(matrix: np.ndarray) -> np.ndarray:
+        forward = np.asarray(target, dtype=float) - matrix[:3, 3]
+        forward /= np.linalg.norm(forward)
+        right = np.cross(forward, [0.0, 0.0, 1.0])
+        right /= np.linalg.norm(right)
+        solved = matrix.copy()
+        solved[:3, :3] = np.column_stack(
+            [right, np.cross(right, forward), -forward]
+        ) * np.linalg.norm(matrix[:3, :3], axis=0)
+        return solved
+
+    return FakeConstraint(name, "TRACK_TO", solve, **state)
+
+
+def _copy_location(
+    target: Sequence[float], name: str = "Copy Location", **state: Any
+) -> FakeConstraint:
+    """A Copy Location: the object stands where ``target`` does, turned as before."""
+
+    def solve(matrix: np.ndarray) -> np.ndarray:
+        solved = matrix.copy()
+        solved[:3, 3] = target
+        return solved
+
+    return FakeConstraint(name, "COPY_LOCATION", solve, **state)
+
+
+def _child_of(
+    target_change: np.ndarray, name: str = "Child Of", **state: Any
+) -> FakeConstraint:
+    """A Child Of whose target moved by ``target_change`` after its inverse was set."""
+    return FakeConstraint(
+        name, "CHILD_OF", lambda matrix: target_change @ matrix, **state
+    )
+
+
+def _satisfied(name: str = "Limit Distance", **state: Any) -> FakeConstraint:
+    """An active constraint that leaves this pose alone, such as a Limit Distance it meets."""
+    return FakeConstraint(name, "LIMIT_DISTANCE", lambda matrix: matrix, **state)
+
+
+def _evaluated_rotation(obj: Any) -> np.ndarray:
+    """An object's world rotation, its scale divided out."""
+    world = np.asarray(obj.matrix_world.rows)[:3, :3]
+    return world / np.linalg.norm(world, axis=0)
+
+
+class _DrivenCamera(FakeTransformObject):
+    """A camera with a driver on location[0] (stored, as in background Blender).
+
+    Each evaluation writes the driver's value into the camera's location
+    before composing matrix_world, as Blender's active depsgraph writes a
+    driver's result back to the original object.
+    """
+
+    def __init__(self, driven_x: float, **kwargs: Any) -> None:
+        self._driven_x = driven_x
+        super().__init__("Camera", "CAMERA", FakeCameraData(), stored=True, **kwargs)
+
+    def evaluate(self) -> None:
+        self.location = FakeVector((self._driven_x, *list(self.location)[1:]))
+        super().evaluate()
+
+
+class _SinglePrecisionCamera(FakeTransformObject):
+    """A camera whose location is single precision, as Blender's Object.location is."""
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "location":
+            value = FakeVector(np.asarray(list(value), dtype=np.float32).tolist())
+        super().__setattr__(name, value)
 
 
 def _world_axes(obj: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1689,6 +1768,426 @@ class TestVisualObservationTools:
             )
             assert 0.0 < x < 1.0 and 0.0 < y < 1.0, (x, y)
             assert cam.data.clip_start < depth < cam.data.clip_end
+
+    # -- constraints on the camera -----------------------------------------
+    # Blender applies a camera's constraints on top of the transform a
+    # placement writes when it next evaluates the depsgraph. These cameras
+    # keep matrix_world until then (stored=True), as in Blender, so a
+    # constraint acts only on evaluation.
+
+    def _session_on(
+        self, monkeypatch: pytest.MonkeyPatch, *objects: Any
+    ) -> blender_runtime.BlenderRuntimeSession:
+        fake_bpy = self._make_fake_bpy_with_camera(objects=list(objects))
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        return blender_runtime.BlenderRuntimeSession()
+
+    def _constrained_camera(
+        self, *constraints: FakeConstraint, setup: str = "unparented", **camera: Any
+    ) -> FakeTransformObject:
+        cam = self._make_camera_object(setup=setup, stored=True, **camera)
+        cam.constraints.extend(constraints)
+        cam.evaluate()
+        return cam
+
+    @pytest.mark.parametrize(
+        ("constraint", "moved", "turned"),
+        [
+            (_track_to((5.0, 5.0, 0.0)), False, True),
+            (_copy_location((5.0, 5.0, 0.0)), True, False),
+        ],
+        ids=["track_to", "copy_location"],
+    )
+    def test_set_camera_view_reports_constraints_that_override_the_placement(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        constraint: FakeConstraint,
+        moved: bool,
+        turned: bool,
+    ) -> None:
+        """A Track To turned the camera to its target, a Copy Location moved it,
+        and the reply gave the requested pose as the camera's.
+
+        On Blender 5.0.1 a camera tracking another object was reported at
+        rotation (1.1, 0.25, 0.78) and evaluated at (1.205, 0, 0.077).
+        """
+        cam = self._constrained_camera(constraint)
+        session = self._session_on(monkeypatch, cam)
+        location, rotation = [7.0, -7.0, 5.0], [1.1, 0.25, 0.78]
+
+        result = session.set_camera_view(location=location, rotation_euler=rotation)
+
+        # Blender evaluates the depsgraph before it draws or renders the camera.
+        cam.evaluate()
+        world = np.asarray(cam.matrix_world.rows)
+        assert result["location"] == pytest.approx(list(world[:3, 3]))
+        assert euler_matrix(result["rotation_euler"]) == pytest.approx(
+            _evaluated_rotation(cam)
+        )
+        assert (not np.allclose(result["location"], location)) is moved
+        turned_by = euler_matrix(result["rotation_euler"])
+        assert (not np.allclose(turned_by, euler_matrix(rotation))) is turned
+        assert result["placement_overridden"] is True
+        assert result["constraints_applied"] == [
+            {"name": constraint.name, "type": constraint.type}
+        ]
+        assert f"'{constraint.name}' ({constraint.type})" in result["warning"]
+        assert "mute" in result["warning"] and "influence to 0" in result["warning"]
+        # The camera's own transform holds the placement; the constraint is untouched.
+        basis = np.asarray(cam.matrix_basis.rows)
+        assert basis[:3, 3] == pytest.approx(location)
+        assert basis[:3, :3] == pytest.approx(euler_matrix(rotation))
+        assert (constraint.mute, constraint.influence) == (False, 1.0)
+
+    @pytest.mark.parametrize(
+        ("constraint", "applied"),
+        [
+            (_track_to((5.0, 5.0, 0.0), mute=True), []),
+            (_track_to((5.0, 5.0, 0.0), influence=0.0), []),
+            # A Track To without a target: Blender marks it invalid and skips it.
+            (_track_to((5.0, 5.0, 0.0), is_valid=False), []),
+            (_satisfied(), [{"name": "Limit Distance", "type": "LIMIT_DISTANCE"}]),
+        ],
+        ids=["muted", "no_influence", "invalid", "satisfied"],
+    )
+    def test_set_camera_view_reports_a_placement_no_constraint_changes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        constraint: FakeConstraint,
+        applied: List[Dict[str, str]],
+    ) -> None:
+        """Constraints that Blender skips, or that leave the pose alone, override nothing."""
+        cam = self._constrained_camera(constraint)
+        session = self._session_on(monkeypatch, cam)
+        location, rotation = [7.0, -7.0, 5.0], [1.1, 0.25, 0.78]
+
+        result = session.set_camera_view(location=location, rotation_euler=rotation)
+
+        assert result["location"] == pytest.approx(location)
+        assert result["rotation_euler"] == pytest.approx(rotation)
+        assert result["placement_overridden"] is False
+        assert result["constraints_applied"] == applied
+        assert result["warning"] is None
+
+    def test_set_camera_view_reports_an_unconstrained_placement_held(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        cam = self._make_camera_object(setup="parented_quaternion", stored=True)
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view([7.0, -7.0, 5.0], [1.1, 0.25, 0.78])
+
+        assert result["placement_overridden"] is False
+        assert result["constraints_applied"] == []
+        assert result["warning"] is None
+
+    @pytest.mark.parametrize(
+        ("setup", "scale"),
+        [
+            ("unparented", (1.0, 1.0, 1.0)),
+            ("parented", (1.0, 1.0, 1.0)),
+            # A scale of the camera's own stays as it was, not reset to 1.
+            ("unparented", (0.5, 0.5, 0.5)),
+        ],
+        ids=["unparented", "parented", "own_scale"],
+    )
+    def test_set_camera_view_keeps_the_scale_of_a_camera_its_child_of_scales(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        setup: str,
+        scale: Tuple[float, float, float],
+    ) -> None:
+        """Each call doubled the scale of a camera whose Child Of target had
+        been scaled by 2 after the constraint was set up.
+
+        The placement kept the evaluated scale, the constraint's included, in
+        the camera's own scale, where the constraint applied it again: 2, 4
+        and 8 on Blender 5.0.1, the camera evaluated at (14, -14, 10) each
+        time and the reply at (7, -7, 5). A camera of scale 0.5 kept 0.5 on
+        Blender 5.0.1.
+        """
+        cam = self._constrained_camera(
+            _child_of(np.diag([2.0, 2.0, 2.0, 1.0])), setup=setup, scale=scale
+        )
+        own_scale = list(cam.scale)
+        session = self._session_on(monkeypatch, cam)
+
+        for _ in range(3):
+            result = session.set_camera_view([7.0, -7.0, 5.0], [1.1, 0.25, 0.78])
+            assert list(cam.scale) == pytest.approx(own_scale)
+
+        cam.evaluate()
+        assert list(cam.matrix_world.translation) == pytest.approx([14.0, -14.0, 10.0])
+        assert result["location"] == pytest.approx([14.0, -14.0, 10.0])
+        assert result["placement_overridden"] is True
+        assert result["constraints_applied"] == [
+            {"name": "Child Of", "type": "CHILD_OF"}
+        ]
+
+    @pytest.mark.parametrize(
+        ("parent_type", "parent_object"),
+        [("OBJECT", "CURVE"), ("BONE", "ARMATURE"), ("VERTEX", "MESH")],
+        ids=["curve_path", "bone", "vertex"],
+    )
+    def test_matrix_before_constraints_falls_back_where_only_blender_knows_the_parent(
+        self, mathutils: Any, parent_type: str, parent_object: str
+    ) -> None:
+        """A curve's path, a bone or vertices place the child in ways only
+        Blender computes; the evaluated matrix is the best estimate left."""
+        parent = FakeTransformObject("Parent", object_type=parent_object)
+        cam = FakeTransformObject("Camera", "CAMERA", parent=parent)
+        cam.parent_type = parent_type
+        cam.constraints.append(_child_of(np.diag([2.0, 2.0, 2.0, 1.0])))
+
+        own = blender_runtime.BlenderRuntimeSession._matrix_before_constraints(cam)
+
+        assert own.rows == cam.matrix_world.rows
+
+    def test_set_camera_view_reports_a_rotation_a_non_uniform_parent_cannot_carry(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Under a parent scaled (1, 3, 1) no local transform gives the asked rotation.
+
+        Blender 5.0.1 turned such a camera to look along (-0.41, 0.88, -0.25)
+        for (-0.71, 0.56, -0.44), no constraint involved.
+        """
+        rig = FakeTransformObject("Rig", scale=(1.0, 3.0, 1.0), stored=True)
+        cam = FakeTransformObject(
+            "Camera", "CAMERA", FakeCameraData(), parent=rig, stored=True
+        )
+        # Parented without keeping the transform: the rig's scale reaches the camera.
+        cam.matrix_parent_inverse = FakeMatrix.Identity(4)
+        cam.evaluate()
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view([7.0, -7.0, 5.0], [1.1, 0.25, 0.78])
+
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert result["placement_overridden"] is True
+        assert result["constraints_applied"] == []
+        assert "no constraint acts on it" in result["warning"]
+        assert "non-uniform scale" in result["warning"]
+
+    @staticmethod
+    def _sheared_camera() -> FakeTransformObject:
+        """A camera under a rig scaled (1, 3, 1), its scale reaching the camera."""
+        rig = FakeTransformObject("Rig", scale=(1.0, 3.0, 1.0), stored=True)
+        cam = FakeTransformObject(
+            "Camera", "CAMERA", FakeCameraData(), parent=rig, stored=True
+        )
+        cam.matrix_parent_inverse = FakeMatrix.Identity(4)
+        return cam
+
+    @pytest.mark.parametrize("cause", ["driver", "sheared_parent"])
+    def test_set_camera_view_blames_no_constraint_that_leaves_the_pose_alone(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, cause: str
+    ) -> None:
+        """A driver, or a parent scaled unevenly, moved the camera; its Limit
+        Distance, met, changed nothing.
+
+        The warning named the Limit Distance as the override and said to mute
+        it, which leaves the camera where it was. On Blender 5.0.1 a camera
+        with a driver of 3 on location.x was evaluated at x = 3, its Limit
+        Distance (1000 m) met, and the warning named only the Limit Distance.
+        """
+        cam = _DrivenCamera(3.0) if cause == "driver" else self._sheared_camera()
+        cam.constraints.append(_satisfied())
+        cam.evaluate()
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view([7.0, -7.0, 5.0], [1.1, 0.25, 0.78])
+
+        if cause == "driver":
+            assert result["location"] == pytest.approx([3.0, -7.0, 5.0])
+        assert result["placement_overridden"] is True
+        assert result["constraints_applied"] == [
+            {"name": "Limit Distance", "type": "LIMIT_DISTANCE"}
+        ]
+        warning = result["warning"]
+        assert "before its constraints apply" in warning
+        assert "a driver on its transform" in warning and "non-uniform scale" in warning
+        assert "mute" not in warning and "override the requested placement" not in warning
+
+    def test_set_camera_view_names_constraints_and_a_driver_that_both_move_the_camera(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Muting the Copy Location alone would leave the camera where its driver puts it."""
+        cam = _DrivenCamera(3.0)
+        cam.constraints.append(_copy_location((5.0, 5.0, 0.0)))
+        cam.evaluate()
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view([7.0, -7.0, 5.0], [1.1, 0.25, 0.78])
+
+        assert result["location"] == pytest.approx([5.0, 5.0, 0.0])
+        assert result["placement_overridden"] is True
+        warning = result["warning"]
+        assert "override the requested placement: 'Copy Location' (COPY_LOCATION)" in warning
+        assert "mute" in warning and "influence to 0" in warning
+        assert "a driver on its transform" in warning and "as well" in warning
+        assert "its transform holds the placement" not in warning
+
+    def test_set_camera_view_tolerates_single_precision_through_a_far_parent_inverse(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """A camera parented to a rig 27 km out, and the rig then moved back.
+
+        The camera's own location is 27 km long, and single precision rounds
+        it by up to a millimetre, so Blender evaluates the camera that far
+        from the placement although nothing overrides it. The tolerance
+        followed the placed, evaluated and parent locations only, all near the
+        origin, and reported an override with a warning blaming a driver or
+        the parent's scale: on Blender 5.0.1, for 273 of 300 such placements,
+        which missed by up to 2 cm with the rig 100 km out.
+        """
+        rig = FakeTransformObject("Rig", location=(27000.0, 0.0, 0.0), stored=True)
+        cam = _SinglePrecisionCamera(
+            "Camera", "CAMERA", FakeCameraData(), parent=rig, stored=True
+        )
+        rig.location = FakeVector((0.0, 0.0, 0.0))
+        cam.evaluate()
+        session = self._session_on(monkeypatch, cam)
+        location = [7.3, -7.1, 5.2]
+
+        result = session.set_camera_view(location, [1.1, 0.25, 0.78])
+
+        assert list(cam.location)[0] == pytest.approx(27007.3, abs=1e-3)
+        # Single precision put the camera a little off the placement...
+        assert math.dist(result["location"], location) > 1e-4
+        # ...which is no override.
+        assert result["placement_overridden"] is False
+        assert result["warning"] is None
+
+    def test_focus_on_object_reports_a_track_to_that_turns_the_camera_away(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """The camera tracked another object, so the focused cube left the frame
+        while the reply described the framing as done.
+
+        On Blender 5.0.1 the cube's center appeared at (0.015, -0.543) in the
+        camera's view, below the frame, and the tracked object at its center.
+        """
+        decoy = (6.0, 6.0, 0.0)
+        cam = self._constrained_camera(_track_to(decoy))
+
+        result = self._focus(monkeypatch, self._cube(), cam)
+
+        # Blender evaluates the depsgraph before it draws or renders the camera.
+        cam.evaluate()
+        half = (18 / 50, 18 / 50 * 9 / 16)
+        assert _in_frame(cam, decoy, half)[:2] == pytest.approx((0.5, 0.5))
+        corners = [_in_frame(cam, corner, half) for corner in _box()]
+        assert not all(0.0 < x < 1.0 and 0.0 < y < 1.0 for x, y, _ in corners)
+        assert result["look_at"] == pytest.approx([0.0, 0.0, 0.0])
+        world = np.asarray(cam.matrix_world.rows)
+        assert result["camera_location"] == pytest.approx(list(world[:3, 3]))
+        assert euler_matrix(result["camera_rotation_euler"]) == pytest.approx(
+            _evaluated_rotation(cam)
+        )
+        assert result["placement_overridden"] is True
+        assert result["constraints_applied"] == [
+            {"name": "Track To", "type": "TRACK_TO"}
+        ]
+        assert "'Track To' (TRACK_TO)" in result["warning"]
+
+    def test_focus_on_object_reports_the_framing_held_without_constraints(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        cam = self._make_camera_object(stored=True)
+
+        result = self._focus(monkeypatch, self._cube(), cam)
+
+        diagonal = np.array([0.0, -math.sqrt(0.5), math.sqrt(0.5)])
+        assert result["camera_location"] == pytest.approx(
+            list(diagonal * result["distance"])
+        )
+        rotation = blender_runtime.BlenderRuntimeSession._look_at_rotation(
+            result["camera_location"], [0.0, 0.0, 0.0]
+        )
+        assert result["camera_rotation_euler"] == pytest.approx(list(rotation))
+        assert result["placement_overridden"] is False
+        assert result["constraints_applied"] == []
+        assert result["warning"] is None
+
+    def test_get_camera_info_lists_the_constraints_that_act_on_the_camera(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Only the constraints Blender applies, and the pose they give the camera."""
+        target = (5.0, 5.0, 0.0)
+        cam = self._constrained_camera(
+            _copy_location((1.0, 1.0, 1.0), mute=True),
+            _track_to(target),
+            _satisfied(influence=0.0),
+            _copy_location((2.0, 2.0, 2.0), name="Broken", is_valid=False),
+        )
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.get_camera_info()
+
+        assert result["constraints_applied"] == [
+            {"name": "Track To", "type": "TRACK_TO"}
+        ]
+        assert result["location"] == pytest.approx([0.0, 0.0, 5.0])
+        assert euler_matrix(result["rotation_euler"]) == pytest.approx(
+            _evaluated_rotation(cam)
+        )
+        to_target = np.subtract(target, result["location"])
+        forward = euler_matrix(result["rotation_euler"]) @ [0.0, 0.0, -1.0]
+        assert forward == pytest.approx(to_target / np.linalg.norm(to_target))
+
+    @pytest.mark.parametrize(
+        ("location", "rotation", "scale", "extent", "same"),
+        [
+            ((1.0, 2.0, 3.0), (0.4, 0.5, 0.6), (1.0, 1.0, 1.0), 4.0, True),
+            # Scale does not change what a camera sees.
+            ((1.0, 2.0, 3.0), (0.4, 0.5, 0.6), (2.0, 2.0, 2.0), 4.0, True),
+            # Single precision blurs 50 micrometres, not a millimetre...
+            ((1.00005, 2.0, 3.0), (0.4, 0.5, 0.6), (1.0, 1.0, 1.0), 4.0, True),
+            ((1.001, 2.0, 3.0), (0.4, 0.5, 0.6), (1.0, 1.0, 1.0), 4.0, False),
+            # ...except 10 km out, where a millimetre is within its reach.
+            ((1.001, 2.0, 3.0), (0.4, 0.5, 0.6), (1.0, 1.0, 1.0), 1.0e4, True),
+            # A turn about the camera's X axis turns both compared axes by as much.
+            ((1.0, 2.0, 3.0), (0.40001, 0.5, 0.6), (1.0, 1.0, 1.0), 4.0, True),
+            ((1.0, 2.0, 3.0), (0.401, 0.5, 0.6), (1.0, 1.0, 1.0), 4.0, False),
+            # A mirror flips the image even where the axes compared agree.
+            ((1.0, 2.0, 3.0), (0.4, 0.5, 0.6), (-1.0, 1.0, 1.0), 4.0, False),
+        ],
+        ids=[
+            "same",
+            "scaled",
+            "within_precision",
+            "moved_1mm",
+            "moved_1mm_far_out",
+            "turned_within_precision",
+            "turned_1mrad",
+            "mirrored",
+        ],
+    )
+    def test_same_view_tolerates_single_precision_only(
+        self,
+        location: Tuple[float, float, float],
+        rotation: Tuple[float, float, float],
+        scale: Tuple[float, float, float],
+        extent: float,
+        same: bool,
+    ) -> None:
+        placed = FakeMatrix.LocRotScale(
+            FakeVector((1.0, 2.0, 3.0)),
+            FakeEuler((0.4, 0.5, 0.6)),
+            FakeVector((1.0, 1.0, 1.0)),
+        )
+        other = FakeMatrix.LocRotScale(
+            FakeVector(location), FakeEuler(rotation), FakeVector(scale)
+        )
+
+        assert (
+            blender_runtime.BlenderRuntimeSession._same_view(placed, other, extent)
+            is same
+        )
 
     def test_focus_on_object_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """focus_on_object raises ValueError for missing object."""

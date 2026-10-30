@@ -11,8 +11,8 @@ tools; ``BlenderSessionAdapter`` hands it to the server.
 ``FakeVector``, ``FakeMatrix``, ``FakeEuler`` and ``FakePropArray`` stand in
 for Blender's ``mathutils`` types and ``bpy_prop_array``; ``fake_mathutils``
 packages the first three as the module the Blender runtime imports.
-``FakeTransformObject`` is an object whose ``matrix_world`` follows its parent
-and rotation mode as a Blender object's does.
+``FakeTransformObject`` is an object whose ``matrix_world`` follows its parent,
+rotation mode and ``FakeConstraint`` stack as a Blender object's does.
 """
 
 from __future__ import annotations
@@ -469,26 +469,66 @@ class FakeMatrix:
         return FakeVector(product[: len(other)])
 
 
+class FakeConstraint:
+    """``bpy.types.Constraint`` stand-in: what Blender reports of it, and its effect.
+
+    ``solve`` takes the world matrix that parenting and the object's own
+    transform give (a 4x4 array) and returns the one the constraint makes of
+    it, as Blender's constraint stack does. Blender skips a muted constraint,
+    one without influence and an invalid one (``is_valid`` False, e.g. a Track
+    To without a target); so does ``apply``. Blender blends a partial influence;
+    that is not modeled, and ``apply`` refuses it rather than guess.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        constraint_type: str,
+        solve: Callable[[np.ndarray], np.ndarray],
+        mute: bool = False,
+        influence: float = 1.0,
+        is_valid: bool = True,
+    ) -> None:
+        self.name = name
+        self.type = constraint_type
+        self.mute = mute
+        self.influence = influence
+        self.is_valid = is_valid
+        self._solve = solve
+
+    def apply(self, matrix: np.ndarray) -> np.ndarray:
+        """Return ``matrix`` with this constraint applied, or unchanged when Blender skips it."""
+        if self.mute or self.influence <= 0.0 or not self.is_valid:
+            return matrix
+        if self.influence < 1.0:
+            raise NotImplementedError("a partial constraint influence is not modeled")
+        return self._solve(matrix)
+
+
 class FakeTransformObject:
-    """A Blender object whose ``matrix_world`` follows its parent and rotation mode.
+    """A Blender object whose ``matrix_world`` follows its parent, rotation mode and constraints.
 
     Reading ``matrix_world`` composes it as Blender evaluates the object: the
     parent's world matrix, ``matrix_parent_inverse``, then the local
-    location, rotation and scale, the rotation read from ``rotation_euler`` in
-    the order ``rotation_mode`` names, from ``rotation_quaternion`` or from
-    ``rotation_axis_angle``. Assigning it does what bpy's setter does: it
-    solves the local transform through the parent and stores the rotation in
-    the property of the rotation mode only, a mirroring matrix as a rotation
-    and a scale negative on every axis. So a write to ``location`` or
-    ``rotation_euler`` lands where it does in Blender: relative to the parent,
-    and ignored by a QUATERNION or AXIS_ANGLE object.
+    location, rotation and scale (``matrix_basis``), the rotation read from
+    ``rotation_euler`` in the order ``rotation_mode`` names, from
+    ``rotation_quaternion`` or from ``rotation_axis_angle``, and last the
+    ``constraints`` in stack order. Assigning it does what bpy's setter does:
+    it solves the local transform through the parent, not the constraints,
+    and stores the rotation in the property of the rotation mode only, a
+    mirroring matrix as a rotation and a scale negative on every axis. So a
+    write to ``location`` or ``rotation_euler`` lands where it does in
+    Blender: relative to the parent, and ignored by a QUATERNION or
+    AXIS_ANGLE object.
 
     With ``stored=True`` the object keeps ``matrix_world`` as Blender keeps
     it for an original object: ``evaluate()`` (a depsgraph evaluation)
     recomputes it, the parent's first, and assigning it stores the value
     given. Writing location, rotation or scale, or moving the parent, leaves
     it stale until then, as in background Blender and the bpy module, which
-    evaluate only on demand. By default it follows every write at once.
+    evaluate only on demand; so does assigning it to a constrained object,
+    whose constraints act only on evaluation. By default it follows every
+    write at once.
     """
 
     def __init__(
@@ -502,6 +542,7 @@ class FakeTransformObject:
         rotation_mode: str = "XYZ",
         parent: Optional["FakeTransformObject"] = None,
         stored: bool = False,
+        constraints: Sequence[FakeConstraint] = (),
     ) -> None:
         self.name = name
         self.type = object_type
@@ -512,7 +553,9 @@ class FakeTransformObject:
         self.rotation_quaternion: Any = FakeVector((1.0, 0.0, 0.0, 0.0))
         self.rotation_axis_angle: Any = FakeVector((0.0, 0.0, 1.0, 0.0))
         self.scale: Any = FakeVector(scale)
+        self.constraints: List[FakeConstraint] = list(constraints)
         self.parent = parent
+        self.parent_type = "OBJECT"
         # What Blender's Parent (Keep Transform) sets.
         self.matrix_parent_inverse = (
             parent.matrix_world.inverted()
@@ -544,11 +587,22 @@ class FakeTransformObject:
             self.matrix_parent_inverse.rows
         )
 
-    def _composed(self) -> FakeMatrix:
+    def _basis(self) -> np.ndarray:
         basis = np.eye(4)
         basis[:3, :3] = self._rotation() * np.asarray(list(self.scale))
         basis[:3, 3] = list(self.location)
-        return FakeMatrix(self._parent_matrix() @ basis)
+        return basis
+
+    @property
+    def matrix_basis(self) -> FakeMatrix:
+        """The local location, rotation and scale, before parenting and constraints."""
+        return FakeMatrix(self._basis())
+
+    def _composed(self) -> FakeMatrix:
+        matrix = self._parent_matrix() @ self._basis()
+        for constraint in self.constraints:
+            matrix = constraint.apply(matrix)
+        return FakeMatrix(matrix)
 
     @property
     def matrix_world(self) -> FakeMatrix:
