@@ -299,7 +299,12 @@ print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}
 """
 
 # Expects ``args`` = {"actor_path"}. Adds the actor to the editor selection,
-# reads the selection back and prints the actor's location for the camera.
+# reads the selection back and prints the actor's location and bounds for the
+# camera. The bounds are AActor::GetActorBounds over every primitive component,
+# its child actors' included, as a center and a half-size. The half-size is
+# zero when no primitive component has a size (a StaticMeshActor without a
+# mesh); the center is then where such a component sits, or the world origin
+# when the actor has none.
 # While Play In Editor (or Simulate) runs nothing is selected: Unreal's editor
 # reports no selection then and clears it when PIE stops (observed on UE
 # 5.7.4), so a selection made during PIE would be lost unseen. Outside PIE an
@@ -315,8 +320,11 @@ if not pie:
     subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     subsystem.set_actor_selection_state(actor, True)
     selected = actor in subsystem.get_selected_level_actors()
-print(json.dumps({"location": actor_transform(actor)["location"], "selected": selected,
-                  "pie_active": pie}))
+origin, extent = actor.get_actor_bounds(only_colliding_components=False, include_from_child_actors=True)
+print(json.dumps({"location": actor_transform(actor)["location"],
+                  "bounds_origin": [origin.x, origin.y, origin.z],
+                  "bounds_extent": [extent.x, extent.y, extent.z],
+                  "selected": selected, "pie_active": pie}))
 """
 
 # Expects ``args`` = {"path", "location", "rotation", "label"}: location

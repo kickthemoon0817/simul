@@ -116,6 +116,12 @@ class Actor:
     def get_actor_scale3d(self) -> _Vector:
         return _Vector(1.0, 1.0, 1.0)
 
+    def get_actor_bounds(
+        self, only_colliding_components: bool, include_from_child_actors: bool = False
+    ) -> tuple:
+        """A 1 m box standing on the actor's location, in and out of PIE."""
+        return _Vector(1.0, 2.0, 53.0), _Vector(50.0, 50.0, 50.0)
+
     def get_editor_property(self, name: str) -> Any:
         return {"tags": list(self.tags), "hidden": False}[name]
 
@@ -849,11 +855,16 @@ def test_reads_outside_pie_report_pie_active_false(
 # Focus during PIE: the camera moves, the selection does not
 # ---------------------------------------------------------------------------
 
-# Where focus_on_actor puts the camera for an actor at (1, 2, 3) with the
-# default 500 cm distance: behind it, 250 cm above, pitched down at it.
+# Where focus_on_actor puts the camera for an actor whose bounds are a 1 m box
+# centered at (1, 2, 53): far enough behind the center that the box's bounding
+# sphere fills the height of UE's default view (90 degrees across, 16:9) with
+# 10% to spare, half that distance above it, pitched down at it.
+FOCUS_DISTANCE = (
+    1.1 * 50.0 * math.sqrt(3.0) / math.sin(math.atan(9.0 / 16.0)) / math.hypot(1.0, 0.5)
+)
 FOCUS_CAMERA = (
-    (-499.0, 2.0, 253.0),
-    (-math.degrees(math.atan2(250.0, 500.0)), 0.0, 0.0),
+    pytest.approx((1.0 - FOCUS_DISTANCE, 2.0, 53.0 + FOCUS_DISTANCE / 2)),
+    pytest.approx((-math.degrees(math.atan2(0.5, 1.0)), 0.0, 0.0)),
 )
 
 
@@ -872,6 +883,7 @@ def test_focus_during_pie_moves_the_camera_and_says_the_actor_is_not_selected(
         "actor_path": LEVEL + "Crate",
         "camera_location": FOCUS_CAMERA[0],
         "camera_rotation": FOCUS_CAMERA[1],
+        "distance": pytest.approx(FOCUS_DISTANCE),
         "selected": False,
         "pie_active": True,
         "warning": unreal_runtime.FOCUS_PIE_WARNING,
@@ -895,6 +907,7 @@ def test_focus_outside_pie_selects_the_actor_and_reads_the_selection_back(
         "actor_path": LEVEL + "Crate",
         "camera_location": FOCUS_CAMERA[0],
         "camera_rotation": FOCUS_CAMERA[1],
+        "distance": pytest.approx(FOCUS_DISTANCE),
         "selected": True,
         "pie_active": False,
     }
@@ -1318,9 +1331,7 @@ def test_an_agent_sees_whether_focus_selected_the_actor(
         {"actor_path": LEVEL + "Crate"},
     )
 
-    assert during["success"] is True and during["camera_location"] == list(
-        FOCUS_CAMERA[0]
-    )
+    assert during["success"] is True and during["camera_location"] == FOCUS_CAMERA[0]
     assert (during["selected"], during["pie_active"], during["warning"]) == (
         False,
         True,

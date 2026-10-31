@@ -8,6 +8,8 @@ Never point this opt-in tier at an editor with user work.
 import asyncio
 import base64
 import io
+import itertools
+import math
 import os
 import uuid
 from pathlib import Path
@@ -756,11 +758,13 @@ def test_focus_selects_outside_play_in_editor_and_says_why_not_during_it():
     async def run():
         client = session()
         path = await spawn_cube(client)
-        # 500 cm behind the cube at (100, 200, 300) and 250 cm above it.
-        framed = pytest.approx((-400.0, 200.0, 550.0))
         try:
             outside = await client.focus_on_actor(path)
             assert (outside["selected"], outside["pie_active"]) == (True, False), outside
+            # Fitted to the 1 m cube centered at (100, 200, 300): behind its
+            # center and half as far above it.
+            distance = outside["distance"]
+            framed = pytest.approx((100.0 - distance, 200.0, 300.0 + distance / 2))
             assert "warning" not in outside and outside["camera_location"] == framed, outside
             assert path in (await client._execute_json_script(SELECTION))["selection"]
 
@@ -774,6 +778,7 @@ def test_focus_selects_outside_play_in_editor_and_says_why_not_during_it():
             during = await client.focus_on_actor(path)
             assert (during["selected"], during["pie_active"]) == (False, True), during
             assert "control_unreal_simulation" in during["warning"], during
+            assert during["distance"] == pytest.approx(distance), during
             assert during["camera_location"] == framed, during
 
             stopped = await client.control_simulation("stop")
@@ -783,6 +788,91 @@ def test_focus_selects_outside_play_in_editor_and_says_why_not_during_it():
         finally:
             await client.control_simulation("stop")
             await destroy_actor(client, path)
+            await client.close()
+
+    asyncio.run(run())
+
+
+SPAWN_FOCUS_ACTORS = """
+import unreal, json
+subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+cube = unreal.load_asset('/Engine/BasicShapes/Cube')
+def tagged(actor, scale=1.0):
+    actor.set_actor_scale3d(unreal.Vector(scale, scale, scale))
+    actor.set_editor_property('tags', [unreal.Name('simul_review_focus')])
+    return actor.get_path_name()
+print(json.dumps({
+    # A 20 m cube and a 10 cm one, centered on their locations.
+    'large': tagged(subsystem.spawn_actor_from_object(cube, unreal.Vector(0, 3000, 1000)), 20.0),
+    'small': tagged(subsystem.spawn_actor_from_object(cube, unreal.Vector(0, 6000, 5)), 0.1),
+    # A mesh standing on its location, the center of its bounds 128 cm above it.
+    'standing': tagged(subsystem.spawn_actor_from_object(
+        unreal.load_asset('/Engine/EngineMeshes/SM_MatPreviewMesh_01'), unreal.Vector(0, 9000, 0))),
+    # A StaticMeshActor without a mesh, whose bounds have no size.
+    'no_mesh': tagged(subsystem.spawn_actor_from_class(unreal.StaticMeshActor, unreal.Vector(0, 12000, 100))),
+}))
+"""
+
+ACTOR_BOUNDS = """
+import unreal, json
+origin, extent = unreal.load_object(None, args['path']).get_actor_bounds(False, True)
+print(json.dumps({'origin': [origin.x, origin.y, origin.z], 'extent': [extent.x, extent.y, extent.z]}))
+"""
+
+
+def _in_default_view(focused, bounds):
+    """The nearest depth of the box's corners seen from the camera read back, and
+    the largest share of UE's default view (90 degrees across, 16:9) they reach."""
+    pitch, yaw = (math.radians(angle) for angle in focused["camera_rotation"][:2])
+    axes = (
+        (math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), math.sin(pitch)),
+        (-math.sin(yaw), math.cos(yaw), 0.0),
+        (-math.sin(pitch) * math.cos(yaw), -math.sin(pitch) * math.sin(yaw), math.cos(pitch)),
+    )
+    nearest, reach = math.inf, 0.0
+    for signs in itertools.product((-1.0, 1.0), repeat=3):
+        offset = [
+            o + s * e - c
+            for o, s, e, c in zip(bounds["origin"], signs, bounds["extent"], focused["camera_location"])
+        ]
+        depth, across, up = (sum(a * b for a, b in zip(offset, axis)) for axis in axes)
+        nearest = min(nearest, depth)
+        reach = max(reach, abs(across) / depth, abs(up) / depth / (9.0 / 16.0)) if depth > 0 else math.inf
+    return nearest, reach
+
+
+def test_focus_distance_0_fits_the_actor_and_an_explicit_distance_looks_at_its_location():
+    """Distance 0 put the camera a fixed 500 cm from the actor: inside a 20 m
+    cube, and a 10 cm cube was a speck. Now it fits the actor's bounds in UE's
+    default view, looking at their center; an actor without bounds keeps the
+    500 cm and says so, and an explicit distance looks at the actor's location
+    as before."""
+
+    async def run():
+        client = session()
+        spawned = await client._execute_json_script(SPAWN_FOCUS_ACTORS)
+        assert not spawned.get("error"), spawned
+        try:
+            for name in ("large", "small", "standing"):
+                bounds = await client._execute_json_script(f"args = {{'path': {spawned[name]!r}}}\n" + ACTOR_BOUNDS)
+                focused = await client.focus_on_actor(spawned[name])
+                nearest, reach = _in_default_view(focused, bounds)
+                # In the view, beyond the 10 cm near clip plane, not a speck.
+                assert nearest > 10.0 and 0.4 < reach <= 1.0, (name, focused, bounds)
+                center = bounds["origin"]
+                d = focused["distance"]
+                assert focused["camera_location"] == pytest.approx((center[0] - d, center[1], center[2] + d / 2))
+                assert "fit_warning" not in focused, focused
+
+            no_mesh = await client.focus_on_actor(spawned["no_mesh"])
+            assert no_mesh["distance"] == 500.0 and "no bounds" in no_mesh["fit_warning"], no_mesh
+            assert no_mesh["camera_location"] == pytest.approx((-500.0, 12000.0, 350.0)), no_mesh
+
+            explicit = await client.focus_on_actor(spawned["standing"], distance=250.0)
+            assert explicit["distance"] == 250.0, explicit
+            assert explicit["camera_location"] == pytest.approx((-250.0, 9000.0, 125.0)), explicit
+        finally:
+            await client._execute_python(_remove_tagged("simul_review_focus"))
             await client.close()
 
     asyncio.run(run())

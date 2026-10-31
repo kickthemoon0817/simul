@@ -523,6 +523,21 @@ class UnrealFocusActorResponse(BaseModel):
     camera_rotation: Tuple[float, float, float] = Field(
         ..., description="Resulting camera rotation"
     )
+    distance: float = Field(
+        ...,
+        description=(
+            "Distance used, in cm: the camera stands this far behind the point it looks at and half "
+            "as far above it. The distance passed, or for distance 0 the one that fits the actor's "
+            "bounds in the view (500 for an actor without bounds)"
+        ),
+    )
+    fit_warning: Optional[str] = Field(
+        None,
+        description=(
+            "Why distance 0 did not fit the actor: it has no bounds (zero extent), so the camera "
+            "stands the default 500 cm from its location; null otherwise"
+        ),
+    )
     selected: bool = Field(
         ...,
         description=(

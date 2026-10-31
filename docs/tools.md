@@ -176,7 +176,17 @@ Behaviour worth knowing:
   one hidden in the editor or in a hidden or locked level, a child actor or an
   actor inside a level instance (Unreal selects those only through their
   parent), or any actor while the editor mode or a selection lock prevents
-  selection.
+  selection. The camera stands `distance` behind the point it looks at and
+  half as far above it; the reply's `distance` is the one used. A positive
+  `distance` looks at the actor's location. With `distance` 0 (the default)
+  the camera looks at the center of the actor's bounds and stands back until
+  their bounding sphere fills the view's height with 10% to spare. Editor
+  Python cannot read the level viewport's field of view, so UE's default is
+  assumed: 90 degrees across on a 16:9 viewport; a narrower field of view or a
+  viewport wider than about 2:1 can crop the actor. An actor whose bounds have
+  no size, such as a StaticMeshActor without a mesh, gets 500 cm from its
+  location instead, with a `fit_warning`; an empty actor or a light is framed
+  by its editor icon.
 - While Play In Editor (or Simulate In Editor) runs, Unreal's editor refuses
   changes to the editor world: it spawns and destroys no actors, lists and
   selects none, and hands out no editor world. The tools detect it:

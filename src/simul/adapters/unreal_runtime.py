@@ -157,6 +157,62 @@ FOCUS_NOT_SELECTED_WARNING = (
     "a selection lock prevents selection"
 )
 
+# focus_on_actor's auto-fit (distance 0) assumes the level viewport's field of
+# view, because editor Python cannot read it: UE 5.7 keeps each level
+# viewport's FOVAngle in ULevelEditorViewportSettings.PerInstanceSettings, a
+# config-only property the Python API refuses to read (the class is not even
+# exported to Python), and no Blueprint-callable function returns a viewport's
+# field of view or size. The assumption is UE's default: 90 degrees across
+# (EditorViewportDefs::DefaultPerspectiveFOVAngle, held across the width by the
+# default AspectRatio_MaintainXFOV) on a 16:9 viewport, whose vertical field
+# of view (about 58.7 degrees) is then the narrower one.
+FOCUS_FOV_DEGREES = 90.0
+FOCUS_ASPECT_RATIO = 16.0 / 9.0
+
+#: The auto-fit camera stands this many times as far from the actor's bounding
+#: sphere as it would to have the sphere touch the top and bottom of the view.
+FOCUS_FIT_MARGIN = 1.1
+
+#: Smallest bounding-sphere radius the auto-fit frames, in cm: the minimum the
+#: editor's own Focus uses (FEditorViewportClient::MinimumFocusRadius), which
+#: keeps the camera clear of the 10 cm near clip plane.
+FOCUS_MIN_RADIUS = 10.0
+
+#: ``focus_on_actor``'s distance, in cm, for an actor without bounds to fit.
+FOCUS_DEFAULT_DISTANCE = 500.0
+
+#: ``focus_on_actor``'s ``fit_warning`` when distance 0 found no bounds to fit.
+FOCUS_NO_BOUNDS_WARNING = (
+    "The actor has no bounds to fit (zero extent: no primitive component with a size, such as "
+    "a StaticMeshActor without a mesh), so the camera was placed at the default distance of "
+    "500 cm from the actor's location"
+)
+
+
+def _focus_fit_distance(extent: Sequence[float]) -> float:
+    """
+    Return the ``focus_on_actor`` distance that fits a bounding box in the view.
+
+    The camera looks at the box's center from behind and above, as
+    ``focus_on_actor`` places it, and stands FOCUS_FIT_MARGIN times as far
+    from the box's bounding sphere as the sphere needs to fill the height of a
+    FOCUS_ASPECT_RATIO viewport with a horizontal field of view of
+    FOCUS_FOV_DEGREES. A sphere smaller than FOCUS_MIN_RADIUS counts as that
+    size, as in the editor's own Focus.
+
+    Args:
+        extent: The box's half-size along X, Y and Z, in cm.
+
+    Returns:
+        How far behind the box's center the camera stands, in cm. It also
+        stands half that above the center, so its distance from the center is
+        sqrt(1.25) times this.
+    """
+    radius = max(math.hypot(*extent), FOCUS_MIN_RADIUS)
+    half_height = math.atan(math.tan(math.radians(FOCUS_FOV_DEGREES) / 2) / FOCUS_ASPECT_RATIO)
+    from_center = radius * FOCUS_FIT_MARGIN / math.sin(half_height)
+    return from_center / math.hypot(1.0, 0.5)
+
 
 def _outside_pie(script: str, action: str) -> str:
     """``script``, run only while Play In Editor is stopped.
@@ -1887,8 +1943,24 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
         One editor script adds the actor to the editor selection
         (``EditorActorSubsystem.set_actor_selection_state``), reads the
-        selection back and reads the actor's location; the camera is then
-        placed behind and above the actor, looking at it, and read back.
+        selection back and reads the actor's location and bounds
+        (``get_actor_bounds``: every primitive component, child actors'
+        included). The camera is then placed ``distance`` behind the point it
+        looks at (toward -X) and half as far above it, pitched down at it, and
+        read back.
+
+        A positive ``distance`` looks at the actor's location (its pivot).
+        Distance 0 fits the actor in the view, as the editor's own Focus does:
+        the camera looks at the center of the bounds and stands back until
+        their bounding sphere fills the view's height with 10% to spare.
+        Editor Python cannot read the level viewport's field of view or size,
+        so UE's default is assumed: 90 degrees across on a 16:9 viewport. A
+        viewport whose field of view was narrowed, or that is wider than
+        about 2:1, can crop the sphere. An actor whose bounds have no size
+        (zero extent, such as a StaticMeshActor without a mesh) gets the
+        default 500 cm from its location instead, and ``fit_warning`` says
+        so. In the editor an actor without a mesh, such as an empty actor or
+        a light, usually has bounds: those of its editor icon.
 
         While Play In Editor (or Simulate) runs the actor is not selected:
         Unreal's editor reports no selection then and clears it when PIE
@@ -1896,33 +1968,47 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
         Args:
             actor_path: Full actor path to focus on.
-            distance: Camera distance from actor (0 = auto-fit).
+            distance: How far behind the actor the camera stands, in cm; it
+                also rises half as far, looking down at the actor. 0 fits the
+                actor's bounds in the view.
 
         Returns:
             Dictionary with actor_path, camera_location and camera_rotation
-            (read back), selected (the selection read back), pie_active, and
-            a warning when the actor is not selected: Play In Editor
-            running, or an actor Unreal does not select (hidden in the
-            editor or in a hidden or locked level, a child actor or an actor
-            inside a level instance, or any actor while the editor mode or a
-            selection lock prevents selection). A ``ScriptError`` envelope
-            when the actor cannot be found, before the camera moves.
+            (read back), distance (the one used: the distance passed, the
+            fitted one, or 500 for an actor without bounds), selected (the
+            selection read back), pie_active, fit_warning when distance 0
+            found no bounds to fit, and a warning when the actor is not
+            selected: Play In Editor running, or an actor Unreal does not
+            select (hidden in the editor or in a hidden or locked level, a
+            child actor or an actor inside a level instance, or any actor
+            while the editor mode or a selection lock prevents selection). A
+            ``ScriptError`` envelope when the actor cannot be found, before
+            the camera moves.
         """
         args = {"actor_path": actor_path}
         focus = await self._execute_json_script(f"args = {args!r}\n" + FOCUS_ACTOR)
         if focus.get("error"):
             return focus
 
-        # Position camera to look at actor: offset behind and above it.
-        dist = distance if distance > 0.0 else 500.0
-        actor_loc = focus["location"]
-        cam_x = actor_loc[0] - dist
-        cam_y = actor_loc[1]
-        cam_z = actor_loc[2] + dist * 0.5
-        # Compute pitch to look at actor
-        dz = actor_loc[2] - cam_z
-        dxy = dist
-        pitch = -math.degrees(math.atan2(-dz, dxy)) if dxy > 0 else -20.0
+        fit_warning: Optional[str] = None
+        if distance > 0.0:
+            target, dist = focus["location"], distance
+        elif any(focus["bounds_extent"]):
+            target, dist = focus["bounds_origin"], _focus_fit_distance(focus["bounds_extent"])
+        else:
+            # No primitive component with a size. The bounds' origin is then
+            # the world origin, or where a component without a mesh sits, so
+            # the camera looks at the actor's location instead.
+            target, dist = focus["location"], FOCUS_DEFAULT_DISTANCE
+            fit_warning = FOCUS_NO_BOUNDS_WARNING
+
+        # Position camera to look at the target: offset behind and above it.
+        cam_x = target[0] - dist
+        cam_y = target[1]
+        cam_z = target[2] + dist * 0.5
+        # Compute pitch to look at the target
+        dz = target[2] - cam_z
+        pitch = -math.degrees(math.atan2(-dz, dist))
         await self._call_function(
             "/Script/UnrealEd.Default__UnrealEditorSubsystem",
             "SetLevelViewportCameraInfo",
@@ -1943,9 +2029,12 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             "actor_path": actor_path,
             "camera_location": info["camera_location"],
             "camera_rotation": info["camera_rotation"],
+            "distance": dist,
             "selected": selected,
             "pie_active": pie_active,
         }
+        if fit_warning is not None:
+            result["fit_warning"] = fit_warning
         if not selected:
             result["warning"] = FOCUS_PIE_WARNING if pie_active else FOCUS_NOT_SELECTED_WARNING
         return result
