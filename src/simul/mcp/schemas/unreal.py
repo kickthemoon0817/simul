@@ -707,11 +707,19 @@ class UnrealGetMaterialInfoResponse(BaseModel):
         None,
         description=(
             "Blend mode as Unreal names it (BLEND_OPAQUE, BLEND_MASKED, BLEND_TRANSLUCENT, ...): an "
-            "instance's override, else its parent's"
+            "instance's override, else its parent's; BLEND_OPAQUE for an instance without a parent"
         ),
     )
     parameters: List[UnrealMaterialParameterInfo] = Field(
-        default_factory=list, description="Scalar, vector and texture parameters, by kind and then name"
+        default_factory=list,
+        description="Scalar, vector and texture parameters, by kind and then name, each name once",
+    )
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Names Unreal lists more than once, from Material Layers, each listed once with its global "
+            "value since Unreal's Python API reads parameters by name only; null when there are none"
+        ),
     )
 
 

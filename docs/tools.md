@@ -146,9 +146,14 @@ Behaviour worth knowing:
   the value it renders with and whether the instance overrides it), the
   parent and base material, the material domain and the blend mode (an
   instance's override, else its parent's), named as Unreal names them
-  (`MD_SURFACE`, `BLEND_OPAQUE`). An override an instance keeps for a name
-  that is no longer a parameter of its material is not listed, as the
-  Material Instance editor does not show it.
+  (`MD_SURFACE`, `BLEND_OPAQUE`; an instance without a parent renders
+  `BLEND_OPAQUE`). An override an instance keeps for a name that is no
+  longer a parameter of its material is not listed, as the Material Instance
+  editor does not show it. Unreal's Python API lists and reads material
+  parameters by name only, so a parameter inside a Material Layer shows the
+  global value by that name, not the layer's (0, black or no texture when
+  only a layer has the name), and a name Unreal lists more than once (once
+  per layer it appears in) is listed once, with a `warning` naming it.
 - `focus_unreal_on_actor` points the level viewport camera at the actor and
   selects it, reading the selection back: `selected` is false, with a
   `warning`, while PIE runs (below) and for an actor Unreal does not select:

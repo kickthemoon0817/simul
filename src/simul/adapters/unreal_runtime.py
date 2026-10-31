@@ -2251,13 +2251,17 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             Material), base_material_path (the Material at the root of the
             parent chain), material_domain and blend_mode (Unreal's enum
             names, such as MD_SURFACE and BLEND_OPAQUE; an instance's blend
-            mode is its override, else its parent's), and parameters: one
-            entry per scalar, vector and texture parameter with its name,
-            param_type, value (a float, [r, g, b, a] or a texture asset path;
-            a Material's default, an instance's override or inherited value)
-            and overridden (whether the instance overrides it; None for a
-            Material). An error envelope when the path loads nothing
-            (``NotFoundError``) or is not a material (``InvalidAssetType``).
+            mode is its override, else its parent's, and BLEND_OPAQUE without
+            a parent), and parameters: one entry per scalar, vector and
+            texture parameter name with its name, param_type, value (a float,
+            [r, g, b, a] or a texture asset path; a Material's default, an
+            instance's override or inherited value) and overridden (whether
+            the instance overrides it; None for a Material). Unreal lists a
+            name once per Material Layer it appears in and its Python API
+            reads by name only, so each name is listed once, with its global
+            value, and ``warning`` names any listed more than once. An error
+            envelope when the path loads nothing (``NotFoundError``) or is
+            not a material (``InvalidAssetType``).
         """
         return await self._execute_json_script(
             f"args = {{'path': {material_path!r}}}\n" + MATERIAL_INFO,

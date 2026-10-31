@@ -116,10 +116,16 @@ class Material(MaterialInterface):
         package: str,
         domain: str = "MD_SURFACE",
         blend_mode: str = "BLEND_OPAQUE",
+        layer_names: Optional[Dict[str, List[str]]] = None,
         **defaults: Dict[str, Any],
     ) -> None:
         super().__init__(package)
         self.defaults = {kind: dict(defaults.get(kind, {})) for kind in KINDS}
+        # Names Unreal lists again, once per Material Layer that has them;
+        # read by name only, a layer-only name has no global value.
+        self.layer_names = {
+            kind: list((layer_names or {}).get(kind, [])) for kind in KINDS
+        }
         self.properties = {
             "material_domain": _Enum(domain),
             "blend_mode": _Enum(blend_mode),
@@ -132,10 +138,14 @@ class Material(MaterialInterface):
         return self
 
     def names(self, kind: str) -> List[str]:
-        return list(self.defaults[kind])
+        return list(self.defaults[kind]) + self.layer_names[kind]
 
     def effective(self, kind: str, name: str) -> Any:
         return self.defaults[kind].get(name)
+
+
+#: What Unreal renders an instance without a parent with (UE 5.7.4).
+WORLD_GRID = Material("/Engine/EngineMaterials/WorldGridMaterial")
 
 
 class _Entry:
@@ -194,16 +204,19 @@ class MaterialInstanceConstant(MaterialInstance):
         ]
 
     def get_base_material(self) -> Material:
-        return self.parent.get_base_material()
+        # Unreal falls back to the default surface material without a parent.
+        return WORLD_GRID if self.parent is None else self.parent.get_base_material()
 
     def names(self, kind: str) -> List[str]:
-        return self.parent.names(kind)
+        return (
+            WORLD_GRID.names(kind) if self.parent is None else self.parent.names(kind)
+        )
 
     def effective(self, kind: str, name: str) -> Any:
         for k, n, value, association in self.entries:
             if (k, n, association) == (kind, name, "GLOBAL_PARAMETER"):
                 return value
-        return self.parent.effective(kind, name)
+        return None if self.parent is None else self.parent.effective(kind, name)
 
     # The K2 getters: the value the instance renders with.
     def get_scalar_parameter_value(self, name: str) -> float:
@@ -497,6 +510,73 @@ def test_only_overrides_of_the_materials_own_parameters_count(
     ]
 
 
+def test_an_instance_without_a_parent_renders_opaque(editor: SimpleNamespace) -> None:
+    """UMaterialInstance::UpdateOverridableBaseProperties sets BLEND_Opaque for
+    an instance without a parent before it looks at any override; UE 5.7.4's
+    own get_blend_mode() answered BLEND_OPAQUE for one with and without a
+    blend override, while the tool reported null."""
+    orphan = MaterialInstanceConstant(
+        "/Game/Materials/MI_Orphan", None, blend_mode="BLEND_TRANSLUCENT"
+    )
+    editor.fake.assets[orphan.package] = orphan
+
+    result = _info(editor, orphan.package)
+
+    assert result == {
+        "material_path": _object_path(orphan.package),
+        "class_name": "MaterialInstanceConstant",
+        "parent_path": None,
+        "base_material_path": _object_path(WORLD_GRID.package),
+        "material_domain": "MD_SURFACE",
+        "blend_mode": "BLEND_OPAQUE",
+        "parameters": [],
+    }
+
+
+def test_a_name_unreal_lists_more_than_once_is_listed_once_with_a_warning(
+    editor: SimpleNamespace,
+) -> None:
+    """Unreal lists a parameter name once per Material Layer that has it, and
+    its Python API reads parameters by name only."""
+    layered = Material(
+        "/Game/Materials/M_Layered",
+        scalar={"Roughness": 0.5},
+        layer_names={
+            "scalar": ["Roughness", "Wetness", "Wetness"],
+            "vector": ["Tint", "tint"],
+        },
+    )
+    instance = MaterialInstanceConstant(
+        "/Game/Materials/MI_Layered", layered, scalar={"Roughness": 0.25}
+    )
+    for asset in (layered, instance):
+        editor.fake.assets[asset.package] = asset
+
+    material, layered_instance = _info(editor, layered.package), _info(
+        editor, instance.package
+    )
+
+    assert material["parameters"] == [
+        _param("Roughness", "scalar", 0.5, None),
+        # Only a layer has it: read by name, it has no global value.
+        _param("Wetness", "scalar", 0.0, None),
+        _param("Tint", "vector", [0.0] * 4, None),
+    ]
+    assert layered_instance["parameters"] == [
+        _param("Roughness", "scalar", 0.25, True),
+        _param("Wetness", "scalar", 0.0, False),
+        _param("Tint", "vector", [0.0] * 4, False),
+    ]
+    warning = (
+        "Unreal lists Roughness (scalar), Wetness (scalar), Tint (vector) more than once, from "
+        "Material Layers. Its Python API reads parameters by name only, so each is listed once, "
+        "with its global value, not a layer's"
+    )
+    assert material["warning"] == layered_instance["warning"] == warning
+    # A material without layers has no warning.
+    assert "warning" not in _info(editor, PARENT)
+
+
 @pytest.mark.parametrize(
     ("path", "error_type", "error"),
     [
@@ -607,7 +687,28 @@ def test_the_tool_returns_parameters_overrides_and_metadata(
             _param("Mask", "texture", None, False),
             _param("SlateUI", "texture", _object_path(DEFAULT_TEXTURE), True),
         ],
+        "warning": None,
     }
+
+
+def test_the_tool_returns_the_warning_for_names_listed_more_than_once(
+    editor: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The response schema declares warning; an undeclared field would be dropped."""
+    layered = Material(
+        "/Game/Materials/M_Layered",
+        scalar={"Roughness": 0.5},
+        layer_names={"scalar": ["Roughness"]},
+    )
+    editor.fake.assets[layered.package] = layered
+
+    payload = _call_tool(editor, monkeypatch, layered.package)
+
+    assert payload["success"] is True
+    assert [p["name"] for p in payload["parameters"]] == ["Roughness"]
+    assert payload["warning"].startswith(
+        "Unreal lists Roughness (scalar) more than once"
+    )
 
 
 def test_the_tool_reports_a_path_that_is_not_a_material(
