@@ -279,8 +279,9 @@ Behaviour worth knowing:
   reads it); its constraints then do not run there, although a render through
   it applies them. The scene camera and a marker's camera lose that exception
   while their `hide_viewport` is animated (keyframes, a driver, or a strip in
-  an NLA track that is not muted) and a collection not excluded from the view
-  layer holds them: Blender then skips such a camera while its
+  an NLA track that plays: not muted, or the solo track when there is one)
+  and a collection not excluded from the view layer holds them: Blender then
+  skips such a camera while its
   `hide_viewport` is on at the current frame, or while each of those
   collections is disabled in viewports. Such a disabled camera is checked
   when Blender holds an evaluated copy of it whose pose changed with the
