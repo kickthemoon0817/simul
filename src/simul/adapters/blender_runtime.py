@@ -123,7 +123,8 @@ _FLOAT32_EPSILON = 2.0**-23
 # 32 nm with 0.17 m), and the former 0.1 mm floor hid a 50 micrometre Copy
 # Location in a millimetre scene. The rotation Blender stores does not grow
 # with the scene: those rigs turned cameras by up to 2e-5 rad, and by more
-# near gimbal lock, where Blender's Euler decomposition loses precision.
+# near gimbal lock, where Blender's Euler decomposition loses precision; the
+# check reads that from the stored transform instead (_stores_placement).
 # _PLACEMENT_ANGLE_TOLERANCE, 1e-4 rad, is about a quarter of a pixel across a
 # 1920-pixel frame at 50 mm. A constraint that aims the camera turns it by more,
 # as it takes the camera's direction from two locations that rounding moves.
@@ -890,8 +891,9 @@ class BlenderRuntimeSession:
         disablers = self._viewport_disablers(cam_obj)
         before = self._evaluated_pose(cam_obj) if disablers else None
         placement = self._place_in_world(cam_obj, location, rotation_euler)
+        stored = self._matrix_without_constraints(cam_obj)
         self._evaluate_transforms()
-        report = self._placement_check(cam_obj, placement, disablers, before)
+        report = self._placement_check(cam_obj, placement, stored, disablers, before)
         if report["override_check"] == "done":
             world_location, world_rotation = self._world_placement(
                 cam_obj, rotation_euler
@@ -1020,9 +1022,10 @@ class BlenderRuntimeSession:
         location = [c + v * distance for c, v in zip(center, _FOCUS_DIRECTION)]
         rotation = self._look_at_rotation(location, center)
         placement = self._place_in_world(cam_obj, location, rotation)
+        stored = self._matrix_without_constraints(cam_obj)
         clip_adjusted = self._clip_around(data, distance, radius)
         self._evaluate_transforms()
-        report = self._placement_check(cam_obj, placement, disablers, before)
+        report = self._placement_check(cam_obj, placement, stored, disablers, before)
         if report["override_check"] == "done":
             camera_location, camera_rotation = self._world_placement(cam_obj, rotation)
         else:
@@ -3903,7 +3906,10 @@ class BlenderRuntimeSession:
 
         That is its parent's matrix times its matrix_parent_inverse and
         matrix_basis (location, rotation and scale, deltas included), or
-        matrix_basis alone without a parent.
+        matrix_basis alone without a parent. An object's matrix_basis reads
+        its transform whenever it is used, as matrices from bpy properties
+        do, so the matrix returned is a copy: on Blender 5.0.1 one read
+        before an evaluation held a driver's value after it.
 
         Args:
             obj: The object, its transforms evaluated.
@@ -3915,7 +3921,7 @@ class BlenderRuntimeSession:
         """
         parent = obj.parent
         if parent is None:
-            return obj.matrix_basis
+            return obj.matrix_basis.copy()
         if obj.parent_type == "OBJECT" and parent.type != "CURVE":
             return parent.matrix_world @ obj.matrix_parent_inverse @ obj.matrix_basis
         return None
@@ -4000,7 +4006,9 @@ class BlenderRuntimeSession:
             return False
         return hasattr(constraint, "target") and constraint.target is None
 
-    def _placement_report(self, camera: Any, placement: Any) -> Dict[str, Any]:
+    def _placement_report(
+        self, camera: Any, placement: Any, stored: Any
+    ) -> Dict[str, Any]:
         """
         Say whether Blender evaluates a placed camera where it was placed.
 
@@ -4010,26 +4018,43 @@ class BlenderRuntimeSession:
         its target, a Copy Location moves it), drivers on the transform
         overwrite it, and under a parent with non-uniform scale no transform
         carries every rotation: in each case the camera ends up away from the
-        placement while its transform holds it.
+        placement while its transform holds it. Blender also stores the
+        placement in single precision, which near gimbal lock, or for an
+        axis-angle near zero, turns the camera off it (_stores_placement).
+        So the camera counts as held when
+        Blender evaluates it at the placement, or at the transform it stored
+        for the placement when nothing changed that since and its constraints
+        leave it as it is.
 
         Args:
             camera: The placed camera object.
             placement: The world matrix written (_place_in_world).
+            stored: The camera's own world matrix read right after the
+                placement (_matrix_without_constraints), None when only
+                Blender computes its parent matrix.
 
         Returns:
             Dictionary with placement_overridden (whether the evaluated
             location, view or up direction, or mirroring differs from the
-            placement), constraints_applied (_active_constraints) and warning,
-            which explains an override (_override_warning) and is None
-            otherwise.
+            placement and from the transform stored for it),
+            constraints_applied (_active_constraints) and warning, which
+            explains an override (_override_warning) and is None otherwise.
         """
         evaluated = camera.matrix_world
         extent = self._placement_extent(camera, placement, evaluated)
         turn = self._placement_turn(camera, extent)
-        overridden = not self._same_view(placement, evaluated, extent, turn)
+        own = self._matrix_without_constraints(camera)
+        if own is None or stored is None:
+            moved = held = False
+        else:
+            moved = not self._stores_placement(camera, placement, stored, own, extent)
+            held = self._same_view(own, evaluated, extent, turn)
+        overridden = not (
+            self._same_view(placement, evaluated, extent, turn) or (held and not moved)
+        )
         constraints = self._active_constraints(camera)
         warning = (
-            self._override_warning(camera, placement, extent, constraints)
+            self._override_warning(camera, constraints, moved, held)
             if overridden
             else None
         )
@@ -4203,13 +4228,12 @@ class BlenderRuntimeSession:
                 view = max(view, turn)
         return _PLACEMENT_ANGLE_TOLERANCE + up, _PLACEMENT_ANGLE_TOLERANCE + view
 
-    @classmethod
+    @staticmethod
     def _override_warning(
-        cls,
         camera: Any,
-        placement: Any,
-        extent: float,
         constraints: List[Dict[str, str]],
+        moved: bool,
+        held: bool,
     ) -> str:
         """
         Explain why Blender evaluates a placed camera away from the placement.
@@ -4224,9 +4248,11 @@ class BlenderRuntimeSession:
 
         Args:
             camera: The placed camera, its transforms evaluated.
-            placement: The world matrix written (_place_in_world).
-            extent: The farthest distance involved (_placement_extent).
             constraints: The camera's active constraints (_active_constraints).
+            moved: Whether its own transform misses the placement as Blender
+                stores it (_stores_placement); False when only Blender knows
+                that transform.
+            held: Whether its constraints leave its own transform as it is.
 
         Returns:
             The warning.
@@ -4242,10 +4268,7 @@ class BlenderRuntimeSession:
                 "reported pose is where Blender evaluates the camera."
             )
         names = ", ".join(f"'{c['name']}' ({c['type']})" for c in constraints)
-        own = cls._matrix_without_constraints(camera)
-        moved = own is not None and not cls._same_view(placement, own, extent)
-        turn = cls._placement_turn(camera, extent)
-        if moved and cls._same_view(own, camera.matrix_world, extent, turn):
+        if moved and held:
             return (
                 f"Blender evaluates camera {camera.name!r} away from the requested "
                 f"placement before its constraints apply, and they ({names}) leave "
@@ -4253,18 +4276,113 @@ class BlenderRuntimeSession:
                 "evaluates the camera."
             )
         if moved:
-            held = f"before they apply, {transform} as well, and"
+            cause = f"before they apply, {transform} as well, and"
             remedy = "and remove that driver or parent scale, "
         else:
-            held = "its transform holds the placement and"
+            cause = "its transform holds the placement and"
             remedy = ""
         return (
             f"Constraints on camera {camera.name!r} override the requested placement: "
-            f"{names}. The reported pose is where Blender evaluates the camera; {held} "
+            f"{names}. The reported pose is where Blender evaluates the camera; {cause} "
             "the constraints were left unchanged. To place it exactly, mute them (the "
             "eye icon in Object Constraint Properties, or constraint.mute = True) or "
             f"set their influence to 0, {remedy}then place the camera again."
         )
+
+    @classmethod
+    def _stores_placement(
+        cls, camera: Any, placement: Any, stored: Any, own: Any, extent: float
+    ) -> bool:
+        """
+        Whether a placed camera's own transform is the placement as Blender stores it.
+
+        Blender solves the placement through the camera's parent and stores it
+        in single precision, the rotation in the camera's rotation mode, by a
+        conversion that is ill-conditioned for an Euler order near gimbal
+        lock and for an axis-angle near zero. On Blender 5.0.1, with nothing
+        acting on them, that put 141 of 1,200 cameras placed 4e-5 to 1.1e-3
+        rad from gimbal lock up to 4.7e-3 rad off the placement, and 160 of
+        1,200 axis-angle cameras turned by 1e-4 to 1.7e-3 rad up to 5.6e-4
+        rad off (the cosine of half the angle rounds to 1, and the rotation
+        is lost). Read right after the placement, before any evaluation, the
+        stored transform is what that conversion gave, so its rotation is
+        held to the placement's only when the parent shears the placement
+        (_shears): then no stored rotation carries it. Its location and
+        mirroring keep the fixed tolerances. Evaluation recomputes the same
+        matrix from the same stored values, so a change beyond rounding there
+        is a driver on the transform or a parent that moved.
+
+        Args:
+            camera: The placed camera, its transforms evaluated.
+            placement: The world matrix written (_place_in_world).
+            stored: The camera's own world matrix read right after the
+                placement (_matrix_without_constraints).
+            own: That matrix after the evaluation.
+            extent: The farthest distance involved (_placement_extent).
+
+        Returns:
+            True when the stored transform holds the placement as far as its
+            storage allows, and the evaluation left it as stored.
+        """
+        storage = (
+            (_PLACEMENT_ANGLE_TOLERANCE, _PLACEMENT_ANGLE_TOLERANCE)
+            if cls._shears(camera, placement)
+            else (math.inf, math.inf)
+        )
+        rounding = (_PLACEMENT_LOCATION_PRECISION, _PLACEMENT_LOCATION_PRECISION)
+        stores = cls._same_view(placement, stored, extent, storage)
+        return stores and cls._same_view(stored, own, extent, rounding)
+
+    @staticmethod
+    def _shears(camera: Any, placement: Any) -> bool:
+        """
+        Whether a camera's parent skews the placement's axes more than rounding does.
+
+        A camera's own transform is a location, a rotation and a scale along
+        its own axes, so it carries the placement only when the placement's
+        axes, brought into the parent's space (its matrix_world times the
+        camera's matrix_parent_inverse), stay at right angles. A parent with
+        non-uniform scale skews them when the camera is turned against that
+        scale. Single precision skews them too, by a few epsilons times the
+        parent matrix's condition number, which _PLACEMENT_LOCATION_PRECISION
+        times its Frobenius condition number (3 for a uniform scale) bounds.
+
+        Args:
+            camera: The placed camera; its parent, if any, is an object other
+                than a curve.
+            placement: The world matrix written (_place_in_world).
+
+        Returns:
+            True when the axes are skewed by more than that bound, or the
+            parent matrix has no inverse.
+        """
+        parent = camera.parent
+        if parent is None:
+            return False
+        to_parent = parent.matrix_world @ camera.matrix_parent_inverse
+        try:
+            from_parent = to_parent.inverted()
+        except ValueError:
+            return True
+        local = from_parent @ placement
+        axes = [[local[row][axis] for row in range(3)] for axis in range(3)]
+        lengths = [math.hypot(*axis) for axis in axes]
+        if not all(lengths):
+            return True
+        skew: float = max(
+            abs(sum(a * b for a, b in zip(axes[i], axes[j])))
+            / (lengths[i] * lengths[j])
+            for i, j in ((0, 1), (0, 2), (1, 2))
+        )
+
+        def size(matrix: Any) -> float:
+            """The Frobenius norm of a matrix's 3x3 part."""
+            return math.hypot(
+                *(matrix[row][col] for row in range(3) for col in range(3))
+            )
+
+        condition = size(to_parent) * size(from_parent)
+        return skew > _PLACEMENT_LOCATION_PRECISION * condition
 
     @staticmethod
     def _same_view(
@@ -4290,8 +4408,9 @@ class BlenderRuntimeSession:
             extent: The farthest distance from the origin involved
                 (_placement_extent), which single precision blurs.
             turn: The angles the up and view axes may differ by
-                (_placement_turn); _PLACEMENT_ANGLE_TOLERANCE by default, for
-                matrices no constraint comes between.
+                (_placement_turn; math.inf leaves an axis out);
+                _PLACEMENT_ANGLE_TOLERANCE by default, for matrices no
+                constraint comes between.
 
         Returns:
             True when they agree within the placement tolerances.
@@ -4347,6 +4466,7 @@ class BlenderRuntimeSession:
         self,
         camera: Any,
         placement: Any,
+        stored: Any,
         disablers: List[str],
         before: Optional[List[List[float]]],
     ) -> Dict[str, Any]:
@@ -4373,6 +4493,8 @@ class BlenderRuntimeSession:
         Args:
             camera: The placed camera, the depsgraph evaluated since.
             placement: The world matrix written (_place_in_world).
+            stored: The camera's own world matrix read right after the
+                placement (_placement_report).
             disablers: The settings that disable the camera (_viewport_disablers).
             before: Its evaluated pose before the placement (_evaluated_pose),
                 read when ``disablers`` is not empty.
@@ -4387,7 +4509,7 @@ class BlenderRuntimeSession:
         after = self._evaluated_pose(camera) if disablers else None
         if not disablers or (after is not None and after != before):
             return {
-                **self._placement_report(camera, placement),
+                **self._placement_report(camera, placement, stored),
                 "override_check": "done",
             }
         if after is None:

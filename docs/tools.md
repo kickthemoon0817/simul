@@ -263,9 +263,14 @@ Behaviour worth knowing:
   that is not the placement, `placement_overridden` is `true`,
   `constraints_applied` lists the active constraints (not muted, influence
   above 0, valid, target not deleted: Blender keeps calling such a constraint
-  valid) and `warning` names the cause. For constraints it says how
-  to disable them: mute them or set their influence to 0, then place the
-  camera again. A driver on the camera's transform, or a parent with
+  valid) and `warning` names the cause. Rounding is not reported as an
+  override, so the reported pose can miss the placement by what single
+  precision explains: up to a few milliradians where Blender stores the
+  rotation near gimbal lock of the camera's Euler order or as an axis-angle
+  near zero, and more where a constraint aims the camera at a target close
+  to it far from the origin, or almost straight up or down. For constraints
+  it says how to disable them: mute them or set their influence to 0, then
+  place the camera again. A driver on the camera's transform, or a parent with
   non-uniform scale, is named instead when it moves the camera before the
   constraints apply, and also when they leave that pose alone. Simul never
   mutes or removes a constraint itself. `get_blender_camera_info` reports the

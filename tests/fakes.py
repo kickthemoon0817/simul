@@ -426,6 +426,10 @@ class FakeMatrix:
     def inverted(self) -> "FakeMatrix":
         return FakeMatrix(np.linalg.inv(np.asarray(self.rows)))
 
+    def copy(self) -> "FakeMatrix":
+        """A matrix of these values that no later change to its source reaches."""
+        return FakeMatrix(self.rows)
+
     @property
     def is_negative(self) -> bool:
         """Whether the matrix mirrors (a negative determinant), as mathutils reports it."""
@@ -587,6 +591,23 @@ class FakeConstraint:
         return self._solve(matrix)
 
 
+class FakeLiveMatrix(FakeMatrix):
+    """A ``FakeMatrix`` that reads its values from its source whenever it is used.
+
+    A matrix that bpy returns for an object's property, such as
+    ``matrix_basis``, stays bound to that property: on Blender 5.0.1 one read
+    before a depsgraph evaluation held what a driver wrote during it. Its
+    ``copy()``, like any product with it, keeps the values of the moment.
+    """
+
+    def __init__(self, source: Callable[[], Any]) -> None:
+        self._source = source
+
+    @property  # type: ignore[override]
+    def rows(self) -> List[Tuple[float, ...]]:
+        return [tuple(float(v) for v in row) for row in self._source()]
+
+
 class FakeTransformObject:
     """A Blender object whose ``matrix_world`` follows its parent, rotation mode and constraints.
 
@@ -683,8 +704,11 @@ class FakeTransformObject:
 
     @property
     def matrix_basis(self) -> FakeMatrix:
-        """The local location, rotation and scale, before parenting and constraints."""
-        return FakeMatrix(self._basis())
+        """The local location, rotation and scale, before parenting and constraints.
+
+        Bound to the object, as bpy's is: it reads the transform when used.
+        """
+        return FakeLiveMatrix(self._basis)
 
     def _composed(self) -> FakeMatrix:
         matrix = self._parent_matrix() @ self._basis()
@@ -715,6 +739,10 @@ class FakeTransformObject:
             self._stored = FakeMatrix(value.rows)
         self.location = FakeVector(local[:3, 3])
         self.scale = FakeVector(scale)
+        self._store_rotation(rotation)
+
+    def _store_rotation(self, rotation: np.ndarray) -> None:
+        """Store a rotation matrix in the property of the rotation mode, exactly."""
         if self.rotation_mode == "QUATERNION":
             self.rotation_quaternion = FakeVector(matrix_quaternion(rotation))
         elif self.rotation_mode == "AXIS_ANGLE":

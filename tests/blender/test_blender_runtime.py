@@ -23,8 +23,10 @@ from tests.fakes import (
     FakeTransformObject,
     FakeVector,
     FakeViewLayer,
+    axis_angle_matrix,
     euler_matrix,
     matrix_euler,
+    matrix_quaternion,
 )
 
 
@@ -382,6 +384,64 @@ class _SinglePrecisionCamera(FakeTransformObject):
         if name == "location":
             value = FakeVector(np.asarray(list(value), dtype=np.float32).tolist())
         super().__setattr__(name, value)
+
+
+class _SinglePrecisionRotationCamera(FakeTransformObject):
+    """A camera that stores the rotation it is placed at in single precision, as Blender does.
+
+    Blender decomposes the rotation into the camera's rotation mode from
+    single-precision matrix entries. Here, near gimbal lock of an Euler
+    order, an entry next to 1 rounds to 1 and the middle angle reads as
+    exactly 90 degrees: placed 2.4e-4 rad from gimbal lock, the camera is
+    stored 2.3e-4 rad off (Blender's own decomposition misses in the other
+    two angles, by up to epsilon over the cosine of the middle one). An
+    axis-angle takes its angle from the arc cosine of a single-precision
+    cosine of half of it, which rounds to 1 below 4.9e-4 rad: the rotation is
+    lost. ``driven`` is a driver, (property, index, value), written into the
+    camera at each evaluation, as background Blender writes a driver's result
+    back to the original object.
+    """
+
+    def __init__(
+        self,
+        rotation_mode: str,
+        driven: Optional[Tuple[str, int, float]] = None,
+        **kwargs: Any,
+    ) -> None:
+        self._driven = driven
+        super().__init__(
+            "Camera",
+            "CAMERA",
+            FakeCameraData(),
+            rotation_mode=rotation_mode,
+            stored=True,
+            **kwargs,
+        )
+
+    def _store_rotation(self, rotation: np.ndarray) -> None:
+        single = np.asarray(rotation, dtype=np.float32).astype(float)
+        if self.rotation_mode != "AXIS_ANGLE":
+            super()._store_rotation(single)
+            return
+        w, *vector = matrix_quaternion(single)
+        half = math.acos(min(1.0, float(np.float32(w))))
+        # quat_to_axis_angle keeps the vector part as the axis rather than
+        # divide by a sine below 0.0005.
+        sine = math.sin(half)
+        axis = vector if sine < 0.0005 else [v / sine for v in vector]
+        self.rotation_axis_angle = FakeVector((2 * half, *axis))
+
+    def evaluate(self) -> None:
+        if self._driven is not None:
+            prop, index, value = self._driven
+            values = list(getattr(self, prop))
+            values[index] = value
+            setattr(
+                self,
+                prop,
+                FakeEuler(values) if prop == "rotation_euler" else FakeVector(values),
+            )
+        super().evaluate()
 
 
 class _PartlyEvaluatedCamera(FakeTransformObject):
@@ -2275,6 +2335,138 @@ class TestVisualObservationTools:
         assert "mute" in warning and "influence to 0" in warning
         assert "a driver on its transform" in warning and "as well" in warning
         assert "its transform holds the placement" not in warning
+
+    @pytest.mark.parametrize(
+        ("rotation_mode", "rotation", "driven", "overridden"),
+        [
+            ("XYZ", (0.3, math.pi / 2 - 2.4e-4, 0.7), None, False),
+            # A driver turns the stored third angle 2e-4 rad further.
+            (
+                "XYZ",
+                (0.3, math.pi / 2 - 2.4e-4, 0.7),
+                ("rotation_euler", 2, 0.7002),
+                True,
+            ),
+            (
+                "AXIS_ANGLE",
+                matrix_euler(axis_angle_matrix((4e-4, 1 / 3, 2 / 3, 2 / 3))),
+                None,
+                False,
+            ),
+            # A driver sets the angle to 8e-4 rad, twice the placement's.
+            (
+                "AXIS_ANGLE",
+                matrix_euler(axis_angle_matrix((4e-4, 1 / 3, 2 / 3, 2 / 3))),
+                ("rotation_axis_angle", 0, 8e-4),
+                True,
+            ),
+        ],
+        ids=[
+            "near_gimbal_lock",
+            "near_gimbal_lock_driven",
+            "axis_angle_near_zero",
+            "axis_angle_near_zero_driven",
+        ],
+    )
+    def test_set_camera_view_tolerates_the_rotation_blender_stores(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        rotation_mode: str,
+        rotation: Tuple[float, float, float],
+        driven: Optional[Tuple[str, int, float]],
+        overridden: bool,
+    ) -> None:
+        """Single precision stores a camera near gimbal lock, or turned by an
+        axis-angle near zero, off its placement; a driver then turns it further.
+
+        The fixed 1e-4 rad tolerance reported such a stored rotation as an
+        override: on Blender 5.0.1, nothing acting on them, for 141 of 1,200
+        cameras placed 4e-5 to 1.1e-3 rad from gimbal lock (up to 4.7e-3 rad
+        off) and 160 of 1,200 axis-angle cameras turned by 1e-4 to 1.7e-3 rad
+        (up to 5.6e-4 rad off). The stored transform is what Blender made of
+        the placement, so only a change to it since is an override. A driver
+        on the rotation of an unparented camera also showed that the stored
+        transform has to be copied: bpy's matrix_basis reads the transform
+        whenever it is used.
+        """
+        cam = _SinglePrecisionRotationCamera(rotation_mode, driven)
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view([1.0, -2.0, 3.0], list(rotation))
+
+        cam.evaluate()
+        placed = euler_matrix(rotation)
+        evaluated = _evaluated_rotation(cam)
+        missed = max(_angle(placed[:, k], evaluated[:, k]) for k in (1, 2))
+        # The camera is evaluated more than twice the former tolerance off.
+        assert missed > 2e-4
+        assert result["placement_overridden"] is overridden
+        if overridden:
+            assert "no constraint acts on it" in result["warning"]
+            assert "a driver on its transform" in result["warning"]
+        else:
+            assert result["warning"] is None
+
+    def test_set_camera_view_reports_a_parent_that_shears_a_camera_near_gimbal_lock(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Under a parent scaled (1, 1.5, 1) the axes of a camera placed near
+        gimbal lock are skewed by 0.29: no stored rotation carries them, so
+        that is an override, however single precision stores the rest."""
+        rig = FakeTransformObject("Rig", scale=(1.0, 1.5, 1.0), stored=True)
+        cam = _SinglePrecisionRotationCamera("XYZ", parent=rig)
+        # Parented without keeping the transform: the rig's scale reaches the camera.
+        cam.matrix_parent_inverse = FakeMatrix.Identity(4)
+        cam.evaluate()
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view(
+            [7.0, -7.0, 5.0], [0.3, math.pi / 2 - 2.4e-4, 0.7]
+        )
+
+        assert result["placement_overridden"] is True
+        assert "non-uniform scale" in result["warning"]
+
+    @pytest.mark.parametrize(
+        ("parent_scale", "rotation", "sheared"),
+        [
+            (None, (1.1, 0.25, 0.78), False),
+            ((2.0, 2.0, 2.0), (1.1, 0.25, 0.78), False),
+            ((1.0, 3.0, 1.0), (1.1, 0.25, 0.78), True),
+            # Turned about the stretched axis, the camera's axes stay square.
+            ((1.0, 3.0, 1.0), (0.0, 0.5, 0.0), False),
+            ((1.0, 3.0, 1.0), (0.0, 0.0, math.pi / 2), False),
+            # A flattened parent has no inverse to solve through.
+            ((1.0, 0.0, 1.0), (1.1, 0.25, 0.78), True),
+        ],
+        ids=[
+            "unparented",
+            "uniform",
+            "stretched",
+            "turned_about_the_stretch",
+            "quarter_turn",
+            "flattened",
+        ],
+    )
+    def test_shears_is_a_skew_beyond_rounding(
+        self,
+        mathutils: Any,
+        parent_scale: Optional[Tuple[float, float, float]],
+        rotation: Tuple[float, float, float],
+        sheared: bool,
+    ) -> None:
+        cam = FakeTransformObject("Camera", "CAMERA")
+        if parent_scale is not None:
+            # Parented without keeping the transform: the scale reaches the camera.
+            cam.parent = FakeTransformObject("Rig", scale=parent_scale)
+        placement = FakeMatrix.LocRotScale(
+            FakeVector((7.0, -7.0, 5.0)),
+            FakeEuler(rotation),
+            FakeVector((1.0, 1.0, 1.0)),
+        )
+
+        assert blender_runtime.BlenderRuntimeSession._shears(cam, placement) is sheared
 
     def test_set_camera_view_tolerates_single_precision_through_a_far_parent_inverse(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
