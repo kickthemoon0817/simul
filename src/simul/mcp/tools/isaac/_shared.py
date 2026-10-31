@@ -76,7 +76,8 @@ PRIM_DETAIL_ASPECTS = {
 # mesh at /World/Cube) asking a mesh for its textures returns nothing. Left
 # out until it can take a prim and resolve that prim's bound material.
 
-# Largest raw script accepted for execution.
+# Largest raw script accepted for execution, in UTF-8 bytes, the unit the usage
+# log's code_bytes reports a script's size in.
 MAX_SCRIPT_BYTES = 100_000
 
 # 4K on the long edge, so a capture can't grow to tens of megabytes before

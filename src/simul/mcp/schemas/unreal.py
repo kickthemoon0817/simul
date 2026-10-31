@@ -523,6 +523,23 @@ class UnrealFocusActorResponse(BaseModel):
     camera_rotation: Tuple[float, float, float] = Field(
         ..., description="Resulting camera rotation"
     )
+    selected: bool = Field(
+        ...,
+        description=(
+            "Whether the actor is selected in the editor, as Unreal reads its selection back; "
+            "false while Play In Editor runs, when Unreal's editor selects nothing"
+        ),
+    )
+    pie_active: bool = Field(
+        False,
+        description=(
+            "Whether Play In Editor (or Simulate) was running; the camera moves then, "
+            "the selection does not"
+        ),
+    )
+    warning: Optional[str] = Field(
+        None, description="Why the actor is not selected; null when it is"
+    )
 
 
 # ---------------------------------------------------------------------------
