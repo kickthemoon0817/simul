@@ -140,6 +140,13 @@ Behaviour worth knowing:
   have spawned, because Unreal keeps an outliner folder, empty, after its
   actors go and its Python API cannot delete one; a failed call therefore
   leaves no folder behind. Props are Movable boxes; everything else is Static.
+- `focus_unreal_on_actor` points the level viewport camera at the actor and
+  selects it, reading the selection back: `selected` is false, with a
+  `warning`, while PIE runs (below) and for an actor Unreal does not select:
+  one hidden in the editor or in a hidden or locked level, a child actor or an
+  actor inside a level instance (Unreal selects those only through their
+  parent), or any actor while the editor mode or a selection lock prevents
+  selection.
 - While Play In Editor (or Simulate In Editor) runs, Unreal's editor refuses
   changes to the editor world: it spawns and destroys no actors, lists and
   selects none, and hands out no editor world. The tools detect it:
@@ -167,6 +174,13 @@ Behaviour worth knowing:
   - Editing actors already in the level by path (transform, lights, collision,
     physics settings, visibility, materials) keeps working and changes the
     editor world.
+  - `focus_unreal_on_actor` still moves the viewport camera but selects
+    nothing, since Unreal reads back no selection during PIE and clears it
+    when PIE stops: the reply has `selected: false`, `pie_active: true` and a
+    `warning`. After Simulate In Editor (what `control_unreal_simulation`
+    starts) the camera stays where it was put; when a Play session in the
+    level viewport stops, Unreal replaces the editor camera, by default with
+    the game camera's last view.
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.

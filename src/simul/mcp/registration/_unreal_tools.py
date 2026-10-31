@@ -604,7 +604,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="focus_unreal_on_actor",
-        description="Focus the editor viewport camera on a specific actor.",
+        description=(
+            "Focus the editor viewport camera on a specific actor and select it; selected reports "
+            "whether Unreal selected it. While PIE runs, Unreal's editor selects nothing, so the camera "
+            "moves but selected is false, with pie_active true and a warning."
+        ),
         response=UnrealFocusActorResponse,
         read_only=False,
         method="focus_on_actor",
