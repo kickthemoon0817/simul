@@ -633,6 +633,9 @@ class FakeTransformObject:
         self.rotation_axis_angle: Any = FakeVector((0.0, 0.0, 1.0, 0.0))
         self.scale: Any = FakeVector(scale)
         self.constraints: List[FakeConstraint] = list(constraints)
+        # Disable in Viewports (the monitor icon), and the collections that hold it.
+        self.hide_viewport = False
+        self.users_collection: List["FakeCollection"] = []
         self.parent = parent
         self.parent_type = "OBJECT"
         # What Blender's Parent (Keep Transform) sets.
@@ -689,6 +692,10 @@ class FakeTransformObject:
             return FakeMatrix(self._stored.rows)
         return self._composed()
 
+    def evaluated_get(self, depsgraph: "FakeDepsgraph") -> Any:
+        """``Object.evaluated_get``: this object's evaluated copy, or the original when left out."""
+        return depsgraph.evaluated(self)
+
     @matrix_world.setter
     def matrix_world(self, value: FakeMatrix) -> None:
         local = np.linalg.inv(self._parent_matrix()) @ np.asarray(value.rows)
@@ -719,3 +726,65 @@ def fake_mathutils() -> ModuleType:
     module.Matrix = FakeMatrix  # type: ignore[attr-defined]
     module.Euler = FakeEuler  # type: ignore[attr-defined]
     return module
+
+
+class FakeCollection:
+    """``bpy.types.Collection`` stand-in: its name and Disable in Viewports (hide_viewport)."""
+
+    def __init__(self, name: str, hide_viewport: bool = False) -> None:
+        self.name = name
+        self.hide_viewport = hide_viewport
+
+    def link(self, obj: Any) -> None:
+        """Put an object in this collection, as ``collection.objects.link`` does."""
+        obj.users_collection.append(self)
+
+
+class FakeLayerCollection:
+    """``bpy.types.LayerCollection`` stand-in: a collection's place in a view layer.
+
+    ``exclude`` is its checkbox in the outliner; ``children`` are the layer
+    collections of its child collections. The eye icon (hide_viewport here)
+    is left out: hiding never keeps Blender from evaluating an object.
+    """
+
+    def __init__(
+        self,
+        collection: FakeCollection,
+        children: Sequence["FakeLayerCollection"] = (),
+        exclude: bool = False,
+    ) -> None:
+        self.collection = collection
+        self.children = list(children)
+        self.exclude = exclude
+
+
+class FakeViewLayer:
+    """``bpy.types.ViewLayer`` stand-in: its name and the scene collection's layer collection."""
+
+    def __init__(
+        self, layer_collection: FakeLayerCollection, name: str = "ViewLayer"
+    ) -> None:
+        self.name = name
+        self.layer_collection = layer_collection
+
+
+class FakeDepsgraph:
+    """``bpy.types.Depsgraph`` stand-in for ``Object.evaluated_get``.
+
+    Blender gives back an object's evaluated copy (``is_evaluated`` True) when
+    the depsgraph holds the object, and the original itself (``is_evaluated``
+    False) when it left the object out, as the viewport depsgraph leaves out a
+    camera disabled in viewports that nothing visible depends on. The copy's
+    ``matrix_world`` is the object's: what its last evaluation stored.
+    """
+
+    def __init__(self, left_out: Sequence[Any] = ()) -> None:
+        self._left_out = list(left_out)
+
+    def evaluated(self, obj: Any) -> SimpleNamespace:
+        """The copy of ``obj`` this depsgraph evaluated, or ``obj`` as an original."""
+        held = not any(obj is out for out in self._left_out)
+        return SimpleNamespace(
+            original=obj, is_evaluated=held, matrix_world=obj.matrix_world
+        )

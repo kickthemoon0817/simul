@@ -777,7 +777,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "rotation_euler report where Blender evaluates the camera; placement_overridden "
             "is true when that is not the request, with constraints_applied and a warning "
             "on how to disable them. Keys on the camera's transform take over at the next "
-            "frame change."
+            "frame change. Blender's viewport skips a camera disabled in viewports unless it "
+            "is the scene camera, a timeline marker's camera or needed by something visible: "
+            "when Blender did not evaluate it after the placement (or its evaluated pose did "
+            "not change), override_check is 'skipped' and placement_overridden null."
         ),
         hints=IDEMPOTENT,
         operation="set_camera_view",
@@ -805,7 +808,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "set_blender_camera_view, success means the framing is in the camera's "
             "transform and its constraints still apply: camera_location and "
             "camera_rotation_euler report where Blender evaluates the camera, and "
-            "placement_overridden is true when constraints or drivers moved it off the framing."
+            "placement_overridden is true when constraints or drivers moved it off the framing. "
+            "For a camera disabled in viewports that Blender did not evaluate after the "
+            "placement (or whose evaluated pose did not change), override_check is 'skipped' "
+            "and placement_overridden null."
         ),
         hints=IDEMPOTENT,
         operation="focus_on_object",

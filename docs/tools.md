@@ -251,7 +251,25 @@ Behaviour worth knowing:
   constraints apply, and also when they leave that pose alone. Simul never
   mutes or removes a constraint itself. `get_blender_camera_info` reports the
   evaluated pose and `constraints_applied` too. Keys on the camera's transform
-  take over again at the next frame change. An add-on built before this report
+  take over again at the next frame change. `override_check` is `"done"` when
+  Blender evaluated the camera after the placement. Blender's viewport skips a
+  camera that is disabled in viewports (the monitor icon on the camera or on a
+  collection holding it, or its collection excluded from the view layer)
+  unless it is the scene camera, a timeline marker binds it, or something
+  visible depends on its transform (a child, or a constraint or driver that
+  reads it); its constraints then do not run there, although a render through
+  it applies them. Such a disabled camera is checked when Blender holds an
+  evaluated copy of it whose pose changed with the placement. Otherwise
+  `override_check` is `"skipped"`, `placement_overridden` is `null`, the
+  reported pose is the requested placement, unchecked, `constraints_applied`
+  lists the constraints that apply when Blender evaluates it, and `warning`
+  names the setting that disables it. That covers a camera Blender evaluates
+  only in part (a driver reads only one of its properties, or its visibility
+  is animated), and also a disabled camera Blender does evaluate when the
+  placement leaves its pose as it was: placed where it already is, or under
+  constraints that set its whole transform. Neither the depsgraph's member
+  IDs nor `is_evaluated` tells these cases apart. A camera hidden with the eye
+  icon is still evaluated and checked. An add-on built before this report
   answers without these fields, and the server returns them as `null`.
 - `search_blender_objects` refuses a `name_pattern` that repeats a group holding
   a quantifier or alternatives, such as `(\w+)+`: Python's regex search
