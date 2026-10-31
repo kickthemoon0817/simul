@@ -206,6 +206,34 @@ def _single_precision_child_of(
     return constraint
 
 
+def _single_precision_armature(
+    rig: FakeTransformObject, moved: Sequence[float] = (0.0, 0.0, 0.0)
+) -> FakeConstraint:
+    """An Armature constraint on bone 'Bone' of ``rig``, the bone then moved by ``moved``.
+
+    Blender deforms the owner by the armature's matrix, the bone's pose
+    change (in armature space) and the armature's inverse, in single
+    precision. A bone at rest leaves the owner in place up to rounding in
+    proportion to the armature's distance from the origin: millimetres 27 km
+    out. The armature is in the constraint's ``targets``, not a ``target``.
+    """
+    world = np.asarray(rig.matrix_world.rows)
+    to_world = world.astype(np.float32)
+    from_world = np.linalg.inv(world).astype(np.float32)
+    pose = np.eye(4, dtype=np.float32)
+    pose[:3, 3] = moved
+
+    def solve(matrix: np.ndarray) -> np.ndarray:
+        deform = to_world @ pose @ from_world
+        return (deform @ matrix.astype(np.float32)).astype(float)
+
+    constraint = FakeConstraint("Armature", "ARMATURE", solve)
+    constraint.targets = [  # type: ignore[attr-defined]
+        SimpleNamespace(target=rig, subtarget="Bone", weight=1.0)
+    ]
+    return constraint
+
+
 def _evaluated_rotation(obj: Any) -> np.ndarray:
     """An object's world rotation, its scale divided out."""
     world = np.asarray(obj.matrix_world.rows)[:3, :3]
@@ -2286,6 +2314,97 @@ class TestVisualObservationTools:
         )
 
         assert extent == pytest.approx(27_000.0)
+
+    @pytest.mark.parametrize(
+        ("moved", "overridden"),
+        [((0.0, 0.0, 0.0), False), ((0.0, 1.0, 0.0), True)],
+        ids=["bone_at_rest", "bone_moved_1m"],
+    )
+    def test_set_camera_view_tolerates_an_armature_constraint_far_out(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        moved: Tuple[float, float, float],
+        overridden: bool,
+    ) -> None:
+        """An Armature constraint on a resting armature 27 km out leaves the camera in place.
+
+        Single precision rounds the product of the armature's matrix and its
+        inverse by millimetres, while the camera and its placement lie near the
+        origin. Its armature is in targets, not target; with the extent leaving
+        it out, 37 of 40 such cameras on an armature 300 m out were reported
+        overridden on Blender 5.0.1. A bone moved 1 m is an override.
+        """
+        rig = FakeTransformObject(
+            "Rig",
+            "ARMATURE",
+            location=(16200.0, -21600.0, 0.0),
+            rotation_euler=(0.3, -0.2, 2.1),
+        )
+        cam = self._constrained_camera(_single_precision_armature(rig, moved))
+        session = self._session_on(monkeypatch, cam)
+        location = [7.3, -7.1, 5.2]
+
+        result = session.set_camera_view(location, [1.1, 0.25, 0.78])
+
+        turn = np.asarray(rig.matrix_world.rows)[:3, :3]
+        expected = np.add(location, turn @ moved)
+        assert 1e-4 < math.dist(result["location"], expected) < 1e-2
+        assert result["placement_overridden"] is overridden
+        assert result["constraints_applied"] == [
+            {"name": "Armature", "type": "ARMATURE"}
+        ]
+
+    @pytest.mark.parametrize(
+        ("object_type", "subtarget", "extent"),
+        [
+            # A bone posed 300 m from its armature's origin...
+            ("ARMATURE", "Bone", 300.0 * math.sqrt(3.0)),
+            # ...or a vertex group 300 m from its mesh's: the bounding box holds it.
+            ("MESH", "Group", 300.0 * math.sqrt(3.0)),
+            # Without one, Blender computes with the target's origin.
+            ("MESH", "", 1.0),
+        ],
+        ids=["bone", "vertex_group", "no_subtarget"],
+    )
+    def test_placement_extent_counts_the_bone_or_vertex_group_a_target_names(
+        self, mathutils: Any, object_type: str, subtarget: str, extent: float
+    ) -> None:
+        target = FakeTransformObject("Target", object_type)
+        target.bound_box = _box(299.0, 300.0)
+        child_of = FakeConstraint("Child Of", "CHILD_OF", lambda m: m)
+        child_of.target = target  # type: ignore[attr-defined]
+        child_of.subtarget = subtarget  # type: ignore[attr-defined]
+        cam = FakeTransformObject(
+            "Camera", "CAMERA", location=(0.0, 0.0, 1.0), constraints=[child_of]
+        )
+
+        assert blender_runtime.BlenderRuntimeSession._placement_extent(
+            cam, cam.matrix_world, cam.matrix_world
+        ) == pytest.approx(extent)
+
+    def test_placement_extent_counts_the_weighted_armatures_of_an_armature_constraint(
+        self, mathutils: Any
+    ) -> None:
+        """Blender skips an Armature constraint's target without weight."""
+
+        def bone(distance: float, weight: float) -> SimpleNamespace:
+            rig = FakeTransformObject("Rig", "ARMATURE", location=(distance, 0.0, 0.0))
+            return SimpleNamespace(target=rig, subtarget="Bone", weight=weight)
+
+        armature = FakeConstraint("Armature", "ARMATURE", lambda m: m)
+        armature.targets = [  # type: ignore[attr-defined]
+            bone(400.0, 1.0),
+            bone(900.0, 0.0),
+            SimpleNamespace(target=None, subtarget="Bone", weight=1.0),
+        ]
+        cam = FakeTransformObject(
+            "Camera", "CAMERA", location=(0.0, 0.0, 1.0), constraints=[armature]
+        )
+
+        assert blender_runtime.BlenderRuntimeSession._placement_extent(
+            cam, cam.matrix_world, cam.matrix_world
+        ) == pytest.approx(400.0)
 
     def test_focus_on_object_reports_a_track_to_that_turns_the_camera_away(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
