@@ -590,6 +590,133 @@ if rejected:
 print(json.dumps(result))
 """
 
+# Expects ``args`` = {"path", "values"}, where ``values`` maps "scalar",
+# "vector" and "texture" to {parameter name: value}: a float, [r, g, b, a]
+# floats, a texture asset path. Writes the Material Instance Constant through
+# MaterialEditingLibrary, the calls its editor makes, in one undoable
+# transaction. A Remote Control write of the instance's parameter arrays
+# answered OK and changed nothing, and the setters return False whether or not
+# they applied the value (observed on UE 5.7.4, in and out of Play In Editor),
+# so like SET_LIGHT_PARAMS this reads every value back and fails the call when
+# one reads back different (MaterialParamsNotApplied); the values that did
+# apply stay written and are reported in applied, as lights do. A setter also
+# adds an override for a name the material has no parameter of, so before
+# anything is written the names are matched against the material's parameters
+# (ignoring case, as Unreal's names do) and the textures are loaded: a name the
+# material lacks or a texture that does not load refuses the whole request
+# (ValidationError, nothing written, each reason in not_applied). Unreal lists
+# a Material Layer's parameters with the material's own and its Python API
+# writes by name only, so a name found only in a layer gets a global override,
+# which leaves the layer as it was. Assets load through unreal.load_asset:
+# EditorAssetLibrary loads nothing during PIE. The instance is left unsaved, as
+# an edit in its editor is.
+SET_MATERIAL_PARAMS = """
+import json, struct, unreal
+MEL = unreal.MaterialEditingLibrary
+PARAMETER_NAMES = {"scalar": MEL.get_scalar_parameter_names, "vector": MEL.get_vector_parameter_names,
+                   "texture": MEL.get_texture_parameter_names}
+LISTED = 20
+
+def stored(value):
+    # Unreal keeps material scalars and colors as 32-bit floats.
+    return struct.unpack("f", struct.pack("f", value))[0]
+
+def expected(kind, value):
+    if kind == "scalar":
+        return stored(value)
+    if kind == "vector":
+        return [stored(channel) for channel in value]
+    return value.get_path_name()
+
+def write(instance, kind, name, value):
+    if kind == "scalar":
+        MEL.set_material_instance_scalar_parameter_value(instance, name, value)
+    elif kind == "vector":
+        MEL.set_material_instance_vector_parameter_value(instance, name, unreal.LinearColor(*value))
+    else:
+        MEL.set_material_instance_texture_parameter_value(instance, name, value)
+
+def read(instance, kind, name):
+    if kind == "scalar":
+        return MEL.get_material_instance_scalar_parameter_value(instance, name)
+    if kind == "vector":
+        color = MEL.get_material_instance_vector_parameter_value(instance, name)
+        return [color.r, color.g, color.b, color.a]
+    texture = MEL.get_material_instance_texture_parameter_value(instance, name)
+    return texture.get_path_name() if texture is not None else None
+
+def missing(kind, name, names):
+    if not names:
+        return "the material has no " + kind + " parameters"
+    listed = ", ".join(names[:LISTED]) + (", ..." if len(names) > LISTED else "")
+    return ("the material has no " + kind + " parameter named " + repr(name)
+            + " (its " + kind + " parameters: " + listed + ")")
+
+def described(reasons):
+    return "; ".join(name + " (" + kind + "): " + reason
+                     for kind, entries in reasons.items() for name, reason in entries.items())
+
+def set_params(path, values):
+    instance = unreal.load_asset(path)
+    if instance is None:
+        return {"success": False, "error_type": "NotFoundError",
+                "error": "No material instance at " + repr(path) + ": pass a Material Instance "
+                         "Constant asset path such as /Game/Materials/MI_Wood"}
+    if not isinstance(instance, unreal.MaterialInstanceConstant):
+        error = path + " is a " + instance.get_class().get_name() + ", not a Material Instance Constant"
+        if isinstance(instance, unreal.Material):
+            error += "; create an instance of it with create_unreal_material_instance and set that"
+        return {"success": False, "error_type": "InvalidAssetType", "error": error}
+    pending, refused = [], {}
+    for kind, requested in values.items():
+        # Unreal lists a name once per layer it appears in; names ignore case.
+        by_key = {}
+        for name in PARAMETER_NAMES[kind](instance):
+            by_key.setdefault(str(name).lower(), str(name))
+        names = sorted(by_key.values(), key=str.lower)
+        for name, value in requested.items():
+            parameter = by_key.get(name.lower())
+            if parameter is None:
+                refused.setdefault(kind, {})[name] = missing(kind, name, names)
+                continue
+            if kind == "texture":
+                texture = unreal.load_asset(value)
+                if not isinstance(texture, unreal.Texture):
+                    refused.setdefault(kind, {})[parameter] = "no texture at " + repr(value)
+                    continue
+                value = texture
+            pending.append((kind, parameter, value))
+    material_path = instance.get_path_name()
+    if refused:
+        return {"success": False, "error_type": "ValidationError",
+                "error": "Nothing was written to " + material_path + ": " + described(refused),
+                "material_path": material_path, "params_set": 0, "applied": {}, "not_applied": refused}
+    with unreal.ScopedEditorTransaction("simul: set material params"):
+        instance.modify()
+        for kind, name, value in pending:
+            write(instance, kind, name, value)
+    MEL.update_material_instance(instance)
+    applied, not_applied = {}, {}
+    for kind, name, value in pending:
+        value_read = read(instance, kind, name)
+        if value_read == expected(kind, value):
+            applied.setdefault(kind, {})[name] = value_read
+        else:
+            not_applied.setdefault(kind, {})[name] = (
+                "Unreal read back " + json.dumps(value_read) + " after the write")
+    result = {"material_path": material_path,
+              "params_set": sum(len(entries) for entries in applied.values()),
+              "applied": applied, "not_applied": not_applied}
+    if not_applied:
+        error = "Unreal did not apply every parameter to " + material_path + ": " + described(not_applied)
+        if applied:
+            error += ". The parameters in applied were set and stay set"
+        result.update(success=False, error_type="MaterialParamsNotApplied", error=error)
+    return result
+
+print(json.dumps(set_params(**args)))
+"""
+
 # Expects ``args`` = {"pieces": [{"label", "mesh", "location", "scale",
 # "movable"}], "folder", "tags", "transaction"}. Spawns one StaticMeshActor per
 # piece, in order, inside one undoable transaction, and files them all in the

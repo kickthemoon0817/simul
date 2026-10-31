@@ -731,7 +731,22 @@ class UnrealSetMaterialParamsResponse(BaseModel):
         None, description="Error message when success is False"
     )
     material_path: str = Field(..., description="Material Instance path")
-    params_set: int = Field(0, description="Number of parameters set")
+    params_set: int = Field(0, description="Number of parameters that read back as requested")
+    applied: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description=(
+            "Values read back after the write, by kind (scalar, vector, texture) and parameter name: "
+            "a float, [r, g, b, a], or a texture asset path"
+        ),
+    )
+    not_applied: Dict[str, Dict[str, str]] = Field(
+        default_factory=dict,
+        description=(
+            "By kind and parameter name, why a requested parameter was not set: refused before anything "
+            "was written (the material has no parameter of that kind by that name, the texture does not "
+            "load, a malformed value), or read back different after the write. Empty when the call succeeds"
+        ),
+    )
 
 
 class UnrealCreateMaterialInstanceResponse(BaseModel):

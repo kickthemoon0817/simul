@@ -106,6 +106,22 @@ Behaviour worth knowing:
   editor Python APIs. Single-frame stepping is not supported by the editor and
   returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
   engine cannot report a simulation-specific count.
+- `set_unreal_material_params` writes a Material Instance Constant through
+  Unreal's MaterialEditingLibrary in one undoable transaction, in or out of
+  Play In Editor, and reads every value back, so `success` alone tells
+  whether every value applied. The request is checked first: a name the
+  material has no parameter of that kind for (names match ignoring case, so
+  two names that differ only in case are one parameter and may not both be
+  given), a texture that does not load or a malformed value fails the call
+  with `ValidationError`, and nothing is written; `not_applied` gives each
+  parameter's reason. After the write, a value that reads back different
+  fails the call with `MaterialParamsNotApplied`, naming it in `not_applied`;
+  the values that did apply stay written, as with lights. `applied` holds the
+  values read back (scalars and colors as the 32-bit floats Unreal stores)
+  and `params_set` counts them. The instance is left unsaved. Unreal's Python
+  API lists and writes material parameters by name only, so a name that
+  exists only inside a Material Layer gets a global override, which leaves
+  the layer unchanged and still reads back as applied.
 - USD import and export need the optional **USDImporter** plugin enabled when
   the editor starts. They use `AssetImportTask` and `LevelExporterUSD`;
   `get_unreal_interchange_info` reports whether the plugin is available.
@@ -188,6 +204,9 @@ Behaviour worth knowing:
   - Editing actors already in the level by path (transform, lights, collision,
     physics settings, visibility, materials) keeps working and changes the
     editor world.
+  - `set_unreal_material_params` edits the material instance asset, which the
+    running game uses too: an edit made during PIE shows in the game and stays
+    after PIE stops.
   - `focus_unreal_on_actor` still moves the viewport camera but selects
     nothing, since Unreal reads back no selection during PIE and clears it
     when PIE stops: the reply has `selected: false`, `pie_active: true` and a
