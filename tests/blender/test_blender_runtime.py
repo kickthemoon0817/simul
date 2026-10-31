@@ -1345,6 +1345,7 @@ class TestVisualObservationTools:
         )
         scene = SimpleNamespace(
             camera=cam_obj,
+            objects=ObjectStore(),
             render=render,
             frame_current=frame_current,
             frame_start=frame_start,
@@ -1510,6 +1511,8 @@ class TestVisualObservationTools:
         assert result["location"] == pytest.approx([1.0, 2.0, 3.0])
         # The camera's own angles, not an equivalent a whole turn away (4 - 2 pi).
         assert result["rotation_euler"] == pytest.approx([0.1, 0.2, 4.0])
+        assert result["pose_source"] == "evaluated"
+        assert result["warning"] is None
         assert result["lens"] == 35.0
         assert result["sensor_width"] == 32.0
         assert result["clip_start"] == 0.01
@@ -3011,6 +3014,433 @@ class TestVisualObservationTools:
         self._session_in(monkeypatch, FakeViewLayer(FakeLayerCollection(root)), side)
 
         assert blender_runtime.BlenderRuntimeSession._viewport_disablers(side) == []
+
+    # -- get_camera_info on cameras Blender does not evaluate ---------------
+    # A camera left out of the depsgraph keeps the matrix_world of its last
+    # evaluation (stored=True), as on Blender 5.0.1, where get_camera_info
+    # reported a camera moved after it was disabled 11 m from where its
+    # transform and a render through it put it.
+
+    @staticmethod
+    def _move(camera: FakeTransformObject) -> None:
+        """Move and turn a camera by its transform, as set_object_transform does."""
+        camera.location = FakeVector((7.0, -7.0, 5.0))
+        camera.rotation_euler = FakeEuler((1.1, 0.25, 0.78))
+
+    @staticmethod
+    def _rendered(camera: FakeTransformObject) -> np.ndarray:
+        """The world matrix a render gives the camera: it evaluates it, its parent too."""
+        camera.evaluate()
+        return np.asarray(camera.matrix_world.rows)
+
+    @staticmethod
+    def _looks_at(result: Dict[str, Any], target: Sequence[float]) -> bool:
+        """Whether the reported pose looks at ``target``, as a Track To turns it."""
+        forward = euler_matrix(result["rotation_euler"]) @ [0.0, 0.0, -1.0]
+        to_target = np.subtract(target, result["location"])
+        return bool(np.allclose(forward, to_target / np.linalg.norm(to_target)))
+
+    @pytest.mark.parametrize(
+        ("how", "reason"),
+        [
+            ("object", "it is disabled in viewports (hide_viewport)"),
+            ("collection", "collection 'Cameras' is disabled in viewports"),
+            ("parent_collection", "collection 'Rig' is disabled in viewports"),
+            (
+                "excluded",
+                "its collection 'Cameras' is excluded from view layer 'ViewLayer'",
+            ),
+        ],
+    )
+    def test_get_camera_info_composes_the_pose_of_a_camera_blender_does_not_evaluate(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, how: str, reason: str
+    ) -> None:
+        """It reported the matrix_world Blender kept from before the camera moved.
+
+        On Blender 5.0.1 a camera moved after it was disabled in viewports, or
+        after its collection was excluded, was reported at (1, 2, 3), where it
+        stood before, while its transform and a render through it put it at
+        (7, -7, 5).
+        """
+        side, view_layer = self._side_camera(how)
+        session = self._session_in(monkeypatch, view_layer, side, left_out=[side])
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        # Blender kept the pose from before the move...
+        assert list(side.matrix_world.translation) == pytest.approx([0.0, 0.0, 5.0])
+        # ...and the reply gives the one its transform holds, where a render puts it.
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
+        assert result["pose_source"] == "transform"
+        assert result["constraints_applied"] == []
+        warning = result["warning"]
+        assert (
+            f"timeline marker's camera, {reason}, and nothing Blender evaluates "
+            "depends on it through a child or a constraint"
+        ) in warning
+        assert (
+            "The reported pose is the one its own transform gives (its location, "
+            "rotation and scale). No constraint acts on it"
+        ) in warning
+        assert "its parent" not in warning
+        assert self._rendered(side)[:3, 3] == pytest.approx(result["location"])
+
+    def test_get_camera_info_names_the_constraints_a_composed_pose_leaves_out(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """A render applies the Track To of a camera Blender skips for the viewport;
+        its composed pose does not, and the warning names the constraint."""
+        target = (5.0, 5.0, 0.0)
+        side, view_layer = self._side_camera("object", _track_to(target))
+        session = self._session_in(monkeypatch, view_layer, side, left_out=[side])
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
+        assert result["pose_source"] == "transform"
+        assert result["constraints_applied"] == [
+            {"name": "Track To", "type": "TRACK_TO"}
+        ]
+        assert (
+            "It leaves out its constraints ('Track To' (TRACK_TO)) and any drivers "
+            "and keys on its transform"
+        ) in result["warning"]
+        # A render puts it at the reported location, turned to the target.
+        rendered = self._rendered(side)
+        assert rendered[:3, 3] == pytest.approx(result["location"])
+        assert not self._looks_at(result, target)
+        forward = -rendered[:3, 2] / np.linalg.norm(rendered[:3, 2])
+        to_target = np.subtract(target, result["location"])
+        assert forward == pytest.approx(to_target / np.linalg.norm(to_target))
+
+    @pytest.mark.parametrize("mirrored", [False, True], ids=["plain", "mirrored"])
+    @pytest.mark.parametrize("setup", list(CAMERA_SETUPS))
+    def test_get_camera_info_composes_the_transform_whatever_the_parent_and_rotation_mode(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        setup: str,
+        mirrored: bool,
+    ) -> None:
+        """Without constraints the composed pose is where a render puts the camera:
+        through its rig, in its own rotation mode, and looking as it does when
+        its scale mirrors it."""
+        cam = self._make_camera_object(
+            name="Side",
+            setup=setup,
+            scale=(-1.5, 1.5, 1.5) if mirrored else (1.0, 1.0, 1.0),
+            stored=True,
+        )
+        cam.hide_viewport = True
+        root = FakeCollection("Scene Collection")
+        objects = [cam] if cam.parent is None else [cam, cam.parent]
+        for obj in objects:
+            root.link(obj)
+        session = self._session_in(
+            monkeypatch,
+            FakeViewLayer(FakeLayerCollection(root)),
+            *objects,
+            left_out=[cam],
+        )
+        cam.location = FakeVector((7.0, -7.0, 5.0))
+        cam.rotation_euler = FakeEuler((1.1, 0.25, 0.78))
+        cam.rotation_quaternion = FakeVector((0.8, 0.2, 0.1, 0.55))
+        cam.rotation_axis_angle = FakeVector((0.9, 0.2, 0.3, 0.9))
+
+        result = session.get_camera_info("Side")
+
+        rendered = self._rendered(cam)
+        axes = rendered[:3, :3] / np.linalg.norm(rendered[:3, :3], axis=0)
+        reported = euler_matrix(result["rotation_euler"])
+        assert result["location"] == pytest.approx(list(rendered[:3, 3]))
+        # The view (-Z) and up (+Y) axes; a mirror flips X only.
+        assert reported[:, 1:] == pytest.approx(axes[:, 1:])
+        assert reported[:, 0] == pytest.approx(-axes[:, 0] if mirrored else axes[:, 0])
+        assert result["pose_source"] == "transform"
+
+    @pytest.mark.parametrize(
+        "parent_disabled", [False, True], ids=["parent_enabled", "parent_disabled"]
+    )
+    def test_get_camera_info_composes_through_the_matrix_blender_last_evaluated_for_the_parent(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, parent_disabled: bool
+    ) -> None:
+        """A rig Blender evaluates carries the camera where a render puts it.
+
+        A disabled rig that nothing Blender evaluates needs keeps its last
+        evaluated matrix, so the pose is composed through it, and the warning
+        says so: on Blender 5.0.1 such a rig moved 3 m put the camera 3 m from
+        the reported pose in a render.
+        """
+        rig = FakeTransformObject("Rig", location=(1.0, 0.0, 0.0), stored=True)
+        side = FakeTransformObject(
+            "Side", "CAMERA", FakeCameraData(), parent=rig, stored=True
+        )
+        side.hide_viewport = True
+        rig.hide_viewport = parent_disabled
+        root = FakeCollection("Scene Collection")
+        root.link(rig)
+        root.link(side)
+        session = self._session_in(
+            monkeypatch,
+            FakeViewLayer(FakeLayerCollection(root)),
+            rig,
+            side,
+            left_out=[side, rig] if parent_disabled else [side],
+        )
+        rig.location = FakeVector((3.0, 1.0, -2.0))
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        rendered = self._rendered(side)
+        if parent_disabled:
+            # Through the rig's matrix from before its move, 3 m off the render.
+            assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+            assert math.dist(rendered[:3, 3], result["location"]) == pytest.approx(3.0)
+        else:
+            assert result["location"] == pytest.approx(list(rendered[:3, 3]))
+        assert result["pose_source"] == "transform"
+        warning = result["warning"]
+        assert "(its location, rotation and scale, through its parent)" in warning
+        clause = (
+            "Its parent 'Rig' may not be evaluated either, so the pose was composed "
+            "through the last matrix Blender evaluated for that parent: it is "
+            "elsewhere if the parent has moved since."
+        )
+        assert (clause in warning) is parent_disabled
+
+    @staticmethod
+    def _following(camera: FakeTransformObject, **state: Any) -> FakeConstraint:
+        """A Copy Location that puts its owner where ``camera`` is."""
+
+        def solve(matrix: np.ndarray) -> np.ndarray:
+            solved = matrix.copy()
+            solved[:3, 3] = list(camera.matrix_world.translation)
+            return solved
+
+        return FakeConstraint(
+            "Copy Location", "COPY_LOCATION", solve, target=camera, **state
+        )
+
+    def _side_camera_needed_by(
+        self, dependent: str, how: str, *constraints: FakeConstraint
+    ) -> Tuple[FakeTransformObject, FakeViewLayer, List[FakeTransformObject]]:
+        """
+        Camera "Side" (_side_camera) and an object that depends on it.
+
+        Args:
+            dependent: "child" (an enabled child of Side), "grandchild" (an
+                enabled child of a disabled child), "constraint" (an enabled
+                object whose Copy Location targets Side), "disabled_child",
+                "disabled_owner" (a disabled object whose Copy Location targets
+                Side) or "muted_constraint" (an enabled object whose muted Copy
+                Location targets Side).
+            how: How Side is disabled (_side_camera).
+            constraints: Side's constraints.
+
+        Returns:
+            Side, the view layer and every object to put in the scene.
+        """
+        side, view_layer = self._side_camera(how, *constraints)
+        root = view_layer.layer_collection.collection
+        reader = FakeTransformObject("Reader")
+        objects = [side, reader]
+        if dependent in ("child", "disabled_child"):
+            reader.parent = side
+        elif dependent == "grandchild":
+            child = FakeTransformObject("Child")
+            child.parent = side
+            child.hide_viewport = True
+            root.link(child)
+            objects.append(child)
+            reader.parent = child
+        else:
+            reader.constraints.append(
+                self._following(side, mute=dependent == "muted_constraint")
+            )
+        reader.hide_viewport = dependent in ("disabled_child", "disabled_owner")
+        root.link(reader)
+        return side, view_layer, objects
+
+    @pytest.mark.parametrize(
+        ("dependent", "how"),
+        [
+            ("child", "object"),
+            ("child", "excluded"),
+            ("grandchild", "object"),
+            ("constraint", "object"),
+            ("constraint", "collection"),
+        ],
+    )
+    def test_get_camera_info_keeps_the_evaluated_pose_of_a_disabled_camera_something_visible_needs(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, dependent: str, how: str
+    ) -> None:
+        """Blender evaluates a disabled camera in full when an object it evaluates
+        needs the camera's world matrix, and that pose, its constraints included,
+        is where a render puts the camera.
+
+        On Blender 5.0.1 a disabled camera with a child (its collection
+        excluded too), with a grandchild through a disabled child, or targeted
+        by another object's Copy Location, kept the matrix_world a render
+        through it gave it, its Track To included; composing its transform
+        would leave the Track To out.
+        """
+        target = (5.0, 5.0, 0.0)
+        side, view_layer, objects = self._side_camera_needed_by(
+            dependent, how, _track_to(target)
+        )
+        # Not left out: the fake depsgraph evaluates the camera, as Blender does.
+        session = self._session_in(monkeypatch, view_layer, *objects)
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "evaluated"
+        assert result["warning"] is None
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert self._looks_at(result, target)
+
+    @pytest.mark.parametrize(
+        "dependent", ["disabled_child", "disabled_owner", "muted_constraint"]
+    )
+    def test_get_camera_info_composes_a_camera_only_unevaluated_or_muted_dependents_need(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, dependent: str
+    ) -> None:
+        """A disabled child or constraint owner that nothing visible needs leaves the
+        camera unevaluated: on Blender 5.0.1 its matrix_world stayed stale.
+
+        A muted constraint needs nothing of its target. Blender 5.0.1 evaluated
+        the camera for one all the same, but nothing requires it to, so the
+        pose is composed then too, and the warning names what that leaves out.
+        """
+        target = (5.0, 5.0, 0.0)
+        side, view_layer, objects = self._side_camera_needed_by(
+            dependent, "object", _track_to(target)
+        )
+        # Blender leaves out the camera and its disabled dependent, and
+        # evaluates the camera that the muted constraint targets.
+        left_out = [] if dependent == "muted_constraint" else objects
+        session = self._session_in(monkeypatch, view_layer, *objects, left_out=left_out)
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
+        assert result["pose_source"] == "transform"
+        assert "'Track To' (TRACK_TO)" in result["warning"]
+
+    def test_get_camera_info_composes_a_camera_blender_evaluates_only_in_part(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """A driver that reads only a custom property of a disabled camera gets it
+        evaluated in part.
+
+        On Blender 5.0.1 such a camera's evaluated copy, is_evaluated True,
+        kept the matrix_world it had before it was disabled, and the reply gave
+        that pose, 11 m from where its transform and a render put it.
+        """
+        side = _PartlyEvaluatedCamera(_track_to((5.0, 5.0, 0.0)))
+        root = FakeCollection("Scene Collection")
+        root.link(side)
+        session = self._session_in(
+            monkeypatch, FakeViewLayer(FakeLayerCollection(root)), side
+        )
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert list(side.matrix_world.translation) == pytest.approx([1.0, 2.0, 3.0])
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
+        assert result["pose_source"] == "transform"
+
+    @pytest.mark.parametrize(
+        ("parent_type", "parent_object", "kind"),
+        [("BONE", "ARMATURE", "parent type BONE"), ("OBJECT", "CURVE", "a curve")],
+        ids=["bone", "curve"],
+    )
+    def test_get_camera_info_reports_the_last_evaluated_pose_where_only_blender_computes_the_parent(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        parent_type: str,
+        parent_object: str,
+        kind: str,
+    ) -> None:
+        """A bone parent's matrix comes from Blender's pose evaluation, and a curve
+        parent's can follow its path, so the pose of a disabled camera parented
+        to one cannot be composed: its matrix_world is reported, with a warning
+        that it may be stale."""
+        parent = FakeTransformObject(
+            "Rig", parent_object, SimpleNamespace(bones=["Bone"]), stored=True
+        )
+        side = FakeTransformObject(
+            "Side",
+            "CAMERA",
+            FakeCameraData(),
+            location=(1.0, 2.0, 3.0),
+            parent=parent,
+            stored=True,
+        )
+        side.parent_type = parent_type
+        side.hide_viewport = True
+        root = FakeCollection("Scene Collection")
+        root.link(parent)
+        root.link(side)
+        session = self._session_in(
+            monkeypatch,
+            FakeViewLayer(FakeLayerCollection(root)),
+            parent,
+            side,
+            left_out=[side],
+        )
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "evaluated"
+        assert result["location"] == pytest.approx([1.0, 2.0, 3.0])
+        assert (
+            f"Only Blender computes the matrix its parent 'Rig' gives it ({kind}), so "
+            "the reported pose is that matrix_world, which misses any change to the "
+            "camera or its parent since."
+        ) in result["warning"]
+
+    @pytest.mark.parametrize("how", ["enabled", "scene_camera", "marker_camera"])
+    def test_get_camera_info_reports_the_evaluated_pose_of_a_camera_blender_evaluates(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, how: str
+    ) -> None:
+        """Blender evaluates an enabled camera, and the scene camera and a timeline
+        marker's camera whatever their visibility (5.0.1): the pose it evaluated,
+        constraints included, is reported as before."""
+        target = (5.0, 5.0, 0.0)
+        if how == "scene_camera":
+            cam = self._constrained_camera(_track_to(target))
+            cam.hide_viewport = True
+            session = self._session_on(monkeypatch, cam)
+        else:
+            cam, view_layer = self._side_camera(
+                "enabled" if how == "enabled" else "object", _track_to(target)
+            )
+            session = self._session_in(
+                monkeypatch,
+                view_layer,
+                cam,
+                marker_cameras=[cam] if how == "marker_camera" else [],
+            )
+        self._move(cam)
+
+        result = session.get_camera_info(cam.name)
+
+        assert result["pose_source"] == "evaluated"
+        assert result["warning"] is None
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert self._looks_at(result, target)
 
     @pytest.mark.parametrize(
         "constraint",

@@ -404,10 +404,25 @@ def test_camera_tools_relay_a_skipped_override_check(
     assert {key: payload[key] for key in _SKIPPED_REPORT} == _SKIPPED_REPORT
 
 
-@pytest.mark.parametrize("addon", ["current", "predating_the_report"])
-def test_get_blender_camera_info_relays_the_active_constraints(
+# For a camera Blender does not evaluate, whose pose was composed from its transform.
+_COMPOSED_POSE_REPORT = {
+    "pose_source": "transform",
+    "warning": "Blender may not evaluate camera 'Camera' for the viewport",
+}
+
+
+@pytest.mark.parametrize(
+    "addon", ["current", "predating_the_pose_report", "predating_the_report"]
+)
+def test_get_blender_camera_info_relays_the_active_constraints_and_pose_source(
     monkeypatch: pytest.MonkeyPatch, addon: str
 ) -> None:
+    """Both reports reach the caller; an add-on built before either still succeeds, with nulls.
+
+    The response schema drops undeclared fields, so pose_source and warning
+    have to be declared there, and optional: the add-on is installed
+    separately and can be older than the server.
+    """
     constraints = [{"name": "Track To", "type": "TRACK_TO"}]
     reply = {
         "camera_name": "Camera",
@@ -419,14 +434,23 @@ def test_get_blender_camera_info_relays_the_active_constraints(
         "clip_end": 100.0,
         "camera_type": "PERSP",
     }
-    if addon == "current":
+    if addon != "predating_the_report":
         reply["constraints_applied"] = constraints
+    if addon == "current":
+        reply.update(_COMPOSED_POSE_REPORT)
     session = StrictBlenderSession(responses={"get_camera_info": reply})
     instance = _strict_server(monkeypatch, session, "attached")
 
     payload = _call_through_client(instance, "get_blender_camera_info", {})
 
+    assert session.rejected == []
     assert payload["success"] is True
     assert payload["constraints_applied"] == (
-        constraints if addon == "current" else None
+        None if addon == "predating_the_report" else constraints
     )
+    expected = (
+        _COMPOSED_POSE_REPORT
+        if addon == "current"
+        else dict.fromkeys(_COMPOSED_POSE_REPORT)
+    )
+    assert {key: payload[key] for key in _COMPOSED_POSE_REPORT} == expected
