@@ -341,6 +341,8 @@ class FakeEditor:
                 get_editor_world=lambda: None if editor.pie else editor_world,
                 get_game_world=lambda: pie_world if editor.pie else None,
             ),
+            # GWorld: the editor world wherever Remote Control runs a script, also during PIE.
+            "LayersSubsystem": SimpleNamespace(get_world=lambda: editor_world),
             "StaticMeshEditorSubsystem": SimpleNamespace(
                 get_simple_collision_count=collision(0),
                 get_convex_collision_count=collision(1),
@@ -351,11 +353,11 @@ class FakeEditor:
             EditorActorSubsystem="EditorActorSubsystem",
             LevelEditorSubsystem="LevelEditorSubsystem",
             UnrealEditorSubsystem="UnrealEditorSubsystem",
+            LayersSubsystem="LayersSubsystem",
             StaticMeshEditorSubsystem="StaticMeshEditorSubsystem",
             GameplayStatics=SimpleNamespace(get_all_actors_of_class=all_actors_of_class),
             Actor=FakeActor,
             WorldSettings=type("WorldSettings", (FakeActor,), {}),
-            find_object=lambda outer, path: editor_world if path == "/Game/Maps/Test.Test" else None,
             get_editor_subsystem=subsystems.__getitem__,
             PrimitiveComponent=PrimitiveComponent,
             StaticMeshComponent=StaticMeshComponent,

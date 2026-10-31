@@ -9,12 +9,14 @@ returns False), lists no level actors and selects none, and
 ``delete_unreal_actor`` reported ``deleted: false`` with no reason, the level
 reads returned 0 actors, ``get_unreal_loaded_map`` raised on None, and in
 attached mode every call (``control_unreal_simulation`` stop included) failed
-with "No editor world is available". The editor world itself stays loaded,
-under the PIE world's package name minus its ``UEDPIE_<n>_`` prefix.
-``focus_unreal_on_actor`` reported success as if it had selected the actor:
-``set_actor_selection_state`` is not refused, but what it selects during PIE
-reads back as nothing and is cleared when PIE stops, while the viewport camera
-does move.
+with "No editor world is available". ``LayersSubsystem.get_world()`` still
+returns the editor world then: it returns GWorld, which Unreal keeps on the
+editor world wherever Remote Control runs a script, also after the game opens
+another level and the PIE world's package (``UEDPIE_<n>_<map>``) no longer
+names the editor's map. ``focus_unreal_on_actor`` reported success as if it
+had selected the actor: ``set_actor_selection_state`` is not refused, but what
+it selects during PIE reads back as nothing and is cleared when PIE stops,
+while the viewport camera does move.
 
 Now an editor-world change Unreal refuses comes back as a ``PIEActive`` error
 whose hint names the tool that stops PIE, the reads find the editor world and
@@ -44,6 +46,7 @@ from simul.adapters._unreal_scripts import PIE_ACTIVE, PIE_STOP_HINT, pie_refusa
 from simul.config import Settings
 from simul.mcp import server as server_module
 from simul.mcp.usage_tracker import ToolUsageTracker
+from simul.utils.private_files import BridgeFiles
 from tests.fakes import AvailableAdapter
 
 LEVEL = "/Game/Maps/Lab.Lab:PersistentLevel."
@@ -155,6 +158,9 @@ class Editor:
         self.pie = False
         self.editor_world = World("/Game/Maps/Lab", "Lab")
         self.pie_world = World("/Game/Maps/UEDPIE_0_Lab", "Lab")
+        # GWorld, which LayersSubsystem.get_world() returns: the editor world
+        # wherever Remote Control runs a script, in and out of PIE.
+        self.gworld: Optional[World] = self.editor_world
         self.level = [
             Actor("Floor", tags=("floor",)),
             Actor("Crate", tags=("prop", "crate")),
@@ -229,8 +235,13 @@ class Editor:
 
     def module(self) -> SimpleNamespace:
         editor = self
+
+        def end_play() -> None:
+            editor.pie = False
+
         level_editor = SimpleNamespace(
             is_in_play_in_editor=lambda: editor.pie,
+            editor_request_end_play=end_play,
             on_map_changed=SimpleNamespace(add_callable=lambda callback: None),
             get_viewport_config_keys=lambda: [VIEWPORT],
             get_active_viewport_config_key=lambda: VIEWPORT,
@@ -245,6 +256,7 @@ class Editor:
             "EditorActorSubsystem": editor,
             "LevelEditorSubsystem": level_editor,
             "UnrealEditorSubsystem": unreal_editor,
+            "LayersSubsystem": SimpleNamespace(get_world=lambda: editor.gworld),
             "StaticMeshEditorSubsystem": SimpleNamespace(),
         }
 
@@ -252,13 +264,6 @@ class Editor:
             editor.calls.append("GameplayStatics.get_all_actors_of_class")
             assert world is editor.editor_world, "the editor world, not the PIE world"
             return list(editor.level) + list(editor.unlisted)
-
-        def find_object(outer: Any, path: str) -> Any:
-            return (
-                editor.editor_world
-                if path == editor.editor_world.get_path_name()
-                else None
-            )
 
         def load_object(outer: Any, path: str) -> Any:
             editor.calls.append("load_object " + path)
@@ -279,11 +284,14 @@ class Editor:
             EditorActorSubsystem="EditorActorSubsystem",
             LevelEditorSubsystem="LevelEditorSubsystem",
             UnrealEditorSubsystem="UnrealEditorSubsystem",
+            LayersSubsystem="LayersSubsystem",
             StaticMeshEditorSubsystem="StaticMeshEditorSubsystem",
             get_editor_subsystem=subsystems.__getitem__,
             GameplayStatics=SimpleNamespace(
                 get_all_actors_of_class=get_all_actors_of_class,
                 get_platform_name=lambda: "Mac",
+                is_game_paused=lambda world: False,
+                get_time_seconds=lambda world: 12.5,
             ),
             SystemLibrary=SimpleNamespace(
                 get_engine_version=lambda: "5.7.4", get_game_name=lambda: "Lab"
@@ -298,7 +306,6 @@ class Editor:
             ),
             ScopedEditorTransaction=editor.transaction,
             MathLibrary=SimpleNamespace(class_is_child_of=lambda cls, parent: True),
-            find_object=find_object,
             load_object=load_object,
             load_asset=lambda path: None,
             UsdStageImportFactory=object,
@@ -552,6 +559,181 @@ def test_usd_import_and_export_are_refused_during_pie(
 
     assert result["error_type"] == PIE_ACTIVE
     assert result["error"] == pie_refusal(action)["error"]
+
+
+# ---------------------------------------------------------------------------
+# Material instances: an asset library Unreal withholds during PIE
+# ---------------------------------------------------------------------------
+
+
+class MaterialInterface:
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.parent: Optional[MaterialInterface] = None
+
+    def get_path_name(self) -> str:
+        return self.path
+
+    def get_class(self) -> _Class:
+        return _Class(type(self).__name__)
+
+
+class MaterialInstanceConstant(MaterialInterface):
+    pass
+
+
+class AssetLibrary:
+    """EditorAssetLibrary, AssetTools and MaterialEditingLibrary over a few assets.
+
+    Observed on UE 5.7.4 while PIE ran: EditorAssetLibrary loads, finds and
+    saves nothing (load_asset returns None, does_asset_exist and
+    save_loaded_asset False, for assets that exist; the log says "The Editor is
+    currently in a play mode"), while AssetTools.create_asset still creates.
+    """
+
+    def __init__(self, editor: Editor) -> None:
+        self.editor = editor
+        self.assets: Dict[str, MaterialInterface] = {
+            "/Game/Materials/M_Wood": MaterialInterface("/Game/Materials/M_Wood.M_Wood")
+        }
+        self.calls: List[str] = []
+        self.saved: List[str] = []
+
+    def load_asset(self, path: str) -> Optional[MaterialInterface]:
+        self.calls.append("load_asset")
+        return None if self.editor.pie else self.assets.get(path.split(".")[0])
+
+    def does_asset_exist(self, path: str) -> bool:
+        self.calls.append("does_asset_exist")
+        return not self.editor.pie and path.split(".")[0] in self.assets
+
+    def save_loaded_asset(self, asset: MaterialInterface) -> bool:
+        self.calls.append("save_loaded_asset")
+        if self.editor.pie:
+            return False
+        self.saved.append(asset.get_path_name())
+        return True
+
+    def create_asset(
+        self, name: str, folder: str, cls: Any, factory: Any
+    ) -> MaterialInterface:
+        self.calls.append("create_asset")
+        asset = cls(f"{folder}/{name}.{name}")
+        self.assets[f"{folder}/{name}"] = asset
+        return asset
+
+    def set_material_instance_parent(
+        self, instance: MaterialInterface, parent: MaterialInterface
+    ) -> None:
+        self.calls.append("set_material_instance_parent")
+        instance.parent = parent
+
+    def module_attributes(self) -> Dict[str, Any]:
+        return {
+            "EditorAssetLibrary": SimpleNamespace(
+                load_asset=self.load_asset,
+                does_asset_exist=self.does_asset_exist,
+                save_loaded_asset=self.save_loaded_asset,
+            ),
+            "AssetToolsHelpers": SimpleNamespace(
+                get_asset_tools=lambda: SimpleNamespace(create_asset=self.create_asset)
+            ),
+            "MaterialEditingLibrary": SimpleNamespace(
+                set_material_instance_parent=self.set_material_instance_parent
+            ),
+            "MaterialInterface": MaterialInterface,
+            "MaterialInstanceConstant": MaterialInstanceConstant,
+            "MaterialInstanceConstantFactoryNew": SimpleNamespace,
+        }
+
+
+@pytest.fixture
+def asset_library(editor: Editor, monkeypatch: pytest.MonkeyPatch) -> AssetLibrary:
+    library = AssetLibrary(editor)
+    for name, value in library.module_attributes().items():
+        monkeypatch.setattr(sys.modules["unreal"], name, value, raising=False)
+    return library
+
+
+def test_a_material_instance_during_pie_is_refused_before_any_asset_call(
+    editor: Editor,
+    asset_library: AssetLibrary,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """It used to be a ScriptError saying the parent material, which exists,
+    was not found: EditorAssetLibrary.load_asset returns None during PIE."""
+    editor.pie = True
+    caplog.set_level(logging.INFO, logger="simul")
+
+    result = asyncio.run(
+        _session(editor, monkeypatch).create_material_instance(
+            "/Game/Materials/M_Wood", "MI_Chair"
+        )
+    )
+
+    assert result == pie_refusal("create material instances")
+    # Refused up front: nothing is created, although AssetTools still could.
+    assert asset_library.calls == []
+    assert "/Game/Materials/MI_Chair" not in asset_library.assets
+    assert _errors(caplog) == []
+    assert any(
+        "Unreal refused the request (PIEActive)" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_a_material_instance_outside_pie_is_created_parented_and_saved(
+    editor: Editor, asset_library: AssetLibrary, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = asyncio.run(
+        _session(editor, monkeypatch).create_material_instance(
+            "/Game/Materials/M_Wood", "MI_Chair"
+        )
+    )
+
+    assert result == {
+        "instance_path": "/Game/Materials/MI_Chair.MI_Chair",
+        "parent_path": "/Game/Materials/M_Wood.M_Wood",
+        "class_name": "MaterialInstanceConstant",
+    }
+    instance = asset_library.assets["/Game/Materials/MI_Chair"]
+    assert instance.parent is asset_library.assets["/Game/Materials/M_Wood"]
+    assert asset_library.saved == ["/Game/Materials/MI_Chair.MI_Chair"]
+
+
+@pytest.mark.parametrize(
+    ("parent_path", "instance_name", "error"),
+    [
+        (
+            "/Game/Materials/M_Missing",
+            "MI_Chair",
+            "Parent material not found: /Game/Materials/M_Missing",
+        ),
+        (
+            "/Game/Materials/M_Wood",
+            "M_Wood",
+            "Asset already exists: /Game/Materials/M_Wood",
+        ),
+    ],
+)
+def test_a_material_instance_outside_pie_reports_a_missing_parent_or_a_taken_name(
+    editor: Editor,
+    asset_library: AssetLibrary,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_path: str,
+    instance_name: str,
+    error: str,
+) -> None:
+    result = asyncio.run(
+        _session(editor, monkeypatch).create_material_instance(
+            parent_path, instance_name
+        )
+    )
+
+    assert result["success"] is False and result["error_type"] == "ScriptError"
+    assert result["error"] == error
+    assert "create_asset" not in asset_library.calls
 
 
 # ---------------------------------------------------------------------------
@@ -849,6 +1031,154 @@ def test_named_controls_are_refused_during_pie_but_inspect_works(
 
 
 # ---------------------------------------------------------------------------
+# PIE on the editor's level, PIE after the game opens another level
+# ---------------------------------------------------------------------------
+
+
+def _play(editor: Editor, game_map: str) -> None:
+    """Run PIE with the game on ``game_map``; "Other" is a level the game opened."""
+    editor.pie = True
+    editor.pie_world = World(f"/Game/Maps/UEDPIE_0_{game_map}", game_map)
+
+
+class _RemoteControl:
+    """``PUT /remote/object/call`` answered by running its Python in the fake editor."""
+
+    def __init__(self, editor: Editor) -> None:
+        self.editor = editor
+
+    def put(self, path: str, json: Dict[str, Any]) -> "_Reply":
+        assert path == "/remote/object/call"
+        return _Reply(self.editor.run(json["parameters"]["PythonCommand"]))
+
+
+class _Reply:
+    status = 200
+
+    def __init__(self, body: Dict[str, Any]) -> None:
+        self.body = body
+
+    async def __aenter__(self) -> "_Reply":
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        return None
+
+    def raise_for_status(self) -> None:
+        return None
+
+    async def json(self) -> Dict[str, Any]:
+        return self.body
+
+
+def _attached_session(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> Any:
+    """An attached-mode session, attached to ``editor`` as it is now; the
+    attachment check guards each of its calls, as over Remote Control."""
+    identity = _attached_run(editor, attach_scripts.EDITOR_IDENTITY)
+    target = {
+        key: identity[key]
+        for key in ("instance_id", "document_id", "project_path", "map_path")
+    }
+    path = tmp_path / "attachment.json"
+    BridgeFiles.write(
+        path,
+        {
+            "version": 1,
+            "host": "localhost",
+            "port": 30010,
+            "target": dict(target, viewport=VIEWPORT),
+        },
+    )
+    session = unreal_runtime.UnrealRuntimeSession(
+        Settings(unreal={"mode": "attached", "attachment_path": str(path)})
+    )
+    remote_control = _RemoteControl(editor)
+
+    async def http_session(timeout_override: Optional[float] = None) -> Any:
+        return remote_control
+
+    monkeypatch.setattr(session, "_ensure_http_session", http_session)
+    return session
+
+
+@pytest.mark.parametrize("game_map", ["Lab", "Other"])
+def test_reads_during_pie_find_the_editor_world_whichever_level_the_game_is_on(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, game_map: str
+) -> None:
+    """After the game opened another level, the PIE world's package no longer
+    named the editor's map: the reads returned 0 actors with pie_active true and
+    get_unreal_loaded_map raised."""
+    _play(editor, game_map)
+    session = _session(editor, monkeypatch)
+
+    listing = asyncio.run(session.list_actors())
+    loaded = asyncio.run(session.get_loaded_map())
+    info = asyncio.run(session.get_engine_info())
+    summary = asyncio.run(session.summarize_scene())
+
+    assert [a["name"] for a in listing["actors"]] == ["Floor", "Crate", "Lamp"]
+    assert listing["pie_active"] is True
+    assert loaded == {"map_path": "/Game/Maps/Lab.Lab", "pie_active": True}
+    assert info["loaded_map"] == "/Game/Maps/Lab.Lab"
+    assert summary["map_path"] == "/Game/Maps/Lab.Lab"
+    assert summary["total_actors"] == 3
+
+
+@pytest.mark.parametrize("game_map", ["Lab", "Other"])
+def test_attached_calls_and_the_pie_stop_work_whichever_level_the_game_is_on(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, tmp_path: Any, game_map: str
+) -> None:
+    """Each attached call checks the attachment against the editor world first;
+    with the game on another level the check raised "No editor world is
+    available", so every call was refused, the PIE stop included."""
+    session = _attached_session(editor, monkeypatch, tmp_path)
+    _play(editor, game_map)
+
+    async def calls() -> List[Dict[str, Any]]:
+        return [
+            await session.attachment_status(),
+            await session.get_loaded_map(),
+            await session.control_simulation("stop"),
+        ]
+
+    status, loaded, stopped = asyncio.run(calls())
+
+    assert status["map_path"] == "/Game/Maps/Lab.Lab"
+    assert loaded == {"map_path": "/Game/Maps/Lab.Lab", "pie_active": True}
+    assert stopped == {"action": "stop", "state": "stopped"}
+    assert editor.pie is False
+
+
+@pytest.mark.parametrize("gworld", ["none", "the PIE world"])
+def test_without_an_editor_world_nothing_reads_the_pie_world_and_attached_calls_are_refused(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, tmp_path: Any, gworld: str
+) -> None:
+    """GWorld holding no world, or a PIE world (as while Unreal ticks the game),
+    leaves no editor world to read: the reads find none instead of the PIE world,
+    and the attachment check refuses every call."""
+    attached = _attached_session(editor, monkeypatch, tmp_path)
+    _play(editor, "Other")
+    editor.gworld = editor.pie_world if gworld == "the PIE world" else None
+    session = _session(editor, monkeypatch)
+
+    listing = asyncio.run(session.list_actors())
+    loaded = asyncio.run(session.get_loaded_map())
+    info = asyncio.run(session.get_engine_info())
+    stop = asyncio.run(attached.control_simulation("stop"))
+
+    assert listing["actors"] == [] and listing["pie_active"] is True
+    assert "GameplayStatics.get_all_actors_of_class" not in editor.calls
+    assert loaded["error_type"] == "ScriptError"
+    assert "No editor world is loaded" in loaded["error"]
+    assert info["loaded_map"] == "" and info["pie_active"] is True
+    assert stop["success"] is False
+    assert "No editor world is available" in stop["error"]
+    assert editor.pie is True
+
+
+# ---------------------------------------------------------------------------
 # Through the MCP envelope
 # ---------------------------------------------------------------------------
 
@@ -914,6 +1244,26 @@ def test_an_agent_sees_the_refusal_and_the_hint(
 
     assert payload == pie_refusal("spawn actors")
     assert _errors(caplog) == []
+
+
+def test_an_agent_creating_a_material_instance_during_pie_sees_the_refusal(
+    editor: Editor,
+    asset_library: AssetLibrary,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    editor.pie = True
+
+    payload = _call(
+        editor,
+        monkeypatch,
+        tmp_path,
+        "create_unreal_material_instance",
+        {"parent_path": "/Game/Materials/M_Wood", "instance_name": "MI_Chair"},
+    )
+
+    assert payload == pie_refusal("create material instances")
+    assert asset_library.calls == []
 
 
 def test_an_agent_sees_pie_active_on_the_reads(
