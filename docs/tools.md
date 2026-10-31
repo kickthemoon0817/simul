@@ -140,6 +140,15 @@ Behaviour worth knowing:
   have spawned, because Unreal keeps an outliner folder, empty, after its
   actors go and its Python API cannot delete one; a failed call therefore
   leaves no folder behind. Props are Movable boxes; everything else is Static.
+- `get_unreal_material_info` reads a Material or Material Instance through
+  editor scripting, in or out of Play In Editor: each scalar, vector and
+  texture parameter with its value (a Material's default; for an instance,
+  the value it renders with and whether the instance overrides it), the
+  parent and base material, the material domain and the blend mode (an
+  instance's override, else its parent's), named as Unreal names them
+  (`MD_SURFACE`, `BLEND_OPAQUE`). An override an instance keeps for a name
+  that is no longer a parameter of its material is not listed, as the
+  Material Instance editor does not show it.
 - While Play In Editor (or Simulate In Editor) runs, Unreal's editor refuses
   changes to the editor world: it spawns and destroys no actors, lists and
   selects none, and hands out no editor world. The tools detect it:

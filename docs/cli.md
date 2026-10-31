@@ -134,7 +134,7 @@ Commands accept `-H/--host` and `-p/--port` for the Remote Control endpoint
 | `spawn PATH [--location x,y,z] [--rotation p,y,r] [--label]` (an Actor class path or an asset path), `delete`, `set-transform ACTOR [--location x,y,z] [--rotation p,y,r] [--scale x,y,z]` (an option left out keeps its value), `set-property`, `set-visibility` | Edit actors |
 | `sim ACTION`, `sim-status` | Play-In-Editor: `start`, `stop`, `pause`, `resume`, `step` |
 | `capture [OUTPUT] [--width] [--height] [--format png\|jpeg]` | Viewport screenshot |
-| `materials` | Material information for an actor |
+| `materials MATERIAL_PATH` | Parameters (with values and, for an instance, overrides), parent, domain and blend mode of a material or material instance |
 | `exec CODE` | Run Python inside the editor |
 
 `setup` flags: `--port` (default 30010), `--engine-path`, `--no-launch`,

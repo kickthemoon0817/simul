@@ -1166,32 +1166,35 @@ class TestUnrealRuntimeSessionPhase4:
 
     # -- get_material_info --
 
-    def test_get_material_info_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """get_material_info returns parameters list."""
+    def test_get_material_info_reads_the_material_in_one_editor_script(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not Remote Control's describe, which answered with object properties
+        (tests/unreal/test_material_info.py runs the script itself)."""
         session = self._make_session(monkeypatch)
+        scripts: list = []
+        reply = {
+            "material_path": "/Game/Materials/MI_Custom.MI_Custom",
+            "parent_path": "/Game/Materials/M_Base.M_Base",
+            "parameters": [
+                {"name": "Roughness", "param_type": "scalar", "value": 0.5, "overridden": True},
+            ],
+        }
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
-            if "/remote/object/describe" in path:
-                return FakeResponse({
-                    "Parent": "/Game/Materials/M_Base",
-                    "Properties": [
-                        {"Name": "Roughness", "Type": "Float", "DefaultValue": 0.5},
-                        {"Name": "BaseColor", "Type": "Vector", "DefaultValue": None},
-                    ],
-                })
+            assert "/remote/object/describe" not in path
+            if (json or {}).get("functionName") == "ExecutePythonCommandEx":
+                scripts.append(json["parameters"]["PythonCommand"])
+                return python_json_response(reply)
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
-        result = asyncio.run(session.get_material_info(
-            material_path="/Game/Materials/MI_Custom",
-        ))
+        result = asyncio.run(session.get_material_info("/Game/Materials/MI_Custom"))
 
-        assert result["material_path"] == "/Game/Materials/MI_Custom"
-        assert result["parent_path"] == "/Game/Materials/M_Base"
-        assert len(result["parameters"]) == 2
-        assert result["parameters"][0]["name"] == "Roughness"
-        assert result["parameters"][0]["param_type"] == "scalar"
+        assert result == reply
+        assert len(scripts) == 1
+        assert scripts[0].startswith("args = {'path': '/Game/Materials/MI_Custom'}\n")
 
     # -- set_material_params --
 

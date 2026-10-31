@@ -421,6 +421,87 @@ else:
         }))
 """
 
+# Expects ``args`` = {"path"}: a Material or Material Instance asset. Reads its
+# scalar, vector and texture parameters through editor scripting: Remote
+# Control's /remote/object/describe answered with the asset's object properties
+# instead, and no parent (observed on UE 5.7.4). A Material reports each
+# parameter's default (MaterialEditingLibrary); an instance reports the value
+# it renders with, its own override or what it inherits, and whether it
+# overrides it, as the Material Instance editor shows. Overrides recorded for a
+# name that is no longer a parameter of the material are not reported, as the
+# editor does not show them. The blend mode is an instance's override, else its
+# parent's; the domain is the base material's. Loads through unreal.load_asset,
+# so it answers the same during Play In Editor.
+MATERIAL_INFO = """
+import json, unreal
+MEL = unreal.MaterialEditingLibrary
+NAMES = {"scalar": MEL.get_scalar_parameter_names, "vector": MEL.get_vector_parameter_names,
+         "texture": MEL.get_texture_parameter_names}
+DEFAULTS = {"scalar": MEL.get_material_default_scalar_parameter_value,
+            "vector": MEL.get_material_default_vector_parameter_value,
+            "texture": MEL.get_material_default_texture_parameter_value}
+OVERRIDES = {"scalar": "scalar_parameter_values", "vector": "vector_parameter_values",
+             "texture": "texture_parameter_values"}
+
+def path_of(asset):
+    return asset.get_path_name() if asset is not None else None
+
+def plain(value):
+    if isinstance(value, unreal.LinearColor):
+        return [value.r, value.g, value.b, value.a]
+    if isinstance(value, unreal.Object) or value is None:
+        return path_of(value)
+    return value
+
+def value_of(material, kind, name):
+    if not isinstance(material, unreal.MaterialInstance):
+        return DEFAULTS[kind](material, name)
+    if kind == "scalar":
+        return material.get_scalar_parameter_value(name)
+    if kind == "vector":
+        return material.get_vector_parameter_value(name)
+    return material.get_texture_parameter_value(name)
+
+def overridden(instance, kind):
+    return {str(entry.parameter_info.name).lower() for entry in instance.get_editor_property(OVERRIDES[kind])
+            if entry.parameter_info.association.name == "GLOBAL_PARAMETER"}
+
+def blend_mode(material):
+    while isinstance(material, unreal.MaterialInstance):
+        overrides = material.get_editor_property("base_property_overrides")
+        if overrides.get_editor_property("override_blend_mode"):
+            return overrides.get_editor_property("blend_mode").name
+        material = material.get_editor_property("parent")
+    return material.get_editor_property("blend_mode").name if material is not None else None
+
+def info(path):
+    material = unreal.load_asset(path)
+    if material is None:
+        return {"success": False, "error_type": "NotFoundError",
+                "error": "No material at " + repr(path) + ": pass a Material or Material Instance asset "
+                         "path such as /Engine/BasicShapes/BasicShapeMaterial"}
+    if not isinstance(material, unreal.MaterialInterface):
+        return {"success": False, "error_type": "InvalidAssetType",
+                "error": path + " is a " + material.get_class().get_name()
+                         + ", not a Material or Material Instance"}
+    instance = isinstance(material, unreal.MaterialInstance)
+    parameters = []
+    for kind in ("scalar", "vector", "texture"):
+        overrides = overridden(material, kind) if instance else set()
+        for name in sorted((str(name) for name in NAMES[kind](material)), key=str.lower):
+            entry = {"name": name, "param_type": kind, "value": plain(value_of(material, kind, name))}
+            entry["overridden"] = name.lower() in overrides if instance else None
+            parameters.append(entry)
+    base = material.get_base_material()
+    return {"material_path": material.get_path_name(), "class_name": material.get_class().get_name(),
+            "parent_path": path_of(material.get_editor_property("parent")) if instance else None,
+            "base_material_path": path_of(base),
+            "material_domain": base.get_editor_property("material_domain").name if base is not None else None,
+            "blend_mode": blend_mode(material), "parameters": parameters}
+
+print(json.dumps(info(**args)))
+"""
+
 # Expects ``args`` = {"actor_path", "values": {editor_property: value}}, with
 # ``light_color`` as [r, g, b, a] bytes. Writes through set_editor_property
 # (the edit path the Details panel uses): Remote Control property writes and

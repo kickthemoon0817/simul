@@ -239,6 +239,57 @@ print(json.dumps({{'mesh': c.static_mesh.get_path_name()}}))
     asyncio.run(run())
 
 
+def test_material_info_reports_parameters_and_overrides_in_and_out_of_play_in_editor():
+    """get_unreal_material_info listed the instance's object properties
+    (ParameterStateId, PhysMaterialMask, ...) without values, and a null parent."""
+
+    async def run():
+        client = session()
+        folder = "/Game/SimulReview_" + uuid.uuid4().hex[:8]
+        parent = "/Engine/BasicShapes/BasicShapeMaterial"
+        try:
+            created = await client.create_material_instance(parent, "MI_Info", folder)
+            assert not created.get("error"), created
+            path = created["instance_path"]
+            overridden = await client._execute_json_script(f"""
+import unreal, json
+MEL = unreal.MaterialEditingLibrary
+m = unreal.load_asset({path!r})
+MEL.set_material_instance_scalar_parameter_value(m, 'Roughness', 0.25)
+MEL.update_material_instance(m)
+print(json.dumps({{'roughness': MEL.get_material_instance_scalar_parameter_value(m, 'Roughness')}}))
+""")
+            assert overridden == {"roughness": 0.25}, overridden
+            for pie in (False, True):
+                if pie:
+                    started = await client.control_simulation("start")
+                    assert started.get("state") == "playing", started
+                info = await client.get_material_info(path)
+                assert info["parent_path"] == parent + ".BasicShapeMaterial", info
+                roughness, color = info["parameters"]
+                assert roughness == {"name": "Roughness", "param_type": "scalar", "value": 0.25, "overridden": True}
+                assert (color["name"], color["param_type"], color["overridden"]) == ("Color", "vector", False)
+                assert color["value"] == pytest.approx([0.9, 0.9, 0.9, 1.0]), color
+                assert info["material_path"] == path, info
+                assert info["class_name"] == "MaterialInstanceConstant", info
+                assert info["base_material_path"] == parent + ".BasicShapeMaterial", info
+                assert (info["material_domain"], info["blend_mode"]) == ("MD_SURFACE", "BLEND_OPAQUE"), info
+            base = await client.get_material_info(parent)
+            assert base["parent_path"] is None, base
+            assert base["parameters"][0]["value"] == pytest.approx(0.6407), base
+            assert base["parameters"][0]["overridden"] is None, base
+            missing = await client.get_material_info(folder + "/MI_Missing")
+            assert missing["error_type"] == "NotFoundError", missing
+            mesh = await client.get_material_info("/Engine/BasicShapes/Cube")
+            assert mesh["error_type"] == "InvalidAssetType", mesh
+        finally:
+            await client.control_simulation("stop")
+            await client._execute_python(f"import unreal\nunreal.EditorAssetLibrary.delete_directory({folder!r})")
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_simulation_lifecycle():
     async def run():
         client = session()

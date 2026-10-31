@@ -37,6 +37,7 @@ from ._unreal_scripts import (
     FIND_ACTORS_BY_TAG,
     INTERCHANGE_INFO,
     LOADED_MAP,
+    MATERIAL_INFO,
     PIE_ACTIVE,
     PLACE_BASIC_SHAPES,
     ROBOTICS_SCENE_ANALYSIS,
@@ -2196,51 +2197,35 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
     async def get_material_info(self, material_path: str) -> Dict[str, Any]:
         """
-        Get material instance parameters and metadata.
+        Get the parameters and metadata of a Material or Material Instance.
 
-        Uses ``PUT /remote/object/describe`` to inspect material properties.
+        Reads the asset through editor scripting, in or out of Play In
+        Editor. Remote Control's ``/remote/object/describe`` answered with the
+        asset's object properties instead, and no parent (observed on UE
+        5.7.4).
 
         Args:
-            material_path: Material or MIC asset path.
+            material_path: Material or Material Instance asset path, e.g.
+                /Game/Materials/MI_Wood.
 
         Returns:
-            Dictionary with material_path, parent_path, parameters list.
+            Dictionary with material_path (the asset's object path),
+            class_name, parent_path (an instance's parent; None for a
+            Material), base_material_path (the Material at the root of the
+            parent chain), material_domain and blend_mode (Unreal's enum
+            names, such as MD_SURFACE and BLEND_OPAQUE; an instance's blend
+            mode is its override, else its parent's), and parameters: one
+            entry per scalar, vector and texture parameter with its name,
+            param_type, value (a float, [r, g, b, a] or a texture asset path;
+            a Material's default, an instance's override or inherited value)
+            and overridden (whether the instance overrides it; None for a
+            Material). An error envelope when the path loads nothing
+            (``NotFoundError``) or is not a material (``InvalidAssetType``).
         """
-        body: Dict[str, Any] = {
-            "objectPath": material_path,
-        }
-        data = await self._http_put("/remote/object/describe", body)
-
-        properties = data.get("Properties", [])
-        parameters: list = []
-        parent_path: Optional[str] = data.get("Parent", None)
-
-        for prop in properties:
-            prop_name = prop.get("Name", "")
-            prop_type = prop.get("Type", "")
-            prop_value = prop.get("DefaultValue", None)
-
-            # Classify parameter type based on UE property type
-            if "Scalar" in prop_type or "Float" in prop_type:
-                param_type = "scalar"
-            elif "Vector" in prop_type or "Color" in prop_type:
-                param_type = "vector"
-            elif "Texture" in prop_type or "Object" in prop_type:
-                param_type = "texture"
-            else:
-                param_type = prop_type.lower() if prop_type else "unknown"
-
-            parameters.append({
-                "name": prop_name,
-                "param_type": param_type,
-                "value": prop_value,
-            })
-
-        return {
-            "material_path": material_path,
-            "parent_path": parent_path,
-            "parameters": parameters,
-        }
+        return await self._execute_json_script(
+            f"args = {{'path': {material_path!r}}}\n" + MATERIAL_INFO,
+            expected_errors=("NotFoundError", "InvalidAssetType"),
+        )
 
     async def set_material_params(
         self,
