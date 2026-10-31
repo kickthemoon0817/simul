@@ -464,9 +464,14 @@ print(json.dumps(create(**args)))
 # UMaterialInstance::CopyMaterialInstanceParameters walks the parameter list
 # MaterialEditingLibrary names from (GetAllParameterInfoOfType, which the
 # instance shares with its parent) and stores each with its full
-# FMaterialParameterInfo and the parent's value for it, its overrides
-# included, in the instance's own parameter arrays. Nothing is written to the
-# material, and the copy works the same during Play In Editor.
+# FMaterialParameterInfo and the material's value for it, its overrides
+# included, in the instance's own parameter arrays. A dynamic instance takes
+# only a Material or a Material Instance Constant as its parent
+# (UMaterialInstance::SetParentInternal leaves it without one otherwise, and it
+# would list the default material's parameters), so the copy of a Material
+# Instance Dynamic is parented to that one's parent, whose parameters it lists,
+# or without one to the default material Unreal renders it with. Nothing is
+# written to the material, and the copy works the same during Play In Editor.
 MATERIAL_PARAMETERS = """
 ASSOCIATIONS = {"GLOBAL_PARAMETER": "global", "LAYER_PARAMETER": "layer", "BLEND_PARAMETER": "blend"}
 PARAMETER_VALUES = {"scalar": "scalar_parameter_values", "vector": "vector_parameter_values",
@@ -477,8 +482,13 @@ def parameter_key(entry):
     return str(info.name), ASSOCIATIONS[info.association.name], info.index
 
 def material_parameters(material):
+    parent = material
+    if isinstance(material, unreal.MaterialInstance) and not isinstance(material, unreal.MaterialInstanceConstant):
+        parent = material.get_editor_property("parent")
+        if parent is None:
+            parent = material.get_base_material()
     copy = unreal.MaterialLibrary.create_dynamic_material_instance(
-        None, material, creation_flags=unreal.MIDCreationFlags.TRANSIENT)
+        None, parent, creation_flags=unreal.MIDCreationFlags.TRANSIENT)
     copy.copy_material_instance_parameters(material, False)
     return {kind: [parameter_key(entry) + (entry.parameter_value,) for entry in copy.get_editor_property(values)]
             for kind, values in PARAMETER_VALUES.items()}

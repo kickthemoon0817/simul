@@ -25,7 +25,9 @@ getters (which take only a Material) and the instance getters read by name,
 which reads the global parameter; a transient Material Instance Dynamic
 parented to a material copies every parameter Unreal lists for it with its
 association, index and the value the material renders with (its override,
-else its parent's), and a quick copy keeps the names only; an instance keeps
+else its parent's), and a quick copy keeps the names only; a Material
+Instance Dynamic takes only a Material or a Material Instance Constant as its
+parent and is left without one otherwise; an instance keeps
 its overrides with their association and index, and can keep overrides for
 names that are no longer parameters (the engine's
 Widget3DPassThrough_Translucent keeps RefractionDepthBias); and
@@ -211,10 +213,8 @@ class _BasePropertyOverrides:
 
 
 class MaterialInstance(MaterialInterface):
-    pass
+    """What a Material Instance Constant and a Material Instance Dynamic share."""
 
-
-class MaterialInstanceConstant(MaterialInstance):
     def __init__(
         self,
         package: str,
@@ -275,20 +275,20 @@ class MaterialInstanceConstant(MaterialInstance):
         return self.by_name("texture", name)
 
 
-class MaterialInstanceDynamic(MaterialInstance):
-    def __init__(self, parent: MaterialInterface) -> None:
-        super().__init__("/Engine/Transient/MID_" + parent.package.rsplit("/", 1)[-1])
-        self.parent = parent
-        self.values: List[Tuple[str, _Entry]] = []
+class MaterialInstanceConstant(MaterialInstance):
+    pass
 
+
+class MaterialInstanceDynamic(MaterialInstance):
     def copy_material_instance_parameters(
         self, source: MaterialInterface, quick_parameters_only: bool = False
     ) -> None:
-        """Every parameter the parent lists, with its association, index and
-        the source's value for it, kept as Unreal stores it; the quick copy
+        """Every parameter it lists (its parent's), with its association,
+        index and the source's value for it, kept as Unreal stores it in its
+        own parameter values, which the copy clears first; the quick copy
         (CopyMaterialUniformParameters) keeps names only."""
-        self.values = []
-        for key in self.parent.listed():
+        self.overrides = {}
+        for key in self.listed():
             kind, name, association, index = key
             value = source.rendered(key)
             if kind == "scalar":
@@ -297,11 +297,7 @@ class MaterialInstanceDynamic(MaterialInstance):
                 value = LinearColor(*value)
             if quick_parameters_only:
                 association, index = "GLOBAL_PARAMETER", -1
-            self.values.append((kind, _Entry(name, value, association, index)))
-
-    def get_editor_property(self, name: str) -> Any:
-        kind = name.replace("_parameter_values", "")
-        return [entry for k, entry in self.values if k == kind]
+            self.overrides[(kind, name, association, index)] = value
 
 
 def _material_only(material: Any) -> None:
@@ -357,19 +353,8 @@ class MIDCreationFlags:
     TRANSIENT = _Enum("TRANSIENT")
 
 
-class MaterialLibrary:
-    @staticmethod
-    def create_dynamic_material_instance(
-        world_context_object: Any,
-        parent: MaterialInterface,
-        optional_name: str = "None",
-        creation_flags: _Enum = MIDCreationFlags.NONE,
-    ) -> MaterialInstanceDynamic:
-        return MaterialInstanceDynamic(parent)
-
-
 class _Editor:
-    """The assets and whether PIE runs."""
+    """The assets, the Material Instance Dynamics created and whether PIE runs."""
 
     def __init__(self) -> None:
         white = Texture2D(WHITE)
@@ -411,6 +396,8 @@ class _Editor:
                 StaticMesh("/Engine/BasicShapes/Cube"),
             )
         }
+        # (world context, parent, creation flags) of each dynamic instance created.
+        self.created: List[Tuple[Any, Any, Any]] = []
         self.pie = False
 
     def load_asset(self, path: str) -> Any:
@@ -419,6 +406,25 @@ class _Editor:
         if asset is None or (name and asset.get_path_name() != path):
             return None
         return asset
+
+    def create_dynamic_material_instance(
+        self,
+        world_context_object: Any,
+        parent: Optional[MaterialInterface],
+        optional_name: str = "None",
+        creation_flags: _Enum = MIDCreationFlags.NONE,
+    ) -> Optional[MaterialInstanceDynamic]:
+        """None without a parent. UMaterialInstance::SetParentInternal takes
+        only a Material or a Material Instance Constant as the parent and
+        logs a warning for anything else, leaving the instance without one."""
+        self.created.append((world_context_object, parent, creation_flags))
+        if parent is None:
+            return None
+        valid = isinstance(parent, (Material, MaterialInstanceConstant))
+        return MaterialInstanceDynamic(
+            "/Engine/Transient/MID_" + parent.package.rsplit("/", 1)[-1],
+            parent if valid else None,
+        )
 
     def module(self) -> SimpleNamespace:
         def editor_asset_library_load(path: str) -> Any:
@@ -433,7 +439,9 @@ class _Editor:
             MaterialInstanceConstant=MaterialInstanceConstant,
             MaterialInstanceDynamic=MaterialInstanceDynamic,
             MaterialEditingLibrary=MaterialEditingLibrary,
-            MaterialLibrary=MaterialLibrary,
+            MaterialLibrary=SimpleNamespace(
+                create_dynamic_material_instance=self.create_dynamic_material_instance
+            ),
             MIDCreationFlags=MIDCreationFlags,
             Texture=Texture,
             LinearColor=LinearColor,
@@ -643,6 +651,58 @@ def test_an_instance_without_a_parent_renders_opaque(editor: SimpleNamespace) ->
         "blend_mode": "BLEND_OPAQUE",
         "parameters": [],
     }
+
+
+def test_the_parameters_are_copied_into_a_transient_instance_outside_any_world(
+    editor: SimpleNamespace,
+) -> None:
+    """Without a world context and with the transient flag, Unreal puts the
+    copy in the transient package, which is never saved, and marks it
+    transient."""
+    _info(editor, INSTANCE)
+    _info(editor, PARENT)
+
+    assert editor.fake.created == [
+        (None, editor.fake.instance, MIDCreationFlags.TRANSIENT),
+        (None, editor.fake.parent, MIDCreationFlags.TRANSIENT),
+    ]
+
+
+def test_a_dynamic_instance_is_read_through_a_copy_of_its_parent(
+    editor: SimpleNamespace,
+) -> None:
+    """A copy parented to a Material Instance Dynamic would have no parent
+    and list the default material's parameters, none here, while reading by
+    name had listed the dynamic instance's own."""
+    dynamic = MaterialInstanceDynamic(
+        "/Engine/Transient/MID_BasicShapeMaterial_0",
+        editor.fake.parent,
+        scalar={"Roughness": 0.125},
+    )
+    orphan = MaterialInstanceDynamic("/Engine/Transient/MID_Orphan", None)
+    for asset in (dynamic, orphan):
+        editor.fake.assets[asset.package] = asset
+
+    result = _info(editor, dynamic.package)
+
+    assert result == {
+        "material_path": _object_path(dynamic.package),
+        "class_name": "MaterialInstanceDynamic",
+        "parent_path": _object_path(PARENT),
+        "base_material_path": _object_path(PARENT),
+        "material_domain": "MD_SURFACE",
+        "blend_mode": "BLEND_OPAQUE",
+        "parameters": [
+            _param("Roughness", "scalar", 0.125, True),
+            _param("Color", "vector", GREY, False),
+        ],
+    }
+    assert editor.fake.created == [
+        (None, editor.fake.parent, MIDCreationFlags.TRANSIENT)
+    ]
+    # Without a parent it renders with the default material, which the copy is parented to.
+    assert _info(editor, orphan.package)["parameters"] == []
+    assert editor.fake.created[-1] == (None, WORLD_GRID, MIDCreationFlags.TRANSIENT)
 
 
 LAYERED = "/Game/LayerTest/M_Layered"
