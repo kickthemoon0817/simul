@@ -15,6 +15,7 @@ from simul.config import SecurityConfig, Settings
 from tests.fakes import (
     FakeCollection,
     FakeConstraint,
+    FakeDepsgraph,
     FakeEuler,
     FakeLayerCollection,
     FakeMatrix,
@@ -1228,14 +1229,14 @@ class TestVisualObservationTools:
             def get(self, name: str) -> Optional[Any]:
                 return None
 
-        def evaluated_depsgraph_get() -> str:
+        def evaluated_depsgraph_get() -> FakeDepsgraph:
             """Recompute every stored matrix_world, as Blender's evaluation does."""
             for obj in all_objects:
                 if isinstance(obj, FakeTransformObject) and not any(
                     obj is out for out in left_out
                 ):
                     obj.evaluate()
-            return "depsgraph"
+            return FakeDepsgraph(left_out)
 
         return SimpleNamespace(
             app=SimpleNamespace(
@@ -2318,10 +2319,13 @@ class TestVisualObservationTools:
         ]
         warning = result["warning"]
         clause = (
-            "neither the scene camera nor a timeline marker's camera, and "
-            f"{reason}, so the placement was not checked"
+            f"neither the scene camera nor a timeline marker's camera and {reason}. "
+            "Blender did not evaluate it after the placement, so the placement was "
+            "not checked. The reported pose is the requested placement, unchecked."
         )
         assert clause in warning
+        # Unparented, so no parent matrix of its can be stale.
+        assert "its parent" not in warning
         assert "'Track To' (TRACK_TO)" in warning and "influence to 0" in warning
         # The reply gives the placement, which the camera's transform holds...
         assert result["location"] == pytest.approx(location)
@@ -2374,6 +2378,10 @@ class TestVisualObservationTools:
         assert result["rotation_euler"] == pytest.approx(rotation)
         assert result["placement_overridden"] is None
         assert result["override_check"] == "skipped"
+        # Blender holds an evaluated copy, is_evaluated True, but a stale one.
+        assert (
+            "Its evaluated pose did not change with the placement" in result["warning"]
+        )
 
     def test_focus_on_object_skips_the_check_for_a_camera_blender_does_not_evaluate(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
@@ -2402,6 +2410,88 @@ class TestVisualObservationTools:
             {"name": "Track To", "type": "TRACK_TO"}
         ]
         assert "it is disabled in viewports (hide_viewport)" in result["warning"]
+
+    @pytest.mark.parametrize("how", ["object", "collection", "excluded"])
+    def test_set_camera_view_checks_a_disabled_camera_something_visible_depends_on(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, how: str
+    ) -> None:
+        """Blender evaluates a disabled camera in full when a visible object needs its
+        transform: a child of the camera, or a constraint that targets it.
+
+        On Blender 5.0.1 such a camera, disabled in viewports or in an excluded
+        collection, was turned by its Track To in the viewport depsgraph, as
+        the reply on main reported; skipping its check lost that override.
+        """
+        side, view_layer = self._side_camera(how, _track_to((5.0, 5.0, 0.0)))
+        # Not left out: the fake depsgraph evaluates it, as Blender does then.
+        session = self._session_in(monkeypatch, view_layer, side)
+
+        result = session.set_camera_view(
+            [7.0, -7.0, 5.0], [1.1, 0.25, 0.78], camera_name="Side"
+        )
+
+        assert result["override_check"] == "done"
+        assert result["placement_overridden"] is True
+        assert "override the requested placement" in result["warning"]
+        forward = euler_matrix(result["rotation_euler"]) @ [0.0, 0.0, -1.0]
+        to_target = np.subtract((5.0, 5.0, 0.0), result["location"])
+        assert forward == pytest.approx(to_target / np.linalg.norm(to_target))
+
+    def test_set_camera_view_skips_a_disabled_camera_whose_evaluated_pose_did_not_change(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Placed again where it already is, a disabled camera Blender evaluates
+        keeps its evaluated pose, as one Blender evaluates only in part does;
+        the two cannot be told apart, so the check is skipped."""
+        side, view_layer = self._side_camera("object", _track_to((5.0, 5.0, 0.0)))
+        session = self._session_in(monkeypatch, view_layer, side)
+        location, rotation = [7.0, -7.0, 5.0], [1.1, 0.25, 0.78]
+
+        first = session.set_camera_view(location, rotation, camera_name="Side")
+        again = session.set_camera_view(location, rotation, camera_name="Side")
+
+        assert first["override_check"] == "done"
+        assert again["override_check"] == "skipped"
+        assert again["placement_overridden"] is None
+        assert again["location"] == pytest.approx(location)
+        warning = again["warning"]
+        assert "Its evaluated pose did not change with the placement" in warning
+        assert "where it already is" in warning
+
+    def test_skipped_check_warns_that_a_parent_blender_did_not_evaluate_moves_the_camera(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Placing writes the camera's transform through its parent's last
+        evaluated matrix. On Blender 5.0.1 a rig moved 5 m while its collection
+        was disabled put the camera 5 m off the reported placement in a render,
+        so the warning no longer says the placement is in its transform.
+        """
+        rig = FakeTransformObject("Rig", stored=True)
+        side = FakeTransformObject(
+            "Side", "CAMERA", FakeCameraData(), parent=rig, stored=True
+        )
+        side.hide_viewport = True
+        root = FakeCollection("Scene Collection")
+        root.link(rig)
+        root.link(side)
+        session = self._session_in(
+            monkeypatch,
+            FakeViewLayer(FakeLayerCollection(root)),
+            rig,
+            side,
+            left_out=[side],
+        )
+
+        result = session.set_camera_view(
+            [7.0, -7.0, 5.0], [1.1, 0.25, 0.78], camera_name="Side"
+        )
+
+        assert result["override_check"] == "skipped"
+        assert "which is in its transform" not in result["warning"]
+        assert (
+            "Its transform was solved through the last matrix Blender evaluated for "
+            "its parent, so it lands elsewhere if that parent has moved since."
+        ) in result["warning"]
 
     @pytest.mark.parametrize("how", ["enabled", "excluded_parent", "second_collection"])
     def test_set_camera_view_checks_a_camera_a_collection_enables(

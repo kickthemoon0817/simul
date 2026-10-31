@@ -613,6 +613,10 @@ class FakeTransformObject:
             return FakeMatrix(self._stored.rows)
         return self._composed()
 
+    def evaluated_get(self, depsgraph: "FakeDepsgraph") -> Any:
+        """``Object.evaluated_get``: this object's evaluated copy, or the original when left out."""
+        return depsgraph.evaluated(self)
+
     @matrix_world.setter
     def matrix_world(self, value: FakeMatrix) -> None:
         local = np.linalg.inv(self._parent_matrix()) @ np.asarray(value.rows)
@@ -684,3 +688,24 @@ class FakeViewLayer:
     ) -> None:
         self.name = name
         self.layer_collection = layer_collection
+
+
+class FakeDepsgraph:
+    """``bpy.types.Depsgraph`` stand-in for ``Object.evaluated_get``.
+
+    Blender gives back an object's evaluated copy (``is_evaluated`` True) when
+    the depsgraph holds the object, and the original itself (``is_evaluated``
+    False) when it left the object out, as the viewport depsgraph leaves out a
+    camera disabled in viewports that nothing visible depends on. The copy's
+    ``matrix_world`` is the object's: what its last evaluation stored.
+    """
+
+    def __init__(self, left_out: Sequence[Any] = ()) -> None:
+        self._left_out = list(left_out)
+
+    def evaluated(self, obj: Any) -> SimpleNamespace:
+        """The copy of ``obj`` this depsgraph evaluated, or ``obj`` as an original."""
+        held = not any(obj is out for out in self._left_out)
+        return SimpleNamespace(
+            original=obj, is_evaluated=held, matrix_world=obj.matrix_world
+        )

@@ -869,15 +869,18 @@ class BlenderRuntimeSession:
         """
         cam_obj = self._resolve_camera(camera_name)
         self._evaluate_transforms()
+        disablers = self._viewport_disablers(cam_obj)
+        before = self._evaluated_pose(cam_obj) if disablers else None
         placement = self._place_in_world(cam_obj, location, rotation_euler)
         self._evaluate_transforms()
-        report = self._placement_check(cam_obj, placement)
+        report = self._placement_check(cam_obj, placement, disablers, before)
         if report["override_check"] == "done":
             world_location, world_rotation = self._world_placement(
                 cam_obj, rotation_euler
             )
         else:
-            # Blender did not evaluate the camera, so matrix_world holds no pose it renders.
+            # Blender did not evaluate the camera after the placement, so
+            # matrix_world holds no pose it renders.
             world_location, world_rotation = list(location), list(rotation_euler)
         return {
             "camera_name": cam_obj.name,
@@ -969,6 +972,8 @@ class BlenderRuntimeSession:
         data = cam_obj.data
 
         self._evaluate_transforms()
+        disablers = self._viewport_disablers(cam_obj)
+        before = self._evaluated_pose(cam_obj) if disablers else None
         center, radius = self._bounding_sphere(self._world_bound_box(obj))
         if radius <= 0.0:
             radius = _POINT_RADIUS
@@ -999,11 +1004,12 @@ class BlenderRuntimeSession:
         placement = self._place_in_world(cam_obj, location, rotation)
         clip_adjusted = self._clip_around(data, distance, radius)
         self._evaluate_transforms()
-        report = self._placement_check(cam_obj, placement)
+        report = self._placement_check(cam_obj, placement, disablers, before)
         if report["override_check"] == "done":
             camera_location, camera_rotation = self._world_placement(cam_obj, rotation)
         else:
-            # Blender did not evaluate the camera, so matrix_world holds no pose it renders.
+            # Blender did not evaluate the camera after the placement, so
+            # matrix_world holds no pose it renders.
             camera_location, camera_rotation = list(location), list(rotation)
 
         return {
@@ -4125,34 +4131,64 @@ class BlenderRuntimeSession:
         )
         return list(matrix.translation), list(matrix.to_euler("XYZ", compatible))
 
-    def _placement_check(self, camera: Any, placement: Any) -> Dict[str, Any]:
+    def _placement_check(
+        self,
+        camera: Any,
+        placement: Any,
+        disablers: List[str],
+        before: Optional[List[List[float]]],
+    ) -> Dict[str, Any]:
         """
         Report whether Blender keeps a placed camera at the placement, when it can tell.
 
         The check compares the placement with the matrix_world Blender
-        evaluates for the camera (_placement_report). A camera that Blender
-        does not evaluate for the viewport (_viewport_disablers) keeps the
+        evaluates for the camera (_placement_report). Blender's viewport
+        evaluates a camera disabled in viewports (_viewport_disablers) only
+        when something visible depends on it: in full when that reads its
+        transform (a child, a constraint or a driver variable that reads it),
+        in part when only a property, and in part too while its visibility is
+        animated. A camera evaluated in part, or not at all, keeps the
         matrix_world the placement wrote, or one from an earlier evaluation,
-        whatever its constraints, drivers and parent do in a render; for it
-        the check is skipped instead of reporting the placement as held.
+        whatever its constraints, drivers and parent do in a render. Neither
+        depsgraph.ids nor is_evaluated tells it from one evaluated in full: on
+        Blender 5.0.1 depsgraph.ids, which lists only directly visible IDs,
+        left out a disabled camera a visible object's constraint targets, and
+        a camera evaluated in part reported is_evaluated True. So a disabled
+        camera is checked only when the depsgraph holds an evaluated copy of
+        it whose pose changed with the placement; the check is skipped
+        otherwise, rather than compared with a stale matrix.
 
         Args:
             camera: The placed camera, the depsgraph evaluated since.
             placement: The world matrix written (_place_in_world).
+            disablers: The settings that disable the camera (_viewport_disablers).
+            before: Its evaluated pose before the placement (_evaluated_pose),
+                read when ``disablers`` is not empty.
 
         Returns:
-            The _placement_report with override_check "done". For a camera
-            Blender does not evaluate: override_check "skipped",
-            placement_overridden None, constraints_applied (the constraints
-            that apply when Blender evaluates it) and a warning that names
-            the settings that disable it.
+            The _placement_report with override_check "done". Otherwise
+            override_check "skipped", placement_overridden None,
+            constraints_applied (the constraints that apply when Blender
+            evaluates it) and a warning that names the settings that disable
+            it.
         """
-        disablers = self._viewport_disablers(camera)
-        if not disablers:
+        after = self._evaluated_pose(camera) if disablers else None
+        if not disablers or (after is not None and after != before):
             return {
                 **self._placement_report(camera, placement),
                 "override_check": "done",
             }
+        if after is None:
+            unchecked = "Blender did not evaluate it after the placement"
+        else:
+            unchecked = (
+                "Its evaluated pose did not change with the placement: Blender "
+                "evaluates such a camera only in part when nothing visible reads its "
+                "transform (a driver reads one of its properties, or its visibility is "
+                "animated), and a placement that leaves the pose as it was (where it "
+                "already is, or under constraints that set its whole transform) "
+                "changes nothing either"
+            )
         constraints = self._active_constraints(camera)
         if constraints:
             names = ", ".join(f"'{c['name']}' ({c['type']})" for c in constraints)
@@ -4166,19 +4202,47 @@ class BlenderRuntimeSession:
                 "No constraint acts on it, but a driver on its transform or a parent "
                 "with non-uniform scale would still apply whenever Blender evaluates it."
             )
+        parent = (
+            " Its transform was solved through the last matrix Blender evaluated for "
+            "its parent, so it lands elsewhere if that parent has moved since."
+            if camera.parent is not None
+            else ""
+        )
         return {
             "placement_overridden": None,
             "override_check": "skipped",
             "constraints_applied": constraints,
             "warning": (
                 f"Blender may not evaluate camera {camera.name!r} for the viewport, as "
-                "it is neither the scene camera nor a timeline marker's camera, and "
-                f"{' and '.join(disablers)}, so the placement was not checked. The "
-                "reported pose is the placement, which is in its transform. "
-                f"{effect} To check it, change those settings or make it the scene "
-                "camera, then place it again."
+                "it is neither the scene camera nor a timeline marker's camera and "
+                f"{' and '.join(disablers)}. {unchecked}, so the placement was not "
+                "checked. The reported pose is the requested placement, unchecked."
+                f"{parent} {effect} To check it, change those settings or make it the "
+                "scene camera, then place it again."
             ),
         }
+
+    @staticmethod
+    def _evaluated_pose(obj: Any) -> Optional[List[List[float]]]:
+        """
+        Return the world matrix of the object's copy that the viewport depsgraph evaluated.
+
+        Args:
+            obj: The object, the depsgraph evaluated since its last change.
+
+        Returns:
+            The matrix as rows of floats, a copy: Blender's matrix_world
+            follows later evaluations. None when the depsgraph holds no
+            evaluated copy of the object: evaluated_get then gives back the
+            original, whose is_evaluated is False.
+        """
+        blender_module: Any = bpy
+        depsgraph = blender_module.context.evaluated_depsgraph_get()
+        evaluated = obj.evaluated_get(depsgraph)
+        if not evaluated.is_evaluated:
+            return None
+        matrix = evaluated.matrix_world
+        return [[float(matrix[row][column]) for column in range(4)] for row in range(4)]
 
     @staticmethod
     def _viewport_disablers(obj: Any) -> List[str]:
@@ -4194,11 +4258,11 @@ class BlenderRuntimeSession:
         (excluding a collection unchecks its children too, but a child checked
         again counts) and that is not disabled in viewports, nor are its
         parent collections. Hiding in the view layer (the eye icon) leaves an
-        object evaluated. Blender evaluates other objects only when something
-        evaluated depends on them, and then sometimes in part: on Blender
-        5.0.1 such a camera kept the matrix_world a placement wrote, or the
-        one it had before it was disabled, while a render through it applied
-        its constraints.
+        object evaluated. Blender evaluates another object only when something
+        visible depends on it, and sometimes only in part (_placement_check).
+        A scene camera whose hide_viewport is animated is a rare exception:
+        on Blender 5.0.1, while it was disabled, it kept a stale matrix_world
+        even as the scene camera.
 
         Args:
             obj: The object.
