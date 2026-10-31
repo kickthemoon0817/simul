@@ -109,19 +109,22 @@ Behaviour worth knowing:
 - `set_unreal_material_params` writes a Material Instance Constant through
   Unreal's MaterialEditingLibrary in one undoable transaction, in or out of
   Play In Editor, and reads every value back, so `success` alone tells
-  whether every value applied. The request is checked first: a name the
-  material has no parameter of that kind for (names match ignoring case, so
-  two names that differ only in case are one parameter and may not both be
-  given), a texture that does not load or a malformed value fails the call
-  with `ValidationError`, and nothing is written; `not_applied` gives each
-  parameter's reason. After the write, a value that reads back different
-  fails the call with `MaterialParamsNotApplied`, naming it in `not_applied`;
-  the values that did apply stay written, as with lights. `applied` holds the
+  whether every value applied. It sets the material's global parameters.
+  The request is checked first: a name the material has no global parameter
+  of that kind for (names match ignoring case, so two names that differ only
+  in case are one parameter and may not both be given), a texture that does
+  not load or a malformed value fails the call with `ValidationError`, and
+  nothing is written; `not_applied` gives each parameter's reason. That
+  includes a name only the material's Material Layers have (a `layer` or
+  `blend` parameter in `get_unreal_material_info`; the reason names each layer
+  and blend): Unreal's Python API writes parameters by name, and the global
+  override it would add reads back as set while the layer renders as it was.
+  A name both the material and a layer have sets the material's own
+  parameter. After the write, a value that reads back different fails the
+  call with `MaterialParamsNotApplied`, naming it in `not_applied`; the
+  values that did apply stay written, as with lights. `applied` holds the
   values read back (scalars and colors as the 32-bit floats Unreal stores)
-  and `params_set` counts them. The instance is left unsaved. Unreal's Python
-  API lists and writes material parameters by name only, so a name that
-  exists only inside a Material Layer gets a global override, which leaves
-  the layer unchanged and still reads back as applied.
+  and `params_set` counts them. The instance is left unsaved.
 - USD import and export need the optional **USDImporter** plugin enabled when
   the editor starts. They use `AssetImportTask` and `LevelExporterUSD`;
   `get_unreal_interchange_info` reports whether the plugin is available.
@@ -165,18 +168,35 @@ Behaviour worth knowing:
   (`MD_SURFACE`, `BLEND_OPAQUE`; an instance without a parent renders
   `BLEND_OPAQUE`). An override an instance keeps for a name that is no
   longer a parameter of its material is not listed, as the Material Instance
-  editor does not show it. Unreal's Python API lists and reads material
-  parameters by name only, so a parameter inside a Material Layer shows the
-  global value by that name, not the layer's (0, black or no texture when
-  only a layer has the name), and a name Unreal lists more than once (once
-  per layer it appears in) is listed once, with a `warning` naming it.
+  editor does not show it. Each parameter has an `association`: `global` for
+  the material's own, `layer` or `blend` for one inside its Material Layers,
+  with the layer or blend `index` (layer 0 is the bottom layer, and blend i
+  blends layer i + 1 onto the layers below; `null` for a global parameter).
+  A layer or blend parameter has that layer's value and override, and a name
+  the material and its layers share is listed once for each. Unreal's Python
+  API lists and reads parameters by name only, so the tool reads them through
+  a transient Material Instance Dynamic that copies the material's
+  parameters with their layers.
 - `focus_unreal_on_actor` points the level viewport camera at the actor and
   selects it, reading the selection back: `selected` is false, with a
   `warning`, while PIE runs (below) and for an actor Unreal does not select:
   one hidden in the editor or in a hidden or locked level, a child actor or an
   actor inside a level instance (Unreal selects those only through their
   parent), or any actor while the editor mode or a selection lock prevents
-  selection.
+  selection. The camera stands `distance` behind the point it looks at and
+  half as far above it; the reply's `distance` is the one used. A positive
+  `distance` looks at the actor's location. With `distance` 0 (the default) or
+  less the camera looks at the center of the actor's bounds and stands back until
+  their bounding sphere fills the view's height with 10% to spare. Editor
+  Python cannot read the level viewport's field of view, so UE's default is
+  assumed: 90 degrees across on a 16:9 viewport; a narrower field of view or a
+  viewport wider than about 2:1 can crop the actor. An actor whose bounds have
+  no size, such as a StaticMeshActor without a mesh, gets 500 cm from its
+  location instead, with a `fit_warning`; an empty actor or a light is framed
+  by its editor icon. The frustum the editor draws for a camera or a 2D scene
+  capture is left out of the bounds, as the editor's own Focus leaves it out
+  (its bounds reach 10 m on every side of the camera), so a camera is framed
+  by its editor mesh.
 - While Play In Editor (or Simulate In Editor) runs, Unreal's editor refuses
   changes to the editor world: it spawns and destroys no actors, lists and
   selects none, and hands out no editor world. The tools detect it:
@@ -290,8 +310,15 @@ Behaviour worth knowing:
   unless it is the scene camera, a timeline marker binds it, or something
   visible depends on its transform (a child, or a constraint or driver that
   reads it); its constraints then do not run there, although a render through
-  it applies them. Such a disabled camera is checked when Blender holds an
-  evaluated copy of it whose pose changed with the placement. Otherwise
+  it applies them. The scene camera and a marker's camera lose that exception
+  while their `hide_viewport` is animated (keyframes, a driver, or a strip in
+  an NLA track that plays: not muted, or the solo track when there is one)
+  and a collection not excluded from the view layer holds them: Blender then
+  skips such a camera while its
+  `hide_viewport` is on at the current frame, or while each of those
+  collections is disabled in viewports. Such a disabled camera is checked
+  when Blender holds an evaluated copy of it whose pose changed with the
+  placement. Otherwise
   `override_check` is `"skipped"`, `placement_overridden` is `null`, the
   reported pose is the requested placement, unchecked, `constraints_applied`
   lists the constraints that apply when Blender evaluates it, and `warning`

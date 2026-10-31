@@ -605,16 +605,27 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="focus_unreal_on_actor",
         description=(
-            "Focus the editor viewport camera on a specific actor and select it; selected reports "
-            "whether Unreal selected it. While PIE runs, Unreal's editor selects nothing, so the camera "
-            "moves but selected is false, with pie_active true and a warning."
+            "Focus the editor viewport camera on a specific actor and select it. With distance 0 the camera "
+            "looks at the center of the actor's bounds and backs off until they fit the view, assuming UE's "
+            "default 90-degree field of view on a 16:9 viewport (editor Python cannot read the viewport's); "
+            "distance reports the distance used, and fit_warning says when an actor without bounds got the "
+            "default 500 cm. selected reports whether Unreal selected it. While PIE runs, Unreal's editor "
+            "selects nothing, so the camera moves but selected is false, with pie_active true and a warning."
         ),
         response=UnrealFocusActorResponse,
         read_only=False,
         method="focus_on_actor",
         params=(
             ToolParam("actor_path", str, description="Full actor path to focus on."),
-            ToolParam("distance", float, 0.0, description="Camera distance from actor (0 = auto-fit)."),
+            ToolParam(
+                "distance",
+                float,
+                0.0,
+                description=(
+                    "How far behind the actor the camera stands, in cm, rising half as far and looking down at "
+                    "it (0 or less = auto-fit to the actor's bounds)."
+                ),
+            ),
         ),
     ),
     # -- Scene manipulation ---------------------------------------------------
@@ -757,7 +768,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         description=(
             "Get a Material's or Material Instance's scalar, vector and texture parameters with their "
             "values (an instance's: the value it renders with, and whether it overrides it), its parent "
-            "and base material, material domain and blend mode."
+            "and base material, material domain and blend mode. A parameter inside the material's "
+            "Material Layers is listed for its layer or blend (association and index), with that "
+            "layer's value."
         ),
         response=UnrealGetMaterialInfoResponse,
         read_only=True,
@@ -769,10 +782,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="set_unreal_material_params",
         description=(
             "Set scalar, vector and texture parameters on a Material Instance Constant (left unsaved) "
-            "and read them back; applied holds the values read back. The call fails, writing nothing, "
-            "when the material lacks a named parameter or a texture does not load, and fails when a "
-            "value reads back different, keeping what applied; not_applied gives each reason. A name "
-            "found only inside a Material Layer gets a global override, which leaves the layer unchanged."
+            "and read them back; applied holds the values read back. Only global parameters are set: "
+            "the call fails, writing nothing, when the material has no global parameter by a given "
+            "name (a name only its Material Layers have included) or a texture does not load, and "
+            "fails when a value reads back different, keeping what applied; not_applied gives each "
+            "reason."
         ),
         response=UnrealSetMaterialParamsResponse,
         read_only=False,

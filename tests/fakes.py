@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import itertools
 import math
 from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
@@ -663,6 +664,8 @@ class FakeTransformObject:
         # Disable in Viewports (the monitor icon), and the collections that hold it.
         self.hide_viewport = False
         self.users_collection: List["FakeCollection"] = []
+        # None until something keys or drives one of its properties.
+        self.animation_data: Optional["FakeAnimData"] = None
         self.parent = parent
         self.parent_type = "OBJECT"
         # What Blender's Parent (Keep Transform) sets.
@@ -822,3 +825,138 @@ class FakeDepsgraph:
         return SimpleNamespace(
             original=obj, is_evaluated=held, matrix_world=obj.matrix_world
         )
+
+
+class FakeFCurve:
+    """``bpy.types.FCurve`` stand-in, keyed or a driver: the property it animates.
+
+    Blender's depsgraph takes a property for animated whenever an F-curve is
+    on it, a muted or empty one too, so the stand-in tells nothing else.
+    """
+
+    __slots__ = ("data_path",)
+
+    def __init__(self, data_path: str) -> None:
+        self.data_path = data_path
+
+
+class FakeActionSlot:
+    """``bpy.types.ActionSlot`` stand-in (Blender 4.4+): which ID an action's F-curves animate.
+
+    ``handle`` is the number that animation data stores to name its slot, as
+    ``AnimData.action_slot_handle_tweak_storage`` does; each slot gets its own.
+    """
+
+    __slots__ = ("identifier", "handle")
+    _handles = itertools.count(1)
+
+    def __init__(self, identifier: str) -> None:
+        self.identifier = identifier
+        self.handle = next(FakeActionSlot._handles)
+
+
+class FakeAction:
+    """``bpy.types.Action`` stand-in of Blender 4.4 and later: the F-curves of each slot.
+
+    An action animates each ID through the slot it assigns that ID;
+    ``fake_anim_utils`` finds a slot's F-curves as ``bpy_extras.anim_utils``
+    does. Blender 5.0 has no ``Action.fcurves``, nor does this.
+    """
+
+    __slots__ = ("slot_fcurves",)
+
+    def __init__(self, slots: Mapping[FakeActionSlot, Sequence[FakeFCurve]]) -> None:
+        self.slot_fcurves = {slot: list(fcurves) for slot, fcurves in slots.items()}
+
+    @property
+    def slots(self) -> List[FakeActionSlot]:
+        """The action's slots."""
+        return list(self.slot_fcurves)
+
+
+class FakeNlaStrip:
+    """``bpy.types.NlaStrip`` stand-in: its action and slot, and a meta strip's own strips."""
+
+    __slots__ = ("action", "action_slot", "strips")
+
+    def __init__(
+        self,
+        action: Optional[FakeAction] = None,
+        action_slot: Optional[FakeActionSlot] = None,
+        strips: Sequence["FakeNlaStrip"] = (),
+    ) -> None:
+        self.action = action
+        self.action_slot = action_slot
+        self.strips = list(strips)
+
+
+class FakeNlaTrack:
+    """``bpy.types.NlaTrack`` stand-in: its strips, and whether it is muted or solo."""
+
+    __slots__ = ("strips", "mute", "is_solo")
+
+    def __init__(
+        self, strips: Sequence[FakeNlaStrip], mute: bool = False, is_solo: bool = False
+    ) -> None:
+        self.strips = list(strips)
+        self.mute = mute
+        self.is_solo = is_solo
+
+
+class FakeAnimData:
+    """``bpy.types.AnimData`` stand-in of Blender 4.5 and later: what animates an ID.
+
+    ``action`` animates it through ``action_slot``, ``drivers`` are F-curves,
+    and the strips of ``nla_tracks`` hold an action and a slot of their own.
+    In NLA tweak mode the tweaked strip's action and slot are assigned, and
+    the ID's own action and its slot's handle wait in
+    ``action_tweak_storage`` and ``action_slot_handle_tweak_storage`` (0 for
+    no slot).
+    """
+
+    __slots__ = (
+        "action",
+        "action_slot",
+        "drivers",
+        "nla_tracks",
+        "action_tweak_storage",
+        "action_slot_handle_tweak_storage",
+    )
+
+    def __init__(
+        self,
+        action: Optional[FakeAction] = None,
+        action_slot: Optional[FakeActionSlot] = None,
+        drivers: Sequence[FakeFCurve] = (),
+        nla_tracks: Sequence[FakeNlaTrack] = (),
+        tweak_storage: Optional[FakeAction] = None,
+        tweak_slot: Optional[FakeActionSlot] = None,
+    ) -> None:
+        self.action = action
+        self.action_slot = action_slot
+        self.drivers = list(drivers)
+        self.nla_tracks = list(nla_tracks)
+        self.action_tweak_storage = tweak_storage
+        self.action_slot_handle_tweak_storage = (
+            0 if tweak_slot is None else tweak_slot.handle
+        )
+
+
+def fake_anim_utils() -> ModuleType:
+    """Return a ``bpy_extras.anim_utils`` module that reads a ``FakeAction``.
+
+    Its ``action_get_channelbag_for_slot`` gives the slot's F-curves as a
+    channelbag, and None for a missing action or slot, as Blender 4.4.1 and
+    later do, or for a slot the action keeps no F-curves for.
+    """
+
+    def action_get_channelbag_for_slot(
+        action: Optional[FakeAction], slot: Optional[FakeActionSlot]
+    ) -> Optional[SimpleNamespace]:
+        if action is None or slot is None or slot not in action.slot_fcurves:
+            return None
+        return SimpleNamespace(fcurves=action.slot_fcurves[slot])
+
+    module = ModuleType("bpy_extras.anim_utils")
+    module.action_get_channelbag_for_slot = action_get_channelbag_for_slot  # type: ignore[attr-defined]
+    return module

@@ -4577,7 +4577,9 @@ class BlenderRuntimeSession:
         a camera evaluated in part reported is_evaluated True. So a disabled
         camera is checked only when the depsgraph holds an evaluated copy of
         it whose pose changed with the placement; the check is skipped
-        otherwise, rather than compared with a stale matrix.
+        otherwise, rather than compared with a stale matrix. The scene camera
+        and a marker's camera count as disabled only while their
+        hide_viewport is animated.
 
         Args:
             camera: The placed camera, the depsgraph evaluated since.
@@ -4593,7 +4595,8 @@ class BlenderRuntimeSession:
             override_check "skipped", placement_overridden None,
             constraints_applied (the constraints that apply when Blender
             evaluates it) and a warning that names the settings that disable
-            it.
+            it, and for the scene camera or a marker's camera its animated
+            hide_viewport.
         """
         after = self._evaluated_pose(camera) if disablers else None
         if not disablers or (after is not None and after != before):
@@ -4631,17 +4634,36 @@ class BlenderRuntimeSession:
             if camera.parent is not None
             else ""
         )
+        role = self._camera_role(camera)
+        if role is None:
+            cause = (
+                "as it is neither the scene camera nor a timeline marker's camera and "
+                f"{' and '.join(disablers)}"
+            )
+            # As the scene camera too, a camera whose hide_viewport is animated
+            # is evaluated only while it is enabled in viewports
+            # (_viewport_disablers).
+            remedy = "make it the scene camera" + (
+                " and remove the animation of its hide_viewport"
+                if self._animates_visibility(camera)
+                else ""
+            )
+        else:
+            cause = (
+                f"although it is {role}, as {' and '.join(disablers)}: Blender "
+                "evaluates a camera whose hide_viewport is animated only while it is "
+                "enabled in viewports"
+            )
+            remedy = "remove the animation of its hide_viewport"
         return {
             "placement_overridden": None,
             "override_check": "skipped",
             "constraints_applied": constraints,
             "warning": (
-                f"Blender may not evaluate camera {camera.name!r} for the viewport, as "
-                "it is neither the scene camera nor a timeline marker's camera and "
-                f"{' and '.join(disablers)}. {unchecked}, so the placement was not "
-                "checked. The reported pose is the requested placement, unchecked."
-                f"{parent} {effect} To check it, change those settings or make it the "
-                "scene camera, then place it again."
+                f"Blender may not evaluate camera {camera.name!r} for the viewport, "
+                f"{cause}. {unchecked}, so the placement was not checked. The reported "
+                f"pose is the requested placement, unchecked.{parent} {effect} To check "
+                f"it, change those settings or {remedy}, then place it again."
             ),
         }
 
@@ -4667,8 +4689,7 @@ class BlenderRuntimeSession:
         matrix = evaluated.matrix_world
         return [[float(matrix[row][column]) for column in range(4)] for row in range(4)]
 
-    @staticmethod
-    def _viewport_disablers(obj: Any) -> List[str]:
+    def _viewport_disablers(self, obj: Any) -> List[str]:
         """
         Return the settings that keep Blender from evaluating an object for the viewport.
 
@@ -4683,30 +4704,35 @@ class BlenderRuntimeSession:
         parent collections. Hiding in the view layer (the eye icon) leaves an
         object evaluated. Blender evaluates another object only when something
         visible depends on it, and sometimes only in part (_placement_check).
-        A scene camera whose hide_viewport is animated is a rare exception:
-        on Blender 5.0.1, while it was disabled, it kept a stale matrix_world
-        even as the scene camera.
+
+        The scene camera and a marker's camera lose that exception while their
+        hide_viewport is animated (_animates_visibility): Blender then builds
+        them through their base in the view layer, which each collection not
+        excluded from it gives them, and evaluates them only while that base
+        is enabled in viewports. On Blender 5.0.1 such a camera, while its
+        hide_viewport was on or the collections giving it a base were disabled
+        in viewports, kept the matrix_world of its last evaluation after a
+        placement, while a render through it applied its constraints at the
+        placement; one without a base, in no collection of the view layer or
+        only in excluded ones, was evaluated.
 
         Args:
             obj: The object.
 
         Returns:
-            One description per setting that disables it; empty for the
-            scene camera, a camera a timeline marker binds and an object
-            enabled in viewports.
+            One description per setting that disables it; empty for an object
+            enabled in viewports, and for the scene camera and a camera a
+            timeline marker binds unless their hide_viewport is animated.
         """
-        blender_module: Any = bpy
-        context = blender_module.context
-        scene = context.scene
-        if obj == scene.camera or any(
-            marker.camera == obj for marker in scene.timeline_markers
-        ):
+        role = self._camera_role(obj)
+        if role is not None and not self._animates_visibility(obj):
             return []
-        view_layer = context.view_layer
+        blender_module: Any = bpy
+        view_layer = blender_module.context.view_layer
         owners = list(obj.users_collection)
         root = view_layer.layer_collection
         # The scene's own collection can be neither excluded nor disabled.
-        enabled = root.collection in owners
+        enabled = has_base = root.collection in owners
         blocked: List[str] = []
         # Depth first, in outliner order: (layer collection, disabled ancestor).
         pending: List[Tuple[Any, Optional[str]]] = [
@@ -4718,6 +4744,7 @@ class BlenderRuntimeSession:
             if disabled_by is None and collection.hide_viewport:
                 disabled_by = collection.name
             if collection in owners:
+                has_base = has_base or not layer.exclude
                 if not layer.exclude and disabled_by is None:
                     enabled = True
                 else:
@@ -4732,6 +4759,13 @@ class BlenderRuntimeSession:
             pending.extend(
                 (child, disabled_by) for child in reversed(list(layer.children))
             )
+        if role is not None:
+            if not has_base or (enabled and not obj.hide_viewport):
+                return []
+            animated = "its hide_viewport is animated" + (
+                " and on at this frame" if obj.hide_viewport else ""
+            )
+            return [animated] + ([] if enabled else blocked)
         reasons = (
             ["it is disabled in viewports (hide_viewport)"] if obj.hide_viewport else []
         )
@@ -4740,6 +4774,101 @@ class BlenderRuntimeSession:
                 blocked or [f"it is in no collection of view layer {view_layer.name!r}"]
             )
         return reasons
+
+    @staticmethod
+    def _camera_role(obj: Any) -> Optional[str]:
+        """
+        Name the role for which Blender's viewport evaluates a camera whatever its visibility.
+
+        Args:
+            obj: The object.
+
+        Returns:
+            "the scene camera", "a timeline marker's camera" when a marker
+            binds it, or None.
+        """
+        blender_module: Any = bpy
+        scene = blender_module.context.scene
+        if obj == scene.camera:
+            return "the scene camera"
+        if any(marker.camera == obj for marker in scene.timeline_markers):
+            return "a timeline marker's camera"
+        return None
+
+    def _animates_visibility(self, obj: Any) -> bool:
+        """
+        Whether Blender's depsgraph takes an object's hide_viewport for animated.
+
+        Blender 5.0.1 (BKE_fcurves_id_cb) reads the F-curves of the action
+        slot the object is assigned, of the action and slot that tweaking an
+        NLA strip stashes away (_tweak_storage_fcurves), its drivers and the
+        action slots of the strips, meta strips' included, in its NLA tracks
+        that are enabled: not muted, and solo while a track is solo. A muted
+        or empty F-curve counts, as do a muted driver, a muted strip and a
+        strip while NLA evaluation is off.
+
+        Args:
+            obj: The object.
+
+        Returns:
+            True when one of those F-curves animates hide_viewport.
+        """
+        anim_data = obj.animation_data
+        if anim_data is None:
+            return False
+        fcurves = list(action_fcurves(anim_data, self._blender_version) or [])
+        fcurves.extend(self._tweak_storage_fcurves(anim_data))
+        fcurves.extend(anim_data.drivers)
+        tracks = list(anim_data.nla_tracks)
+        solo = any(track.is_solo for track in tracks)
+        strips = [
+            strip
+            for track in tracks
+            if (track.is_solo if solo else not track.mute)
+            for strip in track.strips
+        ]
+        while strips:
+            strip = strips.pop()
+            strips.extend(strip.strips)
+            # A strip holds an action and its slot as animation data does.
+            fcurves.extend(action_fcurves(strip, self._blender_version) or [])
+        return any(fcurve.data_path == "hide_viewport" for fcurve in fcurves)
+
+    def _tweak_storage_fcurves(self, anim_data: Any) -> List[Any]:
+        """
+        Return the F-curves through which the action that NLA tweak mode stashes away animates its ID.
+
+        While a strip is tweaked, the strip's action and slot are the assigned
+        ones, and the ID's own action waits in action_tweak_storage, its slot's
+        handle in action_slot_handle_tweak_storage (Blender 4.5 and later).
+        Blender 4.4 does not expose that handle, so each slot of the stashed
+        action counts there. On Blender 5.0.1 a scene camera whose stashed
+        action keyed its hide_viewport kept the matrix_world of its last
+        evaluation while its collection was disabled in viewports.
+
+        Args:
+            anim_data: The ID's animation_data.
+
+        Returns:
+            The F-curves; empty outside tweak mode, or when no action was
+            assigned on entering it.
+        """
+        action = anim_data.action_tweak_storage
+        if action is None:
+            return []
+        if self._blender_version < SLOTTED_ACTIONS_VERSION:
+            return list(action.fcurves)
+        from bpy_extras import anim_utils
+
+        handle = getattr(anim_data, "action_slot_handle_tweak_storage", None)
+        fcurves: List[Any] = []
+        for slot in action.slots:
+            if handle is not None and slot.handle != handle:
+                continue
+            channelbag = anim_utils.action_get_channelbag_for_slot(action, slot)
+            if channelbag is not None:
+                fcurves.extend(channelbag.fcurves)
+        return fcurves
 
     @staticmethod
     def _world_bound_box(obj: Any) -> List[List[float]]:
