@@ -163,11 +163,13 @@ def _build_tool_wrapper(
             return await server._exec_isaac(meta.name, call, bypass_instance_lock=True)
         if meta.script:
             code = str(arguments["code"])
+            # surrogatepass, as utf8_byte_length counts: a lone surrogate from an
+            # in-process client is hashed instead of raising before the record.
             return await server._exec_isaac(
                 meta.name,
                 call,
                 params={"code_bytes": utf8_byte_length(code)},
-                script_sha256=hashlib.sha256(code.encode("utf-8")).hexdigest(),
+                script_sha256=hashlib.sha256(code.encode("utf-8", "surrogatepass")).hexdigest(),
             )
         return await server._exec_isaac(meta.name, call)
 

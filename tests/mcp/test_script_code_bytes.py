@@ -118,6 +118,29 @@ def test_isaac_and_unreal_log_one_size_for_one_script(
     assert isaac["script_sha256"] == hashlib.sha256(SCRIPT.encode("utf-8")).hexdigest()
 
 
+# The wire transports' JSON parser refuses an unpaired surrogate, but an
+# in-process FastMCP client hands the tool its string without parsing any JSON.
+LONE_SURROGATE_SCRIPT = "x = '\ud800'"
+
+
+def test_isaac_and_unreal_log_one_size_for_a_lone_surrogate(
+    server: server_module.SimulMCPServer,
+) -> None:
+    """Isaac hashed the source in strict UTF-8, so it raised before the call was recorded."""
+    size = len("x = ''") + 3
+
+    _call(server, "execute_isaac_script", LONE_SURROGATE_SCRIPT)
+    _call(server, "execute_unreal_script", LONE_SURROGATE_SCRIPT)
+
+    assert server.client.executed == [LONE_SURROGATE_SCRIPT]  # type: ignore[attr-defined]
+    (isaac,) = _records(server, "execute_isaac_script")
+    (unreal,) = _records(server, "execute_unreal_script")
+    assert isaac["params"] == {"code_bytes": size}
+    assert unreal["params"] == {"code_bytes": size, "mode": "ExecuteFile"}
+    digest = hashlib.sha256(LONE_SURROGATE_SCRIPT.encode("utf-8", "surrogatepass"))
+    assert isaac["script_sha256"] == digest.hexdigest()
+
+
 def test_a_refused_isaac_script_names_the_size_its_usage_record_keeps(
     server: server_module.SimulMCPServer,
 ) -> None:
