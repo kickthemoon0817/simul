@@ -671,20 +671,55 @@ class UnrealMaterialParameterInfo(BaseModel):
 
     name: str = Field(..., description="Parameter name")
     param_type: str = Field(..., description="scalar | vector | texture")
-    value: Any = Field(None, description="Current value")
+    value: Any = Field(
+        None,
+        description=(
+            "A float (scalar), [r, g, b, a] (vector) or a texture asset path (texture; null for none): "
+            "a Material's default, or the value an instance renders with, its override or what it inherits"
+        ),
+    )
+    overridden: Optional[bool] = Field(
+        None, description="Whether the instance overrides this parameter; null for a Material"
+    )
 
 
 class UnrealGetMaterialInfoResponse(BaseModel):
-    """Response with material instance parameters."""
+    """Response with the parameters and metadata of a Material or Material Instance."""
 
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    material_path: str = Field(..., description="Material asset path")
-    parent_path: Optional[str] = Field(None, description="Parent material path")
+    material_path: str = Field(..., description="Object path of the material asset")
+    class_name: Optional[str] = Field(
+        None, description="Material, MaterialInstanceConstant or another material class"
+    )
+    parent_path: Optional[str] = Field(
+        None, description="The instance's parent material; null for a Material"
+    )
+    base_material_path: Optional[str] = Field(
+        None, description="The Material at the root of the parent chain (the material itself for a Material)"
+    )
+    material_domain: Optional[str] = Field(
+        None, description="The base material's domain, as Unreal names it (MD_SURFACE, MD_POST_PROCESS, ...)"
+    )
+    blend_mode: Optional[str] = Field(
+        None,
+        description=(
+            "Blend mode as Unreal names it (BLEND_OPAQUE, BLEND_MASKED, BLEND_TRANSLUCENT, ...): an "
+            "instance's override, else its parent's; BLEND_OPAQUE for an instance without a parent"
+        ),
+    )
     parameters: List[UnrealMaterialParameterInfo] = Field(
-        default_factory=list, description="Material parameters"
+        default_factory=list,
+        description="Scalar, vector and texture parameters, by kind and then name, each name once",
+    )
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Names Unreal lists more than once, from Material Layers, each listed once with its global "
+            "value since Unreal's Python API reads parameters by name only; null when there are none"
+        ),
     )
 
 

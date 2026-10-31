@@ -754,13 +754,15 @@ def exec_script(
 # ---------------------------------------------------------------------------
 @app.command("materials")
 def list_materials(
-    actor_path: str = typer.Argument(..., help="Actor path to inspect materials"),
+    material_path: str = typer.Argument(
+        ..., help="Material or Material Instance asset path, e.g. /Game/Materials/MI_Wood"
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """Get material information for an actor."""
+    """Get a material's parameters, parent, domain and blend mode."""
     session = _session(host, port)
-    result = _run(session.get_material_info(actor_path), session)
+    result = _run(session.get_material_info(material_path), session)
     if is_json_mode():
         emit(result)
         return

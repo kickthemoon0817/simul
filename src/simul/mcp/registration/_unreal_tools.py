@@ -754,7 +754,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     # -- Materials, lighting and rendering --------------------------------------
     UnrealTool(
         name="get_unreal_material_info",
-        description="Get material instance parameters and metadata.",
+        description=(
+            "Get a Material's or Material Instance's scalar, vector and texture parameters with their "
+            "values (an instance's: the value it renders with, and whether it overrides it), its parent "
+            "and base material, material domain and blend mode."
+        ),
         response=UnrealGetMaterialInfoResponse,
         read_only=True,
         idempotent=True,
