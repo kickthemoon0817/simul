@@ -299,7 +299,18 @@ print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}
 """
 
 # Expects ``args`` = {"actor_path"}. Adds the actor to the editor selection,
-# reads the selection back and prints the actor's location for the camera.
+# reads the selection back and prints the actor's location and bounds for the
+# camera. The bounds are AActor::GetActorBounds over every primitive component,
+# its child actors' included, as a center and a half-size. The half-size is
+# zero when no primitive component has a size (a StaticMeshActor without a
+# mesh); the center is then where such a component sits, or the world origin
+# when the actor has none. The frustum the editor draws for a camera or a 2D
+# scene capture is left out, as the editor's own Focus leaves it out: that
+# editor-only DrawFrustumComponent belongs to the actor, and its bounds are a
+# cube reaching the frustum's far end, 10 m, on every side of the camera,
+# whatever the actor's size (UE 5.7 source). Such an actor's box is drawn
+# around the bounds of its other primitive components and its child actors';
+# one with nothing but frustums keeps GetActorBounds' box.
 # While Play In Editor (or Simulate) runs nothing is selected: Unreal's editor
 # reports no selection then and clears it when PIE stops (observed on UE
 # 5.7.4), so a selection made during PIE would be lost unseen. Outside PIE an
@@ -308,6 +319,21 @@ print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}
 # selects only through its parent, or any actor while the editor mode or a
 # selection lock prevents selection) reads back unselected.
 FOCUS_ACTOR = ACTOR_HELPERS + EDITOR_WORLD + """
+def focus_bounds(actor):
+    actors = [actor] + list(actor.get_all_child_actors())
+    components = [c for a in actors for c in a.get_components_by_class(unreal.PrimitiveComponent)]
+    kept = [c for c in components if not isinstance(c, unreal.DrawFrustumComponent)]
+    if not kept or len(kept) == len(components):
+        origin, extent = actor.get_actor_bounds(only_colliding_components=False, include_from_child_actors=True)
+        return [origin.x, origin.y, origin.z], [extent.x, extent.y, extent.z]
+    low, high = [float("inf")] * 3, [float("-inf")] * 3
+    for component in kept:
+        center, half, _ = unreal.SystemLibrary.get_component_bounds(component)
+        for axis, (mid, size) in enumerate(((center.x, half.x), (center.y, half.y), (center.z, half.z))):
+            low[axis], high[axis] = min(low[axis], mid - size), max(high[axis], mid + size)
+    return ([(lo + hi) / 2 for lo, hi in zip(low, high)],
+            [(hi - lo) / 2 for lo, hi in zip(low, high)])
+
 actor = actor_at(args["actor_path"])
 pie = pie_active()
 selected = False
@@ -315,8 +341,10 @@ if not pie:
     subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     subsystem.set_actor_selection_state(actor, True)
     selected = actor in subsystem.get_selected_level_actors()
-print(json.dumps({"location": actor_transform(actor)["location"], "selected": selected,
-                  "pie_active": pie}))
+origin, extent = focus_bounds(actor)
+print(json.dumps({"location": actor_transform(actor)["location"],
+                  "bounds_origin": origin, "bounds_extent": extent,
+                  "selected": selected, "pie_active": pie}))
 """
 
 # Expects ``args`` = {"path", "location", "rotation", "label"}: location

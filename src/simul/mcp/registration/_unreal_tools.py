@@ -605,16 +605,27 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="focus_unreal_on_actor",
         description=(
-            "Focus the editor viewport camera on a specific actor and select it; selected reports "
-            "whether Unreal selected it. While PIE runs, Unreal's editor selects nothing, so the camera "
-            "moves but selected is false, with pie_active true and a warning."
+            "Focus the editor viewport camera on a specific actor and select it. With distance 0 the camera "
+            "looks at the center of the actor's bounds and backs off until they fit the view, assuming UE's "
+            "default 90-degree field of view on a 16:9 viewport (editor Python cannot read the viewport's); "
+            "distance reports the distance used, and fit_warning says when an actor without bounds got the "
+            "default 500 cm. selected reports whether Unreal selected it. While PIE runs, Unreal's editor "
+            "selects nothing, so the camera moves but selected is false, with pie_active true and a warning."
         ),
         response=UnrealFocusActorResponse,
         read_only=False,
         method="focus_on_actor",
         params=(
             ToolParam("actor_path", str, description="Full actor path to focus on."),
-            ToolParam("distance", float, 0.0, description="Camera distance from actor (0 = auto-fit)."),
+            ToolParam(
+                "distance",
+                float,
+                0.0,
+                description=(
+                    "How far behind the actor the camera stands, in cm, rising half as far and looking down at "
+                    "it (0 or less = auto-fit to the actor's bounds)."
+                ),
+            ),
         ),
     ),
     # -- Scene manipulation ---------------------------------------------------

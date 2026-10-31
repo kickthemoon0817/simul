@@ -14,7 +14,7 @@ import json
 import sys
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Coroutine, Dict, NoReturn, Optional, TypeVar
+from typing import Any, BinaryIO, Coroutine, Dict, NoReturn, Optional, TypeVar, Union
 
 import typer
 from rich.console import Console
@@ -199,6 +199,42 @@ def exit_if_failed(result: Any) -> None:
         raise typer.Exit(1)
 
 
+def _fail_not_utf8(source: str, exc: Union[UnicodeDecodeError, UnicodeEncodeError]) -> NoReturn:
+    """Exit 2 because script input is not UTF-8, naming the first byte that is not.
+
+    A ``UnicodeDecodeError`` (a file or stdin) points into the bytes read. A
+    ``UnicodeEncodeError`` (an inline argument, or a stdin that hands over
+    text) points at a lone surrogate: POSIX decodes argv bytes that are not
+    UTF-8 with surrogateescape, so U+DC80..U+DCFF stand for the bytes
+    0x80..0xFF the caller passed.
+
+    Args:
+        source: Where the script came from, completing "Script ...":
+            ``"file job.py"``, ``"from stdin"`` or ``"argument"``.
+        exc: The error strict UTF-8 raised on it.
+    """
+    if isinstance(exc, UnicodeDecodeError):
+        offset = exc.start
+        problem = f"byte 0x{exc.object[offset]:02x} ({exc.reason})"
+    else:
+        point = ord(exc.object[exc.start])
+        offset = len(exc.object[: exc.start].encode("utf-8"))
+        if 0xDC80 <= point <= 0xDCFF:
+            problem = f"byte 0x{point - 0xDC00:02x}"
+        else:
+            problem = f"lone surrogate U+{point:04X}"
+    fail(f"Script {source} is not valid UTF-8: {problem} at offset {offset}.", "InvalidEncoding", exit_code=2)
+
+
+def _require_utf8_text(source: str, text: str) -> str:
+    """Return ``text`` when it encodes as UTF-8, else exit 2 naming its first lone surrogate."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        _fail_not_utf8(source, exc)
+    return text
+
+
 def read_script_arg(script: Optional[str]) -> str:
     """Resolve a script argument that may be code, a ``.py`` path, or absent.
 
@@ -207,16 +243,35 @@ def read_script_arg(script: Optional[str]) -> str:
     is the code itself. The suffix is checked before touching the
     filesystem, since ``Path(code).is_file()`` on a long inline script
     raises ``OSError`` (file name too long) instead of returning False.
+
+    The script must be UTF-8 however it arrives, and stdin is read as bytes
+    so that neither the locale nor UTF-8 mode decides how it decodes. Input
+    that is not valid UTF-8 exits 2 naming its source and the first bad
+    byte, instead of raising a ``UnicodeDecodeError`` traceback or slipping
+    through as lone surrogates, which the script size limit counts at 3
+    bytes each. Valid input reads as before: a BOM stays a leading U+FEFF,
+    a file's line endings go through universal newlines, and stdin's are
+    kept as sent. A stdin replaced by a text stream with no ``buffer`` (an
+    ``io.StringIO``, which ``TextIOBase`` allows) is read as text and
+    checked as an argument is.
     """
     if script is None:
         if sys.stdin.isatty():
             fail(_SCRIPT_INPUT_HINT, "InputError")
-        return sys.stdin.read()
+        buffer: Optional[BinaryIO] = getattr(sys.stdin, "buffer", None)
+        if buffer is None:
+            return _require_utf8_text("from stdin", sys.stdin.read())
+        try:
+            return buffer.read().decode("utf-8")
+        except UnicodeDecodeError as exc:
+            _fail_not_utf8("from stdin", exc)
     if script.endswith(".py"):
         path = Path(script)
         try:
             if path.is_file():
                 return path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            _fail_not_utf8(f"file {script}", exc)
         except OSError:
             pass
-    return script
+    return _require_utf8_text("argument", script)

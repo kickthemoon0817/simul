@@ -710,8 +710,9 @@ class TestUnrealRuntimeSessionPhase2:
     # -- focus_on_actor --
 
     def test_focus_on_actor_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """focus_on_actor selects the actor and reads its location in one script,
-        then positions the camera and reads it back."""
+        """focus_on_actor selects the actor and reads its location and bounds in
+        one script, then positions the camera the given distance from the
+        actor's location, whatever its bounds, and reads it back."""
         session = self._make_session(monkeypatch)
         actor_path = "/Game/Maps/TestMap.TestMap:PersistentLevel.SM_Chair_1"
         calls_made: list = []
@@ -725,7 +726,13 @@ class TestUnrealRuntimeSessionPhase2:
             if fn == "ExecutePythonCommandEx":
                 scripts.append(parameters["PythonCommand"])
                 return python_json_response(
-                    {"location": [100.0, 200.0, 50.0], "selected": True, "pie_active": False}
+                    {
+                        "location": [100.0, 200.0, 50.0],
+                        "bounds_origin": [100.0, 200.0, 100.0],
+                        "bounds_extent": [40.0, 40.0, 50.0],
+                        "selected": True,
+                        "pie_active": False,
+                    }
                 )
             if fn == "SetLevelViewportCameraInfo":
                 camera_set.append(parameters)
@@ -741,12 +748,13 @@ class TestUnrealRuntimeSessionPhase2:
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
-        result = asyncio.run(session.focus_on_actor(actor_path=actor_path))
+        result = asyncio.run(session.focus_on_actor(actor_path=actor_path, distance=500.0))
 
         assert result == {
             "actor_path": actor_path,
             "camera_location": (150.0, 250.0, 350.0),
             "camera_rotation": (-20.0, 60.0, 0.0),
+            "distance": 500.0,
             "selected": True,
             "pie_active": False,
         }
@@ -756,7 +764,9 @@ class TestUnrealRuntimeSessionPhase2:
             "GetLevelViewportCameraInfo",
         ]
         assert repr(actor_path) in scripts[0] and "set_actor_selection_state" in scripts[0]
-        # 500 cm behind the actor and 250 cm above it, pitched down at it.
+        assert "get_actor_bounds" in scripts[0]
+        # 500 cm behind the actor's location and 250 cm above it, pitched down
+        # at it; the center of its bounds plays no part.
         assert camera_set == [
             {
                 "CameraLocation": {"X": -400.0, "Y": 200.0, "Z": 300.0},
