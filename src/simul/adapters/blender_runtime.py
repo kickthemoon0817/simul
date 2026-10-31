@@ -4338,7 +4338,14 @@ class BlenderRuntimeSession:
                 "as it is neither the scene camera nor a timeline marker's camera and "
                 f"{' and '.join(disablers)}"
             )
-            remedy = "make it the scene camera"
+            # As the scene camera too, a camera whose hide_viewport is animated
+            # is evaluated only while it is enabled in viewports
+            # (_viewport_disablers).
+            remedy = "make it the scene camera" + (
+                " and remove the animation of its hide_viewport"
+                if self._animates_visibility(camera)
+                else ""
+            )
         else:
             cause = (
                 f"although it is {role}, as {' and '.join(disablers)}: Blender "
@@ -4491,12 +4498,12 @@ class BlenderRuntimeSession:
         Whether Blender's depsgraph takes an object's hide_viewport for animated.
 
         Blender 5.0.1 (BKE_fcurves_id_cb) reads the F-curves of the action
-        slot the object is assigned, its drivers and the action slots of the
-        strips, meta strips' included, in its NLA tracks that are enabled: not
-        muted, and solo while a track is solo. A muted or empty F-curve
-        counts, as do a muted driver and a strip while NLA evaluation is off.
-        The action that tweaking an NLA strip stashes away counts in Blender
-        too, and is left out here.
+        slot the object is assigned, of the action and slot that tweaking an
+        NLA strip stashes away (_tweak_storage_fcurves), its drivers and the
+        action slots of the strips, meta strips' included, in its NLA tracks
+        that are enabled: not muted, and solo while a track is solo. A muted
+        or empty F-curve counts, as do a muted driver, a muted strip and a
+        strip while NLA evaluation is off.
 
         Args:
             obj: The object.
@@ -4508,6 +4515,7 @@ class BlenderRuntimeSession:
         if anim_data is None:
             return False
         fcurves = list(action_fcurves(anim_data, self._blender_version) or [])
+        fcurves.extend(self._tweak_storage_fcurves(anim_data))
         fcurves.extend(anim_data.drivers)
         tracks = list(anim_data.nla_tracks)
         solo = any(track.is_solo for track in tracks)
@@ -4523,6 +4531,42 @@ class BlenderRuntimeSession:
             # A strip holds an action and its slot as animation data does.
             fcurves.extend(action_fcurves(strip, self._blender_version) or [])
         return any(fcurve.data_path == "hide_viewport" for fcurve in fcurves)
+
+    def _tweak_storage_fcurves(self, anim_data: Any) -> List[Any]:
+        """
+        Return the F-curves through which the action that NLA tweak mode stashes away animates its ID.
+
+        While a strip is tweaked, the strip's action and slot are the assigned
+        ones, and the ID's own action waits in action_tweak_storage, its slot's
+        handle in action_slot_handle_tweak_storage (Blender 4.5 and later).
+        Blender 4.4 does not expose that handle, so each slot of the stashed
+        action counts there. On Blender 5.0.1 a scene camera whose stashed
+        action keyed its hide_viewport kept the matrix_world of its last
+        evaluation while its collection was disabled in viewports.
+
+        Args:
+            anim_data: The ID's animation_data.
+
+        Returns:
+            The F-curves; empty outside tweak mode, or when no action was
+            assigned on entering it.
+        """
+        action = anim_data.action_tweak_storage
+        if action is None:
+            return []
+        if self._blender_version < SLOTTED_ACTIONS_VERSION:
+            return list(action.fcurves)
+        from bpy_extras import anim_utils
+
+        handle = getattr(anim_data, "action_slot_handle_tweak_storage", None)
+        fcurves: List[Any] = []
+        for slot in action.slots:
+            if handle is not None and slot.handle != handle:
+                continue
+            channelbag = anim_utils.action_get_channelbag_for_slot(action, slot)
+            if channelbag is not None:
+                fcurves.extend(channelbag.fcurves)
+        return fcurves
 
     @staticmethod
     def _world_bound_box(obj: Any) -> List[List[float]]:

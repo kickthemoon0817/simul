@@ -3045,12 +3045,15 @@ class TestVisualObservationTools:
         Args:
             how: Taken as animating it: "keyframed" (in the camera's action
                 slot), "driven", "nla" (a strip of an NLA track), "meta_strip"
-                (a strip inside a meta strip) or "solo_muted_track" (a muted
-                track, but the solo one). Not taken so: "muted_track" (in a
-                muted NLA track only), "other_track_solo" (while another track
-                is solo), "other_slot" (in the slot of another ID that shares
-                the action), "no_slot" (the action assigns the camera no slot)
-                or "other_property" (keys its scale only).
+                (a strip inside a meta strip), "solo_muted_track" (a muted
+                track, but the solo one) or "tweak_storage" (in the camera's
+                own action, which tweaking a strip that keys its scale stashed
+                away). Not taken so: "muted_track" (in a muted NLA track
+                only), "other_track_solo" (while another track is solo),
+                "other_slot" (in the slot of another ID that shares the
+                action), "tweak_storage_other_slot" (the same, in the stashed
+                action), "no_slot" (the action assigns the camera no slot) or
+                "other_property" (keys its scale only).
 
         Returns:
             The animation data.
@@ -3059,6 +3062,21 @@ class TestVisualObservationTools:
         visibility = FakeAction({own: [FakeFCurve("hide_viewport")]})
         scale = FakeAction({own: [FakeFCurve("scale")]})
         strip = FakeNlaStrip(visibility, own)
+        shared = FakeAction(
+            {own: [FakeFCurve("location")], other: [FakeFCurve("hide_viewport")]}
+        )
+
+        def tweaking(stashed: FakeAction) -> FakeAnimData:
+            # Tweak mode assigns the tweaked strip's action and slot.
+            tweaked = FakeNlaStrip(scale, own)
+            return FakeAnimData(
+                scale,
+                own,
+                nla_tracks=[FakeNlaTrack([tweaked])],
+                tweak_storage=stashed,
+                tweak_slot=own,
+            )
+
         animations = {
             "keyframed": lambda: FakeAnimData(visibility, own),
             "driven": lambda: FakeAnimData(drivers=[FakeFCurve("hide_viewport")]),
@@ -3081,15 +3099,9 @@ class TestVisualObservationTools:
                     FakeNlaTrack([FakeNlaStrip(scale, own)], is_solo=True),
                 ]
             ),
-            "other_slot": lambda: FakeAnimData(
-                FakeAction(
-                    {
-                        own: [FakeFCurve("location")],
-                        other: [FakeFCurve("hide_viewport")],
-                    }
-                ),
-                own,
-            ),
+            "other_slot": lambda: FakeAnimData(shared, own),
+            "tweak_storage": lambda: tweaking(visibility),
+            "tweak_storage_other_slot": lambda: tweaking(shared),
             "no_slot": lambda: FakeAnimData(visibility, None),
             "other_property": lambda: FakeAnimData(scale, own),
         }
@@ -3100,7 +3112,15 @@ class TestVisualObservationTools:
         [("scene", "the scene camera"), ("marker", "a timeline marker's camera")],
     )
     @pytest.mark.parametrize(
-        "how", ["keyframed", "driven", "nla", "meta_strip", "solo_muted_track"]
+        "how",
+        [
+            "keyframed",
+            "driven",
+            "nla",
+            "meta_strip",
+            "solo_muted_track",
+            "tweak_storage",
+        ],
     )
     def test_set_camera_view_skips_the_check_for_a_scene_camera_whose_animated_hide_viewport_is_on(
         self,
@@ -3116,8 +3136,9 @@ class TestVisualObservationTools:
         On Blender 5.0.1, its hide_viewport keyframed, driven or keyed in an
         NLA strip, the reply put the scene camera, or a marker's camera, at
         (1, 2, 3) where it stood before, with placement_overridden true, for a
-        placement at (7, -7, 5) that a render through it kept. Blender reads
-        the strips inside a meta strip as it reads the others
+        placement at (7, -7, 5) that a render through it kept. Tweaking an NLA
+        strip, which stashed the keyed action away, left it as stale. Blender
+        reads the strips inside a meta strip as it reads the others
         (BKE_fcurves_id_cb); its Python API creates no meta strip.
         """
         side = _PartlyEvaluatedCamera(_track_to((5.0, 5.0, 0.0)))
@@ -3268,7 +3289,14 @@ class TestVisualObservationTools:
 
     @pytest.mark.parametrize(
         "how",
-        ["muted_track", "other_track_solo", "other_slot", "no_slot", "other_property"],
+        [
+            "muted_track",
+            "other_track_solo",
+            "other_slot",
+            "tweak_storage_other_slot",
+            "no_slot",
+            "other_property",
+        ],
     )
     def test_set_camera_view_checks_the_scene_camera_whose_hide_viewport_blender_does_not_take_as_animated(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, anim_utils: Any, how: str
@@ -3354,6 +3382,95 @@ class TestVisualObservationTools:
         )
 
         assert session._viewport_disablers(side) == reasons
+
+    @pytest.mark.parametrize(
+        ("how", "animated"),
+        [("action", True), ("strip", True), ("tweak_storage", True), ("other", False)],
+    )
+    def test_animates_visibility_reads_the_actions_of_blender_before_slotted_actions(
+        self, monkeypatch: pytest.MonkeyPatch, how: str, animated: bool
+    ) -> None:
+        """Before Blender 4.4 an action keeps its F-curves in Action.fcurves, and
+        neither animation data nor a strip has an action slot to read."""
+
+        def action(where: str) -> SimpleNamespace:
+            # Keys the location, and hide_viewport where ``how`` puts it.
+            paths = ["location"] + (["hide_viewport"] if how == where else [])
+            return SimpleNamespace(fcurves=[FakeFCurve(path) for path in paths])
+
+        strip = SimpleNamespace(action=action("strip"), strips=[])
+        side, view_layer = self._side_camera("enabled")
+        side.animation_data = SimpleNamespace(
+            action=action("action"),
+            action_tweak_storage=action("tweak_storage"),
+            drivers=[],
+            nla_tracks=[SimpleNamespace(mute=False, is_solo=False, strips=[strip])],
+        )
+        session = self._session_in(monkeypatch, view_layer, side, version=(4, 2, 0))
+
+        assert session._animates_visibility(side) is animated
+
+    def test_animates_visibility_reads_each_stashed_slot_on_blender_4_4(
+        self, monkeypatch: pytest.MonkeyPatch, anim_utils: Any
+    ) -> None:
+        """Blender 4.4 keeps the slot of the action that tweak mode stashes away
+        out of Python, so each of its slots counts there; 4.5 and later read
+        that one slot (action_slot_handle_tweak_storage)."""
+        side, view_layer = self._side_camera("enabled")
+        side.animation_data = self._visibility_animation("tweak_storage_other_slot")
+        session = self._session_in(monkeypatch, view_layer, side, version=BLENDER_5_0)
+        assert session._animates_visibility(side) is False
+
+        del side.animation_data.action_slot_handle_tweak_storage
+        session = self._session_in(monkeypatch, view_layer, side, version=(4, 4, 0))
+
+        assert session._animates_visibility(side) is True
+
+    @pytest.mark.parametrize(
+        ("how", "remedy"),
+        [
+            (
+                "keyframed",
+                "make it the scene camera and remove the animation of its hide_viewport",
+            ),
+            ("other_property", "make it the scene camera"),
+        ],
+    )
+    def test_skipped_check_of_another_camera_names_the_animation_of_its_hide_viewport(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        anim_utils: Any,
+        how: str,
+        remedy: str,
+    ) -> None:
+        """Made the scene camera, a camera whose hide_viewport is animated is skipped too.
+
+        On Blender 5.0.1 a camera whose keyed hide_viewport was on, made the
+        scene camera as the warning advised, kept the matrix_world of its last
+        evaluation, and its next placement was skipped again.
+        """
+        side = _PartlyEvaluatedCamera(_track_to((5.0, 5.0, 0.0)))
+        side.animation_data = self._visibility_animation(how)
+        root = FakeCollection("Scene Collection")
+        root.link(side)
+        session = self._session_in(
+            monkeypatch,
+            FakeViewLayer(FakeLayerCollection(root)),
+            side,
+            version=BLENDER_5_0,
+        )
+
+        result = session.set_camera_view(
+            [7.0, -7.0, 5.0], [1.1, 0.25, 0.78], camera_name="Side"
+        )
+
+        assert result["override_check"] == "skipped"
+        warning = result["warning"]
+        assert "neither the scene camera nor a timeline marker's camera" in warning
+        assert warning.endswith(
+            f"To check it, change those settings or {remedy}, then place it again."
+        )
 
     @pytest.mark.parametrize(
         "constraint",

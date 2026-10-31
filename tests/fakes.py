@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import itertools
 import math
 from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
@@ -806,12 +807,18 @@ class FakeFCurve:
 
 
 class FakeActionSlot:
-    """``bpy.types.ActionSlot`` stand-in (Blender 4.4+): which ID an action's F-curves animate."""
+    """``bpy.types.ActionSlot`` stand-in (Blender 4.4+): which ID an action's F-curves animate.
 
-    __slots__ = ("identifier",)
+    ``handle`` is the number that animation data stores to name its slot, as
+    ``AnimData.action_slot_handle_tweak_storage`` does; each slot gets its own.
+    """
+
+    __slots__ = ("identifier", "handle")
+    _handles = itertools.count(1)
 
     def __init__(self, identifier: str) -> None:
         self.identifier = identifier
+        self.handle = next(FakeActionSlot._handles)
 
 
 class FakeAction:
@@ -826,6 +833,11 @@ class FakeAction:
 
     def __init__(self, slots: Mapping[FakeActionSlot, Sequence[FakeFCurve]]) -> None:
         self.slot_fcurves = {slot: list(fcurves) for slot, fcurves in slots.items()}
+
+    @property
+    def slots(self) -> List[FakeActionSlot]:
+        """The action's slots."""
+        return list(self.slot_fcurves)
 
 
 class FakeNlaStrip:
@@ -858,13 +870,24 @@ class FakeNlaTrack:
 
 
 class FakeAnimData:
-    """``bpy.types.AnimData`` stand-in of Blender 4.4 and later: what animates an ID.
+    """``bpy.types.AnimData`` stand-in of Blender 4.5 and later: what animates an ID.
 
     ``action`` animates it through ``action_slot``, ``drivers`` are F-curves,
     and the strips of ``nla_tracks`` hold an action and a slot of their own.
+    In NLA tweak mode the tweaked strip's action and slot are assigned, and
+    the ID's own action and its slot's handle wait in
+    ``action_tweak_storage`` and ``action_slot_handle_tweak_storage`` (0 for
+    no slot).
     """
 
-    __slots__ = ("action", "action_slot", "drivers", "nla_tracks")
+    __slots__ = (
+        "action",
+        "action_slot",
+        "drivers",
+        "nla_tracks",
+        "action_tweak_storage",
+        "action_slot_handle_tweak_storage",
+    )
 
     def __init__(
         self,
@@ -872,11 +895,17 @@ class FakeAnimData:
         action_slot: Optional[FakeActionSlot] = None,
         drivers: Sequence[FakeFCurve] = (),
         nla_tracks: Sequence[FakeNlaTrack] = (),
+        tweak_storage: Optional[FakeAction] = None,
+        tweak_slot: Optional[FakeActionSlot] = None,
     ) -> None:
         self.action = action
         self.action_slot = action_slot
         self.drivers = list(drivers)
         self.nla_tracks = list(nla_tracks)
+        self.action_tweak_storage = tweak_storage
+        self.action_slot_handle_tweak_storage = (
+            0 if tweak_slot is None else tweak_slot.handle
+        )
 
 
 def fake_anim_utils() -> ModuleType:
