@@ -7,7 +7,25 @@ from types import ModuleType
 
 import pytest
 
-from tests.fakes import fake_mathutils
+from tests.fakes import fake_anim_utils, fake_mathutils
+
+
+@pytest.fixture
+def anim_utils(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    """Install the ``bpy_extras.anim_utils`` stand-in that reads a ``FakeAction``.
+
+    The Blender runtime reads the F-curves of an action slot through it on
+    Blender 4.4 and later.
+
+    Returns:
+        The installed module.
+    """
+    module = fake_anim_utils()
+    package = ModuleType("bpy_extras")
+    setattr(package, "anim_utils", module)
+    monkeypatch.setitem(sys.modules, "bpy_extras", package)
+    monkeypatch.setitem(sys.modules, "bpy_extras.anim_utils", module)
+    return module
 
 
 @pytest.fixture

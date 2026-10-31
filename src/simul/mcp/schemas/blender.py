@@ -510,8 +510,9 @@ _OVERRIDE_CHECK = (
     "'done' when Blender evaluated the camera after the placement, so "
     "placement_overridden tells whether it stays there. 'skipped' for a camera disabled "
     "in viewports (itself, or its collections disabled in viewports or excluded from the "
-    "view layer) that is neither the scene camera nor a timeline marker's camera, when "
-    "Blender did not evaluate it after the placement or its evaluated pose did not change "
+    "view layer) that is neither the scene camera nor a timeline marker's camera, or is "
+    "one with an animated hide_viewport, when Blender did not evaluate it after the "
+    "placement or its evaluated pose did not change "
     "with the placement: Blender evaluates such a camera only when something visible "
     "depends on it, and only in part when nothing visible reads its transform. "
     "placement_overridden is then null, the reported pose is the requested placement, "
@@ -1704,6 +1705,7 @@ class BlenderCreateMeshFromDataResponse(BaseModel):
     vertex_count: int = Field(..., description="Number of vertices created")
     edge_count: int = Field(..., description="Number of edges created")
     face_count: int = Field(..., description="Number of faces created")
+
 
 __all__ = [
     "SCRIPT_OUTPUT_CHARS_DEFAULT",
