@@ -768,7 +768,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         description=(
             "Get a Material's or Material Instance's scalar, vector and texture parameters with their "
             "values (an instance's: the value it renders with, and whether it overrides it), its parent "
-            "and base material, material domain and blend mode."
+            "and base material, material domain and blend mode. A parameter inside the material's "
+            "Material Layers is listed for its layer or blend (association and index), with that "
+            "layer's value."
         ),
         response=UnrealGetMaterialInfoResponse,
         read_only=True,
@@ -780,10 +782,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="set_unreal_material_params",
         description=(
             "Set scalar, vector and texture parameters on a Material Instance Constant (left unsaved) "
-            "and read them back; applied holds the values read back. The call fails, writing nothing, "
-            "when the material lacks a named parameter or a texture does not load, and fails when a "
-            "value reads back different, keeping what applied; not_applied gives each reason. A name "
-            "found only inside a Material Layer gets a global override, which leaves the layer unchanged."
+            "and read them back; applied holds the values read back. Only global parameters are set: "
+            "the call fails, writing nothing, when the material has no global parameter by a given "
+            "name (a name only its Material Layers have included) or a texture does not load, and "
+            "fails when a value reads back different, keeping what applied; not_applied gives each "
+            "reason."
         ),
         response=UnrealSetMaterialParamsResponse,
         read_only=False,

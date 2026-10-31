@@ -477,32 +477,71 @@ def create(parent, name, folder):
 print(json.dumps(create(**args)))
 """
 
+# Defines material_parameters(material): every scalar, vector and texture
+# parameter Unreal lists for a Material or Material Instance, by kind, as
+# (name, association, index, value). The association is "global" for the
+# material's own parameter, "layer" or "blend" for one inside its Material
+# Layers, with the layer or blend index (-1 for a global parameter); the value
+# is what the material renders with for that parameter. MaterialEditingLibrary
+# lists a Material Layer's parameters with the material's own by name only,
+# and reads and writes by name, which addresses the global parameter (with an
+# association argument, layer 0, or a blend at index -1, which fails
+# check(NewIndex > 0) in RemapLayerIndex for an instance of a layered material
+# and took the editor down; observed on UE 5.7.4). So a transient
+# Material Instance Dynamic parented to the material copies its parameters:
+# UMaterialInstance::CopyMaterialInstanceParameters walks the parameter list
+# MaterialEditingLibrary names from (GetAllParameterInfoOfType, which the
+# instance shares with its parent) and stores each with its full
+# FMaterialParameterInfo and the material's value for it, its overrides
+# included, in the instance's own parameter arrays. A dynamic instance takes
+# only a Material or a Material Instance Constant as its parent
+# (UMaterialInstance::SetParentInternal leaves it without one otherwise, and it
+# would list the default material's parameters), so the copy of a Material
+# Instance Dynamic is parented to that one's parent, whose parameters it lists,
+# or without one to the default material Unreal renders it with. Nothing is
+# written to the material, and the copy works the same during Play In Editor.
+MATERIAL_PARAMETERS = """
+ASSOCIATIONS = {"GLOBAL_PARAMETER": "global", "LAYER_PARAMETER": "layer", "BLEND_PARAMETER": "blend"}
+PARAMETER_VALUES = {"scalar": "scalar_parameter_values", "vector": "vector_parameter_values",
+                    "texture": "texture_parameter_values"}
+
+def parameter_key(entry):
+    info = entry.parameter_info
+    return str(info.name), ASSOCIATIONS[info.association.name], info.index
+
+def material_parameters(material):
+    parent = material
+    if isinstance(material, unreal.MaterialInstance) and not isinstance(material, unreal.MaterialInstanceConstant):
+        parent = material.get_editor_property("parent")
+        if parent is None:
+            parent = material.get_base_material()
+    copy = unreal.MaterialLibrary.create_dynamic_material_instance(
+        None, parent, creation_flags=unreal.MIDCreationFlags.TRANSIENT)
+    copy.copy_material_instance_parameters(material, False)
+    return {kind: [parameter_key(entry) + (entry.parameter_value,) for entry in copy.get_editor_property(values)]
+            for kind, values in PARAMETER_VALUES.items()}
+"""
+
 # Expects ``args`` = {"path"}: a Material or Material Instance asset. Reads its
 # scalar, vector and texture parameters through editor scripting: Remote
 # Control's /remote/object/describe answered with the asset's object properties
-# instead, and no parent (observed on UE 5.7.4). A Material reports each
-# parameter's default (MaterialEditingLibrary); an instance reports the value
-# it renders with, its own override or what it inherits, and whether it
-# overrides it, as the Material Instance editor shows. Overrides recorded for a
-# name that is no longer a parameter of the material are not reported, as the
-# editor does not show them. Unreal lists a parameter name once per Material
-# Layer it appears in, and its Python API reads parameters by name only, so a
-# name is reported once, with its global value, and a warning names each one
-# listed more than once. The blend mode is an instance's override, else its
-# parent's, and opaque for an instance without a parent (as
-# UMaterialInstance::UpdateOverridableBaseProperties sets it); the domain is
-# the base material's. Loads through unreal.load_asset, so it answers the same
-# during Play In Editor.
+# instead, and no parent (observed on UE 5.7.4). Each parameter is reported
+# with its association and layer or blend index (MATERIAL_PARAMETERS), so a
+# name the material and its Material Layers share is reported once for each,
+# with that layer's value. A Material reports each parameter's default; an
+# instance reports the value it renders with, its own override or what it
+# inherits, and whether it overrides it, as the Material Instance editor shows.
+# Overrides recorded for a name that is no longer a parameter of the material
+# are not reported, as the editor does not show them. The blend mode is an
+# instance's override, else its parent's, and opaque for an instance without a
+# parent (as UMaterialInstance::UpdateOverridableBaseProperties sets it); the
+# domain is the base material's. Loads through unreal.load_asset, so it answers
+# the same during Play In Editor.
 MATERIAL_INFO = """
 import json, unreal
-MEL = unreal.MaterialEditingLibrary
-NAMES = {"scalar": MEL.get_scalar_parameter_names, "vector": MEL.get_vector_parameter_names,
-         "texture": MEL.get_texture_parameter_names}
-DEFAULTS = {"scalar": MEL.get_material_default_scalar_parameter_value,
-            "vector": MEL.get_material_default_vector_parameter_value,
-            "texture": MEL.get_material_default_texture_parameter_value}
-OVERRIDES = {"scalar": "scalar_parameter_values", "vector": "vector_parameter_values",
-             "texture": "texture_parameter_values"}
+""" + MATERIAL_PARAMETERS + """
+# The material's own parameters first, then each Material Layer's, then each blend's.
+ORDER = {"global": 0, "layer": 1, "blend": 2}
 
 def path_of(asset):
     return asset.get_path_name() if asset is not None else None
@@ -514,18 +553,10 @@ def plain(value):
         return path_of(value)
     return value
 
-def value_of(material, kind, name):
-    if not isinstance(material, unreal.MaterialInstance):
-        return DEFAULTS[kind](material, name)
-    if kind == "scalar":
-        return material.get_scalar_parameter_value(name)
-    if kind == "vector":
-        return material.get_vector_parameter_value(name)
-    return material.get_texture_parameter_value(name)
-
 def overridden(instance, kind):
-    return {str(entry.parameter_info.name).lower() for entry in instance.get_editor_property(OVERRIDES[kind])
-            if entry.parameter_info.association.name == "GLOBAL_PARAMETER"}
+    # Parameter names ignore case, as Unreal compares them.
+    return {(name.lower(), association, index) for name, association, index
+            in map(parameter_key, instance.get_editor_property(PARAMETER_VALUES[kind]))}
 
 def blend_mode(material):
     while isinstance(material, unreal.MaterialInstance):
@@ -550,33 +581,22 @@ def info(path):
                 "error": path + " is a " + material.get_class().get_name()
                          + ", not a Material or Material Instance"}
     instance = isinstance(material, unreal.MaterialInstance)
-    parameters, repeated = [], []
+    found = material_parameters(material)
+    parameters = []
     for kind in ("scalar", "vector", "texture"):
         overrides = overridden(material, kind) if instance else set()
-        # Parameter names ignore case, as Unreal compares them.
-        first = {}
-        for name in sorted((str(name) for name in NAMES[kind](material)), key=str.lower):
-            key = name.lower()
-            if key in first:
-                label = first[key] + " (" + kind + ")"
-                if label not in repeated:
-                    repeated.append(label)
-                continue
-            first[key] = name
-            entry = {"name": name, "param_type": kind, "value": plain(value_of(material, kind, name))}
-            entry["overridden"] = name.lower() in overrides if instance else None
-            parameters.append(entry)
+        for name, association, index, value in sorted(
+                found[kind], key=lambda parameter: (ORDER[parameter[1]], parameter[2], parameter[0].lower())):
+            parameters.append({
+                "name": name, "param_type": kind, "association": association,
+                "index": None if association == "global" else index, "value": plain(value),
+                "overridden": (name.lower(), association, index) in overrides if instance else None})
     base = material.get_base_material()
-    result = {"material_path": material.get_path_name(), "class_name": material.get_class().get_name(),
-              "parent_path": path_of(material.get_editor_property("parent")) if instance else None,
-              "base_material_path": path_of(base),
-              "material_domain": base.get_editor_property("material_domain").name if base is not None else None,
-              "blend_mode": blend_mode(material), "parameters": parameters}
-    if repeated:
-        result["warning"] = ("Unreal lists " + ", ".join(repeated) + " more than once, from Material Layers. Its "
-                             "Python API reads parameters by name only, so each is listed once, with its global "
-                             "value, not a layer's")
-    return result
+    return {"material_path": material.get_path_name(), "class_name": material.get_class().get_name(),
+            "parent_path": path_of(material.get_editor_property("parent")) if instance else None,
+            "base_material_path": path_of(base),
+            "material_domain": base.get_editor_property("material_domain").name if base is not None else None,
+            "blend_mode": blend_mode(material), "parameters": parameters}
 
 print(json.dumps(info(**args)))
 """
@@ -629,20 +649,20 @@ print(json.dumps(result))
 # one reads back different (MaterialParamsNotApplied); the values that did
 # apply stay written and are reported in applied, as lights do. A setter also
 # adds an override for a name the material has no parameter of, so before
-# anything is written the names are matched against the material's parameters
-# (ignoring case, as Unreal's names do) and the textures are loaded: a name the
-# material lacks or a texture that does not load refuses the whole request
-# (ValidationError, nothing written, each reason in not_applied). Unreal lists
-# a Material Layer's parameters with the material's own and its Python API
-# writes by name only, so a name found only in a layer gets a global override,
-# which leaves the layer as it was. Assets load through unreal.load_asset:
-# EditorAssetLibrary loads nothing during PIE. The instance is left unsaved, as
-# an edit in its editor is.
+# anything is written the names are matched against the material's global
+# parameters (MATERIAL_PARAMETERS; ignoring case, as Unreal's names do) and the
+# textures are loaded: a name the material lacks or a texture that does not
+# load refuses the whole request (ValidationError, nothing written, each reason
+# in not_applied). So does a name only the material's Material Layers have:
+# the setters write by name, and the global override they would add reads back
+# as set while the layer renders as it was (observed on UE 5.7.4). A name both
+# the material and a layer have sets the material's own parameter. Assets load
+# through unreal.load_asset: EditorAssetLibrary loads nothing during PIE. The
+# instance is left unsaved, as an edit in its editor is.
 SET_MATERIAL_PARAMS = """
 import json, struct, unreal
+""" + MATERIAL_PARAMETERS + """
 MEL = unreal.MaterialEditingLibrary
-PARAMETER_NAMES = {"scalar": MEL.get_scalar_parameter_names, "vector": MEL.get_vector_parameter_names,
-                   "texture": MEL.get_texture_parameter_names}
 LISTED = 20
 
 def stored(value):
@@ -673,12 +693,22 @@ def read(instance, kind, name):
     texture = MEL.get_material_instance_texture_parameter_value(instance, name)
     return texture.get_path_name() if texture is not None else None
 
-def missing(kind, name, names):
+def missing(kind, name, names, layered):
+    # names: the material's global parameters of this kind; layered: whether its layers have any.
+    scope = "global " + kind if layered else kind
     if not names:
-        return "the material has no " + kind + " parameters"
+        return "the material has no " + scope + " parameters"
     listed = ", ".join(names[:LISTED]) + (", ..." if len(names) > LISTED else "")
     return ("the material has no " + kind + " parameter named " + repr(name)
-            + " (its " + kind + " parameters: " + listed + ")")
+            + " (its " + scope + " parameters: " + listed + ")")
+
+def in_layers(kind, name, places):
+    # places: (association, index) of each layer and blend parameter by that name.
+    where = ", ".join(association + " " + str(index) for association, index
+                      in sorted(places, key=lambda place: (place[0] != "layer", place[1])))
+    return ("only the material's Material Layers have a " + kind + " parameter named " + repr(name)
+            + " (" + where + "), and this tool sets global parameters only: a global override by that "
+            "name would not change them")
 
 def described(reasons):
     return "; ".join(name + " (" + kind + "): " + reason
@@ -695,17 +725,23 @@ def set_params(path, values):
         if isinstance(instance, unreal.Material):
             error += "; create an instance of it with create_unreal_material_instance and set that"
         return {"success": False, "error_type": "InvalidAssetType", "error": error}
+    found = material_parameters(instance)
     pending, refused = [], {}
     for kind, requested in values.items():
-        # Unreal lists a name once per layer it appears in; names ignore case.
-        by_key = {}
-        for name in PARAMETER_NAMES[kind](instance):
-            by_key.setdefault(str(name).lower(), str(name))
+        # The material's own parameters, and where its layers have each name; names ignore case.
+        by_key, layers = {}, {}
+        for name, association, index, _ in found[kind]:
+            if association == "global":
+                by_key.setdefault(name.lower(), name)
+            else:
+                layers.setdefault(name.lower(), []).append((association, index))
         names = sorted(by_key.values(), key=str.lower)
         for name, value in requested.items():
             parameter = by_key.get(name.lower())
             if parameter is None:
-                refused.setdefault(kind, {})[name] = missing(kind, name, names)
+                places = layers.get(name.lower())
+                refused.setdefault(kind, {})[name] = (
+                    in_layers(kind, name, places) if places else missing(kind, name, names, bool(layers)))
                 continue
             if kind == "texture":
                 texture = unreal.load_asset(value)

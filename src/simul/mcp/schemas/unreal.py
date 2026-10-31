@@ -686,11 +686,27 @@ class UnrealMaterialParameterInfo(BaseModel):
 
     name: str = Field(..., description="Parameter name")
     param_type: str = Field(..., description="scalar | vector | texture")
+    association: str = Field(
+        "global",
+        description=(
+            "global (the material's own parameter), layer (inside one of its Material Layers) or blend "
+            "(inside a layer blend)"
+        ),
+    )
+    index: Optional[int] = Field(
+        None,
+        description=(
+            "The Material Layer or layer blend the parameter belongs to, as Unreal numbers them: layer 0 "
+            "is the bottom layer, and blend i blends layer i + 1 onto the layers below; null for a global "
+            "parameter"
+        ),
+    )
     value: Any = Field(
         None,
         description=(
             "A float (scalar), [r, g, b, a] (vector) or a texture asset path (texture; null for none): "
-            "a Material's default, or the value an instance renders with, its override or what it inherits"
+            "a Material's default, or the value an instance renders with, its override or what it "
+            "inherits; a layer or blend parameter's for that layer or blend"
         ),
     )
     overridden: Optional[bool] = Field(
@@ -727,13 +743,10 @@ class UnrealGetMaterialInfoResponse(BaseModel):
     )
     parameters: List[UnrealMaterialParameterInfo] = Field(
         default_factory=list,
-        description="Scalar, vector and texture parameters, by kind and then name, each name once",
-    )
-    warning: Optional[str] = Field(
-        None,
         description=(
-            "Names Unreal lists more than once, from Material Layers, each listed once with its global "
-            "value since Unreal's Python API reads parameters by name only; null when there are none"
+            "Scalar, vector and texture parameters, by kind; within a kind the material's own (global) "
+            "parameters, then each Material Layer's and each blend's in index order, each by name. A name "
+            "the material and its layers share is listed once for each"
         ),
     )
 
@@ -758,8 +771,9 @@ class UnrealSetMaterialParamsResponse(BaseModel):
         default_factory=dict,
         description=(
             "By kind and parameter name, why a requested parameter was not set: refused before anything "
-            "was written (the material has no parameter of that kind by that name, the texture does not "
-            "load, a malformed value), or read back different after the write. Empty when the call succeeds"
+            "was written (the material has no global parameter of that kind by that name, or only its "
+            "Material Layers have one; the texture does not load; a malformed value), or read back "
+            "different after the write. Empty when the call succeeds"
         ),
     )
 
