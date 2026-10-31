@@ -290,8 +290,15 @@ Behaviour worth knowing:
   unless it is the scene camera, a timeline marker binds it, or something
   visible depends on its transform (a child, or a constraint or driver that
   reads it); its constraints then do not run there, although a render through
-  it applies them. Such a disabled camera is checked when Blender holds an
-  evaluated copy of it whose pose changed with the placement. Otherwise
+  it applies them. The scene camera and a marker's camera lose that exception
+  while their `hide_viewport` is animated (keyframes, a driver, or a strip in
+  an NLA track that plays: not muted, or the solo track when there is one)
+  and a collection not excluded from the view layer holds them: Blender then
+  skips such a camera while its
+  `hide_viewport` is on at the current frame, or while each of those
+  collections is disabled in viewports. Such a disabled camera is checked
+  when Blender holds an evaluated copy of it whose pose changed with the
+  placement. Otherwise
   `override_check` is `"skipped"`, `placement_overridden` is `null`, the
   reported pose is the requested placement, unchecked, `constraints_applied`
   lists the constraints that apply when Blender evaluates it, and `warning`

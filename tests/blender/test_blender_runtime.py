@@ -13,18 +13,28 @@ import pytest
 from simul.adapters import blender_runtime
 from simul.config import SecurityConfig, Settings
 from tests.fakes import (
+    FakeAction,
+    FakeActionSlot,
+    FakeAnimData,
     FakeCollection,
     FakeConstraint,
     FakeDepsgraph,
     FakeEuler,
+    FakeFCurve,
     FakeLayerCollection,
     FakeMatrix,
+    FakeNlaStrip,
+    FakeNlaTrack,
     FakePropArray,
     FakeTransformObject,
     FakeVector,
     FakeViewLayer,
     euler_matrix,
 )
+
+# The release the camera rules were measured on; it keeps an action's
+# F-curves per action slot.
+BLENDER_5_0 = (5, 0, 1)
 
 
 def _box(low: float = -1.0, high: float = 1.0) -> List[FakePropArray]:
@@ -2694,10 +2704,15 @@ class TestVisualObservationTools:
         *objects: Any,
         left_out: Sequence[Any] = (),
         marker_cameras: Sequence[Any] = (),
+        scene_camera: str = "Camera",
+        version: tuple = (4, 1, 0),
     ) -> blender_runtime.BlenderRuntimeSession:
-        """A session whose scene camera is "Camera", in ``view_layer``."""
+        """A session on Blender ``version`` whose scene camera is ``scene_camera``
+        (by default "Camera", added here), in ``view_layer``."""
         fake_bpy = self._make_fake_bpy_with_camera(
             objects=[self._make_camera_object(), *objects],
+            camera_name=scene_camera,
+            version=version,
             view_layer=view_layer,
             left_out=left_out,
             marker_cameras=marker_cameras,
@@ -2960,7 +2975,7 @@ class TestVisualObservationTools:
         assert result["override_check"] == "done"
         assert result["placement_overridden"] is True
         assert "override the requested placement" in result["warning"]
-        assert blender_runtime.BlenderRuntimeSession._viewport_disablers(side) == []
+        assert session._viewport_disablers(side) == []
 
     def test_set_camera_view_checks_the_scene_camera_disabled_in_viewports(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
@@ -2995,9 +3010,9 @@ class TestVisualObservationTools:
         self, monkeypatch: pytest.MonkeyPatch, how: str, reasons: List[str]
     ) -> None:
         side, view_layer = self._side_camera(how)
-        self._session_in(monkeypatch, view_layer, side)
+        session = self._session_in(monkeypatch, view_layer, side)
 
-        disablers = blender_runtime.BlenderRuntimeSession._viewport_disablers(side)
+        disablers = session._viewport_disablers(side)
 
         assert disablers == reasons
 
@@ -3008,9 +3023,454 @@ class TestVisualObservationTools:
         root = FakeCollection("Scene Collection", hide_viewport=True)
         side, _ = self._side_camera("nowhere")
         root.link(side)
-        self._session_in(monkeypatch, FakeViewLayer(FakeLayerCollection(root)), side)
+        session = self._session_in(
+            monkeypatch, FakeViewLayer(FakeLayerCollection(root)), side
+        )
 
-        assert blender_runtime.BlenderRuntimeSession._viewport_disablers(side) == []
+        assert session._viewport_disablers(side) == []
+
+    # -- the scene camera or a marker's camera, its visibility animated -----
+    # Blender evaluates the scene camera and a marker's camera whatever their
+    # visibility, unless their hide_viewport is animated: Blender 5.0.1 then
+    # built such a camera through its base in the view layer and, while that
+    # base was disabled in viewports, kept the matrix_world of its last
+    # evaluation after a placement, as _PartlyEvaluatedCamera does, while a
+    # render through it applied its constraints at the placement.
+
+    @staticmethod
+    def _visibility_animation(how: str) -> FakeAnimData:
+        """
+        Animation data that Blender's depsgraph does, or does not, take as animating hide_viewport.
+
+        Args:
+            how: Taken as animating it: "keyframed" (in the camera's action
+                slot), "driven", "nla" (a strip of an NLA track), "meta_strip"
+                (a strip inside a meta strip), "solo_muted_track" (a muted
+                track, but the solo one) or "tweak_storage" (in the camera's
+                own action, which tweaking a strip that keys its scale stashed
+                away). Not taken so: "muted_track" (in a muted NLA track
+                only), "other_track_solo" (while another track is solo),
+                "other_slot" (in the slot of another ID that shares the
+                action), "tweak_storage_other_slot" (the same, in the stashed
+                action), "no_slot" (the action assigns the camera no slot) or
+                "other_property" (keys its scale only).
+
+        Returns:
+            The animation data.
+        """
+        own, other = FakeActionSlot("OBSide"), FakeActionSlot("OBOther")
+        visibility = FakeAction({own: [FakeFCurve("hide_viewport")]})
+        scale = FakeAction({own: [FakeFCurve("scale")]})
+        strip = FakeNlaStrip(visibility, own)
+        shared = FakeAction(
+            {own: [FakeFCurve("location")], other: [FakeFCurve("hide_viewport")]}
+        )
+
+        def tweaking(stashed: FakeAction) -> FakeAnimData:
+            # Tweak mode assigns the tweaked strip's action and slot.
+            tweaked = FakeNlaStrip(scale, own)
+            return FakeAnimData(
+                scale,
+                own,
+                nla_tracks=[FakeNlaTrack([tweaked])],
+                tweak_storage=stashed,
+                tweak_slot=own,
+            )
+
+        animations = {
+            "keyframed": lambda: FakeAnimData(visibility, own),
+            "driven": lambda: FakeAnimData(drivers=[FakeFCurve("hide_viewport")]),
+            "nla": lambda: FakeAnimData(nla_tracks=[FakeNlaTrack([strip])]),
+            "meta_strip": lambda: FakeAnimData(
+                nla_tracks=[FakeNlaTrack([FakeNlaStrip(strips=[strip])])]
+            ),
+            "solo_muted_track": lambda: FakeAnimData(
+                nla_tracks=[
+                    FakeNlaTrack([strip], mute=True, is_solo=True),
+                    FakeNlaTrack([FakeNlaStrip(scale, own)]),
+                ]
+            ),
+            "muted_track": lambda: FakeAnimData(
+                nla_tracks=[FakeNlaTrack([strip], mute=True)]
+            ),
+            "other_track_solo": lambda: FakeAnimData(
+                nla_tracks=[
+                    FakeNlaTrack([strip]),
+                    FakeNlaTrack([FakeNlaStrip(scale, own)], is_solo=True),
+                ]
+            ),
+            "other_slot": lambda: FakeAnimData(shared, own),
+            "tweak_storage": lambda: tweaking(visibility),
+            "tweak_storage_other_slot": lambda: tweaking(shared),
+            "no_slot": lambda: FakeAnimData(visibility, None),
+            "other_property": lambda: FakeAnimData(scale, own),
+        }
+        return animations[how]()
+
+    @pytest.mark.parametrize(
+        ("role", "name"),
+        [("scene", "the scene camera"), ("marker", "a timeline marker's camera")],
+    )
+    @pytest.mark.parametrize(
+        "how",
+        [
+            "keyframed",
+            "driven",
+            "nla",
+            "meta_strip",
+            "solo_muted_track",
+            "tweak_storage",
+        ],
+    )
+    def test_set_camera_view_skips_the_check_for_a_scene_camera_whose_animated_hide_viewport_is_on(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        anim_utils: Any,
+        how: str,
+        role: str,
+        name: str,
+    ) -> None:
+        """The reply gave the matrix the camera kept from its last evaluation.
+
+        On Blender 5.0.1, its hide_viewport keyframed, driven or keyed in an
+        NLA strip, the reply put the scene camera, or a marker's camera, at
+        (1, 2, 3) where it stood before, with placement_overridden true, for a
+        placement at (7, -7, 5) that a render through it kept. Tweaking an NLA
+        strip, which stashed the keyed action away, left it as stale. Blender
+        reads the strips inside a meta strip as it reads the others
+        (BKE_fcurves_id_cb); its Python API creates no meta strip.
+        """
+        side = _PartlyEvaluatedCamera(_track_to((5.0, 5.0, 0.0)))
+        side.animation_data = self._visibility_animation(how)
+        root = FakeCollection("Scene Collection")
+        root.link(side)
+        bound: Dict[str, Any] = (
+            {"scene_camera": "Side"} if role == "scene" else {"marker_cameras": [side]}
+        )
+        session = self._session_in(
+            monkeypatch,
+            FakeViewLayer(FakeLayerCollection(root)),
+            side,
+            version=BLENDER_5_0,
+            **bound,
+        )
+        location, rotation = [7.0, -7.0, 5.0], [1.1, 0.25, 0.78]
+
+        result = session.set_camera_view(location, rotation, camera_name="Side")
+
+        assert list(side.matrix_world.translation) == pytest.approx([1.0, 2.0, 3.0])
+        assert result["override_check"] == "skipped"
+        assert result["placement_overridden"] is None
+        assert result["location"] == pytest.approx(location)
+        assert result["rotation_euler"] == pytest.approx(rotation)
+        assert result["constraints_applied"] == [
+            {"name": "Track To", "type": "TRACK_TO"}
+        ]
+        warning = result["warning"]
+        assert warning.startswith(
+            f"Blender may not evaluate camera 'Side' for the viewport, although it is "
+            f"{name}, as its hide_viewport is animated and on at this frame: Blender "
+            "evaluates a camera whose hide_viewport is animated only while it is "
+            "enabled in viewports. Its evaluated pose did not change with the "
+            "placement"
+        )
+        assert warning.endswith(
+            "To check it, change those settings or remove the animation of its "
+            "hide_viewport, then place it again."
+        )
+
+    @pytest.mark.parametrize("role", ["scene", "marker"])
+    def test_set_camera_view_skips_the_check_for_a_scene_camera_with_animated_visibility_in_a_disabled_collection(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        anim_utils: Any,
+        role: str,
+    ) -> None:
+        """With its hide_viewport animated, it needs a collection enabled in viewports too.
+
+        On Blender 5.0.1 such a camera kept the matrix_world of its last
+        evaluation while its hide_viewport was off and its only collection was
+        disabled in viewports.
+        """
+        side = _PartlyEvaluatedCamera(_track_to((5.0, 5.0, 0.0)))
+        side.hide_viewport = False
+        side.animation_data = self._visibility_animation("keyframed")
+        cameras = FakeCollection("Cameras", hide_viewport=True)
+        cameras.link(side)
+        view_layer = FakeViewLayer(
+            FakeLayerCollection(
+                FakeCollection("Scene Collection"), [FakeLayerCollection(cameras)]
+            )
+        )
+        bound: Dict[str, Any] = (
+            {"scene_camera": "Side"} if role == "scene" else {"marker_cameras": [side]}
+        )
+        session = self._session_in(
+            monkeypatch, view_layer, side, version=BLENDER_5_0, **bound
+        )
+
+        result = session.set_camera_view(
+            [7.0, -7.0, 5.0], [1.1, 0.25, 0.78], camera_name="Side"
+        )
+
+        assert result["override_check"] == "skipped"
+        assert result["placement_overridden"] is None
+        assert (
+            "as its hide_viewport is animated and collection 'Cameras' is disabled in "
+            "viewports: Blender evaluates a camera whose hide_viewport is animated only "
+            "while it is enabled in viewports."
+        ) in result["warning"]
+
+    def test_focus_on_object_skips_the_check_for_a_scene_camera_whose_animated_hide_viewport_is_on(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, anim_utils: Any
+    ) -> None:
+        """The reply gives the framing placement, not the matrix Blender kept."""
+        side = _PartlyEvaluatedCamera(_track_to((6.0, 6.0, 0.0)))
+        side.animation_data = self._visibility_animation("keyframed")
+        root = FakeCollection("Scene Collection")
+        root.link(side)
+        session = self._session_in(
+            monkeypatch,
+            FakeViewLayer(FakeLayerCollection(root)),
+            side,
+            self._cube(),
+            scene_camera="Side",
+            version=BLENDER_5_0,
+        )
+
+        result = session.focus_on_object("Cube", camera_name="Side")
+
+        diagonal = np.array([0.0, -math.sqrt(0.5), math.sqrt(0.5)])
+        assert result["camera_location"] == pytest.approx(
+            list(diagonal * result["distance"])
+        )
+        rotation = blender_runtime.BlenderRuntimeSession._look_at_rotation(
+            result["camera_location"], [0.0, 0.0, 0.0]
+        )
+        assert result["camera_rotation_euler"] == pytest.approx(list(rotation))
+        assert result["placement_overridden"] is None
+        assert result["override_check"] == "skipped"
+        assert (
+            "although it is the scene camera, as its hide_viewport is animated and on "
+            "at this frame" in result["warning"]
+        )
+
+    def test_set_camera_view_checks_a_scene_camera_with_animated_visibility_something_visible_depends_on(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, anim_utils: Any
+    ) -> None:
+        """Blender evaluates it in full when a visible object needs its transform.
+
+        On Blender 5.0.1 the scene camera whose animated hide_viewport was on,
+        parent of a visible object, was turned by its Track To in the viewport
+        depsgraph; its pose changed with the placement, so the check runs.
+        """
+        side, view_layer = self._side_camera("enabled", _track_to((5.0, 5.0, 0.0)))
+        side.hide_viewport = True
+        side.animation_data = self._visibility_animation("keyframed")
+        # Not stale: the fake depsgraph evaluates it in full, as Blender does then.
+        session = self._session_in(
+            monkeypatch, view_layer, side, scene_camera="Side", version=BLENDER_5_0
+        )
+
+        result = session.set_camera_view(
+            [7.0, -7.0, 5.0], [1.1, 0.25, 0.78], camera_name="Side"
+        )
+
+        assert session._viewport_disablers(side) == [
+            "its hide_viewport is animated and on at this frame"
+        ]
+        assert result["override_check"] == "done"
+        assert result["placement_overridden"] is True
+        forward = euler_matrix(result["rotation_euler"]) @ [0.0, 0.0, -1.0]
+        to_target = np.subtract((5.0, 5.0, 0.0), result["location"])
+        assert forward == pytest.approx(to_target / np.linalg.norm(to_target))
+
+    @pytest.mark.parametrize(
+        "how",
+        [
+            "muted_track",
+            "other_track_solo",
+            "other_slot",
+            "tweak_storage_other_slot",
+            "no_slot",
+            "other_property",
+        ],
+    )
+    def test_set_camera_view_checks_the_scene_camera_whose_hide_viewport_blender_does_not_take_as_animated(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, anim_utils: Any, how: str
+    ) -> None:
+        """Blender 5.0.1 evaluated such a scene camera though it was disabled in viewports.
+
+        Its depsgraph reads hide_viewport's F-curves from the camera's own
+        action slot, its drivers and the NLA tracks that play.
+        """
+        side, view_layer = self._side_camera("enabled", _track_to((5.0, 5.0, 0.0)))
+        side.hide_viewport = True
+        side.animation_data = self._visibility_animation(how)
+        session = self._session_in(
+            monkeypatch, view_layer, side, scene_camera="Side", version=BLENDER_5_0
+        )
+
+        result = session.set_camera_view(
+            [7.0, -7.0, 5.0], [1.1, 0.25, 0.78], camera_name="Side"
+        )
+
+        assert session._viewport_disablers(side) == []
+        assert result["override_check"] == "done"
+        assert result["placement_overridden"] is True
+
+    @pytest.mark.parametrize(
+        ("how", "hidden", "reasons"),
+        [
+            ("enabled", True, ["its hide_viewport is animated and on at this frame"]),
+            ("enabled", False, []),
+            (
+                "collection",
+                False,
+                [
+                    "its hide_viewport is animated",
+                    "collection 'Cameras' is disabled in viewports",
+                ],
+            ),
+            (
+                "collection",
+                True,
+                [
+                    "its hide_viewport is animated and on at this frame",
+                    "collection 'Cameras' is disabled in viewports",
+                ],
+            ),
+            (
+                "parent_collection",
+                False,
+                [
+                    "its hide_viewport is animated",
+                    "collection 'Rig' is disabled in viewports",
+                ],
+            ),
+            # Each collection not excluded gives it a base in the view layer...
+            (
+                "second_collection",
+                True,
+                ["its hide_viewport is animated and on at this frame"],
+            ),
+            (
+                "excluded_parent",
+                True,
+                ["its hide_viewport is animated and on at this frame"],
+            ),
+            # ...and without one Blender evaluates the scene camera (5.0.1).
+            ("excluded", True, []),
+            ("nowhere", True, []),
+        ],
+    )
+    def test_viewport_disablers_of_a_scene_camera_whose_hide_viewport_is_animated(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        anim_utils: Any,
+        how: str,
+        hidden: bool,
+        reasons: List[str],
+    ) -> None:
+        side, view_layer = self._side_camera(how)
+        side.hide_viewport = hidden
+        side.animation_data = self._visibility_animation("keyframed")
+        session = self._session_in(
+            monkeypatch, view_layer, side, scene_camera="Side", version=BLENDER_5_0
+        )
+
+        assert session._viewport_disablers(side) == reasons
+
+    @pytest.mark.parametrize(
+        ("how", "animated"),
+        [("action", True), ("strip", True), ("tweak_storage", True), ("other", False)],
+    )
+    def test_animates_visibility_reads_the_actions_of_blender_before_slotted_actions(
+        self, monkeypatch: pytest.MonkeyPatch, how: str, animated: bool
+    ) -> None:
+        """Before Blender 4.4 an action keeps its F-curves in Action.fcurves, and
+        neither animation data nor a strip has an action slot to read."""
+
+        def action(where: str) -> SimpleNamespace:
+            # Keys the location, and hide_viewport where ``how`` puts it.
+            paths = ["location"] + (["hide_viewport"] if how == where else [])
+            return SimpleNamespace(fcurves=[FakeFCurve(path) for path in paths])
+
+        strip = SimpleNamespace(action=action("strip"), strips=[])
+        side, view_layer = self._side_camera("enabled")
+        side.animation_data = SimpleNamespace(
+            action=action("action"),
+            action_tweak_storage=action("tweak_storage"),
+            drivers=[],
+            nla_tracks=[SimpleNamespace(mute=False, is_solo=False, strips=[strip])],
+        )
+        session = self._session_in(monkeypatch, view_layer, side, version=(4, 2, 0))
+
+        assert session._animates_visibility(side) is animated
+
+    def test_animates_visibility_reads_each_stashed_slot_on_blender_4_4(
+        self, monkeypatch: pytest.MonkeyPatch, anim_utils: Any
+    ) -> None:
+        """Blender 4.4 keeps the slot of the action that tweak mode stashes away
+        out of Python, so each of its slots counts there; 4.5 and later read
+        that one slot (action_slot_handle_tweak_storage)."""
+        side, view_layer = self._side_camera("enabled")
+        side.animation_data = self._visibility_animation("tweak_storage_other_slot")
+        session = self._session_in(monkeypatch, view_layer, side, version=BLENDER_5_0)
+        assert session._animates_visibility(side) is False
+
+        del side.animation_data.action_slot_handle_tweak_storage
+        session = self._session_in(monkeypatch, view_layer, side, version=(4, 4, 0))
+
+        assert session._animates_visibility(side) is True
+
+    @pytest.mark.parametrize(
+        ("how", "remedy"),
+        [
+            (
+                "keyframed",
+                "make it the scene camera and remove the animation of its hide_viewport",
+            ),
+            ("other_property", "make it the scene camera"),
+        ],
+    )
+    def test_skipped_check_of_another_camera_names_the_animation_of_its_hide_viewport(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        anim_utils: Any,
+        how: str,
+        remedy: str,
+    ) -> None:
+        """Made the scene camera, a camera whose hide_viewport is animated is skipped too.
+
+        On Blender 5.0.1 a camera whose keyed hide_viewport was on, made the
+        scene camera as the warning advised, kept the matrix_world of its last
+        evaluation, and its next placement was skipped again.
+        """
+        side = _PartlyEvaluatedCamera(_track_to((5.0, 5.0, 0.0)))
+        side.animation_data = self._visibility_animation(how)
+        root = FakeCollection("Scene Collection")
+        root.link(side)
+        session = self._session_in(
+            monkeypatch,
+            FakeViewLayer(FakeLayerCollection(root)),
+            side,
+            version=BLENDER_5_0,
+        )
+
+        result = session.set_camera_view(
+            [7.0, -7.0, 5.0], [1.1, 0.25, 0.78], camera_name="Side"
+        )
+
+        assert result["override_check"] == "skipped"
+        warning = result["warning"]
+        assert "neither the scene camera nor a timeline marker's camera" in warning
+        assert warning.endswith(
+            f"To check it, change those settings or {remedy}, then place it again."
+        )
 
     @pytest.mark.parametrize(
         "constraint",

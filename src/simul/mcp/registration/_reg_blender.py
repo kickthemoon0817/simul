@@ -778,9 +778,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "is true when that is not the request, with constraints_applied and a warning "
             "on how to disable them. Keys on the camera's transform take over at the next "
             "frame change. Blender's viewport skips a camera disabled in viewports unless it "
-            "is the scene camera, a timeline marker's camera or needed by something visible: "
-            "when Blender did not evaluate it after the placement (or its evaluated pose did "
-            "not change), override_check is 'skipped' and placement_overridden null."
+            "is needed by something visible, or is the scene camera or a timeline marker's "
+            "camera and its hide_viewport is not animated: when Blender did not evaluate it "
+            "after the placement (or its evaluated pose did not change), override_check is "
+            "'skipped' and placement_overridden null."
         ),
         hints=IDEMPOTENT,
         operation="set_camera_view",
