@@ -1193,34 +1193,6 @@ class TestUnrealRuntimeSessionPhase4:
         assert result["parameters"][0]["name"] == "Roughness"
         assert result["parameters"][0]["param_type"] == "scalar"
 
-    # -- set_material_params --
-
-    def test_set_material_params_success(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """set_material_params sets scalar, vector, texture params."""
-        session = self._make_session(monkeypatch)
-        call_count = {"n": 0}
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            if "/remote/object/property" in path:
-                call_count["n"] += 1
-                return FakeResponse({})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.set_material_params(
-            material_path="/Game/Materials/MI_Custom",
-            scalar_params={"Roughness": 0.3, "Metallic": 1.0},
-            vector_params={"BaseColor": [0.8, 0.2, 0.1, 1.0]},
-            texture_params={"NormalMap": "/Game/Textures/T_Normal"},
-        ))
-
-        assert result["material_path"] == "/Game/Materials/MI_Custom"
-        assert result["params_set"] == 4  # 2 scalar + 1 vector + 1 texture
-        assert call_count["n"] == 4
-
     # -- create_material_instance --
 
     def test_create_material_instance_success(

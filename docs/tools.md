@@ -106,6 +106,15 @@ Behaviour worth knowing:
   editor Python APIs. Single-frame stepping is not supported by the editor and
   returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
   engine cannot report a simulation-specific count.
+- `set_unreal_material_params` writes a Material Instance Constant through
+  Unreal's MaterialEditingLibrary in one undoable transaction, in or out of
+  Play In Editor, and reads every value back: `applied` holds the values read
+  back (scalars and colors as the 32-bit floats Unreal stores) and
+  `params_set` counts them. A name the material has no parameter of that kind
+  for (names match ignoring case), a texture that does not load, or a value
+  that reads back different is listed in `not_applied` with the reason; the
+  call fails with `MaterialParamsNotApplied` when nothing applied. The
+  instance is left unsaved.
 - USD import and export need the optional **USDImporter** plugin enabled when
   the editor starts. They use `AssetImportTask` and `LevelExporterUSD`;
   `get_unreal_interchange_info` reports whether the plugin is available.

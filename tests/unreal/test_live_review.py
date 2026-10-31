@@ -173,6 +173,67 @@ print(json.dumps({{'color': [color.r, color.g, color.b]}}))
     asyncio.run(run())
 
 
+def test_material_params_are_written_and_read_back_in_and_out_of_play_in_editor():
+    """set_unreal_material_params reported params_set 1 while the instance
+    kept no override, Roughness reading its 0.6407 default, in and out of PIE:
+    the Remote Control write it sent changed nothing."""
+
+    async def run():
+        client = session()
+        folder = "/Game/SimulReview_" + uuid.uuid4().hex[:8]
+        readback = """
+import unreal, json
+m = unreal.load_asset(args['path'])
+print(json.dumps({'scalar': {str(v.parameter_info.name): v.parameter_value
+                             for v in m.get_editor_property('scalar_parameter_values')},
+                  'texture': {str(v.parameter_info.name): v.parameter_value.get_path_name()
+                              for v in m.get_editor_property('texture_parameter_values')}}))
+"""
+        try:
+            created = await client.create_material_instance(
+                "/Engine/BasicShapes/BasicShapeMaterial", "MI_Params", folder
+            )
+            assert not created.get("error"), created
+            widget = await client.create_material_instance(
+                "/Engine/EngineMaterials/Widget3DPassThrough", "MI_Widget", folder
+            )
+            assert not widget.get("error"), widget
+            path, widget_path = created["instance_path"], widget["instance_path"]
+            for roughness, pie in ((0.25, False), (0.5, True)):
+                if pie:
+                    started = await client.control_simulation("start")
+                    assert started.get("state") == "playing", started
+                result = await client.set_material_params(
+                    path,
+                    scalar_params={"Roughness": roughness, "Bogus": 1.0},
+                    vector_params={"Color": [0.1, 0.2, 0.3]},
+                )
+                assert result["params_set"] == 2, result
+                assert result["applied"]["scalar"] == {"Roughness": roughness}, result
+                assert result["applied"]["vector"]["Color"] == pytest.approx([0.1, 0.2, 0.3, 1.0]), result
+                assert list(result["not_applied"]["scalar"]) == ["Bogus"], result
+                overrides = await client._execute_json_script(f"args = {{'path': {path!r}}}\n" + readback)
+                # No Bogus override: names are checked before Unreal writes any.
+                assert overrides["scalar"] == {"Roughness": roughness}, overrides
+            textured = await client.set_material_params(
+                widget_path, texture_params={"SlateUI": "/Engine/EngineResources/DefaultTexture"}
+            )
+            assert textured["applied"] == {
+                "texture": {"SlateUI": "/Engine/EngineResources/DefaultTexture.DefaultTexture"}
+            }, textured
+            overrides = await client._execute_json_script(f"args = {{'path': {widget_path!r}}}\n" + readback)
+            assert overrides["texture"] == textured["applied"]["texture"], overrides
+            refused = await client.set_material_params(path, scalar_params={"Bogus": 1.0})
+            assert refused["error_type"] == "MaterialParamsNotApplied", refused
+            assert refused["params_set"] == 0, refused
+        finally:
+            await client.control_simulation("stop")
+            await client._execute_python(f"import unreal\nunreal.EditorAssetLibrary.delete_directory({folder!r})")
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_spawn_from_asset_and_class_paths_then_find_by_semantic_label():
     """An asset path used to go to SpawnActorFromClass and come back as a
     successful spawn with an empty actor path; the semantic label lookup
