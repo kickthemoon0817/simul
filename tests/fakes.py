@@ -623,6 +623,9 @@ class FakeTransformObject:
         self.name = name
         self.type = object_type
         self.data = data
+        # Blender gives an object without geometry (an empty, a camera) eight
+        # bound_box corners at its origin; a test sets an armature's or mesh's.
+        self.bound_box: List[FakePropArray] = [FakePropArray((0.0, 0.0, 0.0))] * 8
         self.location: Any = FakeVector(location)
         self.rotation_mode = rotation_mode
         self.rotation_euler: Any = FakeEuler(rotation_euler)

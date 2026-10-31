@@ -109,13 +109,23 @@ _FRAMING_MARGIN = 1.05
 # light, a camera or a mesh without vertices. An empty's default display size.
 _POINT_RADIUS = 1.0
 
+# Blender's matrices, mathutils and object transforms are single precision:
+# rounding to float32 changes a number by up to half of FLT_EPSILON of its size.
+_FLOAT32_EPSILON = 2.0**-23
+
 # A camera counts as evaluated where it was placed when its location is within
-# _PLACEMENT_LOCATION_TOLERANCE plus _PLACEMENT_LOCATION_PRECISION times the
-# farthest distance from the origin involved (_placement_extent; Blender's
-# matrices are single precision: 6e-5 off for a camera 14 km out on Blender
-# 5.0.1), and its view and up axes within _PLACEMENT_ANGLE_TOLERANCE radians.
-_PLACEMENT_LOCATION_TOLERANCE = 1e-4
-_PLACEMENT_LOCATION_PRECISION = 1e-6
+# _PLACEMENT_LOCATION_PRECISION times the farthest distance from the origin
+# involved (_placement_extent), and its view and up axes within
+# _PLACEMENT_ANGLE_TOLERANCE radians. Rounding grows with those distances, so
+# the location tolerance does too, with no fixed floor: on Blender 5.0.1,
+# cameras on random rigs 0.1 mm to 100 km out were evaluated up to 2.5
+# epsilons of the extent from their placement (3 cm with a 146 km extent,
+# 32 nm with 0.17 m), and the former 0.1 mm floor hid a 50 micrometre Copy
+# Location in a millimetre scene. Angles do not grow with the scene: those
+# rigs turned cameras by up to 2e-5 rad, and by more near gimbal lock, where
+# Blender's Euler decomposition loses precision. 1e-4 rad is about a quarter
+# of a pixel across a 1920-pixel frame at 50 mm.
+_PLACEMENT_LOCATION_PRECISION = 8 * _FLOAT32_EPSILON
 _PLACEMENT_ANGLE_TOLERANCE = 1e-4
 
 # Output-format settings a capture changes and restores, in restore order:
@@ -3903,11 +3913,27 @@ class BlenderRuntimeSession:
         return [
             {"name": constraint.name, "type": constraint.type}
             for constraint in obj.constraints
-            if not constraint.mute
+            if cls._applies(constraint)
+        ]
+
+    @classmethod
+    def _applies(cls, constraint: Any) -> bool:
+        """
+        Whether Blender applies a constraint when it evaluates its owner.
+
+        Args:
+            constraint: The constraint.
+
+        Returns:
+            False for a muted constraint, one without influence, one Blender
+            reports invalid and one that lacks its target (_lacks_target).
+        """
+        return (
+            not constraint.mute
             and constraint.influence > 0.0
             and constraint.is_valid
             and not cls._lacks_target(constraint)
-        ]
+        )
 
     @staticmethod
     def _lacks_target(constraint: Any) -> bool:
@@ -3986,20 +4012,30 @@ class BlenderRuntimeSession:
             "warning": warning,
         }
 
-    @staticmethod
-    def _placement_extent(camera: Any, placement: Any, evaluated: Any) -> float:
+    @classmethod
+    def _placement_extent(cls, camera: Any, placement: Any, evaluated: Any) -> float:
         """
         Return the farthest distance from the origin that placing a camera computes with.
 
         Blender's matrices and an object's location are single precision, so
         the evaluated location is only as exact as the longest translation in
         the arithmetic: the placement and the evaluated location, and between
-        them the parent's matrix, its product with matrix_parent_inverse and
-        the camera's own location. Those can be kilometres long while both
-        ends lie near the origin: a camera parented to a rig 27 km out, the
-        rig then moved back, keeps a 27 km own location, which single
-        precision rounds by up to a millimetre (by 2 cm 100 km out on Blender
-        5.0.1).
+        them the parent's matrix, its product with matrix_parent_inverse, the
+        camera's own location and the targets of the constraints Blender
+        applies. Those can be kilometres long while both ends lie near the
+        origin: a camera parented to a rig 27 km out, the rig then moved back,
+        keeps a 27 km own location, which single precision rounds by up to a
+        millimetre (by 2 cm 100 km out on Blender 5.0.1). A Child Of
+        multiplies by its target's matrix, which rounds as much when the
+        target stands kilometres out, even when the target has not moved
+        since the constraint's inverse was set and the camera stays in place.
+        So does an Armature constraint with its armatures' matrices, and a
+        constraint whose target names a bone or vertex group (subtarget) with
+        that bone's or group's matrix, which can stand far from the target's
+        origin: on Blender 5.0.1, without them, 37 of 40 cameras held by an
+        Armature constraint on a resting armature 300 m out, and 31 of 40
+        held by a satisfied Child Of on a vertex group 300 m from its mesh's
+        origin, were reported overridden.
 
         Args:
             camera: The placed camera.
@@ -4022,7 +4058,53 @@ class BlenderRuntimeSession:
             lengths.append(math.hypot(*to_world.translation))
             reach = max(abs(s) for s in to_world.to_scale())
         lengths.append(reach * math.hypot(*camera.location))
+        for constraint in camera.constraints:
+            if not cls._applies(constraint):
+                continue
+            for target, subtarget in cls._constraint_targets(constraint):
+                lengths.append(math.hypot(*target.matrix_world.translation))
+                if subtarget:
+                    # Blender computes with the posed bone, or the vertex
+                    # group's vertices, which the target's bounding box holds.
+                    lengths.extend(
+                        math.hypot(*corner) for corner in cls._world_bound_box(target)
+                    )
         return max(lengths)
+
+    @staticmethod
+    def _constraint_targets(constraint: Any) -> List[Tuple[Any, str]]:
+        """
+        Return the objects a constraint computes with, and the bone or vertex group each names.
+
+        An Armature constraint lists its bones in ``targets`` and skips one
+        without weight; the other constraints with a target have one
+        ``target`` and, most of them, a ``subtarget``. Limit Location and
+        the like have none.
+
+        Args:
+            constraint: The constraint.
+
+        Returns:
+            (target object, subtarget) pairs, the subtarget "" when none is
+            named; a target that is None (a Pivot or an Action that uses
+            eval_time acts without one) is left out.
+        """
+        if constraint.type == "ARMATURE":
+            pairs = [
+                (entry.target, entry.subtarget)
+                for entry in constraint.targets
+                if entry.weight > 0.0
+            ]
+        else:
+            pairs = [
+                (
+                    getattr(constraint, "target", None),
+                    getattr(constraint, "subtarget", ""),
+                )
+            ]
+        return [
+            (target, subtarget) for target, subtarget in pairs if target is not None
+        ]
 
     @classmethod
     def _override_warning(
@@ -4107,9 +4189,7 @@ class BlenderRuntimeSession:
         """
         if bool(first.is_negative) != bool(second.is_negative):
             return False
-        tolerance = (
-            _PLACEMENT_LOCATION_TOLERANCE + _PLACEMENT_LOCATION_PRECISION * extent
-        )
+        tolerance = _PLACEMENT_LOCATION_PRECISION * extent
         if math.dist(first.translation, second.translation) > tolerance:
             return False
         for axis in (1, 2):
