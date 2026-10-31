@@ -294,6 +294,25 @@ if values:
 print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}))
 """
 
+# Expects ``args`` = {"actor_path"}. Adds the actor to the editor selection,
+# reads the selection back and prints the actor's location for the camera.
+# While Play In Editor (or Simulate) runs nothing is selected: Unreal's editor
+# reports no selection then and clears it when PIE stops (observed on UE
+# 5.7.4), so a selection made during PIE would be lost unseen. Outside PIE an
+# actor Unreal will not select (hidden in the editor, in a hidden or locked
+# level) reads back unselected.
+FOCUS_ACTOR = ACTOR_HELPERS + EDITOR_WORLD + """
+actor = actor_at(args["actor_path"])
+pie = pie_active()
+selected = False
+if not pie:
+    subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    subsystem.set_actor_selection_state(actor, True)
+    selected = actor in subsystem.get_selected_level_actors()
+print(json.dumps({"location": actor_transform(actor)["location"], "selected": selected,
+                  "pie_active": pie}))
+"""
+
 # Expects ``args`` = {"path", "location", "rotation", "label"}: location
 # [x, y, z] cm, rotation [pitch, yaw, roll] degrees, label None to keep the
 # default. An Actor class (``/Script/Engine.PointLight``, a Blueprint's

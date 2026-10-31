@@ -11,11 +11,16 @@ reads returned 0 actors, ``get_unreal_loaded_map`` raised on None, and in
 attached mode every call (``control_unreal_simulation`` stop included) failed
 with "No editor world is available". The editor world itself stays loaded,
 under the PIE world's package name minus its ``UEDPIE_<n>_`` prefix.
+``focus_unreal_on_actor`` reported success as if it had selected the actor:
+``set_actor_selection_state`` is not refused, but what it selects during PIE
+reads back as nothing and is cleared when PIE stops, while the viewport camera
+does move.
 
 Now an editor-world change Unreal refuses comes back as a ``PIEActive`` error
 whose hint names the tool that stops PIE, the reads find the editor world and
-report ``pie_active``, and the attachment check finds it too. The fake editor
-below answers the editor scripts the way UE 5.7.4 did, in and out of PIE.
+report ``pie_active``, the attachment check finds it too, and focus moves the
+camera and says the actor is not selected. The fake editor below answers the
+editor scripts the way UE 5.7.4 did, in and out of PIE.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ import asyncio
 import io
 import json
 import logging
+import math
 import sys
 from contextlib import contextmanager, redirect_stdout
 from types import SimpleNamespace
@@ -84,6 +90,9 @@ class Actor:
         )
         self.root_component = SimpleNamespace(mobility=SimpleNamespace(name="STATIC"))
         self.world: Any = None
+        # False for an actor Unreal will not select: hidden in the editor, or in
+        # a hidden or locked level.
+        self.selectable = True
 
     def get_actor_label(self) -> str:
         return self.name
@@ -160,6 +169,14 @@ class Editor:
         self.spawn_calls: List[str] = []
         self.transactions: List[str] = []
         self.calls: List[str] = []
+        # The editor's selection, and the labels set_actor_selection_state got.
+        self.selection: List[Actor] = []
+        self.selection_calls: List[str] = []
+        # The level viewport camera, as Remote Control reads and writes it.
+        self.camera: Dict[str, Any] = {
+            "CameraLocation": {"X": 0.0, "Y": 0.0, "Z": 1000.0},
+            "CameraRotation": {"Pitch": 0.0, "Yaw": 0.0, "Roll": 0.0},
+        }
 
     # EditorActorSubsystem: refuses everything during PIE.
     def get_all_level_actors(self) -> List[Actor]:
@@ -181,7 +198,28 @@ class Editor:
         return False if self.pie else True
 
     def get_selected_level_actors(self) -> List[Actor]:
-        return []
+        return [] if self.pie else list(self.selection)
+
+    def set_actor_selection_state(self, actor: Actor, should_be_selected: bool) -> None:
+        """Not refused during PIE, but what it selects then reads back as
+        nothing above, and Unreal clears it when PIE stops."""
+        self.selection_calls.append(actor.get_actor_label())
+        if not actor.selectable:
+            return
+        if should_be_selected and actor not in self.selection:
+            self.selection.append(actor)
+        elif not should_be_selected and actor in self.selection:
+            self.selection.remove(actor)
+
+    # UnrealEditorSubsystem's viewport camera over Remote Control: answered
+    # in and out of PIE.
+    def call_function(self, function_name: str, parameters: Any) -> Dict[str, Any]:
+        if function_name == "SetLevelViewportCameraInfo":
+            self.camera = dict(parameters)
+            return {}
+        if function_name == "GetLevelViewportCameraInfo":
+            return {**self.camera, "ReturnValue": True}
+        raise AssertionError("Unexpected Remote Control call: " + function_name)
 
     @contextmanager
     def transaction(self, description: str) -> Iterator[SimpleNamespace]:
@@ -298,12 +336,20 @@ def _session(
 ) -> Any:
     session = unreal_runtime.UnrealRuntimeSession(settings or Settings())
     session.scripts = []  # type: ignore[attr-defined]
+    session.calls = []  # type: ignore[attr-defined]
 
     async def execute(code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
         session.scripts.append(code)  # type: ignore[attr-defined]
         return editor.run(code)
 
+    async def call_function(
+        object_path: str, function_name: str, parameters: Any = None
+    ) -> Dict[str, Any]:
+        session.calls.append(function_name)  # type: ignore[attr-defined]
+        return editor.call_function(function_name, parameters)
+
     monkeypatch.setattr(session, "_execute_python", execute)
+    monkeypatch.setattr(session, "_call_function", call_function)
     return session
 
 
@@ -617,6 +663,92 @@ def test_reads_outside_pie_report_pie_active_false(
 
 
 # ---------------------------------------------------------------------------
+# Focus during PIE: the camera moves, the selection does not
+# ---------------------------------------------------------------------------
+
+# Where focus_on_actor puts the camera for an actor at (1, 2, 3) with the
+# default 500 cm distance: behind it, 250 cm above, pitched down at it.
+FOCUS_CAMERA = (
+    (-499.0, 2.0, 253.0),
+    (-math.degrees(math.atan2(250.0, 500.0)), 0.0, 0.0),
+)
+
+
+def test_focus_during_pie_moves_the_camera_and_says_the_actor_is_not_selected(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It reported success as if the actor were selected. On UE 5.7.4 a
+    selection made during PIE reads back as none and is cleared when PIE
+    stops, so focus selects nothing then; the camera does move."""
+    editor.pie = True
+    session = _session(editor, monkeypatch)
+
+    result = asyncio.run(session.focus_on_actor(LEVEL + "Crate"))
+
+    assert result == {
+        "actor_path": LEVEL + "Crate",
+        "camera_location": FOCUS_CAMERA[0],
+        "camera_rotation": FOCUS_CAMERA[1],
+        "selected": False,
+        "pie_active": True,
+        "warning": unreal_runtime.FOCUS_PIE_WARNING,
+    }
+    assert editor.selection_calls == []
+    assert session.calls == ["SetLevelViewportCameraInfo", "GetLevelViewportCameraInfo"]
+    assert (
+        "control_unreal_simulation" in result["warning"]
+        and "'stop'" in result["warning"]
+    )
+
+
+def test_focus_outside_pie_selects_the_actor_and_reads_the_selection_back(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _session(editor, monkeypatch)
+
+    result = asyncio.run(session.focus_on_actor(LEVEL + "Crate"))
+
+    assert result == {
+        "actor_path": LEVEL + "Crate",
+        "camera_location": FOCUS_CAMERA[0],
+        "camera_rotation": FOCUS_CAMERA[1],
+        "selected": True,
+        "pie_active": False,
+    }
+    assert [actor.name for actor in editor.selection] == ["Crate"]
+    # One script selects, reads the selection back and reads the location.
+    assert len(session.scripts) == 1
+
+
+def test_focus_reports_an_actor_unreal_does_not_select(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outside PIE too, Unreal skips an actor hidden in the editor without a
+    word (UE 5.7.4); that was reported as success as well."""
+    editor.level[1].selectable = False
+    session = _session(editor, monkeypatch)
+
+    result = asyncio.run(session.focus_on_actor(LEVEL + "Crate"))
+
+    assert editor.selection_calls == ["Crate"] and editor.selection == []
+    assert (result["selected"], result["pie_active"]) == (False, False)
+    assert result["warning"] == unreal_runtime.FOCUS_NOT_SELECTED_WARNING
+    assert result["camera_location"] == FOCUS_CAMERA[0]
+
+
+def test_focus_on_a_missing_actor_fails_before_the_camera_moves(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _session(editor, monkeypatch)
+
+    result = asyncio.run(session.focus_on_actor(LEVEL + "Missing"))
+
+    assert result["success"] is False and result["error_type"] == "ScriptError"
+    assert "Actor not found: " + LEVEL + "Missing" in result["error"]
+    assert session.calls == [] and editor.selection_calls == []
+
+
+# ---------------------------------------------------------------------------
 # Attached mode during PIE
 # ---------------------------------------------------------------------------
 
@@ -808,3 +940,39 @@ def test_an_agent_sees_pie_active_on_the_reads(
         "map_path": "/Game/Maps/Lab.Lab",
         "pie_active": True,
     }
+
+
+def test_an_agent_sees_whether_focus_selected_the_actor(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The response schema keeps selected, pie_active and the warning."""
+    editor.pie = True
+    during = _call(
+        editor,
+        monkeypatch,
+        tmp_path,
+        "focus_unreal_on_actor",
+        {"actor_path": LEVEL + "Crate"},
+    )
+    editor.pie = False
+    outside = _call(
+        editor,
+        monkeypatch,
+        tmp_path,
+        "focus_unreal_on_actor",
+        {"actor_path": LEVEL + "Crate"},
+    )
+
+    assert during["success"] is True and during["camera_location"] == list(
+        FOCUS_CAMERA[0]
+    )
+    assert (during["selected"], during["pie_active"], during["warning"]) == (
+        False,
+        True,
+        unreal_runtime.FOCUS_PIE_WARNING,
+    )
+    assert (outside["selected"], outside["pie_active"], outside["warning"]) == (
+        True,
+        False,
+        None,
+    )

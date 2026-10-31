@@ -540,3 +540,50 @@ def test_play_in_editor_refuses_editor_changes_and_flags_reads():
             await client.close()
 
     asyncio.run(run())
+
+
+SELECTION = """
+import unreal, json
+subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+print(json.dumps({'selection': [a.get_path_name() for a in subsystem.get_selected_level_actors()]}))
+"""
+
+
+def test_focus_selects_outside_play_in_editor_and_says_why_not_during_it():
+    """While PIE ran, focus reported success as if it had selected the actor;
+    Unreal reads back no selection made then and clears it when PIE stops. The
+    camera move works in and out of PIE."""
+
+    async def run():
+        client = session()
+        path = await spawn_cube(client)
+        # 500 cm behind the cube at (100, 200, 300) and 250 cm above it.
+        framed = pytest.approx((-400.0, 200.0, 550.0))
+        try:
+            outside = await client.focus_on_actor(path)
+            assert (outside["selected"], outside["pie_active"]) == (True, False), outside
+            assert "warning" not in outside and outside["camera_location"] == framed, outside
+            assert path in (await client._execute_json_script(SELECTION))["selection"]
+
+            await client._execute_python(
+                "import unreal\nunreal.get_editor_subsystem(unreal.EditorActorSubsystem).select_nothing()"
+            )
+            await client.set_camera_view(location=(0.0, 0.0, 1000.0), rotation=(0.0, 0.0, 0.0))
+            started = await client.control_simulation("start")
+            assert started.get("state") == "playing", started
+
+            during = await client.focus_on_actor(path)
+            assert (during["selected"], during["pie_active"]) == (False, True), during
+            assert "control_unreal_simulation" in during["warning"], during
+            assert during["camera_location"] == framed, during
+
+            stopped = await client.control_simulation("stop")
+            assert stopped.get("state") == "stopped", stopped
+            assert path not in (await client._execute_json_script(SELECTION))["selection"]
+            assert (await client.get_viewport_info())["camera_location"] == framed
+        finally:
+            await client.control_simulation("stop")
+            await destroy_actor(client, path)
+            await client.close()
+
+    asyncio.run(run())
