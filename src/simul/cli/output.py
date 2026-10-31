@@ -14,7 +14,7 @@ import json
 import sys
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Coroutine, Dict, NoReturn, Optional, TypeVar, Union
+from typing import Any, BinaryIO, Coroutine, Dict, NoReturn, Optional, TypeVar, Union
 
 import typer
 from rich.console import Console
@@ -203,9 +203,10 @@ def _fail_not_utf8(source: str, exc: Union[UnicodeDecodeError, UnicodeEncodeErro
     """Exit 2 because script input is not UTF-8, naming the first byte that is not.
 
     A ``UnicodeDecodeError`` (a file or stdin) points into the bytes read. A
-    ``UnicodeEncodeError`` (an inline argument) points at a lone surrogate:
-    POSIX decodes argv bytes that are not UTF-8 with surrogateescape, so
-    U+DC80..U+DCFF stand for the bytes 0x80..0xFF the caller passed.
+    ``UnicodeEncodeError`` (an inline argument, or a stdin that hands over
+    text) points at a lone surrogate: POSIX decodes argv bytes that are not
+    UTF-8 with surrogateescape, so U+DC80..U+DCFF stand for the bytes
+    0x80..0xFF the caller passed.
 
     Args:
         source: Where the script came from, completing "Script ...":
@@ -225,6 +226,15 @@ def _fail_not_utf8(source: str, exc: Union[UnicodeDecodeError, UnicodeEncodeErro
     fail(f"Script {source} is not valid UTF-8: {problem} at offset {offset}.", "InvalidEncoding", exit_code=2)
 
 
+def _require_utf8_text(source: str, text: str) -> str:
+    """Return ``text`` when it encodes as UTF-8, else exit 2 naming its first lone surrogate."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        _fail_not_utf8(source, exc)
+    return text
+
+
 def read_script_arg(script: Optional[str]) -> str:
     """Resolve a script argument that may be code, a ``.py`` path, or absent.
 
@@ -241,13 +251,18 @@ def read_script_arg(script: Optional[str]) -> str:
     through as lone surrogates, which the script size limit counts at 3
     bytes each. Valid input reads as before: a BOM stays a leading U+FEFF,
     a file's line endings go through universal newlines, and stdin's are
-    kept as sent.
+    kept as sent. A stdin replaced by a text stream with no ``buffer`` (an
+    ``io.StringIO``, which ``TextIOBase`` allows) is read as text and
+    checked as an argument is.
     """
     if script is None:
         if sys.stdin.isatty():
             fail(_SCRIPT_INPUT_HINT, "InputError")
+        buffer: Optional[BinaryIO] = getattr(sys.stdin, "buffer", None)
+        if buffer is None:
+            return _require_utf8_text("from stdin", sys.stdin.read())
         try:
-            return sys.stdin.buffer.read().decode("utf-8")
+            return buffer.read().decode("utf-8")
         except UnicodeDecodeError as exc:
             _fail_not_utf8("from stdin", exc)
     if script.endswith(".py"):
@@ -259,8 +274,4 @@ def read_script_arg(script: Optional[str]) -> str:
             _fail_not_utf8(f"file {script}", exc)
         except OSError:
             pass
-    try:
-        script.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        _fail_not_utf8("argument", exc)
-    return script
+    return _require_utf8_text("argument", script)

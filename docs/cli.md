@@ -119,6 +119,12 @@ simul isaac step 120
 simul isaac capture shot.png --eye 3,3,2 --target 0,0,0
 ```
 
+`exec` takes the code itself, a path ending in `.py`, or, with no argument,
+code piped on stdin (`simul isaac exec < job.py`). The script must be UTF-8
+however it arrives: otherwise the command exits 2 with
+`error_type: InvalidEncoding`, naming the first bad byte, and sends nothing to
+Isaac Sim.
+
 ## `simul unreal`
 
 Commands accept `-H/--host` and `-p/--port` for the Remote Control endpoint
@@ -135,7 +141,7 @@ Commands accept `-H/--host` and `-p/--port` for the Remote Control endpoint
 | `sim ACTION`, `sim-status` | Play-In-Editor: `start`, `stop`, `pause`, `resume`, `step` |
 | `capture [OUTPUT] [--width] [--height] [--format png\|jpeg]` | Viewport screenshot |
 | `materials MATERIAL_PATH` | Parameters (with values and, for an instance, overrides), parent, domain and blend mode of a material or material instance |
-| `exec CODE` | Run Python inside the editor |
+| `exec CODE_OR_FILE [--mode] [--raw]` | Run Python inside the editor; the script arrives as for [`simul isaac exec`](#simul-isaac) |
 
 `setup` flags: `--port` (default 30010), `--engine-path`, `--no-launch`,
 `--no-headless`, `--agent-overlay`, `--wait-timeout`, `--poll-interval`,

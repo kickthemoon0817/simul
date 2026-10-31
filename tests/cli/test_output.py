@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict
@@ -325,6 +327,30 @@ def test_read_script_arg_decodes_piped_stdin_as_utf8_whatever_the_locale() -> No
 
     assert result.exit_code == 0, result.output
     assert seen == [script]
+
+
+def test_read_script_arg_reads_a_text_only_stdin_as_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stdin replaced by an io.StringIO has no bytes buffer (TextIOBase allows that); its text comes back as is."""
+    monkeypatch.setattr(sys, "stdin", io.StringIO("# 한\r\nprint(1)\n"))
+
+    assert output.read_script_arg(None) == "# 한\r\nprint(1)\n"
+
+
+def test_read_script_arg_checks_a_text_only_stdin_as_it_checks_an_argument(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO("# 한\nx = '\udcff'"))
+    monkeypatch.setattr(output, "is_json_mode", lambda: True)
+
+    with pytest.raises(typer.Exit) as excinfo:
+        output.read_script_arg(None)
+
+    assert excinfo.value.exit_code == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "success": False,
+        "error": "Script from stdin is not valid UTF-8: byte 0xff at offset 11.",
+        "error_type": "InvalidEncoding",
+    }
 
 
 # ---------------------------------------------------------------------------
