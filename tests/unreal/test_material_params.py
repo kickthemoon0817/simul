@@ -104,9 +104,17 @@ class MaterialInstance(MaterialInterface):
 
 
 class MaterialInstanceConstant(MaterialInstance):
-    def __init__(self, package: str, parent: MaterialInterface) -> None:
+    def __init__(
+        self,
+        package: str,
+        parent: MaterialInterface,
+        events: Optional[List[str]] = None,
+    ) -> None:
         super().__init__(package)
         self.parent = parent
+        # What is done to the instance, in order, in the editor's log of
+        # transactions: whether the writes fall inside the undoable one.
+        self.events: List[str] = [] if events is None else events
         self.overrides: Dict[str, Dict[str, Any]] = {
             "scalar": {},
             "vector": {},
@@ -119,6 +127,7 @@ class MaterialInstanceConstant(MaterialInstance):
 
     def modify(self) -> bool:
         self.modified += 1
+        self.events.append("modify")
         return True
 
     def names(self, kind: str) -> List[str]:
@@ -169,6 +178,7 @@ class MaterialEditingLibrary:
         instance: Any, name: str, value: float
     ) -> bool:
         _instance_only(instance)
+        instance.events.append("set " + name)
         if name not in instance.refused:
             instance.overrides["scalar"][name] = _f32(value)
         return False
@@ -178,6 +188,7 @@ class MaterialEditingLibrary:
         instance: Any, name: str, value: LinearColor
     ) -> bool:
         _instance_only(instance)
+        instance.events.append("set " + name)
         if name not in instance.refused:
             instance.overrides["vector"][name] = [value.r, value.g, value.b, value.a]
         return False
@@ -187,6 +198,7 @@ class MaterialEditingLibrary:
         instance: Any, name: str, value: Texture
     ) -> bool:
         _instance_only(instance)
+        instance.events.append("set " + name)
         if name not in instance.refused:
             instance.overrides["texture"][name] = value
         return False
@@ -215,6 +227,7 @@ class MaterialEditingLibrary:
     @staticmethod
     def update_material_instance(instance: Any) -> None:
         _instance_only(instance)
+        instance.events.append("update")
         instance.updates += 1
 
 
@@ -235,8 +248,11 @@ class _Editor:
             vector={"BackColor": [0.0] * 4, "TintColorAndOpacity": [1.0] * 4},
             texture={"SlateUI": white},
         )
-        self.instance = MaterialInstanceConstant(INSTANCE, parent)
-        self.widget_instance = MaterialInstanceConstant(WIDGET_INSTANCE, widget)
+        self.events: List[str] = []
+        self.instance = MaterialInstanceConstant(INSTANCE, parent, self.events)
+        self.widget_instance = MaterialInstanceConstant(
+            WIDGET_INSTANCE, widget, self.events
+        )
         self.assets = {
             asset.package: asset
             for asset in (
@@ -263,7 +279,11 @@ class _Editor:
         @contextmanager
         def scoped_transaction(description: str) -> Iterator[None]:
             self.transactions.append(description)
-            yield
+            self.events.append("begin " + description)
+            try:
+                yield
+            finally:
+                self.events.append("end")
 
         def editor_asset_library_load(path: str) -> Any:
             # "The Editor is currently in a play mode": nothing loads during PIE.
@@ -360,6 +380,15 @@ def test_the_writes_are_one_undoable_transaction_followed_by_an_update(
     assert editor.fake.transactions == ["simul: set material params"]
     assert editor.fake.instance.modified == 1
     assert editor.fake.instance.updates == 1
+    # Both writes inside the transaction, so one undo reverts them.
+    assert editor.fake.events == [
+        "begin simul: set material params",
+        "modify",
+        "set Roughness",
+        "set Color",
+        "end",
+        "update",
+    ]
 
 
 def test_colors_take_rgb_or_rgba_and_read_back_as_unreal_stores_them(
@@ -536,6 +565,19 @@ def test_play_in_editor_changes_nothing(editor: SimpleNamespace) -> None:
             "scalar parameter 'Roughness' must be a finite number",
         ),
         ({"scalar_params": {"Roughness": 1e39}}, "within the 32-bit float range"),
+        # A JSON integer has no bound; one too large for a float is refused
+        # like any other value out of range, not raised as OverflowError.
+        ({"scalar_params": {"Roughness": 10**400}}, "within the 32-bit float range"),
+        (
+            {"vector_params": {"Color": [1.0, 0.0, 10**400]}},
+            "vector parameter 'Color' must be",
+        ),
+        # Unreal's names ignore case: both would write Roughness, and the
+        # first value would come back as not taken.
+        (
+            {"scalar_params": {"Roughness": 0.1, "roughness": 0.9}},
+            "scalar parameters 'Roughness' and 'roughness' are the same parameter",
+        ),
         ({"scalar_params": [0.5]}, "scalar parameters must be a JSON object"),
         ({"scalar_params": {"": 0.5}}, "scalar parameter names must be non-empty"),
         (

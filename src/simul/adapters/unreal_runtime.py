@@ -314,16 +314,15 @@ def _material_parameter_values(
         The values by kind ("scalar", "vector", "texture"; a kind with nothing
         requested is left out), each color with four channels (alpha 1 when
         three are given); and what is wrong with the request, empty when
-        nothing is. A request with no parameter at all is wrong.
+        nothing is. A request with no parameter at all is wrong, and so is
+        one naming a parameter twice in different case.
     """
 
     def number(value: Any) -> bool:
-        return (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-            and abs(value) <= _FLOAT32_MAX
-        )
+        # The range check also rules out NaN and infinity, and unlike
+        # math.isfinite it does not overflow on an integer too large for a
+        # float (a JSON integer has no bound).
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and abs(value) <= _FLOAT32_MAX
 
     values: Dict[str, Dict[str, Any]] = {}
     problems: List[str] = []
@@ -333,9 +332,20 @@ def _material_parameter_values(
         if not isinstance(given, dict):
             problems.append(f"{kind} parameters must be a JSON object of parameter name to value, got {given!r}")
             continue
+        # The editor script matches names ignoring case, as Unreal does, so
+        # two spellings of one name would write one parameter twice and
+        # report the first value as not taken.
+        spellings: Dict[str, str] = {}
         for name, value in given.items():
             if not isinstance(name, str) or not name.strip():
                 problems.append(f"{kind} parameter names must be non-empty, got {name!r}")
+                continue
+            first = spellings.setdefault(name.lower(), name)
+            if first != name:
+                problems.append(
+                    f"{kind} parameters {first!r} and {name!r} are the same parameter "
+                    "(Unreal's parameter names ignore case): give it once"
+                )
             elif kind == "scalar" and number(value):
                 values.setdefault(kind, {})[name] = float(value)
             elif (
@@ -2345,8 +2355,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             (``MaterialParamsNotApplied``); when the path loads nothing
             (``NotFoundError``) or is not a Material Instance Constant
             (``InvalidAssetType``); and a ``ValidationError``, before the
-            editor is called, for a request without parameters or with a
-            malformed one.
+            editor is called, for a request without parameters, with a
+            malformed one, or naming a parameter twice in different case.
         """
         values, problems = _material_parameter_values(scalar_params, vector_params, texture_params)
         if problems:

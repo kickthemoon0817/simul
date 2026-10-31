@@ -113,7 +113,9 @@ Behaviour worth knowing:
   `params_set` counts them. A name the material has no parameter of that kind
   for (names match ignoring case), a texture that does not load, or a value
   that reads back different is listed in `not_applied` with the reason; the
-  call fails with `MaterialParamsNotApplied` when nothing applied. The
+  call fails with `MaterialParamsNotApplied` when nothing applied. Two names
+  that differ only in case are one parameter, so a request giving both is
+  refused with a `ValidationError` before the editor is called. The
   instance is left unsaved.
 - USD import and export need the optional **USDImporter** plugin enabled when
   the editor starts. They use `AssetImportTask` and `LevelExporterUSD`;
