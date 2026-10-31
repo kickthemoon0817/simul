@@ -165,6 +165,47 @@ def _satisfied(name: str = "Limit Distance", **state: Any) -> FakeConstraint:
     return FakeConstraint(name, "LIMIT_DISTANCE", lambda matrix: matrix, **state)
 
 
+def _nudge(offset: Sequence[float]) -> FakeConstraint:
+    """A Copy Location with Offset whose target stands at ``offset``.
+
+    It moves the object by ``offset``.
+    """
+    target = FakeTransformObject("Nudge", location=offset)
+
+    def solve(matrix: np.ndarray) -> np.ndarray:
+        solved = matrix.copy()
+        solved[:3, 3] += list(target.matrix_world.translation)
+        return solved
+
+    constraint = FakeConstraint("Copy Location", "COPY_LOCATION", solve)
+    constraint.target = target  # type: ignore[attr-defined]
+    return constraint
+
+
+def _single_precision_child_of(
+    target: FakeTransformObject,
+    moved: Sequence[float] = (0.0, 0.0, 0.0),
+    **state: Any,
+) -> FakeConstraint:
+    """A Child Of on ``target``, its inverse set, the target then moved by ``moved``.
+
+    Blender multiplies the target's matrix, the inverse and the owner's
+    matrix in single precision. When the target has not moved, its matrix and
+    the inverse cancel up to rounding in proportion to the target's distance
+    from the origin: millimetres 27 km out.
+    """
+    inverse = np.linalg.inv(np.asarray(target.matrix_world.rows)).astype(np.float32)
+    target.location = FakeVector(np.add(list(target.location), moved))
+
+    def solve(matrix: np.ndarray) -> np.ndarray:
+        parent = np.asarray(target.matrix_world.rows, dtype=np.float32)
+        return (parent @ inverse @ matrix.astype(np.float32)).astype(float)
+
+    constraint = FakeConstraint("Child Of", "CHILD_OF", solve, **state)
+    constraint.target = target  # type: ignore[attr-defined]
+    return constraint
+
+
 def _evaluated_rotation(obj: Any) -> np.ndarray:
     """An object's world rotation, its scale divided out."""
     world = np.asarray(obj.matrix_world.rows)[:3, :3]
@@ -2062,6 +2103,190 @@ class TestVisualObservationTools:
         assert result["placement_overridden"] is False
         assert result["warning"] is None
 
+    @pytest.mark.parametrize("tool", ["set_camera_view", "focus_on_object"])
+    @pytest.mark.parametrize(
+        ("nudge", "overridden"),
+        [(None, False), ((5e-5, 0.0, 0.0), True), ((0.0, 0.0, 1e-6), True)],
+        ids=["held", "moved_50um", "moved_1um"],
+    )
+    def test_reports_micrometre_overrides_in_a_millimetre_scene(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        tool: str,
+        nudge: Optional[Tuple[float, float, float]],
+        overridden: bool,
+    ) -> None:
+        """A Copy Location moved a camera 50 micrometres in a millimetre scene.
+
+        The location tolerance never went below 0.1 mm, so on Blender 5.0.1 the
+        reply of both tools said the placement held. A few millimetres from the
+        origin, single precision rounds by nanometres.
+        """
+        cam = _SinglePrecisionCamera(
+            "Camera",
+            "CAMERA",
+            FakeCameraData(clip_start=1e-5, clip_end=1.0),
+            location=(0.0, 0.0, 0.005),
+            stored=True,
+            constraints=[] if nudge is None else [_nudge(nudge)],
+        )
+        if tool == "set_camera_view":
+            placement = [0.004, -0.004, 0.003]
+            session = self._session_on(monkeypatch, cam)
+            result = session.set_camera_view(placement, [1.1, 0.0, 0.785])
+            reported = result["location"]
+        else:
+            # A 1 mm cube at the origin.
+            result = self._focus(monkeypatch, self._cube(half=0.0005), cam)
+            placement = [
+                c + v * result["distance"]
+                for c, v in zip(result["look_at"], blender_runtime._FOCUS_DIRECTION)
+            ]
+            reported = result["camera_location"]
+
+        assert math.dist(reported, placement) == pytest.approx(
+            0.0 if nudge is None else math.hypot(*nudge), abs=1e-9
+        )
+        assert result["placement_overridden"] is overridden
+        if overridden:
+            assert result["constraints_applied"] == [
+                {"name": "Copy Location", "type": "COPY_LOCATION"}
+            ]
+            assert "'Copy Location' (COPY_LOCATION)" in result["warning"]
+        else:
+            assert result["warning"] is None
+
+    @pytest.mark.parametrize("distance", [27_000.0, 100_000.0], ids=["27km", "100km"])
+    @pytest.mark.parametrize("setup", ["camera_far_out", "rig_far_out_moved_back"])
+    @pytest.mark.parametrize(
+        ("nudge", "overridden"),
+        [(None, False), ((0.0, 1.0, 0.0), True)],
+        ids=["held", "moved_1m"],
+    )
+    def test_set_camera_view_reports_only_real_overrides_kilometres_out(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        distance: float,
+        setup: str,
+        nudge: Optional[Tuple[float, float, float]],
+        overridden: bool,
+    ) -> None:
+        """Single precision puts a camera kilometres out millimetres off its
+        placement, which is no override; a constraint that moves it 1 m is one.
+
+        The camera stands that far out itself, or its own location is that
+        long: parented to a rig that far out, the rig then moved back.
+        """
+        constraints = [] if nudge is None else [_nudge(nudge)]
+        if setup == "camera_far_out":
+            location = [0.6 * distance + 7.3, -0.8 * distance - 7.1, 5.2]
+            cam = _SinglePrecisionCamera(
+                "Camera",
+                "CAMERA",
+                FakeCameraData(),
+                stored=True,
+                constraints=constraints,
+            )
+        else:
+            location = [7.3, -7.1, 5.2]
+            rig = FakeTransformObject("Rig", location=(distance, 0.0, 0.0), stored=True)
+            cam = _SinglePrecisionCamera(
+                "Camera",
+                "CAMERA",
+                FakeCameraData(),
+                parent=rig,
+                stored=True,
+                constraints=constraints,
+            )
+            rig.location = FakeVector((0.0, 0.0, 0.0))
+        cam.evaluate()
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view(location, [1.1, 0.25, 0.78])
+
+        expected = np.add(location, nudge or (0.0, 0.0, 0.0))
+        # Single precision put the camera more than the former 0.1 mm floor
+        # off, and far less than the tolerance at that distance.
+        assert 1e-4 < math.dist(result["location"], expected) < 1e-2
+        assert result["placement_overridden"] is overridden
+        if overridden:
+            assert result["constraints_applied"] == [
+                {"name": "Copy Location", "type": "COPY_LOCATION"}
+            ]
+            assert "its transform holds the placement" in result["warning"]
+        else:
+            assert result["warning"] is None
+
+    @pytest.mark.parametrize(
+        ("moved", "overridden"),
+        [((0.0, 0.0, 0.0), False), ((0.0, 1.0, 0.0), True)],
+        ids=["target_held", "target_moved_1m"],
+    )
+    def test_set_camera_view_tolerates_a_child_of_target_far_out(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        moved: Tuple[float, float, float],
+        overridden: bool,
+    ) -> None:
+        """A Child Of whose target, 27 km out, has not moved since its inverse was set.
+
+        It leaves the camera in place, but single precision rounds the
+        product with the target's matrix by millimetres, while the camera
+        and its placement lie near the origin. On Blender 5.0.1 the former
+        tolerance reported 42 of 300 such cameras, with targets 1 m to 100 km
+        out, as overridden; without its 0.1 mm floor and the target's
+        distance, 87 would have been. A target moved 1 m is an override.
+        """
+        vehicle = FakeTransformObject(
+            "Vehicle",
+            location=(16200.0, -21600.0, 0.0),
+            rotation_euler=(0.3, -0.2, 2.1),
+        )
+        cam = self._constrained_camera(_single_precision_child_of(vehicle, moved))
+        session = self._session_on(monkeypatch, cam)
+        location = [7.3, -7.1, 5.2]
+
+        result = session.set_camera_view(location, [1.1, 0.25, 0.78])
+
+        expected = np.add(location, moved)
+        assert 1e-4 < math.dist(result["location"], expected) < 1e-2
+        assert result["placement_overridden"] is overridden
+        assert result["constraints_applied"] == [
+            {"name": "Child Of", "type": "CHILD_OF"}
+        ]
+
+    def test_placement_extent_counts_the_targets_of_constraints_blender_applies(
+        self, mathutils: Any
+    ) -> None:
+        """A muted constraint, one without influence and an invalid one compute
+        nothing with their targets, and a Limit Location has none."""
+
+        def child_of(distance: float, **state: Any) -> FakeConstraint:
+            target = FakeTransformObject("Target", location=(distance, 0.0, 0.0))
+            return _single_precision_child_of(target, **state)
+
+        cam = FakeTransformObject(
+            "Camera",
+            "CAMERA",
+            location=(1.0, 2.0, 3.0),
+            constraints=[
+                child_of(27_000.0),
+                child_of(100_000.0, mute=True),
+                child_of(200_000.0, influence=0.0),
+                child_of(300_000.0, is_valid=False),
+                FakeConstraint("Limit Location", "LIMIT_LOCATION", lambda m: m),
+            ],
+        )
+
+        extent = blender_runtime.BlenderRuntimeSession._placement_extent(
+            cam, cam.matrix_world, cam.matrix_world
+        )
+
+        assert extent == pytest.approx(27_000.0)
+
     def test_focus_on_object_reports_a_track_to_that_turns_the_camera_away(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
@@ -2145,8 +2370,9 @@ class TestVisualObservationTools:
             ((1.0, 2.0, 3.0), (0.4, 0.5, 0.6), (1.0, 1.0, 1.0), 4.0, True),
             # Scale does not change what a camera sees.
             ((1.0, 2.0, 3.0), (0.4, 0.5, 0.6), (2.0, 2.0, 2.0), 4.0, True),
-            # Single precision blurs 50 micrometres, not a millimetre...
-            ((1.00005, 2.0, 3.0), (0.4, 0.5, 0.6), (1.0, 1.0, 1.0), 4.0, True),
+            # Single precision blurs a micrometre 4 m out, not 50 micrometres...
+            ((1.000001, 2.0, 3.0), (0.4, 0.5, 0.6), (1.0, 1.0, 1.0), 4.0, True),
+            ((1.00005, 2.0, 3.0), (0.4, 0.5, 0.6), (1.0, 1.0, 1.0), 4.0, False),
             ((1.001, 2.0, 3.0), (0.4, 0.5, 0.6), (1.0, 1.0, 1.0), 4.0, False),
             # ...except 10 km out, where a millimetre is within its reach.
             ((1.001, 2.0, 3.0), (0.4, 0.5, 0.6), (1.0, 1.0, 1.0), 1.0e4, True),
@@ -2160,6 +2386,7 @@ class TestVisualObservationTools:
             "same",
             "scaled",
             "within_precision",
+            "moved_50um",
             "moved_1mm",
             "moved_1mm_far_out",
             "turned_within_precision",
