@@ -115,18 +115,26 @@ _FLOAT32_EPSILON = 2.0**-23
 
 # A camera counts as evaluated where it was placed when its location is within
 # _PLACEMENT_LOCATION_PRECISION times the farthest distance from the origin
-# involved (_placement_extent), and its view and up axes within
-# _PLACEMENT_ANGLE_TOLERANCE radians. Rounding grows with those distances, so
-# the location tolerance does too, with no fixed floor: on Blender 5.0.1,
+# involved (_placement_extent), and its view and up axes within the angles of
+# _placement_turn. Rounding grows with those distances, so the location
+# tolerance does too, with no fixed floor: on Blender 5.0.1,
 # cameras on random rigs 0.1 mm to 100 km out were evaluated up to 2.5
 # epsilons of the extent from their placement (3 cm with a 146 km extent,
 # 32 nm with 0.17 m), and the former 0.1 mm floor hid a 50 micrometre Copy
-# Location in a millimetre scene. Angles do not grow with the scene: those
-# rigs turned cameras by up to 2e-5 rad, and by more near gimbal lock, where
-# Blender's Euler decomposition loses precision. 1e-4 rad is about a quarter
-# of a pixel across a 1920-pixel frame at 50 mm.
+# Location in a millimetre scene. The rotation Blender stores does not grow
+# with the scene: those rigs turned cameras by up to 2e-5 rad, and by more
+# near gimbal lock, where Blender's Euler decomposition loses precision.
+# _PLACEMENT_ANGLE_TOLERANCE, 1e-4 rad, is about a quarter of a pixel across a
+# 1920-pixel frame at 50 mm. A constraint that aims the camera turns it by more,
+# as it takes the camera's direction from two locations that rounding moves.
 _PLACEMENT_LOCATION_PRECISION = 8 * _FLOAT32_EPSILON
 _PLACEMENT_ANGLE_TOLERANCE = 1e-4
+
+# Constraints that turn their owner toward a target, along the direction from
+# the owner's location to the target's.
+_AIM_CONSTRAINT_TYPES = frozenset(
+    {"DAMPED_TRACK", "LOCKED_TRACK", "STRETCH_TO", "TRACK_TO"}
+)
 
 # Output-format settings a capture changes and restores, in restore order:
 # media_type first, so that the saved file_format is valid again.
@@ -4017,7 +4025,8 @@ class BlenderRuntimeSession:
         """
         evaluated = camera.matrix_world
         extent = self._placement_extent(camera, placement, evaluated)
-        overridden = not self._same_view(placement, evaluated, extent)
+        turn = self._placement_turn(camera, extent)
+        overridden = not self._same_view(placement, evaluated, extent, turn)
         constraints = self._active_constraints(camera)
         warning = (
             self._override_warning(camera, placement, extent, constraints)
@@ -4125,6 +4134,76 @@ class BlenderRuntimeSession:
         ]
 
     @classmethod
+    def _placement_turn(cls, camera: Any, extent: float) -> Tuple[float, float]:
+        """
+        Return how far single precision can turn a placed camera's up and view axes.
+
+        The rounding of the rotation a camera stores does not grow with the
+        camera's distance from the origin (_PLACEMENT_ANGLE_TOLERANCE), but a
+        constraint that aims it (Track To, Damped Track, Locked Track, Stretch
+        To) takes its direction from the camera's location to the target's,
+        and rounding moves each of those by up to
+        _PLACEMENT_LOCATION_PRECISION times the extent: the aim turns by that
+        much over the lever, the distance between them. A Track To then rolls
+        the camera to keep its up axis as near world Z (the target's Z axis
+        with Target Z) as it can, a roll that the turn changes by about turn /
+        sin(angle between the aim and that Z), and to any angle when they line
+        up. On Blender 5.0.1 a Track To aiming a camera where it was placed
+        turned it by up to 0.047 rad, for 62 of 300 cameras focused on the
+        object it tracks 1 m to 100 km out, and rolled it by up to 0.018 rad,
+        for 37 of 300 cameras looking within 1 degree of straight up or down
+        at its target; no camera turned or rolled by more than a fifth of the
+        angles returned here. A bone or vertex group that a target names
+        (subtarget) is left out, as only Blender computes the point it aims
+        at.
+
+        Args:
+            camera: The placed camera, its transforms evaluated.
+            extent: The farthest distance involved (_placement_extent).
+
+        Returns:
+            The angles, in radians, that the up and view axes may turn by:
+            _PLACEMENT_ANGLE_TOLERANCE plus the largest roll and turn of the
+            aim constraints Blender applies. Both are infinite when the camera
+            stands at a target, and the roll when it aims along that Z.
+        """
+        location = list(camera.matrix_world.translation)
+        up = view = 0.0
+        aims = (
+            constraint
+            for constraint in camera.constraints
+            if constraint.type in _AIM_CONSTRAINT_TYPES and cls._applies(constraint)
+        )
+        for constraint in aims:
+            for target, subtarget in cls._constraint_targets(constraint):
+                if subtarget:
+                    continue
+                world = target.matrix_world
+                aim = [t - c for t, c in zip(world.translation, location)]
+                lever = math.hypot(*aim)
+                if lever == 0.0:
+                    return math.inf, math.inf
+                turn = _PLACEMENT_LOCATION_PRECISION * extent / lever
+                roll = turn
+                if constraint.type == "TRACK_TO":
+                    z = (
+                        [world[row][2] for row in range(3)]
+                        if constraint.use_target_z
+                        else [0.0, 0.0, 1.0]
+                    )
+                    cross = (
+                        aim[1] * z[2] - aim[2] * z[1],
+                        aim[2] * z[0] - aim[0] * z[2],
+                        aim[0] * z[1] - aim[1] * z[0],
+                    )
+                    norm = lever * math.hypot(*z)
+                    sine = math.hypot(*cross) / norm if norm else 0.0
+                    roll = turn / sine if sine else math.inf
+                up = max(up, roll)
+                view = max(view, turn)
+        return _PLACEMENT_ANGLE_TOLERANCE + up, _PLACEMENT_ANGLE_TOLERANCE + view
+
+    @classmethod
     def _override_warning(
         cls,
         camera: Any,
@@ -4165,7 +4244,8 @@ class BlenderRuntimeSession:
         names = ", ".join(f"'{c['name']}' ({c['type']})" for c in constraints)
         own = cls._matrix_without_constraints(camera)
         moved = own is not None and not cls._same_view(placement, own, extent)
-        if moved and cls._same_view(own, camera.matrix_world, extent):
+        turn = cls._placement_turn(camera, extent)
+        if moved and cls._same_view(own, camera.matrix_world, extent, turn):
             return (
                 f"Blender evaluates camera {camera.name!r} away from the requested "
                 f"placement before its constraints apply, and they ({names}) leave "
@@ -4187,7 +4267,15 @@ class BlenderRuntimeSession:
         )
 
     @staticmethod
-    def _same_view(first: Any, second: Any, extent: float) -> bool:
+    def _same_view(
+        first: Any,
+        second: Any,
+        extent: float,
+        turn: Tuple[float, float] = (
+            _PLACEMENT_ANGLE_TOLERANCE,
+            _PLACEMENT_ANGLE_TOLERANCE,
+        ),
+    ) -> bool:
         """
         Whether two world matrices put a camera in one place, looking one way.
 
@@ -4201,6 +4289,9 @@ class BlenderRuntimeSession:
             second: The other world matrix.
             extent: The farthest distance from the origin involved
                 (_placement_extent), which single precision blurs.
+            turn: The angles the up and view axes may differ by
+                (_placement_turn); _PLACEMENT_ANGLE_TOLERANCE by default, for
+                matrices no constraint comes between.
 
         Returns:
             True when they agree within the placement tolerances.
@@ -4210,7 +4301,7 @@ class BlenderRuntimeSession:
         tolerance = _PLACEMENT_LOCATION_PRECISION * extent
         if math.dist(first.translation, second.translation) > tolerance:
             return False
-        for axis in (1, 2):
+        for axis, angle in zip((1, 2), turn):
             a = [first[row][axis] for row in range(3)]
             b = [second[row][axis] for row in range(3)]
             cross = (
@@ -4219,7 +4310,7 @@ class BlenderRuntimeSession:
                 a[0] * b[1] - a[1] * b[0],
             )
             dot = sum(x * y for x, y in zip(a, b))
-            if math.atan2(math.hypot(*cross), dot) > _PLACEMENT_ANGLE_TOLERANCE:
+            if math.atan2(math.hypot(*cross), dot) > angle:
                 return False
         return True
 

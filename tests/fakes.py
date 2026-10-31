@@ -509,7 +509,8 @@ class FakeConstraint:
 
     Only a type in ``TARGET_CONSTRAINT_TYPES`` has ``target`` (and may have
     ``subtarget``), only an Armature has ``targets`` (each with ``target``,
-    ``subtarget`` and ``weight``) and only an Action ``use_eval_time``, as on
+    ``subtarget`` and ``weight``), only an Action ``use_eval_time`` and only a
+    Track To ``use_target_z`` (False, Blender's default, unless given), as on
     a real constraint, so code reading them from another type fails here as
     it does in Blender. Deleting a target object leaves ``target`` None and
     ``is_valid`` True, since Blender 5.0.1 checks the targets only when the
@@ -531,6 +532,7 @@ class FakeConstraint:
     ) -> None:
         required = set()
         optional = set()
+        defaults: Dict[str, Any] = {}
         if constraint_type in TARGET_CONSTRAINT_TYPES:
             required.add("target")
             optional.add("subtarget")
@@ -538,6 +540,10 @@ class FakeConstraint:
             required.add("targets")
         if constraint_type == "ACTION":
             required.add("use_eval_time")
+        if constraint_type == "TRACK_TO":
+            # Target Z: the target's Z axis, not world Z, is the up direction.
+            defaults["use_target_z"] = False
+        optional |= set(defaults)
         if not required <= set(settings) <= required | optional:
             raise TypeError(
                 f"A {constraint_type} constraint takes {sorted(required)} "
@@ -549,7 +555,7 @@ class FakeConstraint:
         self.influence = influence
         self.is_valid = is_valid
         self._solve = solve
-        for setting, value in settings.items():
+        for setting, value in {**defaults, **settings}.items():
             setattr(self, setting, value)
 
     def _lacks_target(self) -> bool:
