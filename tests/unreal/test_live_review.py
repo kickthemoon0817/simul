@@ -497,6 +497,40 @@ def test_a_failed_procedural_scene_leaves_no_actor_or_folder(monkeypatch):
     asyncio.run(run())
 
 
+def test_a_material_instance_is_refused_during_play_in_editor_and_created_after():
+    """While PIE ran, EditorAssetLibrary found no assets, so the tool reported
+    the parent material, which exists, as not found."""
+
+    async def run():
+        client = session()
+        folder = "/Game/SimulReview_" + uuid.uuid4().hex[:8]
+        parent = "/Engine/BasicShapes/BasicShapeMaterial"
+        try:
+            started = await client.control_simulation("start")
+            assert started.get("state") == "playing", started
+            refused = await client.create_material_instance(parent, "MI_DuringPIE", folder)
+            assert refused["error_type"] == "PIEActive", refused
+            assert "control_unreal_simulation" in refused["details"]["hint"], refused
+
+            stopped = await client.control_simulation("stop")
+            assert stopped.get("state") == "stopped", stopped
+            leftover = await client._execute_json_script(
+                "import json, unreal\n"
+                f"path = {folder + '/MI_DuringPIE'!r}\n"
+                "print(json.dumps({'exists': unreal.EditorAssetLibrary.does_asset_exist(path)}))"
+            )
+            assert leftover == {"exists": False}, leftover
+            created = await client.create_material_instance(parent, "MI_AfterPIE", folder)
+            assert created["instance_path"] == f"{folder}/MI_AfterPIE.MI_AfterPIE", created
+            assert created["parent_path"] == parent + ".BasicShapeMaterial", created
+        finally:
+            await client.control_simulation("stop")
+            await client._execute_python(f"import unreal\nunreal.EditorAssetLibrary.delete_directory({folder!r})")
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_play_in_editor_refuses_editor_changes_and_flags_reads():
     """While PIE ran, spawn told the agent to pass another class or asset,
     delete reported deleted false, the reads returned 0 actors and the

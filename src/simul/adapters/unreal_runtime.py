@@ -2337,7 +2337,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Returns:
             Dictionary with instance_path, parent_path, or a ``ScriptError``
             envelope when the parent is missing, the destination exists or
-            the asset could not be created.
+            the asset could not be created, or a ``PIEActive`` envelope while
+            Play In Editor runs, when Unreal's EditorAssetLibrary loads,
+            finds and saves no assets.
         """
         if not save_path:
             # Derive save path from parent: /Game/Materials/M_Base -> /Game/Materials/

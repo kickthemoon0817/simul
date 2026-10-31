@@ -151,6 +151,9 @@ Behaviour worth knowing:
     mode, every `control_unreal_ui` action except `inspect` and `clear_cursor`
     return `error_type: "PIEActive"`, with `details.hint` naming the way out:
     `control_unreal_simulation` with action `stop` (CLI: `simul unreal sim stop`).
+  - `create_unreal_material_instance` returns the same `PIEActive` error: it
+    loads the parent material and saves the new instance through Unreal's
+    editor asset library, which loads, finds and saves no assets during PIE.
   - `list_unreal_actors`, `get_unreal_actor_by_semantic_label`,
     `summarize_unreal_scene`, `analyze_unreal_scene_for_robotics`,
     `get_unreal_actor_info`, `get_unreal_loaded_map` and

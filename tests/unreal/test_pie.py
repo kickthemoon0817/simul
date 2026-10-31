@@ -516,6 +516,181 @@ def test_usd_import_and_export_are_refused_during_pie(
 
 
 # ---------------------------------------------------------------------------
+# Material instances: an asset library Unreal withholds during PIE
+# ---------------------------------------------------------------------------
+
+
+class MaterialInterface:
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.parent: Optional[MaterialInterface] = None
+
+    def get_path_name(self) -> str:
+        return self.path
+
+    def get_class(self) -> _Class:
+        return _Class(type(self).__name__)
+
+
+class MaterialInstanceConstant(MaterialInterface):
+    pass
+
+
+class AssetLibrary:
+    """EditorAssetLibrary, AssetTools and MaterialEditingLibrary over a few assets.
+
+    Observed on UE 5.7.4 while PIE ran: EditorAssetLibrary loads, finds and
+    saves nothing (load_asset returns None, does_asset_exist and
+    save_loaded_asset False, for assets that exist; the log says "The Editor is
+    currently in a play mode"), while AssetTools.create_asset still creates.
+    """
+
+    def __init__(self, editor: Editor) -> None:
+        self.editor = editor
+        self.assets: Dict[str, MaterialInterface] = {
+            "/Game/Materials/M_Wood": MaterialInterface("/Game/Materials/M_Wood.M_Wood")
+        }
+        self.calls: List[str] = []
+        self.saved: List[str] = []
+
+    def load_asset(self, path: str) -> Optional[MaterialInterface]:
+        self.calls.append("load_asset")
+        return None if self.editor.pie else self.assets.get(path.split(".")[0])
+
+    def does_asset_exist(self, path: str) -> bool:
+        self.calls.append("does_asset_exist")
+        return not self.editor.pie and path.split(".")[0] in self.assets
+
+    def save_loaded_asset(self, asset: MaterialInterface) -> bool:
+        self.calls.append("save_loaded_asset")
+        if self.editor.pie:
+            return False
+        self.saved.append(asset.get_path_name())
+        return True
+
+    def create_asset(
+        self, name: str, folder: str, cls: Any, factory: Any
+    ) -> MaterialInterface:
+        self.calls.append("create_asset")
+        asset = cls(f"{folder}/{name}.{name}")
+        self.assets[f"{folder}/{name}"] = asset
+        return asset
+
+    def set_material_instance_parent(
+        self, instance: MaterialInterface, parent: MaterialInterface
+    ) -> None:
+        self.calls.append("set_material_instance_parent")
+        instance.parent = parent
+
+    def module_attributes(self) -> Dict[str, Any]:
+        return {
+            "EditorAssetLibrary": SimpleNamespace(
+                load_asset=self.load_asset,
+                does_asset_exist=self.does_asset_exist,
+                save_loaded_asset=self.save_loaded_asset,
+            ),
+            "AssetToolsHelpers": SimpleNamespace(
+                get_asset_tools=lambda: SimpleNamespace(create_asset=self.create_asset)
+            ),
+            "MaterialEditingLibrary": SimpleNamespace(
+                set_material_instance_parent=self.set_material_instance_parent
+            ),
+            "MaterialInterface": MaterialInterface,
+            "MaterialInstanceConstant": MaterialInstanceConstant,
+            "MaterialInstanceConstantFactoryNew": SimpleNamespace,
+        }
+
+
+@pytest.fixture
+def asset_library(editor: Editor, monkeypatch: pytest.MonkeyPatch) -> AssetLibrary:
+    library = AssetLibrary(editor)
+    for name, value in library.module_attributes().items():
+        monkeypatch.setattr(sys.modules["unreal"], name, value, raising=False)
+    return library
+
+
+def test_a_material_instance_during_pie_is_refused_before_any_asset_call(
+    editor: Editor,
+    asset_library: AssetLibrary,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """It used to be a ScriptError saying the parent material, which exists,
+    was not found: EditorAssetLibrary.load_asset returns None during PIE."""
+    editor.pie = True
+    caplog.set_level(logging.INFO, logger="simul")
+
+    result = asyncio.run(
+        _session(editor, monkeypatch).create_material_instance(
+            "/Game/Materials/M_Wood", "MI_Chair"
+        )
+    )
+
+    assert result == pie_refusal("create material instances")
+    # Refused up front: nothing is created, although AssetTools still could.
+    assert asset_library.calls == []
+    assert "/Game/Materials/MI_Chair" not in asset_library.assets
+    assert _errors(caplog) == []
+    assert any(
+        "Unreal refused the request (PIEActive)" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_a_material_instance_outside_pie_is_created_parented_and_saved(
+    editor: Editor, asset_library: AssetLibrary, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = asyncio.run(
+        _session(editor, monkeypatch).create_material_instance(
+            "/Game/Materials/M_Wood", "MI_Chair"
+        )
+    )
+
+    assert result == {
+        "instance_path": "/Game/Materials/MI_Chair.MI_Chair",
+        "parent_path": "/Game/Materials/M_Wood.M_Wood",
+        "class_name": "MaterialInstanceConstant",
+    }
+    instance = asset_library.assets["/Game/Materials/MI_Chair"]
+    assert instance.parent is asset_library.assets["/Game/Materials/M_Wood"]
+    assert asset_library.saved == ["/Game/Materials/MI_Chair.MI_Chair"]
+
+
+@pytest.mark.parametrize(
+    ("parent_path", "instance_name", "error"),
+    [
+        (
+            "/Game/Materials/M_Missing",
+            "MI_Chair",
+            "Parent material not found: /Game/Materials/M_Missing",
+        ),
+        (
+            "/Game/Materials/M_Wood",
+            "M_Wood",
+            "Asset already exists: /Game/Materials/M_Wood",
+        ),
+    ],
+)
+def test_a_material_instance_outside_pie_reports_a_missing_parent_or_a_taken_name(
+    editor: Editor,
+    asset_library: AssetLibrary,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_path: str,
+    instance_name: str,
+    error: str,
+) -> None:
+    result = asyncio.run(
+        _session(editor, monkeypatch).create_material_instance(
+            parent_path, instance_name
+        )
+    )
+
+    assert result["success"] is False and result["error_type"] == "ScriptError"
+    assert result["error"] == error
+    assert "create_asset" not in asset_library.calls
+
+
+# ---------------------------------------------------------------------------
 # Reads during PIE: the editor world, flagged
 # ---------------------------------------------------------------------------
 
@@ -933,6 +1108,26 @@ def test_an_agent_sees_the_refusal_and_the_hint(
 
     assert payload == pie_refusal("spawn actors")
     assert _errors(caplog) == []
+
+
+def test_an_agent_creating_a_material_instance_during_pie_sees_the_refusal(
+    editor: Editor,
+    asset_library: AssetLibrary,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    editor.pie = True
+
+    payload = _call(
+        editor,
+        monkeypatch,
+        tmp_path,
+        "create_unreal_material_instance",
+        {"parent_path": "/Game/Materials/M_Wood", "instance_name": "MI_Chair"},
+    )
+
+    assert payload == pie_refusal("create material instances")
+    assert asset_library.calls == []
 
 
 def test_an_agent_sees_pie_active_on_the_reads(
