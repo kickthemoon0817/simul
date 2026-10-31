@@ -46,19 +46,23 @@ def pie_refusal(action: str) -> Dict[str, Any]:
 # editor scripting then refuses (observed on UE 5.7.4):
 # UnrealEditorSubsystem.get_editor_world() returns None, and
 # EditorActorSubsystem spawns and destroys nothing, lists no actors and selects
-# none. The editor world stays loaded under the PIE world's package name minus
-# its UEDPIE_<n>_ prefix, so editor_world() finds it there.
+# none. LayersSubsystem.get_world() returns GWorld, which is the editor world
+# whenever Remote Control runs a script: the editor points GWorld at a play
+# world only while it ticks that world, and checks at the start of every editor
+# tick that it is back on the editor world. That holds after the game opens
+# another level too, when the play world's package (UEDPIE_<n>_<map>) no longer
+# names the editor's map. GWorld holding a play world means no editor world can
+# be determined, and editor_world() returns None.
 EDITOR_WORLD_FUNCTION = """
 def editor_world():
     editor = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
     world = editor.get_editor_world()
-    if world is not None:
+    if world is not None or editor.get_game_world() is None:
         return world
-    game = editor.get_game_world()
-    if game is None:
+    world = unreal.get_editor_subsystem(unreal.LayersSubsystem).get_world()
+    if world is None or re.match("UEDPIE_[0-9]+_", world.get_outermost().get_name().rpartition("/")[2]):
         return None
-    head, _, short = game.get_outermost().get_name().rpartition("/")
-    return unreal.find_object(None, head + "/" + re.sub("^UEDPIE_[0-9]+_", "", short) + "." + game.get_name())
+    return world
 """
 
 # PIE-aware helpers for the scripts below: pie_active(), pie_refusal(action)
