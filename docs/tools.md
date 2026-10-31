@@ -290,6 +290,27 @@ Behaviour worth knowing:
   IDs nor `is_evaluated` tells these cases apart. A camera hidden with the eye
   icon is still evaluated and checked. An add-on built before this report
   answers without these fields, and the server returns them as `null`.
+- `get_blender_camera_info` reports where Blender evaluates the camera
+  (`pose_source: "evaluated"`). A camera the viewport skips that way keeps the
+  `matrix_world` of an earlier evaluation, so once it moves, that matrix no
+  longer says where it is: on Blender 5.0.1 a camera moved after it was disabled
+  was reported 11 m from where a render through it put it. For such a camera
+  the reply composes the pose from its own location, rotation and scale through
+  its parent (`pose_source: "transform"`). That pose leaves out its constraints,
+  drivers and keys, which a render through it applies, and `warning` names the
+  settings that disable it and the constraints left out. A parent disabled too
+  may not have been evaluated since it moved, and `warning` then says the pose
+  was composed through that parent's last evaluated matrix. A parent whose
+  matrix only Blender computes (a bone or a curve, for instance) leaves the
+  camera's last evaluated pose, with a warning that it may be stale. A disabled
+  camera that an object Blender evaluates needs through a child or a constraint,
+  also through other disabled objects, is evaluated in full and keeps its
+  evaluated pose. One that only a driver, or a constraint that is muted or has
+  no influence, depends on is composed: Blender 5.0.1 evaluated it for those
+  too, but such a constraint needs nothing of its target, and a driver that
+  reads only a custom property of the camera left its matrix stale. An add-on
+  built before this report answers without `pose_source` and `warning`, and the
+  server returns them as `null`.
 - `search_blender_objects` refuses a `name_pattern` that repeats a group holding
   a quantifier or alternatives, such as `(\w+)+`: Python's regex search
   backtracks, and on a long object name such a pattern runs for hours on

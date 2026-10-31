@@ -903,25 +903,52 @@ class BlenderRuntimeSession:
         """
         Get a camera's world-space placement and lens properties.
 
+        The pose is where Blender evaluates the camera, its constraints
+        included. Blender's viewport skips a camera disabled in viewports
+        (_viewport_disablers) unless something it evaluates depends on the
+        camera, and the matrix_world of a camera it skips keeps the pose of
+        an earlier evaluation: on Blender 5.0.1 a camera moved after it was
+        disabled was reported 11 m from where its transform and a render
+        through it put it. Unless a child or a constraint of an object
+        Blender evaluates needs the camera (_evaluated_dependent), its pose
+        is composed from its own transform instead
+        (_matrix_without_constraints), and the warning says what that leaves
+        out (_transform_pose_warning).
+
         Args:
             camera_name: Target camera name. Uses active camera when None.
 
         Returns:
             Dictionary with the world-space location and rotation_euler (XYZ
-            Euler radians, as set_camera_view takes them) where Blender
-            evaluates the camera, its constraints included; constraints_applied,
-            the constraints that act on it; lens, sensor, clip distances and
-            camera type.
+            Euler radians, as set_camera_view takes them); pose_source,
+            "evaluated" for the matrix_world Blender evaluated (constraints,
+            drivers and keys included) or "transform" for the pose composed
+            from the camera's transform; warning, which explains a pose that
+            may not be where Blender evaluates the camera and is None
+            otherwise; constraints_applied, the constraints that act on it;
+            lens, sensor, clip distances and camera type.
         """
         cam_obj = self._resolve_camera(camera_name)
         cam_data = cam_obj.data
         self._evaluate_transforms()
-        location, rotation = self._world_placement(cam_obj)
+        constraints = self._active_constraints(cam_obj)
+        matrix, pose_source, warning = cam_obj.matrix_world, "evaluated", None
+        disablers = self._viewport_disablers(cam_obj)
+        if disablers and self._evaluated_dependent(cam_obj) is None:
+            composed = self._matrix_without_constraints(cam_obj)
+            if composed is not None:
+                matrix, pose_source = composed, "transform"
+            warning = self._transform_pose_warning(
+                cam_obj, disablers, constraints, composed is not None
+            )
+        location, rotation = self._world_placement(cam_obj, matrix=matrix)
         return {
             "camera_name": cam_obj.name,
             "location": location,
             "rotation_euler": rotation,
-            "constraints_applied": self._active_constraints(cam_obj),
+            "pose_source": pose_source,
+            "warning": warning,
+            "constraints_applied": constraints,
             "lens": cam_data.lens,
             "sensor_width": cam_data.sensor_width,
             "clip_start": cam_data.clip_start,
@@ -4225,7 +4252,7 @@ class BlenderRuntimeSession:
 
     @staticmethod
     def _world_placement(
-        obj: Any, near: Optional[Sequence[float]] = None
+        obj: Any, near: Optional[Sequence[float]] = None, matrix: Any = None
     ) -> Tuple[List[float], List[float]]:
         """
         Return an object's world-space location and rotation as an XYZ Euler.
@@ -4238,12 +4265,14 @@ class BlenderRuntimeSession:
         Args:
             obj: The object.
             near: Euler angles the result stays close to.
+            matrix: The world matrix to read; the object's matrix_world when None.
 
         Returns:
             The location [x, y, z] and rotation [rx, ry, rz] in radians.
         """
         mathutils = _mathutils()
-        matrix = obj.matrix_world
+        if matrix is None:
+            matrix = obj.matrix_world
         if matrix.is_negative:
             # Not a rotation: its Euler angles would describe no orientation.
             matrix = matrix @ mathutils.Matrix.Scale(-1.0, 4, (1.0, 0.0, 0.0))
@@ -4438,6 +4467,134 @@ class BlenderRuntimeSession:
                 blocked or [f"it is in no collection of view layer {view_layer.name!r}"]
             )
         return reasons
+
+    @classmethod
+    def _evaluated_dependent(cls, obj: Any) -> Optional[Any]:
+        """
+        Return an object Blender evaluates that computes with this one's world matrix.
+
+        Blender evaluates an object disabled in viewports (_viewport_disablers)
+        in full when an object it evaluates needs its world matrix: a child of
+        it, or the owner of a constraint Blender applies that targets it. That
+        dependent can be disabled too and evaluated through a dependent of its
+        own. On Blender 5.0.1 a disabled camera with a child, with a
+        grandchild through a disabled child, or targeted by another object's
+        Copy Location, kept the matrix_world a render through it gave it, its
+        Track To included; one whose only child was disabled kept a stale
+        one. Blender evaluated it in full for a muted constraint and for a
+        driver that read its transform too, which this leaves out: nothing
+        needs the target of a muted constraint, and a driver that read only a
+        custom property of the camera got it evaluated in part, its
+        matrix_world stale, so drivers are not counted.
+
+        Args:
+            obj: The object.
+
+        Returns:
+            The first dependent found that is enabled in viewports, or None.
+        """
+        blender_module: Any = bpy
+        dependents: Dict[Any, List[Any]] = {}
+        for other in blender_module.context.scene.objects:
+            sources = [] if other.parent is None else [other.parent]
+            for constraint in other.constraints:
+                if cls._applies(constraint):
+                    sources.extend(
+                        target for target, _ in cls._constraint_targets(constraint)
+                    )
+            for source in sources:
+                dependents.setdefault(source, []).append(other)
+        pending, seen = [obj], {obj}
+        while pending:
+            for dependent in dependents.get(pending.pop(), []):
+                if dependent in seen:
+                    continue
+                if not cls._viewport_disablers(dependent):
+                    return dependent
+                seen.add(dependent)
+                pending.append(dependent)
+        return None
+
+    @classmethod
+    def _transform_pose_warning(
+        cls,
+        camera: Any,
+        disablers: List[str],
+        constraints: List[Dict[str, str]],
+        composed: bool,
+    ) -> str:
+        """
+        Explain the pose get_camera_info reports for a camera Blender may not evaluate.
+
+        Args:
+            camera: The camera, disabled in viewports and needed by nothing
+                Blender evaluates (_evaluated_dependent).
+            disablers: The settings that disable it (_viewport_disablers).
+            constraints: Its active constraints (_active_constraints).
+            composed: Whether the pose was composed from its transform
+                (_matrix_without_constraints); False when only Blender
+                computes its parent matrix, and the pose is its matrix_world.
+
+        Returns:
+            The warning: why Blender may not evaluate the camera and what the
+            pose then misses. For a composed pose, that is its constraints
+            (named), drivers and keys, and, when its parent may not be
+            evaluated either, the parent's moves since its last evaluation.
+        """
+        unevaluated = (
+            f"Blender may not evaluate camera {camera.name!r} for the viewport, as "
+            "it is neither the scene camera nor a timeline marker's camera, "
+            f"{' and '.join(disablers)}, and nothing Blender evaluates depends on "
+            "it through a child or a constraint, so its matrix_world may hold the "
+            "pose of an earlier evaluation."
+        )
+        remedy = (
+            "Change those settings or make it the scene camera to have Blender "
+            "evaluate it."
+        )
+        parent = camera.parent
+        if not composed:
+            kind = (
+                f"parent type {camera.parent_type}"
+                if camera.parent_type != "OBJECT"
+                else "a curve"
+            )
+            return (
+                f"{unevaluated} Only Blender computes the matrix its parent "
+                f"{parent.name!r} gives it ({kind}), so the reported pose is that "
+                "matrix_world, which misses any change to the camera or its parent "
+                f"since. {remedy}"
+            )
+        if constraints:
+            names = ", ".join(f"'{c['name']}' ({c['type']})" for c in constraints)
+            left_out = (
+                f"It leaves out its constraints ({names}) and any drivers and keys "
+                "on its transform, which apply whenever Blender evaluates it, as a "
+                "render through it does."
+            )
+        else:
+            left_out = (
+                "No constraint acts on it, but drivers and keys on its transform "
+                "would apply whenever Blender evaluates it, as a render through it "
+                "does."
+            )
+        stale_parent = ""
+        if (
+            parent is not None
+            and cls._viewport_disablers(parent)
+            and cls._evaluated_dependent(parent) is None
+        ):
+            stale_parent = (
+                f" Its parent {parent.name!r} may not be evaluated either, so the "
+                "pose was composed through the last matrix Blender evaluated for "
+                "that parent: it is elsewhere if the parent has moved since."
+            )
+        through = ", through its parent" if parent is not None else ""
+        return (
+            f"{unevaluated} The reported pose is the one its own transform gives "
+            f"(its location, rotation and scale{through}). {left_out}{stale_parent} "
+            f"{remedy}"
+        )
 
     @staticmethod
     def _world_bound_box(obj: Any) -> List[List[float]]:

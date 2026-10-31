@@ -570,6 +570,32 @@ class BlenderSetCameraViewResponse(BaseModel):
     warning: Optional[str] = Field(None, description=_PLACEMENT_WARNING)
 
 
+# get_camera_info's pose report. Optional: an add-on built before it still
+# answers, without these fields.
+_POSE_SOURCE = (
+    "'evaluated' when location and rotation_euler are where Blender evaluated the "
+    "camera (its matrix_world), its constraints, drivers and keys included. "
+    "'transform' for a camera disabled in viewports (itself, or its collections "
+    "disabled in viewports or excluded from the view layer) that is neither the "
+    "scene camera nor a timeline marker's camera and that nothing Blender evaluates "
+    "depends on through a child or a constraint: Blender keeps the matrix of an "
+    "earlier evaluation for such a camera, so the pose is composed from its own "
+    "location, rotation and scale through its parent, without its constraints, "
+    "drivers and keys, and the warning says so. Null from a Blender add-on that "
+    "predates this field"
+)
+_POSE_WARNING = (
+    "Why the reported pose may not be where Blender evaluates the camera, as a render "
+    "through it does: the settings that keep Blender from evaluating it, the "
+    "constraints the composed pose leaves out, and a parent Blender may not evaluate "
+    "either, through whose last evaluated matrix it was composed; or, with "
+    "pose_source 'evaluated', a parent whose matrix only Blender computes (a bone or "
+    "a curve, for instance), so the pose is the camera's last evaluated one. Null "
+    "when the pose is where Blender evaluates the camera, and from a Blender add-on "
+    "that predates this field"
+)
+
+
 class BlenderCameraInfoResponse(BaseModel):
     """Active camera information."""
 
@@ -582,7 +608,8 @@ class BlenderCameraInfoResponse(BaseModel):
         ...,
         description=(
             "World-space camera location [x, y, z] where Blender evaluates the camera, "
-            "constraints included"
+            "constraints included; composed from its own transform when pose_source "
+            "is 'transform'"
         ),
         min_length=3,
         max_length=3,
@@ -591,11 +618,14 @@ class BlenderCameraInfoResponse(BaseModel):
         ...,
         description=(
             "World-space camera rotation [rx, ry, rz] in radians, XYZ Euler, "
-            "whatever the camera's parent and rotation mode, constraints included"
+            "whatever the camera's parent and rotation mode, constraints included; "
+            "composed from its own transform when pose_source is 'transform'"
         ),
         min_length=3,
         max_length=3,
     )
+    pose_source: Optional[str] = Field(None, description=_POSE_SOURCE)
+    warning: Optional[str] = Field(None, description=_POSE_WARNING)
     constraints_applied: Optional[List[BlenderActiveConstraint]] = Field(
         None, description=_CONSTRAINTS_APPLIED
     )
@@ -1704,6 +1734,7 @@ class BlenderCreateMeshFromDataResponse(BaseModel):
     vertex_count: int = Field(..., description="Number of vertices created")
     edge_count: int = Field(..., description="Number of edges created")
     face_count: int = Field(..., description="Number of faces created")
+
 
 __all__ = [
     "SCRIPT_OUTPUT_CHARS_DEFAULT",
