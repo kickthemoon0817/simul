@@ -55,8 +55,51 @@ class _Vector:
         self.x, self.y, self.z = x, y, z
 
 
+class PrimitiveComponent:
+    """A primitive component and its world bounds (``Bounds``) as a center and a half-size."""
+
+    def __init__(self, center: Sequence[float], extent: Sequence[float]) -> None:
+        self.center, self.extent = tuple(center), tuple(extent)
+
+
+class DrawFrustumComponent(PrimitiveComponent):
+    """The frustum the editor draws for a camera: a cube reaching its far end (1000 cm by
+    default) on every side of the camera (UDrawFrustumComponent::CalcBounds, UE 5.7)."""
+
+    def __init__(self, camera: Sequence[float], far: float = 1000.0) -> None:
+        super().__init__(camera, (far, far, far))
+
+
+def get_component_bounds(
+    component: PrimitiveComponent,
+) -> Tuple[_Vector, _Vector, float]:
+    """SystemLibrary.get_component_bounds: (origin, box_extent, sphere_radius)."""
+    return (
+        _Vector(*component.center),
+        _Vector(*component.extent),
+        math.hypot(*component.extent),
+    )
+
+
+def _union(
+    components: Sequence[PrimitiveComponent],
+) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+    """The center and half-size of the box around the components' bounds."""
+    low = [min(c.center[i] - c.extent[i] for c in components) for i in range(3)]
+    high = [max(c.center[i] + c.extent[i] for c in components) for i in range(3)]
+    return (
+        tuple((lo + hi) / 2 for lo, hi in zip(low, high)),
+        tuple((hi - lo) / 2 for lo, hi in zip(low, high)),
+    )
+
+
 class Actor:
-    """An actor with a location and the bounds ``get_actor_bounds`` reports."""
+    """An actor with a location and the bounds ``get_actor_bounds`` reports.
+
+    ``components`` are its primitive components and ``children`` the actors its
+    child actor components spawned; ``get_actor_bounds`` reports ``origin`` and
+    ``extent`` whatever they are, as given.
+    """
 
     def __init__(
         self,
@@ -64,10 +107,13 @@ class Actor:
         location: Sequence[float],
         origin: Sequence[float],
         extent: Sequence[float],
+        components: Sequence[PrimitiveComponent] = (),
+        children: Sequence["Actor"] = (),
     ) -> None:
         self.name = name
         self.location = tuple(location)
         self.origin, self.extent = tuple(origin), tuple(extent)
+        self.components, self.children = list(components), list(children)
         self.bounds_calls: List[Tuple[bool, bool]] = []
 
     def get_path_name(self) -> str:
@@ -88,6 +134,18 @@ class Actor:
         """AActor::GetActorBounds: the box around the primitive components."""
         self.bounds_calls.append((only_colliding_components, include_from_child_actors))
         return _Vector(*self.origin), _Vector(*self.extent)
+
+    def get_components_by_class(self, component_class: type) -> List[Any]:
+        return [c for c in self.components if isinstance(c, component_class)]
+
+    def get_all_child_actors(self, include_descendants: bool = True) -> List["Actor"]:
+        """The actors spawned by its child actor components, children of children included."""
+        found: List[Actor] = []
+        for child in self.children:
+            found.append(child)
+            if include_descendants:
+                found.extend(child.get_all_child_actors())
+        return found
 
 
 class Editor:
@@ -125,6 +183,9 @@ class Editor:
         }
         return SimpleNamespace(
             Actor=Actor,
+            PrimitiveComponent=PrimitiveComponent,
+            DrawFrustumComponent=DrawFrustumComponent,
+            SystemLibrary=SimpleNamespace(get_component_bounds=get_component_bounds),
             EditorActorSubsystem="EditorActorSubsystem",
             LevelEditorSubsystem="LevelEditorSubsystem",
             get_editor_subsystem=subsystems.__getitem__,
@@ -317,6 +378,100 @@ def test_an_actor_smaller_than_the_editor_focus_minimum_stays_clear_of_the_near_
         results.append(result)
 
     assert results[0]["distance"] == results[1]["distance"]
+
+
+def test_distance_0_frames_a_camera_by_its_mesh_not_by_its_frustum(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In the editor every camera (and 2D scene capture) owns a DrawFrustumComponent whose
+    bounds reach 10 m on every side of it, and get_actor_bounds includes them: the camera
+    stood 35 m away and its mesh covered 2% of the view. The editor's own Focus leaves the
+    frustum out, and so does the fit: the camera is framed by its mesh."""
+    camera = (400.0, -300.0, 200.0)
+    mesh = PrimitiveComponent(camera, (40.0, 15.0, 25.0))
+    frustum = DrawFrustumComponent(camera)
+    actor = Actor(
+        "CameraActor_0", camera, *_union([mesh, frustum]), components=[mesh, frustum]
+    )
+    path = editor.add(actor)
+
+    result = _focus(editor, monkeypatch, path)
+
+    nearest, reach = _box_in_view(result, mesh.center, mesh.extent)
+    assert nearest > NEAR_CLIP and 0.4 < reach <= 1.0
+    assert result["distance"] == pytest.approx(
+        unreal_runtime._focus_fit_distance(mesh.extent)
+    )
+    _, across, up = _in_view(
+        result["camera_location"], result["camera_rotation"], camera
+    )
+    assert (across, up) == pytest.approx((0.0, 0.0), abs=1e-9)
+    assert "fit_warning" not in result
+
+
+def test_the_frustum_of_a_child_actor_camera_is_left_out_too(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rig whose child actor component spawned a camera: the box spans the rig's mesh
+    and the camera's mesh, not the camera's frustum."""
+    body = PrimitiveComponent((0.0, 0.0, 50.0), (50.0, 50.0, 50.0))
+    lens = PrimitiveComponent((0.0, 0.0, 300.0), (20.0, 10.0, 15.0))
+    frustum = DrawFrustumComponent((0.0, 0.0, 300.0))
+    camera = Actor(
+        "Rig_Camera",
+        (0.0, 0.0, 300.0),
+        *_union([lens, frustum]),
+        components=[lens, frustum],
+    )
+    rig = Actor(
+        "Rig",
+        (0.0, 0.0, 0.0),
+        *_union([body, lens, frustum]),
+        components=[body],
+        children=[camera],
+    )
+    path = editor.add(rig)
+
+    result = _focus(editor, monkeypatch, path)
+
+    origin, extent = _union([body, lens])
+    nearest, reach = _box_in_view(result, origin, extent)
+    assert nearest > NEAR_CLIP and 0.4 < reach <= 1.0
+    assert result["distance"] == pytest.approx(
+        unreal_runtime._focus_fit_distance(extent)
+    )
+
+
+def test_without_a_frustum_the_bounds_are_those_unreal_reports(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """get_actor_bounds stays the source of the box whenever no frustum is left out: it is
+    virtual, and a level instance adds its level's content to its own components', so
+    the components alone would frame less than Unreal reports."""
+    icon = PrimitiveComponent((0.0, 0.0, 0.0), (64.0, 64.0, 64.0))
+    content = ((500.0, 0.0, 200.0), (800.0, 600.0, 200.0))
+    instance = Actor("LevelInstance_0", (0.0, 0.0, 0.0), *content, components=[icon])
+    frustum_only = Actor(
+        "Frustum",
+        (0.0, 5000.0, 0.0),
+        (0.0, 5000.0, 0.0),
+        (1000.0,) * 3,
+        components=[DrawFrustumComponent((0.0, 5000.0, 0.0))],
+    )
+    for actor, (origin, extent) in (
+        (instance, content),
+        # An actor with nothing but a frustum keeps it, as the editor's own Focus does.
+        (frustum_only, ((0.0, 5000.0, 0.0), (1000.0,) * 3)),
+    ):
+        result = _focus(editor, monkeypatch, editor.add(actor))
+
+        assert actor.bounds_calls == [(False, True)]
+        assert result["distance"] == pytest.approx(
+            unreal_runtime._focus_fit_distance(extent)
+        )
+        assert result["camera_location"] == pytest.approx(
+            _placement(origin, result["distance"])[0]
+        )
 
 
 def test_distance_0_on_an_actor_without_bounds_keeps_500_cm_and_says_so(

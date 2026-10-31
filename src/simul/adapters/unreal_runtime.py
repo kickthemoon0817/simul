@@ -1945,9 +1945,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         (``EditorActorSubsystem.set_actor_selection_state``), reads the
         selection back and reads the actor's location and bounds
         (``get_actor_bounds``: every primitive component, child actors'
-        included). The camera is then placed ``distance`` behind the point it
-        looks at (toward -X) and half as far above it, pitched down at it, and
-        read back.
+        included, less the frustum the editor draws for a camera or a 2D
+        scene capture, whose bounds reach 10 m on every side of it; the
+        editor's own Focus leaves it out too). The camera is then placed
+        ``distance`` behind the point it looks at (toward -X) and half as far
+        above it, pitched down at it, and read back.
 
         A positive ``distance`` looks at the actor's location (its pivot).
         Distance 0 fits the actor in the view, as the editor's own Focus does:

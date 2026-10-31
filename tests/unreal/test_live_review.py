@@ -810,6 +810,8 @@ print(json.dumps({
         unreal.load_asset('/Engine/EngineMeshes/SM_MatPreviewMesh_01'), unreal.Vector(0, 9000, 0))),
     # A StaticMeshActor without a mesh, whose bounds have no size.
     'no_mesh': tagged(subsystem.spawn_actor_from_class(unreal.StaticMeshActor, unreal.Vector(0, 12000, 100))),
+    # A camera, whose editor-only frustum get_actor_bounds includes.
+    'camera': tagged(subsystem.spawn_actor_from_class(unreal.CameraActor, unreal.Vector(0, 15000, 200))),
 }))
 """
 
@@ -844,9 +846,10 @@ def _in_default_view(focused, bounds):
 def test_focus_distance_0_fits_the_actor_and_an_explicit_distance_looks_at_its_location():
     """Distance 0 put the camera a fixed 500 cm from the actor: inside a 20 m
     cube, and a 10 cm cube was a speck. Now it fits the actor's bounds in UE's
-    default view, looking at their center; an actor without bounds keeps the
-    500 cm and says so, and an explicit distance looks at the actor's location
-    as before."""
+    default view, looking at their center, and frames a camera by its mesh,
+    not by the frustum the editor draws for it; an actor without bounds keeps
+    the 500 cm and says so, and an explicit distance looks at the actor's
+    location as before."""
 
     async def run():
         client = session()
@@ -863,6 +866,14 @@ def test_focus_distance_0_fits_the_actor_and_an_explicit_distance_looks_at_its_l
                 d = focused["distance"]
                 assert focused["camera_location"] == pytest.approx((center[0] - d, center[1], center[2] + d / 2))
                 assert "fit_warning" not in focused, focused
+
+            # get_actor_bounds includes the frustum the editor draws for a camera, a cube
+            # reaching 10 m on every side of it, which put the camera 35 m away; the fit
+            # leaves the frustum out and frames the camera's mesh.
+            frustum = await client._execute_json_script(f"args = {{'path': {spawned['camera']!r}}}\n" + ACTOR_BOUNDS)
+            assert min(frustum["extent"]) >= 1000.0, frustum
+            camera = await client.focus_on_actor(spawned["camera"])
+            assert camera["distance"] < 500.0 and "fit_warning" not in camera, camera
 
             no_mesh = await client.focus_on_actor(spawned["no_mesh"])
             assert no_mesh["distance"] == 500.0 and "no bounds" in no_mesh["fit_warning"], no_mesh

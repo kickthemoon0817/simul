@@ -186,7 +186,10 @@ Behaviour worth knowing:
   viewport wider than about 2:1 can crop the actor. An actor whose bounds have
   no size, such as a StaticMeshActor without a mesh, gets 500 cm from its
   location instead, with a `fit_warning`; an empty actor or a light is framed
-  by its editor icon.
+  by its editor icon. The frustum the editor draws for a camera or a 2D scene
+  capture is left out of the bounds, as the editor's own Focus leaves it out
+  (its bounds reach 10 m on every side of the camera), so a camera is framed
+  by its editor mesh.
 - While Play In Editor (or Simulate In Editor) runs, Unreal's editor refuses
   changes to the editor world: it spawns and destroys no actors, lists and
   selects none, and hands out no editor world. The tools detect it:

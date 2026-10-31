@@ -128,6 +128,9 @@ class Actor:
     def get_components_by_class(self, cls: Any) -> List[Any]:
         return []
 
+    def get_all_child_actors(self, include_descendants: bool = True) -> List[Any]:
+        return []
+
     def actor_has_tag(self, tag: str) -> bool:
         return tag in self.tags
 
@@ -281,6 +284,7 @@ class Editor:
             Actor=Actor,
             ActorComponent=object,
             PrimitiveComponent=object,
+            DrawFrustumComponent=type("DrawFrustumComponent", (), {}),
             WorldSettings=WorldSettings,
             Class=_Class,
             Vector=_Vector,
