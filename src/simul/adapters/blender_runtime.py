@@ -4172,10 +4172,11 @@ class BlenderRuntimeSession:
             "constraints_applied": constraints,
             "warning": (
                 f"Blender may not evaluate camera {camera.name!r} for the viewport, as "
-                f"it is not the scene camera and {' and '.join(disablers)}, so the "
-                "placement was not checked. The reported pose is the placement, which "
-                f"is in its transform. {effect} To check it, change those settings or "
-                "make it the scene camera, then place it again."
+                "it is neither the scene camera nor a timeline marker's camera, and "
+                f"{' and '.join(disablers)}, so the placement was not checked. The "
+                "reported pose is the placement, which is in its transform. "
+                f"{effect} To check it, change those settings or make it the scene "
+                "camera, then place it again."
             ),
         }
 
@@ -4184,7 +4185,9 @@ class BlenderRuntimeSession:
         """
         Return the settings that keep Blender from evaluating an object for the viewport.
 
-        evaluated_depsgraph_get() evaluates the scene camera and the view
+        evaluated_depsgraph_get() evaluates the scene camera, every camera a
+        timeline marker binds (on Blender 5.0.1 even one disabled in viewports
+        or in an excluded collection, whatever the current frame), and the view
         layer's objects that are enabled in viewports: not disabled in
         viewports themselves (hide_viewport, the monitor icon), and in a
         collection that its own checkbox does not exclude from the view layer
@@ -4202,11 +4205,15 @@ class BlenderRuntimeSession:
 
         Returns:
             One description per setting that disables it; empty for the
-            scene camera and for an object enabled in viewports.
+            scene camera, a camera a timeline marker binds and an object
+            enabled in viewports.
         """
         blender_module: Any = bpy
         context = blender_module.context
-        if obj == context.scene.camera:
+        scene = context.scene
+        if obj == scene.camera or any(
+            marker.camera == obj for marker in scene.timeline_markers
+        ):
             return []
         view_layer = context.view_layer
         owners = list(obj.users_collection)

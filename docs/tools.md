@@ -223,9 +223,10 @@ Behaviour worth knowing:
   Blender evaluated the camera after the placement. Blender does not evaluate
   a camera that is disabled in viewports (the monitor icon on the camera or on
   a collection holding it, or its collection excluded from the view layer)
-  unless it is the scene camera, so its constraints do not run there, although
-  a render through it applies them. For such a camera `override_check` is
-  `"skipped"`, `placement_overridden` is `null`, the reported pose is the
+  unless it is the scene camera or a timeline marker binds it, so its
+  constraints do not run there, although a render through it applies them.
+  For such a camera `override_check` is `"skipped"`, `placement_overridden`
+  is `null`, the reported pose is the
   placement, `constraints_applied` lists the constraints that apply when
   Blender evaluates it, and `warning` names the setting that disables it. A
   camera hidden with the eye icon is still evaluated and checked. An add-on

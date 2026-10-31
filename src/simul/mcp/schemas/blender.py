@@ -510,7 +510,8 @@ _OVERRIDE_CHECK = (
     "'done' when Blender evaluated the camera after the placement, so "
     "placement_overridden tells whether it stays there; 'skipped' when Blender does not "
     "evaluate the camera for the viewport (disabled in viewports, or its collections "
-    "disabled in viewports or excluded from the view layer, and not the scene camera): "
+    "disabled in viewports or excluded from the view layer, and neither the scene camera "
+    "nor a timeline marker's camera): "
     "placement_overridden is then null, the reported pose is the placement, unchecked, "
     "and the warning names the cause. Null from a Blender add-on that predates this field"
 )
@@ -540,7 +541,8 @@ class BlenderSetCameraViewResponse(BaseModel):
         ...,
         description=(
             "World-space location [x, y, z] where Blender evaluates the camera, "
-            "constraints included: the requested one unless placement_overridden"
+            "constraints included: the requested one unless placement_overridden "
+            "(unchecked when override_check is 'skipped')"
         ),
         min_length=3,
         max_length=3,
@@ -549,7 +551,8 @@ class BlenderSetCameraViewResponse(BaseModel):
         ...,
         description=(
             "World-space rotation [rx, ry, rz] in radians, XYZ Euler, where Blender "
-            "evaluates the camera: the requested one unless placement_overridden"
+            "evaluates the camera: the requested one unless placement_overridden "
+            "(unchecked when override_check is 'skipped')"
         ),
         min_length=3,
         max_length=3,
@@ -638,7 +641,8 @@ class BlenderFocusOnObjectResponse(BaseModel):
         ...,
         description=(
             "World-space location [x, y, z] where Blender evaluates the camera, "
-            "constraints included: the framing placement unless placement_overridden"
+            "constraints included: the framing placement unless placement_overridden "
+            "(unchecked when override_check is 'skipped')"
         ),
         min_length=3,
         max_length=3,
@@ -654,7 +658,8 @@ class BlenderFocusOnObjectResponse(BaseModel):
         None,
         description=(
             "World-space rotation [rx, ry, rz] in radians, XYZ Euler, where Blender "
-            "evaluates the camera: level toward look_at unless placement_overridden"
+            "evaluates the camera: level toward look_at unless placement_overridden "
+            "(unchecked when override_check is 'skipped')"
         ),
         min_length=3,
         max_length=3,

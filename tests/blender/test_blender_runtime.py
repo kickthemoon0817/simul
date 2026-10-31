@@ -1145,6 +1145,7 @@ class TestVisualObservationTools:
         frame_end: int = 250,
         view_layer: Optional[FakeViewLayer] = None,
         left_out: Sequence[Any] = (),
+        marker_cameras: Sequence[Any] = (),
     ) -> SimpleNamespace:
         """
         Build a bpy mock with camera and render settings.
@@ -1154,6 +1155,8 @@ class TestVisualObservationTools:
                 collection holds every object not put in a collection.
             left_out: Objects that evaluated_depsgraph_get() does not
                 evaluate, as Blender leaves out a camera disabled in viewports.
+            marker_cameras: The cameras the scene's timeline markers bind,
+                one marker each.
 
         Returns:
             SimpleNamespace mimicking bpy module.
@@ -1206,6 +1209,10 @@ class TestVisualObservationTools:
             frame_current=frame_current,
             frame_start=frame_start,
             frame_end=frame_end,
+            timeline_markers=[
+                SimpleNamespace(name=f"F_{frame}", frame=frame, camera=camera)
+                for frame, camera in enumerate(marker_cameras, start=frame_current)
+            ],
         )
         scene.frame_set = lambda f: setattr(scene, "frame_current", f)
 
@@ -2263,12 +2270,14 @@ class TestVisualObservationTools:
         view_layer: FakeViewLayer,
         *objects: Any,
         left_out: Sequence[Any] = (),
+        marker_cameras: Sequence[Any] = (),
     ) -> blender_runtime.BlenderRuntimeSession:
         """A session whose scene camera is "Camera", in ``view_layer``."""
         fake_bpy = self._make_fake_bpy_with_camera(
             objects=[self._make_camera_object(), *objects],
             view_layer=view_layer,
             left_out=left_out,
+            marker_cameras=marker_cameras,
         )
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
@@ -2308,7 +2317,10 @@ class TestVisualObservationTools:
             {"name": "Track To", "type": "TRACK_TO"}
         ]
         warning = result["warning"]
-        clause = f"not the scene camera and {reason}, so the placement was not checked"
+        clause = (
+            "neither the scene camera nor a timeline marker's camera, and "
+            f"{reason}, so the placement was not checked"
+        )
         assert clause in warning
         assert "'Track To' (TRACK_TO)" in warning and "influence to 0" in warning
         # The reply gives the placement, which the camera's transform holds...
@@ -2408,6 +2420,30 @@ class TestVisualObservationTools:
         assert result["override_check"] == "done"
         assert result["placement_overridden"] is True
         assert "override the requested placement" in result["warning"]
+
+    @pytest.mark.parametrize("how", ["object", "excluded"])
+    def test_set_camera_view_checks_a_camera_a_timeline_marker_binds(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, how: str
+    ) -> None:
+        """Blender evaluates every camera a timeline marker binds, whatever its
+        visibility and the current frame.
+
+        On Blender 5.0.1 such a camera, disabled in viewports or in an excluded
+        collection while another camera was the scene camera, was turned by its
+        Track To in the viewport depsgraph, and the reply reported the override;
+        the check must not be skipped for it.
+        """
+        side, view_layer = self._side_camera(how, _track_to((5.0, 5.0, 0.0)))
+        session = self._session_in(monkeypatch, view_layer, side, marker_cameras=[side])
+
+        result = session.set_camera_view(
+            [7.0, -7.0, 5.0], [1.1, 0.25, 0.78], camera_name="Side"
+        )
+
+        assert result["override_check"] == "done"
+        assert result["placement_overridden"] is True
+        assert "override the requested placement" in result["warning"]
+        assert blender_runtime.BlenderRuntimeSession._viewport_disablers(side) == []
 
     def test_set_camera_view_checks_the_scene_camera_disabled_in_viewports(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
