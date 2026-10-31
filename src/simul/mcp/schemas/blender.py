@@ -544,8 +544,9 @@ class BlenderSetCameraViewResponse(BaseModel):
         ...,
         description=(
             "World-space location [x, y, z] where Blender evaluates the camera, "
-            "constraints included: the requested one unless placement_overridden "
-            "(unchecked when override_check is 'skipped')"
+            "constraints included: the requested one, up to single-precision "
+            "rounding, unless placement_overridden (unchecked when override_check "
+            "is 'skipped')"
         ),
         min_length=3,
         max_length=3,
@@ -554,8 +555,9 @@ class BlenderSetCameraViewResponse(BaseModel):
         ...,
         description=(
             "World-space rotation [rx, ry, rz] in radians, XYZ Euler, where Blender "
-            "evaluates the camera: the requested one unless placement_overridden "
-            "(unchecked when override_check is 'skipped')"
+            "evaluates the camera: the requested one, up to single-precision rounding "
+            "(a few milliradians where Blender stores it near gimbal lock), unless "
+            "placement_overridden (unchecked when override_check is 'skipped')"
         ),
         min_length=3,
         max_length=3,
@@ -644,8 +646,9 @@ class BlenderFocusOnObjectResponse(BaseModel):
         ...,
         description=(
             "World-space location [x, y, z] where Blender evaluates the camera, "
-            "constraints included: the framing placement unless placement_overridden "
-            "(unchecked when override_check is 'skipped')"
+            "constraints included: the framing placement, up to single-precision "
+            "rounding, unless placement_overridden (unchecked when override_check "
+            "is 'skipped')"
         ),
         min_length=3,
         max_length=3,
@@ -661,8 +664,9 @@ class BlenderFocusOnObjectResponse(BaseModel):
         None,
         description=(
             "World-space rotation [rx, ry, rz] in radians, XYZ Euler, where Blender "
-            "evaluates the camera: level toward look_at unless placement_overridden "
-            "(unchecked when override_check is 'skipped')"
+            "evaluates the camera: level toward look_at, up to single-precision "
+            "rounding, unless placement_overridden (unchecked when override_check is "
+            "'skipped')"
         ),
         min_length=3,
         max_length=3,
@@ -1704,6 +1708,7 @@ class BlenderCreateMeshFromDataResponse(BaseModel):
     vertex_count: int = Field(..., description="Number of vertices created")
     edge_count: int = Field(..., description="Number of edges created")
     face_count: int = Field(..., description="Number of faces created")
+
 
 __all__ = [
     "SCRIPT_OUTPUT_CHARS_DEFAULT",

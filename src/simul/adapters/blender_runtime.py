@@ -137,6 +137,16 @@ _AIM_CONSTRAINT_TYPES = frozenset(
     {"DAMPED_TRACK", "LOCKED_TRACK", "STRETCH_TO", "TRACK_TO"}
 )
 
+# How far single precision can turn an axis of an object's world matrix: its
+# rotation angles round by up to half an epsilon of their size each (pi / 2
+# epsilons for a half turn), and its entries by about an epsilon more. On
+# Blender 5.0.1 a Track To's Target Z behaved as if turned by up to 1 epsilon.
+_TARGET_AXIS_ROUNDING = 3 * _FLOAT32_EPSILON
+
+# Constraints that only turn or scale their owner: Blender leaves its location
+# as it was, so their targets do not enter it.
+_IN_PLACE_CONSTRAINT_TYPES = _AIM_CONSTRAINT_TYPES | {"COPY_ROTATION", "COPY_SCALE"}
+
 # Output-format settings a capture changes and restores, in restore order:
 # media_type first, so that the saved file_format is valid again.
 _IMAGE_FORMAT_FIELDS = (
@@ -4042,7 +4052,7 @@ class BlenderRuntimeSession:
         """
         evaluated = camera.matrix_world
         extent = self._placement_extent(camera, placement, evaluated)
-        turn = self._placement_turn(camera, extent)
+        turn = self._placement_turn(camera, placement)
         own = self._matrix_without_constraints(camera)
         if own is None or stored is None:
             moved = held = False
@@ -4087,7 +4097,10 @@ class BlenderRuntimeSession:
         origin: on Blender 5.0.1, without them, 37 of 40 cameras held by an
         Armature constraint on a resting armature 300 m out, and 31 of 40
         held by a satisfied Child Of on a vertex group 300 m from its mesh's
-        origin, were reported overridden.
+        origin, were reported overridden. A constraint that only turns or
+        scales the camera (_IN_PLACE_CONSTRAINT_TYPES) leaves its location as
+        it was, so its target is left out: a Copy Scale whose target stands
+        50 km out does not widen the tolerance.
 
         Args:
             camera: The placed camera.
@@ -4111,7 +4124,9 @@ class BlenderRuntimeSession:
             reach = max(abs(s) for s in to_world.to_scale())
         lengths.append(reach * math.hypot(*camera.location))
         for constraint in camera.constraints:
-            if not cls._applies(constraint):
+            if constraint.type in _IN_PLACE_CONSTRAINT_TYPES or not cls._applies(
+                constraint
+            ):
                 continue
             for target, subtarget in cls._constraint_targets(constraint):
                 lengths.append(math.hypot(*target.matrix_world.translation))
@@ -4159,7 +4174,7 @@ class BlenderRuntimeSession:
         ]
 
     @classmethod
-    def _placement_turn(cls, camera: Any, extent: float) -> Tuple[float, float]:
+    def _placement_turn(cls, camera: Any, placement: Any) -> Tuple[float, float]:
         """
         Return how far single precision can turn a placed camera's up and view axes.
 
@@ -4167,37 +4182,29 @@ class BlenderRuntimeSession:
         camera's distance from the origin (_PLACEMENT_ANGLE_TOLERANCE), but a
         constraint that aims it (Track To, Damped Track, Locked Track, Stretch
         To) takes its direction from the camera's location to the target's,
-        and rounding moves each of those by up to
-        _PLACEMENT_LOCATION_PRECISION times the extent: the aim turns by that
-        much over the lever, the distance between them. A Track To then rolls
-        the camera to keep its up axis as near world Z (the target's Z axis
-        with Target Z) as it can, a roll that the turn changes by about turn /
-        sin(angle between the aim and that Z), and to any angle as they come
-        to line up. On Blender 5.0.1 a Track To aiming a camera where it was placed
-        turned it by up to 0.047 rad, for 62 of 300 cameras focused on the
-        object it tracks 1 m to 100 km out, and rolled it by up to 0.018 rad,
-        for 37 of 300 cameras looking within 1 degree of straight up or down
-        at its target; no camera turned or rolled by more than a fifth of the
-        angles returned here. A bone or vertex group that a target names
-        (subtarget) is left out, as only Blender computes the point it aims
-        at.
+        both single precision. That aim misses the one the placement asked
+        for by what moved the camera off the placement across the aim (its
+        own rounding, millimetres where its own location is kilometres long)
+        and by an epsilon of each coordinate of the two locations (rounding
+        the requested location, and Blender's subtraction): the aim turns by
+        that over the lever, the distance between them. Only the aim's own
+        two locations count: the target of another constraint, however far
+        out, does not widen it. A Track To also rolls the camera, taking the
+        roll from the aim (_track_to_roll). On Blender 5.0.1 a Track To aiming
+        a camera where it was placed turned it by up to 0.13 rad, for 242 of
+        1,200 cameras focused on the object it tracks 1 m to 100 km out. A
+        bone or vertex group that a target names (subtarget) is left out, as
+        only Blender computes the point it aims at.
 
-        An aim with no direction adds nothing. When the aim Blender computes
-        lies exactly along that Z, or the camera stands exactly at its target,
-        the Track To has no direction to take the roll, or the aim, from and
-        gives the camera a fixed pose instead: on Blender 5.0.1 it rolled
-        every camera straight above or below its target to world +Y up,
-        whatever roll the camera was placed with, and turned one at its
-        target to look straight down, +Y up; Damped Track and Locked Track
-        leave a camera at its target as it is. That pose does not follow the
-        placement, so a placement off it is an override, also where rounding
-        lined the aim up: a camera within single precision of straight above
-        its target (a millimetre 10 km out) is then rolled by up to half a
-        turn.
+        An aim with no direction adds nothing: the camera standing exactly at
+        its target, Blender's Track To turns it to look straight down, +Y up,
+        while Damped Track and Locked Track leave it as it is, and either
+        pose does not follow the placement, so a placement off it is an
+        override.
 
         Args:
             camera: The placed camera, its transforms evaluated.
-            extent: The farthest distance involved (_placement_extent).
+            placement: The world matrix written (_place_in_world).
 
         Returns:
             The angles, in radians, that the up and view axes may turn by:
@@ -4205,6 +4212,7 @@ class BlenderRuntimeSession:
             aim constraints Blender applies.
         """
         location = list(camera.matrix_world.translation)
+        moved = [c - p for c, p in zip(location, placement.translation)]
         up = view = 0.0
         aims = (
             constraint
@@ -4216,30 +4224,109 @@ class BlenderRuntimeSession:
                 if subtarget:
                     continue
                 world = target.matrix_world
-                aim = [t - c for t, c in zip(world.translation, location)]
+                aimed = list(world.translation)
+                aim = [t - c for t, c in zip(aimed, location)]
                 lever = math.hypot(*aim)
                 if lever == 0.0:
                     continue
-                turn = _PLACEMENT_LOCATION_PRECISION * extent / lever
+                rounding = [
+                    _FLOAT32_EPSILON * (abs(c) + abs(t))
+                    for c, t in zip(location, aimed)
+                ]
+                along = sum(m * a for m, a in zip(moved, aim)) / lever**2
+                aside = math.hypot(*(m - along * a for m, a in zip(moved, aim)))
+                turn = (aside + math.hypot(*rounding)) / lever + _FLOAT32_EPSILON
                 roll = turn
                 if constraint.type == "TRACK_TO":
-                    z = (
-                        [world[row][2] for row in range(3)]
-                        if constraint.use_target_z
-                        else [0.0, 0.0, 1.0]
-                    )
-                    cross = (
-                        aim[1] * z[2] - aim[2] * z[1],
-                        aim[2] * z[0] - aim[0] * z[2],
-                        aim[0] * z[1] - aim[1] * z[0],
-                    )
-                    norm = lever * math.hypot(*z)
-                    sine = math.hypot(*cross) / norm if norm else 0.0
-                    if sine:
-                        roll = turn / sine
+                    if constraint.use_target_z:
+                        z = [world[row][2] for row in range(3)]
+                        tilt = _TARGET_AXIS_ROUNDING
+                    else:
+                        z, tilt = [0.0, 0.0, 1.0], 0.0
+                    roll += cls._track_to_roll(aim, moved, rounding, z, tilt)
                 up = max(up, roll)
                 view = max(view, turn)
         return _PLACEMENT_ANGLE_TOLERANCE + up, _PLACEMENT_ANGLE_TOLERANCE + view
+
+    @staticmethod
+    def _track_to_roll(
+        aim: List[float],
+        moved: List[float],
+        rounding: List[float],
+        z: List[float],
+        tilt: float,
+    ) -> float:
+        """
+        Return how far single precision can roll a camera that a Track To aims.
+
+        The Track To keeps the camera's up axis as near world Z (the target's
+        Z axis with Target Z) as it can, so it takes the roll from the
+        direction of the aim's part across that Z. The camera's move off the
+        placement and the rounding of the two locations turn that direction
+        by their error across the part over the part's length, and once their
+        error along it can reach its length, the part can point any way: the
+        roll is lost. Blender 5.0.1's Track To computes the roll itself to
+        within an epsilon however close the aim comes to that Z (0.71 epsilon
+        at worst over 2,334 exact aims 1e-9 to 0.1 rad from it), while its up
+        axis leans out of square with its view by up to the smaller of that
+        angle and epsilon over it (3.5e-4 rad at worst). So a target 1e-5 m
+        beside a camera 10 m straight above it, both near the origin, fixes
+        the roll, while a millimetre beside a camera 10 km out, where single
+        precision moves both locations by more, does not. The target's Z axis
+        is single precision too: turned by ``tilt``, it moves the aim's part
+        by that times the aim's height along it, so 1e-4 rad from it the roll
+        misses by about tilt over that angle (on Blender 5.0.1, 4 of 1,200
+        cameras placed within 1e-4 rad of the target's Z axis were rolled by
+        0.7 to 1 epsilon over its tangent).
+
+        Aimed exactly along that Z, the Track To has no direction to take the
+        roll from and gives the camera a fixed one: on Blender 5.0.1 it rolled
+        every camera straight above or below its target to world +Y up,
+        whatever roll the camera was placed with. That roll does not follow
+        the placement, so it adds nothing here, also where rounding lined the
+        aim up: a camera within single precision of straight above its target
+        (a millimetre 10 km out) is rolled by up to half a turn.
+
+        Args:
+            aim: From the camera's location to the target's.
+            moved: From the placement's location to the camera's.
+            rounding: How far rounding can move the aim along each axis.
+            z: The up direction the Track To keeps the camera's up axis near.
+            tilt: How far rounding can turn that direction, in radians.
+
+        Returns:
+            The roll in radians, beyond the turn of the aim: math.pi when
+            rounding loses the roll's direction.
+        """
+        length = math.hypot(*z)
+        if not length:
+            return 0.0
+        z = [value / length for value in z]
+        height = sum(a * u for a, u in zip(aim, z))
+        part = [a - height * u for a, u in zip(aim, z)]
+        across = math.hypot(*part)
+        if not across:
+            return 0.0
+        heading = [p / across for p in part]
+        # Across both the part and that Z: the way a roll moves the aim's part.
+        swing = [
+            heading[1] * z[2] - heading[2] * z[1],
+            heading[2] * z[0] - heading[0] * z[2],
+            heading[0] * z[1] - heading[1] * z[0],
+        ]
+
+        def error(direction: List[float]) -> float:
+            """How far the move and rounding can shift the part along ``direction``."""
+            shift = abs(sum(m * d for m, d in zip(moved, direction)))
+            spread = sum(r * abs(d) for r, d in zip(rounding, direction))
+            return shift + spread + tilt * abs(height)
+
+        slip = error(heading)
+        if slip >= across:
+            return math.pi
+        sine = across / math.hypot(*aim)
+        lean = min(sine, _FLOAT32_EPSILON / sine)
+        return error(swing) / (across - slip) + _FLOAT32_EPSILON + lean
 
     @staticmethod
     def _override_warning(
@@ -4319,9 +4406,9 @@ class BlenderRuntimeSession:
         rad off (the cosine of half the angle rounds to 1, and the rotation
         is lost). Read right after the placement, before any evaluation, the
         stored transform is what that conversion gave, so its rotation is
-        held to the placement's only when the parent shears the placement
-        (_shears): then no stored rotation carries it. Its location and
-        mirroring keep the fixed tolerances. Evaluation recomputes the same
+        held to the placement's only under a parent that can shear it
+        (_shears), where Blender's storage can miss by any angle. Its location
+        and mirroring keep the fixed tolerances. Evaluation recomputes the same
         matrix from the same stored values, so a change beyond rounding there
         is a driver on the transform or a parent that moved.
 
@@ -4339,7 +4426,7 @@ class BlenderRuntimeSession:
         """
         storage = (
             (_PLACEMENT_ANGLE_TOLERANCE, _PLACEMENT_ANGLE_TOLERANCE)
-            if cls._shears(camera, placement)
+            if cls._shears(camera)
             else (math.inf, math.inf)
         )
         rounding = (_PLACEMENT_LOCATION_PRECISION, _PLACEMENT_LOCATION_PRECISION)
@@ -4347,55 +4434,44 @@ class BlenderRuntimeSession:
         return stores and cls._same_view(stored, own, extent, rounding)
 
     @staticmethod
-    def _shears(camera: Any, placement: Any) -> bool:
+    def _shears(camera: Any) -> bool:
         """
-        Whether a camera's parent skews the placement's axes more than rounding does.
+        Whether a camera's parent can shear its placement: scale it unevenly or skew it.
 
         A camera's own transform is a location, a rotation and a scale along
-        its own axes, so it carries the placement only when the placement's
-        axes, brought into the parent's space (its matrix_world times the
-        camera's matrix_parent_inverse), stay at right angles. A parent with
-        non-uniform scale skews them when the camera is turned against that
-        scale. Single precision skews them too, by a few epsilons times the
-        parent matrix's condition number, which _PLACEMENT_LOCATION_PRECISION
-        times its Frobenius condition number (3 for a uniform scale) bounds.
+        its own axes, so its parent (matrix_world times the camera's
+        matrix_parent_inverse) carries every placement only as a rotation and
+        a uniform scale. Under any other parent matrix the placement can be
+        sheared, and Blender's storage then misses it by however much the
+        parent stretches the shear: on Blender 5.0.1, under parents scaled 22
+        to 1,000 times as much along one axis, cameras turned 1.2e-7 to
+        8.5e-7 rad off the parent's axes were evaluated up to 0.53 rad off
+        their placement, so such a placement keeps the fixed tolerances.
+        Rounding leaves a uniform parent uniform to a few epsilons.
 
         Args:
             camera: The placed camera; its parent, if any, is an object other
                 than a curve.
-            placement: The world matrix written (_place_in_world).
 
         Returns:
-            True when the axes are skewed by more than that bound, or the
-            parent matrix has no inverse.
+            True when the parent matrix's axes differ in length, or lean off
+            right angles, by more than _PLACEMENT_LOCATION_PRECISION.
         """
         parent = camera.parent
         if parent is None:
             return False
         to_parent = parent.matrix_world @ camera.matrix_parent_inverse
-        try:
-            from_parent = to_parent.inverted()
-        except ValueError:
-            return True
-        local = from_parent @ placement
-        axes = [[local[row][axis] for row in range(3)] for axis in range(3)]
+        axes = [[to_parent[row][col] for row in range(3)] for col in range(3)]
         lengths = [math.hypot(*axis) for axis in axes]
         if not all(lengths):
             return True
+        uneven = (max(lengths) - min(lengths)) / max(lengths)
         skew: float = max(
             abs(sum(a * b for a, b in zip(axes[i], axes[j])))
             / (lengths[i] * lengths[j])
             for i, j in ((0, 1), (0, 2), (1, 2))
         )
-
-        def size(matrix: Any) -> float:
-            """The Frobenius norm of a matrix's 3x3 part."""
-            return math.hypot(
-                *(matrix[row][col] for row in range(3) for col in range(3))
-            )
-
-        condition = size(to_parent) * size(from_parent)
-        return skew > _PLACEMENT_LOCATION_PRECISION * condition
+        return max(uneven, skew) > _PLACEMENT_LOCATION_PRECISION
 
     @staticmethod
     def _same_view(

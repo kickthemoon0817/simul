@@ -267,8 +267,13 @@ Behaviour worth knowing:
   override, so the reported pose can miss the placement by what single
   precision explains: up to a few milliradians where Blender stores the
   rotation near gimbal lock of the camera's Euler order or as an axis-angle
-  near zero, and more where a constraint aims the camera at a target close
-  to it far from the origin, or almost straight up or down. Aimed exactly
+  near zero (not under a parent with non-uniform scale, where any such miss
+  is reported), and more where a constraint aims the camera at a target
+  close to it far from the origin. Only the aim's own two locations count,
+  so a far target of another constraint changes nothing. Looking almost
+  straight up or down at its Track To's target, the camera's roll is
+  checked unless the target stands beside the camera's axis by no more
+  than single precision resolves at those coordinates. Aimed exactly
   straight up or down (as single precision stores both locations), or
   standing at its target, a Track To gives the camera a fixed pose, world
   +Y up, so a placement off that pose is reported. For constraints
