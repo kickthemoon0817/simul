@@ -44,6 +44,7 @@ from ._unreal_scripts import (
     SCENE_SUMMARY,
     SET_ACTOR_TRANSFORM,
     SET_LIGHT_PARAMS,
+    SET_MATERIAL_PARAMS,
     SIMULATION_STATUS,
     SPAWN_ACTOR,
     USD_EXPORT,
@@ -307,6 +308,90 @@ def _transform_component_applied(
         abs(w - g) <= _TRANSFORM_RELATIVE_TOLERANCE * max(1.0, abs(w))
         for w, g in zip(wanted, got)
     )
+
+
+# Unreal stores material scalars and colors as 32-bit floats, so a value of
+# larger magnitude cannot be set.
+_FLOAT32_MAX = 3.4028234663852886e38
+
+# What each kind of material parameter takes, for the request's error message.
+_MATERIAL_VALUE_FORMS = {
+    "scalar": "a finite number within the 32-bit float range",
+    "vector": "[r, g, b] or [r, g, b, a] of finite numbers within the 32-bit float range",
+    "texture": "a texture asset path",
+}
+
+
+def _material_parameter_values(
+    scalar_params: Any, vector_params: Any, texture_params: Any
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, str]], List[str]]:
+    """Check requested material parameters and shape them for the editor script.
+
+    Args:
+        scalar_params: Parameter name to number, or None.
+        vector_params: Parameter name to [r, g, b] or [r, g, b, a], or None.
+        texture_params: Parameter name to texture asset path, or None.
+
+    Returns:
+        The values by kind ("scalar", "vector", "texture"; a kind with nothing
+        requested is left out), each color with four channels (alpha 1 when
+        three are given); by kind and name, why a parameter is refused (a
+        malformed value, or a name given twice in different case); and every
+        problem with the request as a message, empty when there is none. A
+        request with no parameter at all is wrong too.
+    """
+
+    def number(value: Any) -> bool:
+        # The range check also rules out NaN and infinity, and unlike
+        # math.isfinite it does not overflow on an integer too large for a
+        # float (a JSON integer has no bound).
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and abs(value) <= _FLOAT32_MAX
+
+    values: Dict[str, Dict[str, Any]] = {}
+    refused: Dict[str, Dict[str, str]] = {}
+    problems: List[str] = []
+
+    def refuse(kind: str, name: str, reason: str) -> None:
+        refused.setdefault(kind, {})[name] = reason
+        problems.append(f"{kind} parameter {name!r} {reason}")
+
+    for kind, given in (("scalar", scalar_params), ("vector", vector_params), ("texture", texture_params)):
+        if given is None:
+            continue
+        if not isinstance(given, dict):
+            problems.append(f"{kind} parameters must be a JSON object of parameter name to value, got {given!r}")
+            continue
+        # The editor script matches names ignoring case, as Unreal does, so
+        # two spellings of one name would write one parameter twice and
+        # report the first value as not taken.
+        spellings: Dict[str, str] = {}
+        for name, value in given.items():
+            if not isinstance(name, str) or not name.strip():
+                problems.append(f"{kind} parameter names must be non-empty, got {name!r}")
+                continue
+            first = spellings.setdefault(name.lower(), name)
+            if first != name:
+                refuse(
+                    kind,
+                    name,
+                    f"is the same parameter as {first!r} (Unreal's parameter names ignore case): give it once",
+                )
+            elif kind == "scalar" and number(value):
+                values.setdefault(kind, {})[name] = float(value)
+            elif (
+                kind == "vector"
+                and isinstance(value, (list, tuple))
+                and len(value) in (3, 4)
+                and all(number(channel) for channel in value)
+            ):
+                values.setdefault(kind, {})[name] = [float(channel) for channel in value] + [1.0] * (4 - len(value))
+            elif kind == "texture" and isinstance(value, str) and value.strip():
+                values.setdefault(kind, {})[name] = value.strip()
+            else:
+                refuse(kind, name, f"must be {_MATERIAL_VALUE_FORMS[kind]}, got {value!r}")
+    if not values and not problems:
+        problems.append("No parameters given: pass at least one scalar, vector or texture parameter")
+    return values, refused, problems
 
 
 class UnrealRuntimeSession(LoggerMixin):
@@ -2287,72 +2372,60 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         texture_params: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
-        Set parameters on a Material Instance Constant.
+        Set parameters on a Material Instance Constant and read them back.
 
-        Uses ``PUT /remote/object/property`` to write parameter overrides.
+        Checks the request, then writes through Unreal's MaterialEditingLibrary
+        in one undoable editor transaction and reads every value back in the
+        same script, in or out of Play In Editor. A Remote Control write of the
+        instance's parameter arrays answered OK and changed nothing (observed
+        on UE 5.7.4). ``success`` alone tells whether every value applied: a
+        request with any problem is refused before anything is written, and a
+        value that reads back different fails the call. Names are matched
+        against the material's parameters ignoring case, as Unreal does. A
+        name found only inside a Material Layer gets a global override, which
+        leaves the layer unchanged: Unreal's Python API lists and writes
+        parameters by name only. The instance is left unsaved.
 
         Args:
             material_path: Material Instance asset path.
-            scalar_params: Scalar parameter name-value pairs.
-            vector_params: Vector parameter name-value pairs (RGBA lists).
-            texture_params: Texture parameter name-asset path pairs.
+            scalar_params: Scalar parameter name to value.
+            vector_params: Vector parameter name to [r, g, b] or [r, g, b, a];
+                alpha defaults to 1.
+            texture_params: Texture parameter name to texture asset path.
 
         Returns:
-            Dictionary with material_path, params_set count.
+            Dictionary with material_path (the instance's object path),
+            params_set (how many values read back as requested), applied
+            (those values as read back, by kind and parameter name) and
+            not_applied (empty). An error envelope with the same fields:
+            ``ValidationError`` when the request is refused and nothing is
+            written (not_applied gives, by kind and name, each parameter the
+            material has no parameter of that kind for, each texture that does
+            not load, each malformed value and each name given twice in
+            different case; a request without parameters or not shaped as
+            objects is refused too, before the editor is called), and
+            ``MaterialParamsNotApplied`` when a value read back different
+            after the write (not_applied names each; the values in applied
+            were written and stay written, as for lights). An error envelope
+            without them when the path loads nothing (``NotFoundError``) or is
+            not a Material Instance Constant (``InvalidAssetType``).
         """
-        params_set = 0
-
-        if scalar_params:
-            for name, value in scalar_params.items():
-                body: Dict[str, Any] = {
-                    "objectPath": material_path,
-                    "propertyName": "ScalarParameterValues",
-                    "propertyValue": {
-                        "ParameterInfo": {"Name": name},
-                        "ParameterValue": value,
-                    },
-                    "access": "WRITE_TRANSACTION_ACCESS",
-                }
-                await self._http_put("/remote/object/property", body)
-                params_set += 1
-
-        if vector_params:
-            for name, value in vector_params.items():
-                body = {
-                    "objectPath": material_path,
-                    "propertyName": "VectorParameterValues",
-                    "propertyValue": {
-                        "ParameterInfo": {"Name": name},
-                        "ParameterValue": {
-                            "R": value[0] if len(value) > 0 else 0.0,
-                            "G": value[1] if len(value) > 1 else 0.0,
-                            "B": value[2] if len(value) > 2 else 0.0,
-                            "A": value[3] if len(value) > 3 else 1.0,
-                        },
-                    },
-                    "access": "WRITE_TRANSACTION_ACCESS",
-                }
-                await self._http_put("/remote/object/property", body)
-                params_set += 1
-
-        if texture_params:
-            for name, asset_path in texture_params.items():
-                body = {
-                    "objectPath": material_path,
-                    "propertyName": "TextureParameterValues",
-                    "propertyValue": {
-                        "ParameterInfo": {"Name": name},
-                        "ParameterValue": asset_path,
-                    },
-                    "access": "WRITE_TRANSACTION_ACCESS",
-                }
-                await self._http_put("/remote/object/property", body)
-                params_set += 1
-
-        return {
-            "material_path": material_path,
-            "params_set": params_set,
-        }
+        values, refused, problems = _material_parameter_values(scalar_params, vector_params, texture_params)
+        if problems:
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": "; ".join(problems),
+                "material_path": material_path,
+                "params_set": 0,
+                "applied": {},
+                "not_applied": refused,
+            }
+        args = {"path": material_path, "values": values}
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + SET_MATERIAL_PARAMS,
+            expected_errors=("NotFoundError", "InvalidAssetType", "ValidationError", "MaterialParamsNotApplied"),
+        )
 
     async def create_material_instance(
         self,

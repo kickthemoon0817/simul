@@ -763,7 +763,13 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_material_params",
-        description="Set scalar/vector/texture parameters on a Material Instance.",
+        description=(
+            "Set scalar, vector and texture parameters on a Material Instance Constant (left unsaved) "
+            "and read them back; applied holds the values read back. The call fails, writing nothing, "
+            "when the material lacks a named parameter or a texture does not load, and fails when a "
+            "value reads back different, keeping what applied; not_applied gives each reason. A name "
+            "found only inside a Material Layer gets a global override, which leaves the layer unchanged."
+        ),
         response=UnrealSetMaterialParamsResponse,
         read_only=False,
         idempotent=True,
@@ -787,8 +793,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 str,
                 "",
                 description=(
-                    "JSON object of vector parameter name to an [R, G, B, A] list of floats. "
-                    "Empty string sets none."
+                    "JSON object of vector parameter name to an [R, G, B, A] list of floats "
+                    "([R, G, B] sets alpha 1). Empty string sets none."
                 ),
                 target="vector_params",
                 convert=_optional_json,
