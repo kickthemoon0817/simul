@@ -493,14 +493,19 @@ print(json.dumps(result))
 # transaction. A Remote Control write of the instance's parameter arrays
 # answered OK and changed nothing, and the setters return False whether or not
 # they applied the value (observed on UE 5.7.4, in and out of Play In Editor),
-# so like SET_LIGHT_PARAMS this reads every value back. A setter also adds an
-# override for a name the material has no parameter of, so names are matched
-# against the material's parameters first, ignoring case as Unreal's names do.
-# A name the material lacks, a texture that does not load and a value that
-# reads back different go in not_applied; when nothing applied the script
-# prints a MaterialParamsNotApplied error with the same fields. Assets load
-# through unreal.load_asset: EditorAssetLibrary loads nothing during PIE. The
-# instance is left unsaved, as an edit in its editor is.
+# so like SET_LIGHT_PARAMS this reads every value back and fails the call when
+# one reads back different (MaterialParamsNotApplied); the values that did
+# apply stay written and are reported in applied, as lights do. A setter also
+# adds an override for a name the material has no parameter of, so before
+# anything is written the names are matched against the material's parameters
+# (ignoring case, as Unreal's names do) and the textures are loaded: a name the
+# material lacks or a texture that does not load refuses the whole request
+# (ValidationError, nothing written, each reason in not_applied). Unreal lists
+# a Material Layer's parameters with the material's own and its Python API
+# writes by name only, so a name found only in a layer gets a global override,
+# which leaves the layer as it was. Assets load through unreal.load_asset:
+# EditorAssetLibrary loads nothing during PIE. The instance is left unsaved, as
+# an edit in its editor is.
 SET_MATERIAL_PARAMS = """
 import json, struct, unreal
 MEL = unreal.MaterialEditingLibrary
@@ -543,6 +548,10 @@ def missing(kind, name, names):
     return ("the material has no " + kind + " parameter named " + repr(name)
             + " (its " + kind + " parameters: " + listed + ")")
 
+def described(reasons):
+    return "; ".join(name + " (" + kind + "): " + reason
+                     for kind, entries in reasons.items() for name, reason in entries.items())
+
 def set_params(path, values):
     instance = unreal.load_asset(path)
     if instance is None:
@@ -554,44 +563,51 @@ def set_params(path, values):
         if isinstance(instance, unreal.Material):
             error += "; create an instance of it with create_unreal_material_instance and set that"
         return {"success": False, "error_type": "InvalidAssetType", "error": error}
-    pending, not_applied = [], {}
+    pending, refused = [], {}
     for kind, requested in values.items():
-        names = sorted(str(name) for name in PARAMETER_NAMES[kind](instance))
-        by_key = {name.lower(): name for name in names}
+        # Unreal lists a name once per layer it appears in; names ignore case.
+        by_key = {}
+        for name in PARAMETER_NAMES[kind](instance):
+            by_key.setdefault(str(name).lower(), str(name))
+        names = sorted(by_key.values(), key=str.lower)
         for name, value in requested.items():
             parameter = by_key.get(name.lower())
             if parameter is None:
-                not_applied.setdefault(kind, {})[name] = missing(kind, name, names)
+                refused.setdefault(kind, {})[name] = missing(kind, name, names)
                 continue
             if kind == "texture":
                 texture = unreal.load_asset(value)
                 if not isinstance(texture, unreal.Texture):
-                    not_applied.setdefault(kind, {})[parameter] = "no texture at " + repr(value)
+                    refused.setdefault(kind, {})[parameter] = "no texture at " + repr(value)
                     continue
                 value = texture
             pending.append((kind, parameter, value))
-    applied = {}
-    if pending:
-        with unreal.ScopedEditorTransaction("simul: set material params"):
-            instance.modify()
-            for kind, name, value in pending:
-                write(instance, kind, name, value)
-        MEL.update_material_instance(instance)
+    material_path = instance.get_path_name()
+    if refused:
+        return {"success": False, "error_type": "ValidationError",
+                "error": "Nothing was written to " + material_path + ": " + described(refused),
+                "material_path": material_path, "params_set": 0, "applied": {}, "not_applied": refused}
+    with unreal.ScopedEditorTransaction("simul: set material params"):
+        instance.modify()
         for kind, name, value in pending:
-            value_read = read(instance, kind, name)
-            if value_read == expected(kind, value):
-                applied.setdefault(kind, {})[name] = value_read
-            else:
-                not_applied.setdefault(kind, {})[name] = (
-                    "Unreal read back " + json.dumps(value_read) + " after the write")
-    result = {"material_path": instance.get_path_name(),
+            write(instance, kind, name, value)
+    MEL.update_material_instance(instance)
+    applied, not_applied = {}, {}
+    for kind, name, value in pending:
+        value_read = read(instance, kind, name)
+        if value_read == expected(kind, value):
+            applied.setdefault(kind, {})[name] = value_read
+        else:
+            not_applied.setdefault(kind, {})[name] = (
+                "Unreal read back " + json.dumps(value_read) + " after the write")
+    result = {"material_path": material_path,
               "params_set": sum(len(entries) for entries in applied.values()),
               "applied": applied, "not_applied": not_applied}
-    if not applied:
-        reasons = "; ".join(name + " (" + kind + "): " + reason
-                            for kind, entries in not_applied.items() for name, reason in entries.items())
-        result.update(success=False, error_type="MaterialParamsNotApplied",
-                      error="Unreal applied none of the parameters to " + instance.get_path_name() + ": " + reasons)
+    if not_applied:
+        error = "Unreal did not apply every parameter to " + material_path + ": " + described(not_applied)
+        if applied:
+            error += ". The parameters in applied were set and stay set"
+        result.update(success=False, error_type="MaterialParamsNotApplied", error=error)
     return result
 
 print(json.dumps(set_params(**args)))

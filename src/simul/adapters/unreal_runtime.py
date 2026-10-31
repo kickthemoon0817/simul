@@ -324,7 +324,7 @@ _MATERIAL_VALUE_FORMS = {
 
 def _material_parameter_values(
     scalar_params: Any, vector_params: Any, texture_params: Any
-) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, str]], List[str]]:
     """Check requested material parameters and shape them for the editor script.
 
     Args:
@@ -335,9 +335,10 @@ def _material_parameter_values(
     Returns:
         The values by kind ("scalar", "vector", "texture"; a kind with nothing
         requested is left out), each color with four channels (alpha 1 when
-        three are given); and what is wrong with the request, empty when
-        nothing is. A request with no parameter at all is wrong, and so is
-        one naming a parameter twice in different case.
+        three are given); by kind and name, why a parameter is refused (a
+        malformed value, or a name given twice in different case); and every
+        problem with the request as a message, empty when there is none. A
+        request with no parameter at all is wrong too.
     """
 
     def number(value: Any) -> bool:
@@ -347,7 +348,13 @@ def _material_parameter_values(
         return isinstance(value, (int, float)) and not isinstance(value, bool) and abs(value) <= _FLOAT32_MAX
 
     values: Dict[str, Dict[str, Any]] = {}
+    refused: Dict[str, Dict[str, str]] = {}
     problems: List[str] = []
+
+    def refuse(kind: str, name: str, reason: str) -> None:
+        refused.setdefault(kind, {})[name] = reason
+        problems.append(f"{kind} parameter {name!r} {reason}")
+
     for kind, given in (("scalar", scalar_params), ("vector", vector_params), ("texture", texture_params)):
         if given is None:
             continue
@@ -364,9 +371,10 @@ def _material_parameter_values(
                 continue
             first = spellings.setdefault(name.lower(), name)
             if first != name:
-                problems.append(
-                    f"{kind} parameters {first!r} and {name!r} are the same parameter "
-                    "(Unreal's parameter names ignore case): give it once"
+                refuse(
+                    kind,
+                    name,
+                    f"is the same parameter as {first!r} (Unreal's parameter names ignore case): give it once",
                 )
             elif kind == "scalar" and number(value):
                 values.setdefault(kind, {})[name] = float(value)
@@ -380,10 +388,10 @@ def _material_parameter_values(
             elif kind == "texture" and isinstance(value, str) and value.strip():
                 values.setdefault(kind, {})[name] = value.strip()
             else:
-                problems.append(f"{kind} parameter {name!r} must be {_MATERIAL_VALUE_FORMS[kind]}, got {value!r}")
+                refuse(kind, name, f"must be {_MATERIAL_VALUE_FORMS[kind]}, got {value!r}")
     if not values and not problems:
         problems.append("No parameters given: pass at least one scalar, vector or texture parameter")
-    return values, problems
+    return values, refused, problems
 
 
 class UnrealRuntimeSession(LoggerMixin):
@@ -2366,13 +2374,17 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         """
         Set parameters on a Material Instance Constant and read them back.
 
-        Writes through Unreal's MaterialEditingLibrary in one undoable editor
-        transaction, then reads every value back in the same script, in or out
-        of Play In Editor. A Remote Control write of the instance's parameter
-        arrays answered OK and changed nothing (observed on UE 5.7.4). Names
-        are matched against the material's parameters, ignoring case as
-        Unreal does, before anything is written. The instance is left
-        unsaved.
+        Checks the request, then writes through Unreal's MaterialEditingLibrary
+        in one undoable editor transaction and reads every value back in the
+        same script, in or out of Play In Editor. A Remote Control write of the
+        instance's parameter arrays answered OK and changed nothing (observed
+        on UE 5.7.4). ``success`` alone tells whether every value applied: a
+        request with any problem is refused before anything is written, and a
+        value that reads back different fails the call. Names are matched
+        against the material's parameters ignoring case, as Unreal does. A
+        name found only inside a Material Layer gets a global override, which
+        leaves the layer unchanged: Unreal's Python API lists and writes
+        parameters by name only. The instance is left unsaved.
 
         Args:
             material_path: Material Instance asset path.
@@ -2385,23 +2397,34 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             Dictionary with material_path (the instance's object path),
             params_set (how many values read back as requested), applied
             (those values as read back, by kind and parameter name) and
-            not_applied (by kind and name, why a parameter was not set: the
-            material has no parameter of that kind by that name, the texture
-            does not load, or the value read back different). An error
-            envelope with the same fields when nothing applied
-            (``MaterialParamsNotApplied``); when the path loads nothing
-            (``NotFoundError``) or is not a Material Instance Constant
-            (``InvalidAssetType``); and a ``ValidationError``, before the
-            editor is called, for a request without parameters, with a
-            malformed one, or naming a parameter twice in different case.
+            not_applied (empty). An error envelope with the same fields:
+            ``ValidationError`` when the request is refused and nothing is
+            written (not_applied gives, by kind and name, each parameter the
+            material has no parameter of that kind for, each texture that does
+            not load, each malformed value and each name given twice in
+            different case; a request without parameters or not shaped as
+            objects is refused too, before the editor is called), and
+            ``MaterialParamsNotApplied`` when a value read back different
+            after the write (not_applied names each; the values in applied
+            were written and stay written, as for lights). An error envelope
+            without them when the path loads nothing (``NotFoundError``) or is
+            not a Material Instance Constant (``InvalidAssetType``).
         """
-        values, problems = _material_parameter_values(scalar_params, vector_params, texture_params)
+        values, refused, problems = _material_parameter_values(scalar_params, vector_params, texture_params)
         if problems:
-            return {"success": False, "error_type": "ValidationError", "error": "; ".join(problems)}
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": "; ".join(problems),
+                "material_path": material_path,
+                "params_set": 0,
+                "applied": {},
+                "not_applied": refused,
+            }
         args = {"path": material_path, "values": values}
         return await self._execute_json_script(
             f"args = {args!r}\n" + SET_MATERIAL_PARAMS,
-            expected_errors=("NotFoundError", "InvalidAssetType", "MaterialParamsNotApplied"),
+            expected_errors=("NotFoundError", "InvalidAssetType", "ValidationError", "MaterialParamsNotApplied"),
         )
 
     async def create_material_instance(

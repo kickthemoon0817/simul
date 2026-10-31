@@ -765,9 +765,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         name="set_unreal_material_params",
         description=(
             "Set scalar, vector and texture parameters on a Material Instance Constant (left unsaved) "
-            "and read them back: applied holds the values read back and params_set counts them. A "
-            "parameter the material lacks, a texture that does not load or a value Unreal did not take "
-            "is listed in not_applied; the call fails when nothing applied."
+            "and read them back; applied holds the values read back. The call fails, writing nothing, "
+            "when the material lacks a named parameter or a texture does not load, and fails when a "
+            "value reads back different, keeping what applied; not_applied gives each reason. A name "
+            "found only inside a Material Layer gets a global override, which leaves the layer unchanged."
         ),
         response=UnrealSetMaterialParamsResponse,
         read_only=False,

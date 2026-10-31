@@ -707,8 +707,9 @@ class UnrealSetMaterialParamsResponse(BaseModel):
     not_applied: Dict[str, Dict[str, str]] = Field(
         default_factory=dict,
         description=(
-            "By kind and parameter name, why a requested parameter was not set: the material has no "
-            "parameter of that kind by that name, the texture does not load, or the value read back different"
+            "By kind and parameter name, why a requested parameter was not set: refused before anything "
+            "was written (the material has no parameter of that kind by that name, the texture does not "
+            "load, a malformed value), or read back different after the write. Empty when the call succeeds"
         ),
     )
 

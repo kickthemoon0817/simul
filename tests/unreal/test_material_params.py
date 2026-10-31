@@ -7,7 +7,11 @@ UE 5.7.4, in and out of Play In Editor: Remote Control answered OK, the tool
 reported ``params_set: 1``, and the instance still had no override, Roughness
 reading its 0.6407 default after two calls. It now writes through
 MaterialEditingLibrary, the calls the Material Instance editor makes, and
-reports the values it reads back.
+reports the values it reads back. As set_unreal_light_params does, it fails
+whenever a value does not apply, so ``success`` alone can be trusted: a
+request naming a parameter the material lacks or a texture that does not load
+is refused before anything is written, and a value that reads back different
+fails the call after the write, keeping what did apply.
 
 The fake editor below answers as UE 5.7.4 did: the MaterialEditingLibrary
 setters return False whether or not they applied the value and add an
@@ -45,6 +49,8 @@ WIDGET_INSTANCE = "/Game/Materials/MI_Widget"
 TEXTURE = "/Engine/EngineResources/DefaultTexture"
 #: Why a scalar named Bogus is not set on an instance of the basic shape material.
 NO_BOGUS = "the material has no scalar parameter named 'Bogus' (its scalar parameters: Roughness)"
+#: What the fake instance holds before anything is written to it.
+NO_OVERRIDES = {"scalar": {}, "vector": {}, "texture": {}}
 
 
 def _f32(value: float) -> float:
@@ -414,32 +420,39 @@ def test_a_texture_is_set_by_asset_path(editor: SimpleNamespace) -> None:
     assert result["params_set"] == 1
 
 
-def test_a_name_the_material_lacks_is_reported_and_not_written(
+def test_a_name_the_material_lacks_refuses_the_request_and_nothing_is_written(
     editor: SimpleNamespace,
 ) -> None:
-    """Unreal's setter would store an override named Bogus; the name is checked first."""
+    """Unreal's setter would store an override named Bogus; the name is checked
+    first, and the valid Color in the same request is not written either."""
     result = _set(
         editor,
         scalar_params={"Bogus": 1.0},
         vector_params={"Color": [0.0, 0.0, 1.0, 1.0]},
     )
 
-    assert result["params_set"] == 1
-    assert result["applied"] == {"vector": {"Color": [0.0, 0.0, 1.0, 1.0]}}
-    assert result["not_applied"] == {"scalar": {"Bogus": NO_BOGUS}}
-    assert "success" not in result  # something applied: not an error
-    assert editor.fake.instance.overrides["scalar"] == {}
+    assert result == {
+        "success": False,
+        "error_type": "ValidationError",
+        "error": "Nothing was written to /Game/Materials/MI_Chair.MI_Chair: Bogus (scalar): "
+        + NO_BOGUS,
+        "material_path": INSTANCE + ".MI_Chair",
+        "params_set": 0,
+        "applied": {},
+        "not_applied": {"scalar": {"Bogus": NO_BOGUS}},
+    }
+    assert editor.fake.instance.overrides == NO_OVERRIDES
+    assert editor.fake.transactions == []
+    assert editor.fake.instance.updates == 0
 
 
-def test_nothing_applied_is_an_error_naming_each_parameter(
-    editor: SimpleNamespace,
-) -> None:
+def test_every_refused_parameter_is_named(editor: SimpleNamespace) -> None:
     result = _set(
         editor, scalar_params={"Bogus": 1.0}, texture_params={"SlateUI": TEXTURE}
     )
 
     assert result["success"] is False
-    assert result["error_type"] == "MaterialParamsNotApplied"
+    assert result["error_type"] == "ValidationError"
     assert result["params_set"] == 0
     assert result["applied"] == {}
     assert result["not_applied"] == {
@@ -447,27 +460,60 @@ def test_nothing_applied_is_an_error_naming_each_parameter(
         "texture": {"SlateUI": "the material has no texture parameters"},
     }
     assert result["error"] == (
-        "Unreal applied none of the parameters to /Game/Materials/MI_Chair.MI_Chair: "
+        "Nothing was written to /Game/Materials/MI_Chair.MI_Chair: "
         "Bogus (scalar): the material has no scalar parameter named 'Bogus' (its scalar parameters: Roughness); "
         "SlateUI (texture): the material has no texture parameters"
     )
-    # Nothing to write, so no transaction and no update.
     assert editor.fake.transactions == []
     assert editor.fake.instance.updates == 0
 
 
-def test_a_value_unreal_does_not_take_is_not_applied(editor: SimpleNamespace) -> None:
+def test_a_value_unreal_does_not_take_fails_the_call(editor: SimpleNamespace) -> None:
     editor.fake.instance.refused.add("Roughness")
 
     result = _set(editor, scalar_params={"Roughness": 0.25})
 
-    assert result["success"] is False
-    assert result["error_type"] == "MaterialParamsNotApplied"
-    assert result["not_applied"] == {
-        "scalar": {
-            "Roughness": f"Unreal read back {json.dumps(_f32(0.6407))} after the write"
-        }
+    roughness = f"Unreal read back {json.dumps(_f32(0.6407))} after the write"
+    assert result == {
+        "success": False,
+        "error_type": "MaterialParamsNotApplied",
+        "error": "Unreal did not apply every parameter to /Game/Materials/MI_Chair.MI_Chair: "
+        "Roughness (scalar): " + roughness,
+        "material_path": INSTANCE + ".MI_Chair",
+        "params_set": 0,
+        "applied": {},
+        "not_applied": {"scalar": {"Roughness": roughness}},
     }
+    assert editor.fake.transactions == ["simul: set material params"]
+
+
+def test_a_value_that_reads_back_different_fails_the_call_and_the_rest_stays_set(
+    editor: SimpleNamespace,
+) -> None:
+    """success alone tells whether every value applied; nothing is rolled
+    back, as set_unreal_light_params rolls nothing back."""
+    editor.fake.instance.refused.add("Roughness")
+
+    result = _set(
+        editor,
+        scalar_params={"Roughness": 0.25},
+        vector_params={"Color": [0.0, 0.0, 1.0, 1.0]},
+    )
+
+    roughness = f"Unreal read back {json.dumps(_f32(0.6407))} after the write"
+    assert result == {
+        "success": False,
+        "error_type": "MaterialParamsNotApplied",
+        "error": "Unreal did not apply every parameter to /Game/Materials/MI_Chair.MI_Chair: "
+        "Roughness (scalar): "
+        + roughness
+        + ". The parameters in applied were set and stay set",
+        "material_path": INSTANCE + ".MI_Chair",
+        "params_set": 1,
+        "applied": {"vector": {"Color": [0.0, 0.0, 1.0, 1.0]}},
+        "not_applied": {"scalar": {"Roughness": roughness}},
+    }
+    assert editor.fake.instance.overrides["vector"] == {"Color": [0.0, 0.0, 1.0, 1.0]}
 
 
 def test_names_match_ignoring_case_and_report_the_materials_spelling(
@@ -482,7 +528,7 @@ def test_names_match_ignoring_case_and_report_the_materials_spelling(
 @pytest.mark.parametrize(
     "path", ["/Game/Textures/T_Missing", "/Engine/BasicShapes/Cube", PARENT]
 )
-def test_a_texture_that_does_not_load_is_not_applied(
+def test_a_texture_that_does_not_load_refuses_the_request(
     editor: SimpleNamespace, path: str
 ) -> None:
     result = _set(
@@ -492,9 +538,12 @@ def test_a_texture_that_does_not_load_is_not_applied(
         scalar_params={"OpacityFromTexture": 0.5},
     )
 
-    assert result["applied"] == {"scalar": {"OpacityFromTexture": 0.5}}
+    assert result["success"] is False
+    assert result["error_type"] == "ValidationError"
+    assert result["applied"] == {}
     assert result["not_applied"] == {"texture": {"SlateUI": f"no texture at {path!r}"}}
-    assert editor.fake.widget_instance.overrides["texture"] == {}
+    # The valid scalar in the same request is not written either.
+    assert editor.fake.widget_instance.overrides == NO_OVERRIDES
 
 
 @pytest.mark.parametrize(
@@ -545,6 +594,18 @@ def test_play_in_editor_changes_nothing(editor: SimpleNamespace) -> None:
     assert during["params_set"] == 2
 
 
+def test_a_refused_request_writes_nothing_during_play_in_editor(
+    editor: SimpleNamespace,
+) -> None:
+    editor.fake.pie = True
+
+    result = _set(editor, scalar_params={"Roughness": 0.25, "Bogus": 1.0})
+
+    assert result["error_type"] == "ValidationError"
+    assert result["not_applied"] == {"scalar": {"Bogus": NO_BOGUS}}
+    assert editor.fake.instance.overrides == NO_OVERRIDES
+
+
 @pytest.mark.parametrize(
     ("params", "problem"),
     [
@@ -576,7 +637,7 @@ def test_play_in_editor_changes_nothing(editor: SimpleNamespace) -> None:
         # first value would come back as not taken.
         (
             {"scalar_params": {"Roughness": 0.1, "roughness": 0.9}},
-            "scalar parameters 'Roughness' and 'roughness' are the same parameter",
+            "scalar parameter 'roughness' is the same parameter as 'Roughness'",
         ),
         ({"scalar_params": [0.5]}, "scalar parameters must be a JSON object"),
         ({"scalar_params": {"": 0.5}}, "scalar parameter names must be non-empty"),
@@ -619,6 +680,39 @@ def test_a_malformed_request_is_refused_before_the_editor_is_called(
     assert result["success"] is False
     assert result["error_type"] == "ValidationError"
     assert problem in result["error"]
+    session._execute_python.assert_not_called()
+
+
+def test_a_refused_entry_is_named_in_not_applied_before_the_editor_is_called() -> None:
+    session = UnrealRuntimeSession(Settings())
+    session._execute_python = AsyncMock()
+
+    result = asyncio.run(
+        session.set_material_params(
+            INSTANCE,
+            scalar_params={"Roughness": 0.1, "roughness": 0.9, "Metallic": "1"},
+            vector_params={"Color": [1.0]},
+        )
+    )
+
+    assert result["success"] is False
+    assert result["error_type"] == "ValidationError"
+    assert (result["material_path"], result["params_set"], result["applied"]) == (
+        INSTANCE,
+        0,
+        {},
+    )
+    assert result["not_applied"] == {
+        "scalar": {
+            "roughness": "is the same parameter as 'Roughness' (Unreal's parameter names ignore case): "
+            "give it once",
+            "Metallic": "must be a finite number within the 32-bit float range, got '1'",
+        },
+        "vector": {
+            "Color": "must be [r, g, b] or [r, g, b, a] of finite numbers within the 32-bit float range, "
+            "got [1.0]"
+        },
+    }
     session._execute_python.assert_not_called()
 
 
@@ -694,7 +788,7 @@ def test_the_tool_returns_the_values_read_back(
         monkeypatch,
         {
             "material_path": INSTANCE,
-            "scalar_params_json": '{"Roughness": 0.25, "Bogus": 1}',
+            "scalar_params_json": '{"Roughness": 0.25}',
             "vector_params_json": '{"Color": [0.5, 0.5, 0.5]}',
         },
     )
@@ -708,20 +802,48 @@ def test_the_tool_returns_the_values_read_back(
             "scalar": {"Roughness": 0.25},
             "vector": {"Color": [0.5, 0.5, 0.5, 1.0]},
         },
-        "not_applied": {"scalar": {"Bogus": NO_BOGUS}},
+        "not_applied": {},
     }
 
 
-def test_the_tool_fails_when_nothing_applied(
+def test_the_tool_refuses_a_parameter_the_material_lacks_writing_nothing(
     editor: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     payload = _call_tool(
         editor,
         monkeypatch,
-        {"material_path": INSTANCE, "scalar_params_json": '{"Bogus": 1}'},
+        {
+            "material_path": INSTANCE,
+            "scalar_params_json": '{"Roughness": 0.25, "Bogus": 1}',
+        },
+    )
+
+    assert payload["success"] is False
+    assert payload["error_type"] == "ValidationError"
+    assert payload["params_set"] == 0
+    assert payload["applied"] == {}
+    assert payload["not_applied"] == {"scalar": {"Bogus": NO_BOGUS}}
+    assert editor.fake.instance.overrides == NO_OVERRIDES
+
+
+def test_the_tool_fails_when_a_value_does_not_read_back(
+    editor: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The error envelope keeps applied and not_applied, so a caller sees what stayed set."""
+    editor.fake.instance.refused.add("Roughness")
+
+    payload = _call_tool(
+        editor,
+        monkeypatch,
+        {
+            "material_path": INSTANCE,
+            "scalar_params_json": '{"Roughness": 0.25}',
+            "vector_params_json": '{"Color": [0.5, 0.5, 0.5]}',
+        },
     )
 
     assert payload["success"] is False
     assert payload["error_type"] == "MaterialParamsNotApplied"
-    assert payload["params_set"] == 0
-    assert payload["not_applied"] == {"scalar": {"Bogus": NO_BOGUS}}
+    assert payload["params_set"] == 1
+    assert payload["applied"] == {"vector": {"Color": [0.5, 0.5, 0.5, 1.0]}}
+    assert list(payload["not_applied"]["scalar"]) == ["Roughness"]

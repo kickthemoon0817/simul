@@ -176,7 +176,9 @@ print(json.dumps({{'color': [color.r, color.g, color.b]}}))
 def test_material_params_are_written_and_read_back_in_and_out_of_play_in_editor():
     """set_unreal_material_params reported params_set 1 while the instance
     kept no override, Roughness reading its 0.6407 default, in and out of PIE:
-    the Remote Control write it sent changed nothing."""
+    the Remote Control write it sent changed nothing. A request naming a
+    parameter the material lacks is refused with nothing written, and an edit
+    made during PIE is the asset the game renders with and stays after PIE."""
 
     async def run():
         client = session()
@@ -186,9 +188,23 @@ import unreal, json
 m = unreal.load_asset(args['path'])
 print(json.dumps({'scalar': {str(v.parameter_info.name): v.parameter_value
                              for v in m.get_editor_property('scalar_parameter_values')},
+                  'vector': {str(v.parameter_info.name): [v.parameter_value.r, v.parameter_value.g,
+                                                          v.parameter_value.b, v.parameter_value.a]
+                             for v in m.get_editor_property('vector_parameter_values')},
                   'texture': {str(v.parameter_info.name): v.parameter_value.get_path_name()
                               for v in m.get_editor_property('texture_parameter_values')}}))
 """
+        game_material = """
+import unreal, json
+world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_game_world()
+copy = [a for a in unreal.GameplayStatics.get_all_actors_of_class(world, unreal.StaticMeshActor)
+        if a.get_name() == args['name']]
+material = copy[0].static_mesh_component.get_material(0) if copy else None
+print(json.dumps({'material': material.get_path_name() if material else None,
+                  'roughness': unreal.MaterialEditingLibrary.get_material_instance_scalar_parameter_value(
+                      material, 'Roughness') if material else None}))
+"""
+        cube = None
         try:
             created = await client.create_material_instance(
                 "/Engine/BasicShapes/BasicShapeMaterial", "MI_Params", folder
@@ -199,35 +215,72 @@ print(json.dumps({'scalar': {str(v.parameter_info.name): v.parameter_value
             )
             assert not widget.get("error"), widget
             path, widget_path = created["instance_path"], widget["instance_path"]
+            # A cube using the instance; always loaded, so World Partition puts
+            # its copy in the PIE world without a streaming source.
+            cube = await client._execute_json_script(f"""
+import unreal, json
+actor = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).spawn_actor_from_class(
+    unreal.StaticMeshActor, unreal.Vector(0, 0, 100))
+actor.static_mesh_component.set_static_mesh(unreal.load_asset('/Engine/BasicShapes/Cube'))
+actor.static_mesh_component.set_material(0, unreal.load_asset({path!r}))
+actor.set_editor_property('is_spatially_loaded', False)
+print(json.dumps({{'path': actor.get_path_name(), 'name': actor.get_name()}}))
+""")
+            assert not cube.get("error"), cube
+
+            async def read(asset):
+                return await client._execute_json_script(f"args = {{'path': {asset!r}}}\n" + readback)
+
             for roughness, pie in ((0.25, False), (0.5, True)):
                 if pie:
                     started = await client.control_simulation("start")
                     assert started.get("state") == "playing", started
+                before = await read(path)
+                refused = await client.set_material_params(
+                    path,
+                    scalar_params={"Roughness": 0.9, "Bogus": 1.0},
+                    vector_params={"Color": [0.9, 0.1, 0.1]},
+                )
+                assert refused["error_type"] == "ValidationError", refused
+                assert (refused["applied"], refused["params_set"]) == ({}, 0), refused
+                assert list(refused["not_applied"]["scalar"]) == ["Bogus"], refused
+                # Nothing written: no Bogus override, and not the valid Roughness and Color either.
+                assert await read(path) == before
                 result = await client.set_material_params(
                     path,
-                    scalar_params={"Roughness": roughness, "Bogus": 1.0},
+                    scalar_params={"Roughness": roughness},
                     vector_params={"Color": [0.1, 0.2, 0.3]},
                 )
+                assert "error" not in result, result
                 assert result["params_set"] == 2, result
                 assert result["applied"]["scalar"] == {"Roughness": roughness}, result
                 assert result["applied"]["vector"]["Color"] == pytest.approx([0.1, 0.2, 0.3, 1.0]), result
-                assert list(result["not_applied"]["scalar"]) == ["Bogus"], result
-                overrides = await client._execute_json_script(f"args = {{'path': {path!r}}}\n" + readback)
-                # No Bogus override: names are checked before Unreal writes any.
-                assert overrides["scalar"] == {"Roughness": roughness}, overrides
+                assert result["not_applied"] == {}, result
+                assert (await read(path))["scalar"] == {"Roughness": roughness}
+            # The game renders with the asset itself, so it has the PIE-time value.
+            game = await client._execute_json_script(f"args = {{'name': {cube['name']!r}}}\n" + game_material)
+            assert game == {"material": path, "roughness": 0.5}, game
+            stopped = await client.control_simulation("stop")
+            assert stopped.get("state") == "stopped", stopped
+            assert (await read(path))["scalar"] == {"Roughness": 0.5}
             textured = await client.set_material_params(
                 widget_path, texture_params={"SlateUI": "/Engine/EngineResources/DefaultTexture"}
             )
             assert textured["applied"] == {
                 "texture": {"SlateUI": "/Engine/EngineResources/DefaultTexture.DefaultTexture"}
             }, textured
-            overrides = await client._execute_json_script(f"args = {{'path': {widget_path!r}}}\n" + readback)
-            assert overrides["texture"] == textured["applied"]["texture"], overrides
-            refused = await client.set_material_params(path, scalar_params={"Bogus": 1.0})
-            assert refused["error_type"] == "MaterialParamsNotApplied", refused
-            assert refused["params_set"] == 0, refused
+            assert (await read(widget_path))["texture"] == textured["applied"]["texture"]
+            missing = await client.set_material_params(
+                widget_path,
+                texture_params={"SlateUI": "/Game/NoSuchTexture"},
+                scalar_params={"OpacityFromTexture": 0.5},
+            )
+            assert missing["error_type"] == "ValidationError", missing
+            assert "OpacityFromTexture" not in (await read(widget_path))["scalar"]
         finally:
             await client.control_simulation("stop")
+            if cube and cube.get("path"):
+                await destroy_actor(client, cube["path"])
             await client._execute_python(f"import unreal\nunreal.EditorAssetLibrary.delete_directory({folder!r})")
             await client.close()
 
