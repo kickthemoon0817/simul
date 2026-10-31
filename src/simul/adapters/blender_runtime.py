@@ -4468,8 +4468,7 @@ class BlenderRuntimeSession:
             )
         return reasons
 
-    @classmethod
-    def _evaluated_dependent(cls, obj: Any) -> Optional[Any]:
+    def _evaluated_dependent(self, obj: Any) -> Optional[Any]:
         """
         Return an object Blender evaluates that computes with this one's world matrix.
 
@@ -4477,15 +4476,20 @@ class BlenderRuntimeSession:
         in full when an object it evaluates needs its world matrix: a child of
         it, or the owner of a constraint Blender applies that targets it. That
         dependent can be disabled too and evaluated through a dependent of its
-        own. On Blender 5.0.1 a disabled camera with a child, with a
-        grandchild through a disabled child, or targeted by another object's
-        Copy Location, kept the matrix_world a render through it gave it, its
-        Track To included; one whose only child was disabled kept a stale
-        one. Blender evaluated it in full for a muted constraint and for a
-        driver that read its transform too, which this leaves out: nothing
-        needs the target of a muted constraint, and a driver that read only a
-        custom property of the camera got it evaluated in part, its
-        matrix_world stale, so drivers are not counted.
+        own. A constraint on an armature's bone needs its target for the
+        armature's pose, which counts only while the armature is enabled: on
+        Blender 5.0.1, through a disabled armature, a visible child of it got
+        the target evaluated and a visible object's Copy Location of it did
+        not. Blender 5.0.1 kept the matrix_world a render gave a disabled
+        camera with a child, with a grandchild through a disabled child, or
+        targeted by another object's Copy Location or by one on a bone of an
+        enabled armature, its Track To included; one whose only child was
+        disabled kept a stale one. Blender evaluated it in full for a muted
+        constraint, for a driver that read its transform and for a Hook
+        modifier too, which this leaves out: nothing needs the target of a
+        muted constraint, and a driver that read only a custom property of the
+        camera got it evaluated in part, its matrix_world stale, so drivers
+        are not counted.
 
         Args:
             obj: The object.
@@ -4494,30 +4498,60 @@ class BlenderRuntimeSession:
             The first dependent found that is enabled in viewports, or None.
         """
         blender_module: Any = bpy
+        context = blender_module.context
+        depsgraph = context.evaluated_depsgraph_get()
         dependents: Dict[Any, List[Any]] = {}
-        for other in blender_module.context.scene.objects:
+        # The armatures whose bones have a constraint that targets an object.
+        posers: Dict[Any, List[Any]] = {}
+
+        def targets(constraints: Any) -> List[Any]:
+            return [
+                target
+                for constraint in constraints
+                if self._applies(constraint)
+                for target, _ in self._constraint_targets(constraint)
+            ]
+
+        for other in context.scene.objects:
             sources = [] if other.parent is None else [other.parent]
-            for constraint in other.constraints:
-                if cls._applies(constraint):
-                    sources.extend(
-                        target for target, _ in cls._constraint_targets(constraint)
-                    )
-            for source in sources:
+            for source in sources + targets(other.constraints):
                 dependents.setdefault(source, []).append(other)
+            if other.pose is not None:
+                for bone in other.pose.bones:
+                    for source in targets(bone.constraints):
+                        posers.setdefault(source, []).append(other)
+
+        enabled: Dict[Any, bool] = {}
+
+        def is_enabled(candidate: Any) -> bool:
+            # The depsgraph holds every enabled object. Telling one it does not
+            # hold costs nothing, while _viewport_disablers reads
+            # users_collection and walks the view layer's collections: once
+            # per object of a disabled set of 10 000, which the walk visited
+            # through their parent, it took 3.4 s on Blender 5.0.1.
+            if candidate not in enabled:
+                enabled[candidate] = bool(
+                    candidate.evaluated_get(depsgraph).is_evaluated
+                ) and not self._viewport_disablers(candidate)
+            return enabled[candidate]
+
         pending, seen = [obj], {obj}
         while pending:
-            for dependent in dependents.get(pending.pop(), []):
+            source = pending.pop()
+            for poser in posers.get(source, []):
+                if is_enabled(poser):
+                    return poser
+            for dependent in dependents.get(source, []):
                 if dependent in seen:
                     continue
-                if not cls._viewport_disablers(dependent):
+                if is_enabled(dependent):
                     return dependent
                 seen.add(dependent)
                 pending.append(dependent)
         return None
 
-    @classmethod
     def _transform_pose_warning(
-        cls,
+        self,
         camera: Any,
         disablers: List[str],
         constraints: List[Dict[str, str]],
@@ -4581,8 +4615,8 @@ class BlenderRuntimeSession:
         stale_parent = ""
         if (
             parent is not None
-            and cls._viewport_disablers(parent)
-            and cls._evaluated_dependent(parent) is None
+            and self._viewport_disablers(parent)
+            and self._evaluated_dependent(parent) is None
         ):
             stale_parent = (
                 f" Its parent {parent.name!r} may not be evaluated either, so the "

@@ -633,6 +633,8 @@ class FakeTransformObject:
         self.rotation_axis_angle: Any = FakeVector((0.0, 0.0, 1.0, 0.0))
         self.scale: Any = FakeVector(scale)
         self.constraints: List[FakeConstraint] = list(constraints)
+        # Object.pose: an armature's pose bones, each with its constraints; None otherwise.
+        self.pose: Any = None
         # Disable in Viewports (the monitor icon), and the collections that hold it.
         self.hide_viewport = False
         self.users_collection: List["FakeCollection"] = []

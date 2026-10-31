@@ -3238,7 +3238,13 @@ class TestVisualObservationTools:
                 object whose Copy Location targets Side), "disabled_child",
                 "disabled_owner" (a disabled object whose Copy Location targets
                 Side) or "muted_constraint" (an enabled object whose muted Copy
-                Location targets Side).
+                Location targets Side). With a bone of armature "Rig2" whose
+                Copy Location targets Side: "bone_constraint" (Rig2 enabled),
+                "bone_constraint_through_child" (Rig2 enabled, the Copy
+                Location targeting a disabled child of Side),
+                "muted_bone_constraint" (Rig2 enabled, the Copy Location muted)
+                or "disabled_armature_read" (Rig2 disabled, an enabled object's
+                Copy Location targeting Rig2).
             how: How Side is disabled (_side_camera).
             constraints: Side's constraints.
 
@@ -3249,19 +3255,35 @@ class TestVisualObservationTools:
         root = view_layer.layer_collection.collection
         reader = FakeTransformObject("Reader")
         objects = [side, reader]
-        if dependent in ("child", "disabled_child"):
-            reader.parent = side
-        elif dependent == "grandchild":
-            child = FakeTransformObject("Child")
-            child.parent = side
-            child.hide_viewport = True
-            root.link(child)
-            objects.append(child)
-            reader.parent = child
-        else:
+        followed = side
+        if dependent in ("grandchild", "bone_constraint_through_child"):
+            followed = FakeTransformObject("Child")
+            followed.parent = side
+            followed.hide_viewport = True
+            root.link(followed)
+            objects.append(followed)
+        if dependent in ("child", "disabled_child", "grandchild"):
+            reader.parent = followed
+        elif dependent in ("constraint", "disabled_owner", "muted_constraint"):
             reader.constraints.append(
                 self._following(side, mute=dependent == "muted_constraint")
             )
+        else:
+            # A bone of Rig2 follows Side, or Side's disabled child.
+            rig = FakeTransformObject(
+                "Rig2", "ARMATURE", SimpleNamespace(bones=["Bone"])
+            )
+            following = self._following(
+                followed, mute=dependent == "muted_bone_constraint"
+            )
+            rig.pose = SimpleNamespace(
+                bones=[SimpleNamespace(name="Bone", constraints=[following])]
+            )
+            rig.hide_viewport = dependent == "disabled_armature_read"
+            root.link(rig)
+            objects.append(rig)
+            if dependent == "disabled_armature_read":
+                reader.constraints.append(self._following(rig))
         reader.hide_viewport = dependent in ("disabled_child", "disabled_owner")
         root.link(reader)
         return side, view_layer, objects
@@ -3274,6 +3296,8 @@ class TestVisualObservationTools:
             ("grandchild", "object"),
             ("constraint", "object"),
             ("constraint", "collection"),
+            ("bone_constraint", "object"),
+            ("bone_constraint_through_child", "object"),
         ],
     )
     def test_get_camera_info_keeps_the_evaluated_pose_of_a_disabled_camera_something_visible_needs(
@@ -3285,9 +3309,10 @@ class TestVisualObservationTools:
 
         On Blender 5.0.1 a disabled camera with a child (its collection
         excluded too), with a grandchild through a disabled child, or targeted
-        by another object's Copy Location, kept the matrix_world a render
-        through it gave it, its Track To included; composing its transform
-        would leave the Track To out.
+        by another object's Copy Location, or by one on a bone of an enabled
+        armature (also through a disabled child of the camera), kept the
+        matrix_world a render through it gave it, its Track To included;
+        composing its transform would leave the Track To out.
         """
         target = (5.0, 5.0, 0.0)
         side, view_layer, objects = self._side_camera_needed_by(
@@ -3305,7 +3330,14 @@ class TestVisualObservationTools:
         assert self._looks_at(result, target)
 
     @pytest.mark.parametrize(
-        "dependent", ["disabled_child", "disabled_owner", "muted_constraint"]
+        "dependent",
+        [
+            "disabled_child",
+            "disabled_owner",
+            "muted_constraint",
+            "muted_bone_constraint",
+            "disabled_armature_read",
+        ],
     )
     def test_get_camera_info_composes_a_camera_only_unevaluated_or_muted_dependents_need(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, dependent: str
@@ -3313,17 +3345,27 @@ class TestVisualObservationTools:
         """A disabled child or constraint owner that nothing visible needs leaves the
         camera unevaluated: on Blender 5.0.1 its matrix_world stayed stale.
 
+        So did a disabled armature whose bone's Copy Location targeted the
+        camera, although a visible object's Copy Location targeted the
+        armature: that needs the armature's transform, not its pose.
+
         A muted constraint needs nothing of its target. Blender 5.0.1 evaluated
-        the camera for one all the same, but nothing requires it to, so the
-        pose is composed then too, and the warning names what that leaves out.
+        the camera for one all the same, on an object or a bone, but nothing
+        requires it to, so the pose is composed then too, and the warning names
+        what that leaves out.
         """
         target = (5.0, 5.0, 0.0)
         side, view_layer, objects = self._side_camera_needed_by(
             dependent, "object", _track_to(target)
         )
-        # Blender leaves out the camera and its disabled dependent, and
-        # evaluates the camera that the muted constraint targets.
-        left_out = [] if dependent == "muted_constraint" else objects
+        # Blender leaves out the camera and its disabled dependent, evaluates
+        # the camera that a muted constraint targets, and evaluates the
+        # disabled armature a visible object reads, but not the camera.
+        left_out = {
+            "muted_constraint": [],
+            "muted_bone_constraint": [],
+            "disabled_armature_read": [side],
+        }.get(dependent, objects)
         session = self._session_in(monkeypatch, view_layer, *objects, left_out=left_out)
         self._move(side)
 
@@ -3358,6 +3400,52 @@ class TestVisualObservationTools:
         assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
         assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
         assert result["pose_source"] == "transform"
+
+    def test_get_camera_info_checks_no_dependent_the_depsgraph_leaves_out(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Whether a dependent is enabled is read from the depsgraph first.
+
+        _viewport_disablers reads users_collection, which scans every
+        collection's objects, and walks the view layer's collections. Called
+        for each object of a disabled set, which the search visits through the
+        camera's disabled parent, it took 3.4 s on Blender 5.0.1 for 10 000
+        objects in one collection, and 33 s for 10 000 in 1 000 collections.
+        The depsgraph holds every enabled object, so one it leaves out is
+        disabled.
+        """
+        rig = FakeTransformObject("Rig", location=(1.0, 0.0, 0.0), stored=True)
+        side = FakeTransformObject(
+            "Side", "CAMERA", FakeCameraData(), parent=rig, stored=True
+        )
+        props = [FakeTransformObject(f"Prop{i}", parent=rig) for i in range(50)]
+        root = FakeCollection("Scene Collection")
+        disabled = [rig, side, *props]
+        for obj in disabled:
+            obj.hide_viewport = True
+            root.link(obj)
+        session = self._session_in(
+            monkeypatch,
+            FakeViewLayer(FakeLayerCollection(root)),
+            *disabled,
+            left_out=disabled,
+        )
+        checked: List[str] = []
+        disablers = session._viewport_disablers
+
+        def spy(obj: Any) -> List[str]:
+            checked.append(obj.name)
+            return disablers(obj)
+
+        monkeypatch.setattr(session, "_viewport_disablers", spy)
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "transform"
+        assert "Its parent 'Rig' may not be evaluated either" in result["warning"]
+        assert "Rig" in checked
+        assert [name for name in checked if name.startswith("Prop")] == []
 
     @pytest.mark.parametrize(
         ("parent_type", "parent_object", "kind"),

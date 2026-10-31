@@ -305,12 +305,13 @@ Behaviour worth knowing:
   camera's last evaluated pose, with a warning that it may be stale. A disabled
   camera that an object Blender evaluates needs through a child or a constraint,
   also through other disabled objects, is evaluated in full and keeps its
-  evaluated pose. One that only a driver, or a constraint that is muted or has
-  no influence, depends on is composed: Blender 5.0.1 evaluated it for those
-  too, but such a constraint needs nothing of its target, and a driver that
-  reads only a custom property of the camera left its matrix stale. An add-on
-  built before this report answers without `pose_source` and `warning`, and the
-  server returns them as `null`.
+  evaluated pose; a constraint on a bone counts while its armature is enabled.
+  One that only a driver, a modifier (a Hook, for instance), or a constraint
+  that is muted or has no influence, depends on is composed: Blender 5.0.1
+  evaluated it for those too, but such a constraint needs nothing of its
+  target, and a driver that reads only a custom property of the camera left its
+  matrix stale. An add-on built before this report answers without
+  `pose_source` and `warning`, and the server returns them as `null`.
 - `search_blender_objects` refuses a `name_pattern` that repeats a group holding
   a quantifier or alternatives, such as `(\w+)+`: Python's regex search
   backtracks, and on a long object name such a pattern runs for hours on
