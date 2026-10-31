@@ -394,31 +394,34 @@ print(json.dumps({
 }))
 """
 
-# Expects ``args`` = {"parent", "name", "folder"}.
-CREATE_MATERIAL_INSTANCE = """
-import json, unreal
-parent = unreal.EditorAssetLibrary.load_asset(args["parent"])
-destination = args["folder"] + "/" + args["name"]
-if parent is None or not isinstance(parent, unreal.MaterialInterface):
-    print(json.dumps({"success": False, "error": "Parent material not found: " + args["parent"]}))
-elif unreal.EditorAssetLibrary.does_asset_exist(destination):
-    print(json.dumps({"success": False, "error": "Asset already exists: " + destination}))
-else:
+# Expects ``args`` = {"parent", "name", "folder"}. EditorAssetLibrary loads the
+# parent, checks the destination and saves the instance, and while PIE runs it
+# loads, finds and saves no assets (observed on UE 5.7.4: load_asset returns
+# None and does_asset_exist False for assets that exist, and the editor logs
+# "The Editor is currently in a play mode"). So the script prints the PIE
+# refusal then, before anything is created, rather than a parent not found.
+CREATE_MATERIAL_INSTANCE = EDITOR_WORLD + """
+def create(parent, name, folder):
+    if pie_active():
+        return pie_refusal("create material instances")
+    material = unreal.EditorAssetLibrary.load_asset(parent)
+    destination = folder + "/" + name
+    if material is None or not isinstance(material, unreal.MaterialInterface):
+        return {"success": False, "error": "Parent material not found: " + parent}
+    if unreal.EditorAssetLibrary.does_asset_exist(destination):
+        return {"success": False, "error": "Asset already exists: " + destination}
     # The factory's InitialParent is not exposed to Python; parent it after.
     instance = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
-        args["name"], args["folder"], unreal.MaterialInstanceConstant,
-        unreal.MaterialInstanceConstantFactoryNew(),
+        name, folder, unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew(),
     )
     if instance is None:
-        print(json.dumps({"success": False, "error": "Could not create material instance: " + destination}))
-    else:
-        unreal.MaterialEditingLibrary.set_material_instance_parent(instance, parent)
-        unreal.EditorAssetLibrary.save_loaded_asset(instance)
-        print(json.dumps({
-            "instance_path": instance.get_path_name(),
-            "parent_path": parent.get_path_name(),
-            "class_name": instance.get_class().get_name(),
-        }))
+        return {"success": False, "error": "Could not create material instance: " + destination}
+    unreal.MaterialEditingLibrary.set_material_instance_parent(instance, material)
+    unreal.EditorAssetLibrary.save_loaded_asset(instance)
+    return {"instance_path": instance.get_path_name(), "parent_path": material.get_path_name(),
+            "class_name": instance.get_class().get_name()}
+
+print(json.dumps(create(**args)))
 """
 
 # Expects ``args`` = {"actor_path", "values": {editor_property: value}}, with
