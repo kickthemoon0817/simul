@@ -20,7 +20,11 @@ from fastmcp.tools import ToolResult
 
 from ..tools._meta import ToolMeta, iter_tool_methods
 from ..tools.isaac_tools import IsaacTools
-from ._helpers import resolve_deprecated_alias, with_param_descriptions
+from ._helpers import (
+    resolve_deprecated_alias,
+    utf8_byte_length,
+    with_param_descriptions,
+)
 
 if TYPE_CHECKING:
     from ..server import SimulMCPServer
@@ -159,11 +163,13 @@ def _build_tool_wrapper(
             return await server._exec_isaac(meta.name, call, bypass_instance_lock=True)
         if meta.script:
             code = str(arguments["code"])
+            # surrogatepass, as utf8_byte_length counts: a lone surrogate from an
+            # in-process client is hashed instead of raising before the record.
             return await server._exec_isaac(
                 meta.name,
                 call,
-                params={"code_bytes": len(code)},
-                script_sha256=hashlib.sha256(code.encode("utf-8")).hexdigest(),
+                params={"code_bytes": utf8_byte_length(code)},
+                script_sha256=hashlib.sha256(code.encode("utf-8", "surrogatepass")).hexdigest(),
             )
         return await server._exec_isaac(meta.name, call)
 

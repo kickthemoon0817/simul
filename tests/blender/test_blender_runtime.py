@@ -4,7 +4,7 @@ import json
 import math
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pytest
@@ -122,7 +122,7 @@ CAMERA_SETUPS = {
 def _track_to(
     target: Sequence[float], name: str = "Track To", **state: Any
 ) -> FakeConstraint:
-    """A Track To as Blender sets one up on a camera: its -Z toward ``target``, +Y up."""
+    """A Track To as Blender sets one up on a camera: its -Z toward an empty at ``target``, +Y up."""
 
     def solve(matrix: np.ndarray) -> np.ndarray:
         forward = np.asarray(target, dtype=float) - matrix[:3, 3]
@@ -135,20 +135,22 @@ def _track_to(
         ) * np.linalg.norm(matrix[:3, :3], axis=0)
         return solved
 
-    return FakeConstraint(name, "TRACK_TO", solve, **state)
+    decoy = FakeTransformObject("Decoy", location=target)
+    return FakeConstraint(name, "TRACK_TO", solve, target=decoy, **state)
 
 
 def _copy_location(
     target: Sequence[float], name: str = "Copy Location", **state: Any
 ) -> FakeConstraint:
-    """A Copy Location: the object stands where ``target`` does, turned as before."""
+    """A Copy Location: the object stands where an empty at ``target`` does, turned as before."""
 
     def solve(matrix: np.ndarray) -> np.ndarray:
         solved = matrix.copy()
         solved[:3, 3] = target
         return solved
 
-    return FakeConstraint(name, "COPY_LOCATION", solve, **state)
+    anchor = FakeTransformObject("Anchor", location=target)
+    return FakeConstraint(name, "COPY_LOCATION", solve, target=anchor, **state)
 
 
 def _child_of(
@@ -156,13 +158,72 @@ def _child_of(
 ) -> FakeConstraint:
     """A Child Of whose target moved by ``target_change`` after its inverse was set."""
     return FakeConstraint(
-        name, "CHILD_OF", lambda matrix: target_change @ matrix, **state
+        name,
+        "CHILD_OF",
+        lambda matrix: target_change @ matrix,
+        target=FakeTransformObject("Holder"),
+        **state,
     )
 
 
 def _satisfied(name: str = "Limit Distance", **state: Any) -> FakeConstraint:
     """An active constraint that leaves this pose alone, such as a Limit Distance it meets."""
-    return FakeConstraint(name, "LIMIT_DISTANCE", lambda matrix: matrix, **state)
+    return FakeConstraint(
+        name,
+        "LIMIT_DISTANCE",
+        lambda matrix: matrix,
+        target=FakeTransformObject("Anchor"),
+        **state,
+    )
+
+
+def _shift(offset: Sequence[float]) -> Callable[[np.ndarray], np.ndarray]:
+    """A constraint's solve that moves its owner by ``offset``."""
+
+    def solve(matrix: np.ndarray) -> np.ndarray:
+        solved = matrix.copy()
+        solved[:3, 3] += offset
+        return solved
+
+    return solve
+
+
+def _target_deleted(constraint: FakeConstraint) -> FakeConstraint:
+    """The constraint as deleting its target object leaves it: no target, still valid."""
+    constraint.target = None
+    return constraint
+
+
+def _armature(*weights: float) -> FakeConstraint:
+    """An Armature constraint with a target per weight, each an armature's bone 'Bone'.
+
+    It moves its owner 2 m along X, as such a bone posed that far does.
+    """
+    targets = [
+        SimpleNamespace(
+            target=FakeTransformObject(
+                "Armature", "ARMATURE", SimpleNamespace(bones=["Bone"])
+            ),
+            subtarget="Bone",
+            weight=weight,
+        )
+        for weight in weights
+    ]
+    return FakeConstraint(
+        "Armature", "ARMATURE", _shift((2.0, 0.0, 0.0)), targets=targets
+    )
+
+
+def _armature_deleted(constraint: FakeConstraint, index: int = 0) -> FakeConstraint:
+    """The Armature constraint once the armature of its target ``index`` was deleted."""
+    constraint.targets[index].target = None
+    return constraint
+
+
+def _bone_deleted(constraint: FakeConstraint) -> FakeConstraint:
+    """The Armature constraint once its first target's bone was deleted."""
+    constraint.targets[0].target.data.bones.remove("Bone")
+    return constraint
 
 
 def _nudge(offset: Sequence[float]) -> FakeConstraint:
@@ -1915,7 +1976,7 @@ class TestVisualObservationTools:
         [
             (_track_to((5.0, 5.0, 0.0), mute=True), []),
             (_track_to((5.0, 5.0, 0.0), influence=0.0), []),
-            # A Track To without a target: Blender marks it invalid and skips it.
+            # A Track To tracking along its up axis: Blender marks it invalid and skips it.
             (_track_to((5.0, 5.0, 0.0), is_valid=False), []),
             (_satisfied(), [{"name": "Limit Distance", "type": "LIMIT_DISTANCE"}]),
         ],
@@ -2482,6 +2543,100 @@ class TestVisualObservationTools:
         to_target = np.subtract(target, result["location"])
         forward = euler_matrix(result["rotation_euler"]) @ [0.0, 0.0, -1.0]
         assert forward == pytest.approx(to_target / np.linalg.norm(to_target))
+
+    @pytest.mark.parametrize(
+        "constraint",
+        [
+            _target_deleted(_track_to((5.0, 5.0, 0.0))),
+            _target_deleted(_child_of(np.diag([2.0, 2.0, 2.0, 1.0]))),
+            # An Action needs its target unless it uses eval_time.
+            FakeConstraint(
+                "Action",
+                "ACTION",
+                _shift((5.0, 0.0, 0.0)),
+                target=None,
+                use_eval_time=False,
+            ),
+            _armature_deleted(_armature(1.0)),
+            _bone_deleted(_armature(1.0)),
+        ],
+        ids=["track_to", "child_of", "action", "armature", "armature_bone"],
+    )
+    def test_camera_tools_leave_out_a_constraint_whose_target_was_deleted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        constraint: FakeConstraint,
+    ) -> None:
+        """Deleting its target leaves a constraint valid in Blender, though it does nothing.
+
+        On Blender 5.0.1 a Track To whose target delete_object removed kept
+        is_valid True until it was next edited. set_camera_view placed the
+        camera exactly (placement_overridden false), yet it, focus_on_object
+        and get_camera_info listed the Track To in constraints_applied; so
+        they did a Child Of, an Action that needs its target, and an Armature
+        constraint whose armature or bone was deleted.
+        """
+        assert constraint.is_valid is True
+        cam = self._constrained_camera(constraint)
+        session = self._session_on(monkeypatch, cam, self._cube())
+        location, rotation = [7.0, -7.0, 5.0], [1.1, 0.25, 0.78]
+
+        placed = session.set_camera_view(location, rotation)
+        info = session.get_camera_info()
+        focused = session.focus_on_object("Cube")
+
+        assert placed["location"] == pytest.approx(location)
+        assert placed["rotation_euler"] == pytest.approx(rotation)
+        for reply in (placed, focused):
+            assert reply["placement_overridden"] is False
+            assert reply["constraints_applied"] == []
+            assert reply["warning"] is None
+        assert info["constraints_applied"] == []
+
+    @pytest.mark.parametrize(
+        "constraint",
+        [
+            # Its target deleted, a Pivot pivots its owner about a point beside it.
+            FakeConstraint("Pivot", "PIVOT", _shift((0.0, 3.0, 0.0)), target=None),
+            # An Action that uses eval_time needs no target.
+            FakeConstraint(
+                "Action",
+                "ACTION",
+                _shift((5.0, 0.0, 0.0)),
+                target=None,
+                use_eval_time=True,
+            ),
+            # An Armature constraint skips a target without weight.
+            _armature_deleted(_armature(1.0, 0.0), index=1),
+            # Without the bone or vertex group it names, the target object counts.
+            _copy_location((1.0, 2.0, 3.0), subtarget="Bone"),
+        ],
+        ids=["pivot", "action_eval_time", "armature_unweighted", "missing_subtarget"],
+    )
+    def test_camera_tools_report_a_constraint_that_acts_without_its_target(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        constraint: FakeConstraint,
+    ) -> None:
+        """Only a constraint left without the target it acts with is left out.
+
+        On Blender 5.0.1, their targets deleted, a Pivot still pivoted the
+        camera and an Action that uses eval_time still moved it; an Armature
+        constraint followed its target with weight after one without weight
+        lost its armature; and a Copy Location whose bone was deleted copied
+        its armature's location instead.
+        """
+        cam = self._constrained_camera(constraint)
+        session = self._session_on(monkeypatch, cam)
+
+        placed = session.set_camera_view([7.0, -7.0, 5.0], [1.1, 0.25, 0.78])
+
+        applied = [{"name": constraint.name, "type": constraint.type}]
+        assert placed["placement_overridden"] is True
+        assert placed["constraints_applied"] == applied
+        assert session.get_camera_info()["constraints_applied"] == applied
 
     @pytest.mark.parametrize(
         ("location", "rotation", "scale", "extent", "same"),

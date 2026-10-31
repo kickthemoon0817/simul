@@ -3894,13 +3894,14 @@ class BlenderRuntimeSession:
             return parent.matrix_world @ obj.matrix_parent_inverse @ obj.matrix_basis
         return None
 
-    @staticmethod
-    def _active_constraints(obj: Any) -> List[Dict[str, str]]:
+    @classmethod
+    def _active_constraints(cls, obj: Any) -> List[Dict[str, str]]:
         """
         Return the constraints Blender applies when it evaluates an object.
 
-        A muted constraint, one without influence and one Blender reports
-        invalid (a Track To without a target, for instance) change nothing.
+        A muted constraint, one without influence, one Blender reports
+        invalid (a Track To without a target, for instance) and one whose
+        target was deleted since (_lacks_target) change nothing.
 
         Args:
             obj: The object.
@@ -3915,7 +3916,47 @@ class BlenderRuntimeSession:
             if not constraint.mute
             and constraint.influence > 0.0
             and constraint.is_valid
+            and not cls._lacks_target(constraint)
         ]
+
+    @staticmethod
+    def _lacks_target(constraint: Any) -> bool:
+        """
+        Whether a constraint Blender reports valid lacks the target it acts with.
+
+        Blender checks a constraint's targets when the constraint is edited,
+        not when a target goes away. On Blender 5.0.1, deleting a target
+        object leaves ``target`` None, and deleting the bone an Armature
+        constraint's target names leaves that ``subtarget`` naming nothing;
+        either way ``is_valid`` stays True until the next edit, while the
+        constraint does nothing. A Pivot without a target pivots about the
+        object itself, and an Action that uses eval_time needs none. An
+        Armature constraint skips a target without weight. A target that no
+        scene links still acts, and so does another constraint whose bone or
+        vertex group (``subtarget``) is gone: Blender reads the target object
+        instead.
+
+        Args:
+            constraint: The constraint.
+
+        Returns:
+            True when the constraint has no target object or, for an Armature
+            constraint, a target with weight has no object or bone.
+        """
+        if constraint.type == "ARMATURE":
+            return any(
+                entry.weight > 0.0
+                and (
+                    entry.target is None
+                    or entry.subtarget not in entry.target.data.bones
+                )
+                for entry in constraint.targets
+            )
+        if constraint.type == "PIVOT" or (
+            constraint.type == "ACTION" and constraint.use_eval_time
+        ):
+            return False
+        return hasattr(constraint, "target") and constraint.target is None
 
     def _placement_report(self, camera: Any, placement: Any) -> Dict[str, Any]:
         """

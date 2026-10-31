@@ -497,8 +497,8 @@ class BlenderActiveConstraint(BaseModel):
 # The camera tools' constraint report. Optional: an add-on built before it
 # still answers, without these fields.
 _CONSTRAINTS_APPLIED = (
-    "The camera's constraints that Blender applies (not muted, influence above 0, valid), "
-    "in stack order; null from a Blender add-on that predates this report"
+    "The camera's constraints that Blender applies (not muted, influence above 0, valid, "
+    "target not deleted), in stack order; null from a Blender add-on that predates this report"
 )
 _PLACEMENT_OVERRIDDEN = (
     "True when Blender evaluates the camera away from the requested placement: its "
