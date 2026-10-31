@@ -11,11 +11,24 @@ scripting: each scalar, vector and texture parameter with its value, whether
 an instance overrides it, the parent and base material, the domain and the
 blend mode.
 
-The fake editor below answers as UE 5.7.4 did: the instance getters return
-the value an instance renders with (its override, else its parent's), the
-MaterialEditingLibrary default getters take only a Material, an instance can
-keep overrides for names that are no longer parameters (the engine's
-Widget3DPassThrough_Translucent keeps RefractionDepthBias), and
+A parameter inside a Material Layer was then read by name, which reads the
+material's global parameter of that name. Observed on UE 5.7.4, on a material
+with two layers and a blend: a name only a layer or the blend had read 0,
+black or no texture with ``overridden`` false, whatever the layer's default or
+the instance's override for it was, and a name two layers shared was listed
+once. Each parameter now has its association (global, layer or blend), its
+layer or blend index and that layer's value and override.
+
+The fake editor below answers as UE 5.7.4 did: MaterialEditingLibrary lists
+each parameter's name, a layer's with the material's own, and its default
+getters (which take only a Material) and the instance getters read by name,
+which reads the global parameter; a transient Material Instance Dynamic
+parented to a material copies every parameter Unreal lists for it with its
+association, index and the value the material renders with (its override,
+else its parent's), and a quick copy keeps the names only; an instance keeps
+its overrides with their association and index, and can keep overrides for
+names that are no longer parameters (the engine's
+Widget3DPassThrough_Translucent keeps RefractionDepthBias); and
 ``EditorAssetLibrary`` loads nothing during PIE while ``unreal.load_asset``
 does.
 """
@@ -30,7 +43,7 @@ import struct
 import sys
 from contextlib import contextmanager, redirect_stdout
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 from unittest.mock import AsyncMock
 
 import pytest
@@ -105,6 +118,34 @@ class _Name(str):
 
 KINDS = ("scalar", "vector", "texture")
 
+#: A parameter as Unreal identifies it: (kind, name, association, layer or blend index).
+Key = Tuple[str, str, str, int]
+#: A Material Layer's or blend's parameter and its value: (kind, name, association, index, value).
+Layered = Tuple[str, str, str, int, Any]
+
+
+def _keyed(
+    plain: Dict[str, Dict[str, Any]], layered: Iterable[Layered]
+) -> Dict[Key, Any]:
+    """Global parameters by kind and name, then the layers' and blends' as given."""
+    keyed = {
+        (kind, name, "GLOBAL_PARAMETER", -1): value
+        for kind in KINDS
+        for name, value in plain.get(kind, {}).items()
+    }
+    keyed.update(
+        {(kind, name, association, index): value for kind, name, association, index, value in layered}
+    )
+    return keyed
+
+
+def _global(keyed: Dict[Key, Any], kind: str, name: str) -> Any:
+    """The global parameter of that kind and name (names ignore case), else None."""
+    for (k, n, association, _), value in keyed.items():
+        if (k, n.lower(), association) == (kind, name.lower(), "GLOBAL_PARAMETER"):
+            return value
+    return None
+
 
 class MaterialInterface(Object):
     pass
@@ -116,16 +157,12 @@ class Material(MaterialInterface):
         package: str,
         domain: str = "MD_SURFACE",
         blend_mode: str = "BLEND_OPAQUE",
-        layer_names: Optional[Dict[str, List[str]]] = None,
+        layered: Iterable[Layered] = (),
         **defaults: Dict[str, Any],
     ) -> None:
         super().__init__(package)
-        self.defaults = {kind: dict(defaults.get(kind, {})) for kind in KINDS}
-        # Names Unreal lists again, once per Material Layer that has them;
-        # read by name only, a layer-only name has no global value.
-        self.layer_names = {
-            kind: list((layer_names or {}).get(kind, [])) for kind in KINDS
-        }
+        # Every parameter Unreal lists for the material, with its default.
+        self.defaults = _keyed(defaults, layered)
         self.properties = {
             "material_domain": _Enum(domain),
             "blend_mode": _Enum(blend_mode),
@@ -137,11 +174,15 @@ class Material(MaterialInterface):
     def get_base_material(self) -> "Material":
         return self
 
-    def names(self, kind: str) -> List[str]:
-        return list(self.defaults[kind]) + self.layer_names[kind]
+    def listed(self) -> List[Key]:
+        return list(self.defaults)
 
-    def effective(self, kind: str, name: str) -> Any:
-        return self.defaults[kind].get(name)
+    def rendered(self, key: Key) -> Any:
+        return self.defaults[key]
+
+    def by_name(self, kind: str, name: str) -> Any:
+        """What reading by name answers: the global parameter of that name, if any."""
+        return _global(self.defaults, kind, name)
 
 
 #: What Unreal renders an instance without a parent with (UE 5.7.4).
@@ -151,9 +192,9 @@ WORLD_GRID = Material("/Engine/EngineMaterials/WorldGridMaterial")
 class _Entry:
     """A ScalarParameterValue / VectorParameterValue / TextureParameterValue."""
 
-    def __init__(self, name: str, value: Any, association: str) -> None:
+    def __init__(self, name: str, value: Any, association: str, index: int) -> None:
         self.parameter_info = SimpleNamespace(
-            name=_Name(name), association=_Enum(association), index=-1
+            name=_Name(name), association=_Enum(association), index=index
         )
         self.parameter_value = value
 
@@ -177,18 +218,15 @@ class MaterialInstanceConstant(MaterialInstance):
     def __init__(
         self,
         package: str,
-        parent: MaterialInterface,
+        parent: Optional[MaterialInterface],
         blend_mode: Optional[str] = None,
+        layered: Iterable[Layered] = (),
         **overrides: Dict[str, Any],
     ) -> None:
         super().__init__(package)
         self.parent = parent
-        # (kind, name, value, association); a GLOBAL_PARAMETER entry is an override.
-        self.entries: List[Tuple[str, str, Any, str]] = [
-            (kind, name, value, "GLOBAL_PARAMETER")
-            for kind in KINDS
-            for name, value in overrides.get(kind, {}).items()
-        ]
+        # The instance's own overrides, global by kind and name, then a layer's or blend's.
+        self.overrides = _keyed(overrides, layered)
         self.base_property_overrides = _BasePropertyOverrides(blend_mode)
 
     def get_editor_property(self, name: str) -> Any:
@@ -198,8 +236,8 @@ class MaterialInstanceConstant(MaterialInstance):
             return self.base_property_overrides
         kind = name.replace("_parameter_values", "")
         return [
-            _Entry(n, v, association)
-            for k, n, v, association in self.entries
+            _Entry(n, value, association, index)
+            for (k, n, association, index), value in self.overrides.items()
             if k == kind
         ]
 
@@ -207,27 +245,63 @@ class MaterialInstanceConstant(MaterialInstance):
         # Unreal falls back to the default surface material without a parent.
         return WORLD_GRID if self.parent is None else self.parent.get_base_material()
 
-    def names(self, kind: str) -> List[str]:
-        return (
-            WORLD_GRID.names(kind) if self.parent is None else self.parent.names(kind)
-        )
+    def listed(self) -> List[Key]:
+        # An instance has its parent's parameters.
+        return (WORLD_GRID if self.parent is None else self.parent).listed()
 
-    def effective(self, kind: str, name: str) -> Any:
-        for k, n, value, association in self.entries:
-            if (k, n, association) == (kind, name, "GLOBAL_PARAMETER"):
+    def rendered(self, key: Key) -> Any:
+        """Its own override (names ignore case), else what its parent renders with."""
+        kind, name, association, index = key
+        for (k, n, a, i), value in self.overrides.items():
+            if (k, n.lower(), a, i) == (kind, name.lower(), association, index):
                 return value
-        return None if self.parent is None else self.parent.effective(kind, name)
+        return (WORLD_GRID if self.parent is None else self.parent).rendered(key)
 
-    # The K2 getters: the value the instance renders with.
+    def by_name(self, kind: str, name: str) -> Any:
+        own = _global(self.overrides, kind, name)
+        if own is not None:
+            return own
+        return (WORLD_GRID if self.parent is None else self.parent).by_name(kind, name)
+
+    # The K2 getters read by name: the global parameter's value the instance renders with.
     def get_scalar_parameter_value(self, name: str) -> float:
-        value = self.effective("scalar", name)
+        value = self.by_name("scalar", name)
         return 0.0 if value is None else _f32(value)
 
     def get_vector_parameter_value(self, name: str) -> LinearColor:
-        return LinearColor(*(self.effective("vector", name) or [0.0] * 4))
+        return LinearColor(*(self.by_name("vector", name) or [0.0] * 4))
 
     def get_texture_parameter_value(self, name: str) -> Optional[Texture]:
-        return self.effective("texture", name)
+        return self.by_name("texture", name)
+
+
+class MaterialInstanceDynamic(MaterialInstance):
+    def __init__(self, parent: MaterialInterface) -> None:
+        super().__init__("/Engine/Transient/MID_" + parent.package.rsplit("/", 1)[-1])
+        self.parent = parent
+        self.values: List[Tuple[str, _Entry]] = []
+
+    def copy_material_instance_parameters(
+        self, source: MaterialInterface, quick_parameters_only: bool = False
+    ) -> None:
+        """Every parameter the parent lists, with its association, index and
+        the source's value for it, kept as Unreal stores it; the quick copy
+        (CopyMaterialUniformParameters) keeps names only."""
+        self.values = []
+        for key in self.parent.listed():
+            kind, name, association, index = key
+            value = source.rendered(key)
+            if kind == "scalar":
+                value = _f32(value)
+            elif kind == "vector":
+                value = LinearColor(*value)
+            if quick_parameters_only:
+                association, index = "GLOBAL_PARAMETER", -1
+            self.values.append((kind, _Entry(name, value, association, index)))
+
+    def get_editor_property(self, name: str) -> Any:
+        kind = name.replace("_parameter_values", "")
+        return [entry for k, entry in self.values if k == kind]
 
 
 def _material_only(material: Any) -> None:
@@ -239,36 +313,59 @@ def _material_only(material: Any) -> None:
 
 
 class MaterialEditingLibrary:
+    """Lists each parameter's name, a Material Layer's with the material's
+    own, and reads by name, which reads the global parameter."""
+
+    @staticmethod
+    def _names(material: MaterialInterface, kind: str) -> List[_Name]:
+        return [_Name(name) for k, name, _, _ in material.listed() if k == kind]
+
     @staticmethod
     def get_scalar_parameter_names(material: MaterialInterface) -> List[_Name]:
-        return [_Name(name) for name in material.names("scalar")]
+        return MaterialEditingLibrary._names(material, "scalar")
 
     @staticmethod
     def get_vector_parameter_names(material: MaterialInterface) -> List[_Name]:
-        return [_Name(name) for name in material.names("vector")]
+        return MaterialEditingLibrary._names(material, "vector")
 
     @staticmethod
     def get_texture_parameter_names(material: MaterialInterface) -> List[_Name]:
-        return [_Name(name) for name in material.names("texture")]
+        return MaterialEditingLibrary._names(material, "texture")
 
     @staticmethod
     def get_material_default_scalar_parameter_value(material: Any, name: str) -> float:
         _material_only(material)
-        return _f32(material.effective("scalar", name) or 0.0)
+        return _f32(material.by_name("scalar", name) or 0.0)
 
     @staticmethod
     def get_material_default_vector_parameter_value(
         material: Any, name: str
     ) -> LinearColor:
         _material_only(material)
-        return LinearColor(*(material.effective("vector", name) or [0.0] * 4))
+        return LinearColor(*(material.by_name("vector", name) or [0.0] * 4))
 
     @staticmethod
     def get_material_default_texture_parameter_value(
         material: Any, name: str
     ) -> Optional[Texture]:
         _material_only(material)
-        return material.effective("texture", name)
+        return material.by_name("texture", name)
+
+
+class MIDCreationFlags:
+    NONE = _Enum("NONE")
+    TRANSIENT = _Enum("TRANSIENT")
+
+
+class MaterialLibrary:
+    @staticmethod
+    def create_dynamic_material_instance(
+        world_context_object: Any,
+        parent: MaterialInterface,
+        optional_name: str = "None",
+        creation_flags: _Enum = MIDCreationFlags.NONE,
+    ) -> MaterialInstanceDynamic:
+        return MaterialInstanceDynamic(parent)
 
 
 class _Editor:
@@ -334,7 +431,10 @@ class _Editor:
             MaterialInterface=MaterialInterface,
             MaterialInstance=MaterialInstance,
             MaterialInstanceConstant=MaterialInstanceConstant,
+            MaterialInstanceDynamic=MaterialInstanceDynamic,
             MaterialEditingLibrary=MaterialEditingLibrary,
+            MaterialLibrary=MaterialLibrary,
+            MIDCreationFlags=MIDCreationFlags,
             Texture=Texture,
             LinearColor=LinearColor,
             load_asset=self.load_asset,
@@ -394,9 +494,21 @@ def _info(editor: SimpleNamespace, path: str) -> Dict[str, Any]:
 
 
 def _param(
-    name: str, kind: str, value: Any, overridden: Optional[bool]
+    name: str,
+    kind: str,
+    value: Any,
+    overridden: Optional[bool],
+    association: str = "global",
+    index: Optional[int] = None,
 ) -> Dict[str, Any]:
-    return {"name": name, "param_type": kind, "value": value, "overridden": overridden}
+    return {
+        "name": name,
+        "param_type": kind,
+        "association": association,
+        "index": index,
+        "value": value,
+        "overridden": overridden,
+    }
 
 
 GREY = [_f32(0.9), _f32(0.9), _f32(0.9), 1.0]
@@ -497,10 +609,10 @@ def test_only_overrides_of_the_materials_own_parameters_count(
 ) -> None:
     """An override for a name that is no longer a parameter, or of a layer
     parameter, is not an override of the material's parameter by that name."""
-    editor.fake.instance.entries = [
-        ("scalar", "RefractionDepthBias", 0.0, "GLOBAL_PARAMETER"),
-        ("scalar", "Roughness", 0.1, "LAYER_PARAMETER"),
-    ]
+    editor.fake.instance.overrides = {
+        ("scalar", "RefractionDepthBias", "GLOBAL_PARAMETER", -1): 0.0,
+        ("scalar", "Roughness", "LAYER_PARAMETER", 0): 0.1,
+    }
 
     result = _info(editor, INSTANCE)
 
@@ -533,48 +645,109 @@ def test_an_instance_without_a_parent_renders_opaque(editor: SimpleNamespace) ->
     }
 
 
-def test_a_name_unreal_lists_more_than_once_is_listed_once_with_a_warning(
-    editor: SimpleNamespace,
-) -> None:
-    """Unreal lists a parameter name once per Material Layer that has it, and
-    its Python API reads parameters by name only."""
-    layered = Material(
-        "/Game/Materials/M_Layered",
-        scalar={"Roughness": 0.5},
-        layer_names={
-            "scalar": ["Roughness", "Wetness", "Wetness"],
-            "vector": ["Tint", "tint"],
-        },
+LAYERED = "/Game/LayerTest/M_Layered"
+LAYERED_INSTANCE = "/Game/LayerTest/MI_Layered"
+LAYERED_CHILD = "/Game/LayerTest/MI_Layered_Child"
+RED, GREEN, BLUE = [1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]
+
+
+def _add_layered(editor: SimpleNamespace) -> None:
+    """The material built live on UE 5.7.4: two Material Layers and a blend,
+    a name the material shares with layer 0 and one both layers have; an
+    instance overriding a global parameter, both layers and the blend; and a
+    child of that instance with an override of its own."""
+    texture = editor.fake.assets[DEFAULT_TEXTURE]
+    material = Material(
+        LAYERED,
+        scalar={"GlobalRough": 0.4, "Shared": 0.1},
+        vector={"GlobalTint": [1.0] * 4},
+        layered=[
+            ("scalar", "LayerRough", "LAYER_PARAMETER", 0, 0.25),
+            ("scalar", "Shared", "LAYER_PARAMETER", 0, 0.7),
+            ("vector", "LayerTint", "LAYER_PARAMETER", 0, RED),
+            ("texture", "LayerTex", "LAYER_PARAMETER", 0, texture),
+            ("scalar", "TopOnly", "LAYER_PARAMETER", 1, 0.5),
+            ("scalar", "LayerRough", "LAYER_PARAMETER", 1, 0.75),
+            ("vector", "LayerTint", "LAYER_PARAMETER", 1, BLUE),
+            ("scalar", "BlendAlpha", "BLEND_PARAMETER", 0, 0.5),
+        ],
     )
     instance = MaterialInstanceConstant(
-        "/Game/Materials/MI_Layered", layered, scalar={"Roughness": 0.25}
+        LAYERED_INSTANCE,
+        material,
+        scalar={"GlobalRough": 0.9},
+        layered=[
+            ("scalar", "LayerRough", "LAYER_PARAMETER", 0, 0.05),
+            ("scalar", "TopOnly", "LAYER_PARAMETER", 1, 0.2),
+            ("scalar", "BlendAlpha", "BLEND_PARAMETER", 0, 0.8),
+            ("vector", "LayerTint", "LAYER_PARAMETER", 1, GREEN),
+        ],
     )
-    for asset in (layered, instance):
+    child = MaterialInstanceConstant(LAYERED_CHILD, instance, scalar={"Shared": 0.6})
+    for asset in (material, instance, child):
         editor.fake.assets[asset.package] = asset
 
-    material, layered_instance = _info(editor, layered.package), _info(
-        editor, instance.package
-    )
 
-    assert material["parameters"] == [
-        _param("Roughness", "scalar", 0.5, None),
-        # Only a layer has it: read by name, it has no global value.
-        _param("Wetness", "scalar", 0.0, None),
-        _param("Tint", "vector", [0.0] * 4, None),
+def test_layer_and_blend_parameters_are_listed_with_their_layer_and_its_value(
+    editor: SimpleNamespace,
+) -> None:
+    """The live regression: TopOnly, BlendAlpha and LayerTex, which only a
+    layer or the blend has, read 0 and no texture, and LayerRough and
+    LayerTint, which both layers have, were each listed once, with 0 and
+    black, and a warning."""
+    _add_layered(editor)
+
+    result = _info(editor, LAYERED)
+
+    assert result["parameters"] == [
+        # By kind: the material's own, then layer 0's, layer 1's and the blend's, each by name.
+        _param("GlobalRough", "scalar", _f32(0.4), None),
+        _param("Shared", "scalar", _f32(0.1), None),
+        _param("LayerRough", "scalar", 0.25, None, "layer", 0),
+        _param("Shared", "scalar", _f32(0.7), None, "layer", 0),
+        _param("LayerRough", "scalar", 0.75, None, "layer", 1),
+        _param("TopOnly", "scalar", 0.5, None, "layer", 1),
+        _param("BlendAlpha", "scalar", 0.5, None, "blend", 0),
+        _param("GlobalTint", "vector", [1.0] * 4, None),
+        _param("LayerTint", "vector", RED, None, "layer", 0),
+        _param("LayerTint", "vector", BLUE, None, "layer", 1),
+        _param("LayerTex", "texture", _object_path(DEFAULT_TEXTURE), None, "layer", 0),
     ]
-    assert layered_instance["parameters"] == [
-        _param("Roughness", "scalar", 0.25, True),
-        _param("Wetness", "scalar", 0.0, False),
-        _param("Tint", "vector", [0.0] * 4, False),
+    assert "warning" not in result
+
+
+def test_an_instance_reports_each_layers_value_and_override(
+    editor: SimpleNamespace,
+) -> None:
+    """The live regression: the instance's overrides of layer 1 and of the
+    blend read 0 with overridden false."""
+    _add_layered(editor)
+
+    instance, child = _info(editor, LAYERED_INSTANCE), _info(editor, LAYERED_CHILD)
+
+    assert instance["parameters"] == [
+        _param("GlobalRough", "scalar", _f32(0.9), True),
+        _param("Shared", "scalar", _f32(0.1), False),
+        _param("LayerRough", "scalar", _f32(0.05), True, "layer", 0),
+        _param("Shared", "scalar", _f32(0.7), False, "layer", 0),
+        _param("LayerRough", "scalar", 0.75, False, "layer", 1),
+        _param("TopOnly", "scalar", _f32(0.2), True, "layer", 1),
+        _param("BlendAlpha", "scalar", _f32(0.8), True, "blend", 0),
+        _param("GlobalTint", "vector", [1.0] * 4, False),
+        _param("LayerTint", "vector", RED, False, "layer", 0),
+        _param("LayerTint", "vector", GREEN, True, "layer", 1),
+        _param("LayerTex", "texture", _object_path(DEFAULT_TEXTURE), False, "layer", 0),
     ]
-    warning = (
-        "Unreal lists Roughness (scalar), Wetness (scalar), Tint (vector) more than once, from "
-        "Material Layers. Its Python API reads parameters by name only, so each is listed once, "
-        "with its global value, not a layer's"
-    )
-    assert material["warning"] == layered_instance["warning"] == warning
-    # A material without layers has no warning.
-    assert "warning" not in _info(editor, PARENT)
+    # The child renders with its parent's layer overrides and overrides only its own Shared.
+    assert child["parameters"][:7] == [
+        _param("GlobalRough", "scalar", _f32(0.9), False),
+        _param("Shared", "scalar", _f32(0.6), True),
+        _param("LayerRough", "scalar", _f32(0.05), False, "layer", 0),
+        _param("Shared", "scalar", _f32(0.7), False, "layer", 0),
+        _param("LayerRough", "scalar", 0.75, False, "layer", 1),
+        _param("TopOnly", "scalar", _f32(0.2), False, "layer", 1),
+        _param("BlendAlpha", "scalar", _f32(0.8), False, "blend", 0),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -687,28 +860,32 @@ def test_the_tool_returns_parameters_overrides_and_metadata(
             _param("Mask", "texture", None, False),
             _param("SlateUI", "texture", _object_path(DEFAULT_TEXTURE), True),
         ],
-        "warning": None,
     }
 
 
-def test_the_tool_returns_the_warning_for_names_listed_more_than_once(
+def test_the_tool_returns_each_parameters_layer(
     editor: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The response schema declares warning; an undeclared field would be dropped."""
-    layered = Material(
-        "/Game/Materials/M_Layered",
-        scalar={"Roughness": 0.5},
-        layer_names={"scalar": ["Roughness"]},
-    )
-    editor.fake.assets[layered.package] = layered
+    """The response schema declares association and index; undeclared fields would be dropped."""
+    _add_layered(editor)
 
-    payload = _call_tool(editor, monkeypatch, layered.package)
+    payload = _call_tool(editor, monkeypatch, LAYERED_INSTANCE)
 
     assert payload["success"] is True
-    assert [p["name"] for p in payload["parameters"]] == ["Roughness"]
-    assert payload["warning"].startswith(
-        "Unreal lists Roughness (scalar) more than once"
-    )
+    assert "warning" not in payload
+    assert [
+        (p["name"], p["association"], p["index"], p["value"], p["overridden"])
+        for p in payload["parameters"]
+        if p["param_type"] == "scalar"
+    ] == [
+        ("GlobalRough", "global", None, _f32(0.9), True),
+        ("Shared", "global", None, _f32(0.1), False),
+        ("LayerRough", "layer", 0, _f32(0.05), True),
+        ("Shared", "layer", 0, _f32(0.7), False),
+        ("LayerRough", "layer", 1, 0.75, False),
+        ("TopOnly", "layer", 1, _f32(0.2), True),
+        ("BlendAlpha", "blend", 0, _f32(0.8), True),
+    ]
 
 
 def test_the_tool_reports_a_path_that_is_not_a_material(

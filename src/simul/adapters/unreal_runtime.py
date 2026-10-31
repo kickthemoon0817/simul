@@ -2338,15 +2338,18 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             names, such as MD_SURFACE and BLEND_OPAQUE; an instance's blend
             mode is its override, else its parent's, and BLEND_OPAQUE without
             a parent), and parameters: one entry per scalar, vector and
-            texture parameter name with its name, param_type, value (a float,
+            texture parameter with its name, param_type, association
+            (``global`` for the material's own parameter, ``layer`` or
+            ``blend`` for one inside its Material Layers), index (the layer or
+            blend index; None for a global parameter), value (a float,
             [r, g, b, a] or a texture asset path; a Material's default, an
-            instance's override or inherited value) and overridden (whether
-            the instance overrides it; None for a Material). Unreal lists a
-            name once per Material Layer it appears in and its Python API
-            reads by name only, so each name is listed once, with its global
-            value, and ``warning`` names any listed more than once. An error
-            envelope when the path loads nothing (``NotFoundError``) or is
-            not a material (``InvalidAssetType``).
+            instance's override or inherited value, for that layer) and
+            overridden (whether the instance overrides it; None for a
+            Material). Unreal's Python API lists and reads parameters by name
+            only, so they are read through a transient Material Instance
+            Dynamic that copies the material's parameters with their layers.
+            An error envelope when the path loads nothing (``NotFoundError``)
+            or is not a material (``InvalidAssetType``).
         """
         return await self._execute_json_script(
             f"args = {{'path': {material_path!r}}}\n" + MATERIAL_INFO,
@@ -2370,10 +2373,11 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         on UE 5.7.4). ``success`` alone tells whether every value applied: a
         request with any problem is refused before anything is written, and a
         value that reads back different fails the call. Names are matched
-        against the material's parameters ignoring case, as Unreal does. A
-        name found only inside a Material Layer gets a global override, which
-        leaves the layer unchanged: Unreal's Python API lists and writes
-        parameters by name only. The instance is left unsaved.
+        against the material's global parameters ignoring case, as Unreal
+        does. A name only the material's Material Layers have is refused:
+        Unreal's Python API writes parameters by name, and the global override
+        it would add reads back as set while the layer stays as it was. The
+        instance is left unsaved.
 
         Args:
             material_path: Material Instance asset path.
@@ -2389,15 +2393,17 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             not_applied (empty). An error envelope with the same fields:
             ``ValidationError`` when the request is refused and nothing is
             written (not_applied gives, by kind and name, each parameter the
-            material has no parameter of that kind for, each texture that does
-            not load, each malformed value and each name given twice in
-            different case; a request without parameters or not shaped as
-            objects is refused too, before the editor is called), and
-            ``MaterialParamsNotApplied`` when a value read back different
-            after the write (not_applied names each; the values in applied
-            were written and stay written, as for lights). An error envelope
-            without them when the path loads nothing (``NotFoundError``) or is
-            not a Material Instance Constant (``InvalidAssetType``).
+            material has no global parameter of that kind for, naming the
+            layers and blends that have it when only its Material Layers do,
+            each texture that does not load, each malformed value and each
+            name given twice in different case; a request without parameters
+            or not shaped as objects is refused too, before the editor is
+            called), and ``MaterialParamsNotApplied`` when a value read back
+            different after the write (not_applied names each; the values in
+            applied were written and stay written, as for lights). An error
+            envelope without them when the path loads nothing
+            (``NotFoundError``) or is not a Material Instance Constant
+            (``InvalidAssetType``).
         """
         values, refused, problems = _material_parameter_values(scalar_params, vector_params, texture_params)
         if problems:
