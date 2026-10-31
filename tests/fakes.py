@@ -554,6 +554,9 @@ class FakeTransformObject:
         self.rotation_axis_angle: Any = FakeVector((0.0, 0.0, 1.0, 0.0))
         self.scale: Any = FakeVector(scale)
         self.constraints: List[FakeConstraint] = list(constraints)
+        # Disable in Viewports (the monitor icon), and the collections that hold it.
+        self.hide_viewport = False
+        self.users_collection: List["FakeCollection"] = []
         self.parent = parent
         self.parent_type = "OBJECT"
         # What Blender's Parent (Keep Transform) sets.
@@ -640,3 +643,44 @@ def fake_mathutils() -> ModuleType:
     module.Matrix = FakeMatrix  # type: ignore[attr-defined]
     module.Euler = FakeEuler  # type: ignore[attr-defined]
     return module
+
+
+class FakeCollection:
+    """``bpy.types.Collection`` stand-in: its name and Disable in Viewports (hide_viewport)."""
+
+    def __init__(self, name: str, hide_viewport: bool = False) -> None:
+        self.name = name
+        self.hide_viewport = hide_viewport
+
+    def link(self, obj: Any) -> None:
+        """Put an object in this collection, as ``collection.objects.link`` does."""
+        obj.users_collection.append(self)
+
+
+class FakeLayerCollection:
+    """``bpy.types.LayerCollection`` stand-in: a collection's place in a view layer.
+
+    ``exclude`` is its checkbox in the outliner; ``children`` are the layer
+    collections of its child collections. The eye icon (hide_viewport here)
+    is left out: hiding never keeps Blender from evaluating an object.
+    """
+
+    def __init__(
+        self,
+        collection: FakeCollection,
+        children: Sequence["FakeLayerCollection"] = (),
+        exclude: bool = False,
+    ) -> None:
+        self.collection = collection
+        self.children = list(children)
+        self.exclude = exclude
+
+
+class FakeViewLayer:
+    """``bpy.types.ViewLayer`` stand-in: its name and the scene collection's layer collection."""
+
+    def __init__(
+        self, layer_collection: FakeLayerCollection, name: str = "ViewLayer"
+    ) -> None:
+        self.name = name
+        self.layer_collection = layer_collection

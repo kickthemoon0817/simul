@@ -328,8 +328,16 @@ def test_set_blender_light_params_forwards_every_parameter(
 # fields are kept to what the response schemas require).
 _TRACK_TO_REPORT = {
     "placement_overridden": True,
+    "override_check": "done",
     "constraints_applied": [{"name": "Track To", "type": "TRACK_TO"}],
     "warning": "Constraints on camera 'Camera' override the requested placement",
+}
+# For a camera Blender does not evaluate, so nothing could be checked.
+_SKIPPED_REPORT = {
+    "placement_overridden": None,
+    "override_check": "skipped",
+    "constraints_applied": [{"name": "Track To", "type": "TRACK_TO"}],
+    "warning": "Blender may not evaluate camera 'Camera' for the viewport",
 }
 _CAMERA_REPLIES = {
     "set_blender_camera_view": (
@@ -378,6 +386,22 @@ def test_camera_tools_relay_the_constraint_report_and_accept_an_older_addon(
     assert payload["success"] is True
     expected = _TRACK_TO_REPORT if current else dict.fromkeys(_TRACK_TO_REPORT)
     assert {key: payload[key] for key in _TRACK_TO_REPORT} == expected
+
+
+@pytest.mark.parametrize("tool", list(_CAMERA_REPLIES))
+def test_camera_tools_relay_a_skipped_override_check(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    """override_check reaches the caller, and placement_overridden stays null, not false."""
+    operation, arguments, reply = _CAMERA_REPLIES[tool]
+    session = StrictBlenderSession(responses={operation: {**reply, **_SKIPPED_REPORT}})
+    instance = _strict_server(monkeypatch, session, "attached")
+
+    payload = _call_through_client(instance, tool, arguments)
+
+    assert session.rejected == []
+    assert payload["success"] is True
+    assert {key: payload[key] for key in _SKIPPED_REPORT} == _SKIPPED_REPORT
 
 
 @pytest.mark.parametrize("addon", ["current", "predating_the_report"])

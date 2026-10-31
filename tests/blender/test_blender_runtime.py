@@ -13,12 +13,15 @@ import pytest
 from simul.adapters import blender_runtime
 from simul.config import SecurityConfig, Settings
 from tests.fakes import (
+    FakeCollection,
     FakeConstraint,
     FakeEuler,
+    FakeLayerCollection,
     FakeMatrix,
     FakePropArray,
     FakeTransformObject,
     FakeVector,
+    FakeViewLayer,
     euler_matrix,
 )
 
@@ -195,6 +198,34 @@ class _SinglePrecisionCamera(FakeTransformObject):
         if name == "location":
             value = FakeVector(np.asarray(list(value), dtype=np.float32).tolist())
         super().__setattr__(name, value)
+
+
+class _PartlyEvaluatedCamera(FakeTransformObject):
+    """A camera disabled in viewports whose custom property a visible object's driver reads.
+
+    Blender evaluates that camera only in part: on Blender 5.0.1 each
+    evaluation gave matrix_world back the matrix the camera had before it was
+    disabled, whatever its transform held since.
+    """
+
+    def __init__(self, *constraints: FakeConstraint) -> None:
+        self._before: Optional[FakeMatrix] = None
+        super().__init__(
+            "Side",
+            "CAMERA",
+            FakeCameraData(),
+            location=(1.0, 2.0, 3.0),
+            stored=True,
+            constraints=constraints,
+        )
+        self._before = self.matrix_world
+        self.hide_viewport = True
+
+    def evaluate(self) -> None:
+        if self._before is None:
+            super().evaluate()
+        else:
+            self._stored = FakeMatrix(self._before.rows)
 
 
 def _world_axes(obj: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1112,14 +1143,28 @@ class TestVisualObservationTools:
         frame_current: int = 1,
         frame_start: int = 1,
         frame_end: int = 250,
+        view_layer: Optional[FakeViewLayer] = None,
+        left_out: Sequence[Any] = (),
     ) -> SimpleNamespace:
         """
         Build a bpy mock with camera and render settings.
+
+        Args:
+            view_layer: The context's view layer. By default one whose scene
+                collection holds every object not put in a collection.
+            left_out: Objects that evaluated_depsgraph_get() does not
+                evaluate, as Blender leaves out a camera disabled in viewports.
 
         Returns:
             SimpleNamespace mimicking bpy module.
         """
         all_objects = list(objects or [])
+        if view_layer is None:
+            scene_collection = FakeCollection("Scene Collection")
+            view_layer = FakeViewLayer(FakeLayerCollection(scene_collection))
+            for obj in all_objects:
+                if not getattr(obj, "users_collection", None):
+                    obj.users_collection = [scene_collection]
         cam_obj = None
         for obj in all_objects:
             if (
@@ -1179,7 +1224,9 @@ class TestVisualObservationTools:
         def evaluated_depsgraph_get() -> str:
             """Recompute every stored matrix_world, as Blender's evaluation does."""
             for obj in all_objects:
-                if isinstance(obj, FakeTransformObject):
+                if isinstance(obj, FakeTransformObject) and not any(
+                    obj is out for out in left_out
+                ):
                     obj.evaluate()
             return "depsgraph"
 
@@ -1198,7 +1245,9 @@ class TestVisualObservationTools:
                 images=ImageStore(),
             ),
             context=SimpleNamespace(
-                scene=scene, evaluated_depsgraph_get=evaluated_depsgraph_get
+                scene=scene,
+                view_layer=view_layer,
+                evaluated_depsgraph_get=evaluated_depsgraph_get,
             ),
         )
 
@@ -2138,6 +2187,277 @@ class TestVisualObservationTools:
         to_target = np.subtract(target, result["location"])
         forward = euler_matrix(result["rotation_euler"]) @ [0.0, 0.0, -1.0]
         assert forward == pytest.approx(to_target / np.linalg.norm(to_target))
+
+    # -- cameras Blender does not evaluate for the viewport -----------------
+    # evaluated_depsgraph_get() leaves out a camera disabled in viewports that
+    # is not the scene camera: on Blender 5.0.1 its constraints never ran
+    # there, while a render through it applied them. ``left_out`` has the fake
+    # depsgraph skip such a camera as Blender does.
+
+    @staticmethod
+    def _side_camera(
+        how: str, *constraints: FakeConstraint
+    ) -> Tuple[FakeTransformObject, FakeViewLayer]:
+        """
+        A camera "Side" in collection Cameras, itself in collection Rig.
+
+        Args:
+            how: "enabled"; disabled in viewports by "object" (its own
+                hide_viewport), "collection" (Cameras disabled in viewports),
+                "parent_collection" (Rig disabled), "excluded" (Cameras
+                excluded from the view layer) or "collection_linked_twice"
+                (Cameras disabled, and linked into Rig and Other); or enabled
+                although "excluded_parent" (Rig excluded, Cameras included
+                again) or "second_collection" (Cameras excluded, Side also in
+                Other); "nowhere" (in no collection of the view layer).
+            constraints: The camera's constraints.
+
+        Returns:
+            The camera, evaluated, and the view layer.
+        """
+        side = FakeTransformObject(
+            "Side",
+            "CAMERA",
+            FakeCameraData(),
+            location=(0.0, 0.0, 5.0),
+            stored=True,
+            constraints=constraints,
+        )
+        rig, cameras, other = (
+            FakeCollection("Rig"),
+            FakeCollection("Cameras"),
+            FakeCollection("Other"),
+        )
+        cameras_layer = FakeLayerCollection(cameras)
+        rig_layer = FakeLayerCollection(rig, [cameras_layer])
+        other_layer = FakeLayerCollection(other)
+        view_layer = FakeViewLayer(
+            FakeLayerCollection(
+                FakeCollection("Scene Collection"), [rig_layer, other_layer]
+            )
+        )
+        if how != "nowhere":
+            cameras.link(side)
+        if how == "object":
+            side.hide_viewport = True
+        elif how == "collection":
+            cameras.hide_viewport = True
+        elif how == "parent_collection":
+            rig.hide_viewport = True
+        elif how == "excluded":
+            cameras_layer.exclude = True
+        elif how == "collection_linked_twice":
+            cameras.hide_viewport = True
+            other_layer.children.append(FakeLayerCollection(cameras))
+        elif how == "excluded_parent":
+            rig_layer.exclude = True
+        elif how == "second_collection":
+            cameras_layer.exclude = True
+            other.link(side)
+        side.evaluate()
+        return side, view_layer
+
+    def _session_in(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        view_layer: FakeViewLayer,
+        *objects: Any,
+        left_out: Sequence[Any] = (),
+    ) -> blender_runtime.BlenderRuntimeSession:
+        """A session whose scene camera is "Camera", in ``view_layer``."""
+        fake_bpy = self._make_fake_bpy_with_camera(
+            objects=[self._make_camera_object(), *objects],
+            view_layer=view_layer,
+            left_out=left_out,
+        )
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        return blender_runtime.BlenderRuntimeSession()
+
+    @pytest.mark.parametrize(
+        ("how", "reason"),
+        [
+            ("object", "it is disabled in viewports (hide_viewport)"),
+            ("collection", "collection 'Cameras' is disabled in viewports"),
+            ("parent_collection", "collection 'Rig' is disabled in viewports"),
+            (
+                "excluded",
+                "its collection 'Cameras' is excluded from view layer 'ViewLayer'",
+            ),
+        ],
+    )
+    def test_set_camera_view_skips_the_check_for_a_camera_blender_does_not_evaluate(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, how: str, reason: str
+    ) -> None:
+        """The Track To of a camera disabled in viewports never ran, and the
+        reply said placement_overridden false; a render through the camera
+        turned it to the Track To's target.
+
+        On Blender 5.0.1 a render put such a camera at rotation
+        (1.3657, 0, 0.7854) for a placement at (1.1, 0.25, 0.78), reported held.
+        """
+        side, view_layer = self._side_camera(how, _track_to((5.0, 5.0, 0.0)))
+        session = self._session_in(monkeypatch, view_layer, side, left_out=[side])
+        location, rotation = [7.0, -7.0, 5.0], [1.1, 0.25, 0.78]
+
+        result = session.set_camera_view(location, rotation, camera_name="Side")
+
+        assert result["placement_overridden"] is None
+        assert result["override_check"] == "skipped"
+        assert result["constraints_applied"] == [
+            {"name": "Track To", "type": "TRACK_TO"}
+        ]
+        warning = result["warning"]
+        clause = f"not the scene camera and {reason}, so the placement was not checked"
+        assert clause in warning
+        assert "'Track To' (TRACK_TO)" in warning and "influence to 0" in warning
+        # The reply gives the placement, which the camera's transform holds...
+        assert result["location"] == pytest.approx(location)
+        assert result["rotation_euler"] == pytest.approx(rotation)
+        basis = np.asarray(side.matrix_basis.rows)
+        assert basis[:3, 3] == pytest.approx(location)
+        assert basis[:3, :3] == pytest.approx(euler_matrix(rotation))
+        # ...which a render, evaluating the camera, does not keep.
+        side.evaluate()
+        assert not np.allclose(_evaluated_rotation(side), euler_matrix(rotation))
+
+    def test_set_camera_view_skips_the_check_for_an_unevaluated_camera_without_constraints(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Nothing may move it, but a driver or a parent's scale would go unseen too."""
+        side, view_layer = self._side_camera("object")
+        session = self._session_in(monkeypatch, view_layer, side, left_out=[side])
+
+        result = session.set_camera_view(
+            [7.0, -7.0, 5.0], [1.1, 0.25, 0.78], camera_name="Side"
+        )
+
+        assert result["placement_overridden"] is None
+        assert result["override_check"] == "skipped"
+        assert result["constraints_applied"] == []
+        assert "No constraint acts on it" in result["warning"]
+
+    def test_set_camera_view_reports_the_placement_for_a_camera_evaluated_in_part(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Blender gave the camera's matrix_world back from before it was
+        disabled, and the reply gave that pose, with placement_overridden true
+        and a warning blaming its Track To.
+
+        On Blender 5.0.1 the reply put the camera at (1, 2, 3), where it stood
+        before it was disabled, for a placement at (7, -7, 5).
+        """
+        side = _PartlyEvaluatedCamera(_track_to((5.0, 5.0, 0.0)))
+        root = FakeCollection("Scene Collection")
+        root.link(side)
+        session = self._session_in(
+            monkeypatch, FakeViewLayer(FakeLayerCollection(root)), side
+        )
+        location, rotation = [7.0, -7.0, 5.0], [1.1, 0.25, 0.78]
+
+        result = session.set_camera_view(location, rotation, camera_name="Side")
+
+        assert list(side.matrix_world.translation) == pytest.approx([1.0, 2.0, 3.0])
+        assert result["location"] == pytest.approx(location)
+        assert result["rotation_euler"] == pytest.approx(rotation)
+        assert result["placement_overridden"] is None
+        assert result["override_check"] == "skipped"
+
+    def test_focus_on_object_skips_the_check_for_a_camera_blender_does_not_evaluate(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """The reply gives the framing placement, not the matrix Blender kept."""
+        side = _PartlyEvaluatedCamera(_track_to((6.0, 6.0, 0.0)))
+        root = FakeCollection("Scene Collection")
+        root.link(side)
+        session = self._session_in(
+            monkeypatch, FakeViewLayer(FakeLayerCollection(root)), side, self._cube()
+        )
+
+        result = session.focus_on_object("Cube", camera_name="Side")
+
+        diagonal = np.array([0.0, -math.sqrt(0.5), math.sqrt(0.5)])
+        assert result["camera_location"] == pytest.approx(
+            list(diagonal * result["distance"])
+        )
+        rotation = blender_runtime.BlenderRuntimeSession._look_at_rotation(
+            result["camera_location"], [0.0, 0.0, 0.0]
+        )
+        assert result["camera_rotation_euler"] == pytest.approx(list(rotation))
+        assert result["placement_overridden"] is None
+        assert result["override_check"] == "skipped"
+        assert result["constraints_applied"] == [
+            {"name": "Track To", "type": "TRACK_TO"}
+        ]
+        assert "it is disabled in viewports (hide_viewport)" in result["warning"]
+
+    @pytest.mark.parametrize("how", ["enabled", "excluded_parent", "second_collection"])
+    def test_set_camera_view_checks_a_camera_a_collection_enables(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, how: str
+    ) -> None:
+        """Excluding a collection leaves its child collections, and the
+        camera's other collections, in the view layer: Blender 5.0.1
+        evaluated such a camera."""
+        side, view_layer = self._side_camera(how, _track_to((5.0, 5.0, 0.0)))
+        session = self._session_in(monkeypatch, view_layer, side)
+
+        result = session.set_camera_view(
+            [7.0, -7.0, 5.0], [1.1, 0.25, 0.78], camera_name="Side"
+        )
+
+        assert result["override_check"] == "done"
+        assert result["placement_overridden"] is True
+        assert "override the requested placement" in result["warning"]
+
+    def test_set_camera_view_checks_the_scene_camera_disabled_in_viewports(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Blender evaluates the scene camera whatever its visibility (5.0.1)."""
+        cam = self._constrained_camera(_track_to((5.0, 5.0, 0.0)))
+        cam.hide_viewport = True
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view([7.0, -7.0, 5.0], [1.1, 0.25, 0.78])
+
+        assert result["override_check"] == "done"
+        assert result["placement_overridden"] is True
+
+    @pytest.mark.parametrize(
+        ("how", "reasons"),
+        [
+            ("enabled", []),
+            ("excluded_parent", []),
+            ("second_collection", []),
+            ("object", ["it is disabled in viewports (hide_viewport)"]),
+            ("parent_collection", ["collection 'Rig' is disabled in viewports"]),
+            # One reason per setting, though Cameras is in the view layer twice.
+            (
+                "collection_linked_twice",
+                ["collection 'Cameras' is disabled in viewports"],
+            ),
+            ("nowhere", ["it is in no collection of view layer 'ViewLayer'"]),
+        ],
+    )
+    def test_viewport_disablers_name_each_setting_that_disables_the_camera(
+        self, monkeypatch: pytest.MonkeyPatch, how: str, reasons: List[str]
+    ) -> None:
+        side, view_layer = self._side_camera(how)
+        self._session_in(monkeypatch, view_layer, side)
+
+        disablers = blender_runtime.BlenderRuntimeSession._viewport_disablers(side)
+
+        assert disablers == reasons
+
+    def test_viewport_disablers_ignore_the_scene_collection_hide_viewport(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blender ignores the flag on the scene's own collection (5.0.1)."""
+        root = FakeCollection("Scene Collection", hide_viewport=True)
+        side, _ = self._side_camera("nowhere")
+        root.link(side)
+        self._session_in(monkeypatch, FakeViewLayer(FakeLayerCollection(root)), side)
+
+        assert blender_runtime.BlenderRuntimeSession._viewport_disablers(side) == []
 
     @pytest.mark.parametrize(
         ("location", "rotation", "scale", "extent", "same"),

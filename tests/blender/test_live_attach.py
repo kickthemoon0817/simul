@@ -415,6 +415,69 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             assert own_scale["return_value"] == "(1.0, 1.0, 1.0)", own_scale
             client.delete_object("HeldCamera")
             client.delete_object("ProbeHolder")
+            # Blender does not evaluate a camera disabled in viewports that is not
+            # the scene camera, so its Track To never ran and the reply said
+            # placement_overridden false. The check is now reported as skipped.
+            hidden = client.execute_script(
+                "scene = bpy.context.scene\n"
+                "decoy = bpy.data.objects.new('HiddenDecoy', None)\n"
+                "scene.collection.objects.link(decoy)\n"
+                "decoy.location = (-10, 10, 0)\n"
+                "camera = bpy.data.objects.new('HiddenCamera', bpy.data.cameras.new('HiddenCamera'))\n"
+                "holder = bpy.data.collections.new('HiddenCameras')\n"
+                "scene.collection.children.link(holder)\n"
+                "holder.objects.link(camera)\n"
+                "camera.constraints.new('TRACK_TO').target = decoy\n"
+                "camera.hide_viewport = True\n"
+            )
+            assert hidden.get("error") is None, hidden
+            placed = tool(
+                "set_blender_camera_view",
+                location=[7, -7, 5],
+                rotation_euler=[1.1, 0.25, 0.78],
+                camera_name="HiddenCamera",
+            )
+            assert placed["success"] is True, placed
+            assert placed["override_check"] == "skipped", placed
+            assert placed["placement_overridden"] is None
+            assert placed["constraints_applied"] == track_to
+            assert "disabled in viewports (hide_viewport)" in placed["warning"]
+            assert placed["location"] == pytest.approx([7, -7, 5], abs=1e-4)
+            assert placed["rotation_euler"] == pytest.approx(
+                [1.1, 0.25, 0.78], abs=1e-4
+            )
+            client.execute_script(
+                "bpy.data.objects['HiddenCamera'].hide_viewport = False\n"
+                "bpy.context.view_layer.layer_collection.children['HiddenCameras'].exclude = True"
+            )
+            focused = tool(
+                "focus_blender_on_object",
+                object_name="AttachmentProbe",
+                camera_name="HiddenCamera",
+            )
+            assert focused["override_check"] == "skipped", focused
+            assert focused["placement_overridden"] is None
+            assert "'HiddenCameras' is excluded from view layer" in focused["warning"]
+            # Enabled again, Blender evaluates it: the Track To override is reported.
+            client.execute_script(
+                "bpy.context.view_layer.layer_collection.children['HiddenCameras'].exclude = False"
+            )
+            placed = tool(
+                "set_blender_camera_view",
+                location=[7, -7, 5],
+                rotation_euler=[1.1, 0.25, 0.78],
+                camera_name="HiddenCamera",
+            )
+            assert placed["override_check"] == "done", placed
+            assert placed["placement_overridden"] is True
+            assert evaluated_as_reported(
+                "HiddenCamera", placed["location"], placed["rotation_euler"]
+            ) == (True, True)
+            client.delete_object("HiddenCamera")
+            client.delete_object("HiddenDecoy")
+            client.execute_script(
+                "bpy.data.collections.remove(bpy.data.collections['HiddenCameras'])"
+            )
             # A pattern that can backtrack for hours is refused before it
             # runs on Blender's main thread; a plain one still searches.
             refused = tool("search_blender_objects", name_pattern=r"^(\w+)+_x$")

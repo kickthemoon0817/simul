@@ -503,12 +503,22 @@ _CONSTRAINTS_APPLIED = (
 _PLACEMENT_OVERRIDDEN = (
     "True when Blender evaluates the camera away from the requested placement: its "
     "constraints, a driver on its transform or a non-uniformly scaled parent changed it. "
-    "The placement is still in the camera's transform. Null from a Blender add-on that "
-    "predates this check"
+    "The placement is still in the camera's transform. Null when override_check is "
+    "'skipped', and from a Blender add-on that predates this check"
+)
+_OVERRIDE_CHECK = (
+    "'done' when Blender evaluated the camera after the placement, so "
+    "placement_overridden tells whether it stays there; 'skipped' when Blender does not "
+    "evaluate the camera for the viewport (disabled in viewports, or its collections "
+    "disabled in viewports or excluded from the view layer, and not the scene camera): "
+    "placement_overridden is then null, the reported pose is the placement, unchecked, "
+    "and the warning names the cause. Null from a Blender add-on that predates this field"
 )
 _PLACEMENT_WARNING = (
     "Why the camera is not where it was placed: its constraints, with how to disable "
-    "them, or a driver on its transform or a non-uniformly scaled parent; null when it is"
+    "them, or a driver on its transform or a non-uniformly scaled parent; or why the "
+    "check was skipped and what can still move the camera. Null when it is where it was "
+    "placed"
 )
 
 
@@ -547,6 +557,7 @@ class BlenderSetCameraViewResponse(BaseModel):
     placement_overridden: Optional[bool] = Field(
         None, description=_PLACEMENT_OVERRIDDEN
     )
+    override_check: Optional[str] = Field(None, description=_OVERRIDE_CHECK)
     constraints_applied: Optional[List[BlenderActiveConstraint]] = Field(
         None, description=_CONSTRAINTS_APPLIED
     )
@@ -668,6 +679,7 @@ class BlenderFocusOnObjectResponse(BaseModel):
     placement_overridden: Optional[bool] = Field(
         None, description=_PLACEMENT_OVERRIDDEN
     )
+    override_check: Optional[str] = Field(None, description=_OVERRIDE_CHECK)
     constraints_applied: Optional[List[BlenderActiveConstraint]] = Field(
         None, description=_CONSTRAINTS_APPLIED
     )

@@ -311,7 +311,9 @@ bounding box, camera focus that keeps the whole object in the frame and clip ran
 rotation), world-space camera placement, a camera whose Track To constraint
 overrides focus and placement (reported with the evaluated pose and the
 constraint, left unmuted, and held once the user mutes it), a Child Of camera
-whose scale placement no longer compounds, refusal of an object-search pattern
+whose scale placement no longer compounds, a camera disabled in viewports or in
+an excluded collection, whose override check is reported as skipped until it is
+enabled again, refusal of an object-search pattern
 that can backtrack for hours, a force field without a location, JPEG capture
 of the 3D View in Edit Mode without a camera, a render through a temporary camera,
 explicit script-output truncation, multiple windows, scene/file changes,
