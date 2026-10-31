@@ -3913,11 +3913,27 @@ class BlenderRuntimeSession:
         return [
             {"name": constraint.name, "type": constraint.type}
             for constraint in obj.constraints
-            if not constraint.mute
+            if cls._applies(constraint)
+        ]
+
+    @classmethod
+    def _applies(cls, constraint: Any) -> bool:
+        """
+        Whether Blender applies a constraint when it evaluates its owner.
+
+        Args:
+            constraint: The constraint.
+
+        Returns:
+            False for a muted constraint, one without influence, one Blender
+            reports invalid and one that lacks its target (_lacks_target).
+        """
+        return (
+            not constraint.mute
             and constraint.influence > 0.0
             and constraint.is_valid
             and not cls._lacks_target(constraint)
-        ]
+        )
 
     @staticmethod
     def _lacks_target(constraint: Any) -> bool:
@@ -4043,11 +4059,7 @@ class BlenderRuntimeSession:
             reach = max(abs(s) for s in to_world.to_scale())
         lengths.append(reach * math.hypot(*camera.location))
         for constraint in camera.constraints:
-            if (
-                constraint.mute
-                or constraint.influence <= 0.0
-                or not constraint.is_valid
-            ):
+            if not cls._applies(constraint):
                 continue
             for target, subtarget in cls._constraint_targets(constraint):
                 lengths.append(math.hypot(*target.matrix_world.translation))
@@ -4074,7 +4086,8 @@ class BlenderRuntimeSession:
 
         Returns:
             (target object, subtarget) pairs, the subtarget "" when none is
-            named; a target that is None (deleted, or never set) is left out.
+            named; a target that is None (a Pivot or an Action that uses
+            eval_time acts without one) is left out.
         """
         if constraint.type == "ARMATURE":
             pairs = [

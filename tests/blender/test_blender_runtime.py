@@ -238,9 +238,7 @@ def _nudge(offset: Sequence[float]) -> FakeConstraint:
         solved[:3, 3] += list(target.matrix_world.translation)
         return solved
 
-    constraint = FakeConstraint("Copy Location", "COPY_LOCATION", solve)
-    constraint.target = target  # type: ignore[attr-defined]
-    return constraint
+    return FakeConstraint("Copy Location", "COPY_LOCATION", solve, target=target)
 
 
 def _single_precision_child_of(
@@ -262,9 +260,7 @@ def _single_precision_child_of(
         parent = np.asarray(target.matrix_world.rows, dtype=np.float32)
         return (parent @ inverse @ matrix.astype(np.float32)).astype(float)
 
-    constraint = FakeConstraint("Child Of", "CHILD_OF", solve, **state)
-    constraint.target = target  # type: ignore[attr-defined]
-    return constraint
+    return FakeConstraint("Child Of", "CHILD_OF", solve, target=target, **state)
 
 
 def _single_precision_armature(
@@ -288,11 +284,12 @@ def _single_precision_armature(
         deform = to_world @ pose @ from_world
         return (deform @ matrix.astype(np.float32)).astype(float)
 
-    constraint = FakeConstraint("Armature", "ARMATURE", solve)
-    constraint.targets = [  # type: ignore[attr-defined]
-        SimpleNamespace(target=rig, subtarget="Bone", weight=1.0)
-    ]
-    return constraint
+    return FakeConstraint(
+        "Armature",
+        "ARMATURE",
+        solve,
+        targets=[SimpleNamespace(target=rig, subtarget="Bone", weight=1.0)],
+    )
 
 
 def _evaluated_rotation(obj: Any) -> np.ndarray:
@@ -2399,6 +2396,7 @@ class TestVisualObservationTools:
         rig = FakeTransformObject(
             "Rig",
             "ARMATURE",
+            SimpleNamespace(bones=["Bone"]),
             location=(16200.0, -21600.0, 0.0),
             rotation_euler=(0.3, -0.2, 2.1),
         )
@@ -2433,9 +2431,9 @@ class TestVisualObservationTools:
     ) -> None:
         target = FakeTransformObject("Target", object_type)
         target.bound_box = _box(299.0, 300.0)
-        child_of = FakeConstraint("Child Of", "CHILD_OF", lambda m: m)
-        child_of.target = target  # type: ignore[attr-defined]
-        child_of.subtarget = subtarget  # type: ignore[attr-defined]
+        child_of = FakeConstraint(
+            "Child Of", "CHILD_OF", lambda m: m, target=target, subtarget=subtarget
+        )
         cam = FakeTransformObject(
             "Camera", "CAMERA", location=(0.0, 0.0, 1.0), constraints=[child_of]
         )
@@ -2447,25 +2445,32 @@ class TestVisualObservationTools:
     def test_placement_extent_counts_the_weighted_armatures_of_an_armature_constraint(
         self, mathutils: Any
     ) -> None:
-        """Blender skips an Armature constraint's target without weight."""
+        """Blender skips an Armature constraint's target without weight, and the
+        whole constraint once a target with weight lost its armature."""
 
         def bone(distance: float, weight: float) -> SimpleNamespace:
-            rig = FakeTransformObject("Rig", "ARMATURE", location=(distance, 0.0, 0.0))
+            rig = FakeTransformObject(
+                "Rig",
+                "ARMATURE",
+                SimpleNamespace(bones=["Bone"]),
+                location=(distance, 0.0, 0.0),
+            )
             return SimpleNamespace(target=rig, subtarget="Bone", weight=weight)
 
-        armature = FakeConstraint("Armature", "ARMATURE", lambda m: m)
-        armature.targets = [  # type: ignore[attr-defined]
-            bone(400.0, 1.0),
-            bone(900.0, 0.0),
-            SimpleNamespace(target=None, subtarget="Bone", weight=1.0),
-        ]
-        cam = FakeTransformObject(
-            "Camera", "CAMERA", location=(0.0, 0.0, 1.0), constraints=[armature]
-        )
+        def extent(*targets: SimpleNamespace) -> float:
+            armature = FakeConstraint(
+                "Armature", "ARMATURE", lambda m: m, targets=list(targets)
+            )
+            cam = FakeTransformObject(
+                "Camera", "CAMERA", location=(0.0, 0.0, 1.0), constraints=[armature]
+            )
+            return blender_runtime.BlenderRuntimeSession._placement_extent(
+                cam, cam.matrix_world, cam.matrix_world
+            )
 
-        assert blender_runtime.BlenderRuntimeSession._placement_extent(
-            cam, cam.matrix_world, cam.matrix_world
-        ) == pytest.approx(400.0)
+        assert extent(bone(400.0, 1.0), bone(900.0, 0.0)) == pytest.approx(400.0)
+        deleted = SimpleNamespace(target=None, subtarget="Bone", weight=1.0)
+        assert extent(bone(400.0, 1.0), deleted) == pytest.approx(1.0)
 
     def test_focus_on_object_reports_a_track_to_that_turns_the_camera_away(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
