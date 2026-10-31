@@ -29,7 +29,10 @@ from tests.fakes import (
     FakeTransformObject,
     FakeVector,
     FakeViewLayer,
+    axis_angle_matrix,
     euler_matrix,
+    matrix_euler,
+    matrix_quaternion,
 )
 
 # The release the camera rules were measured on; it keeps an action's
@@ -318,6 +321,80 @@ def _single_precision_armature(
     )
 
 
+def _single_precision_track_to(target: Sequence[float]) -> FakeConstraint:
+    """A Track To on an empty at ``target``, aiming at that location as Blender stores it.
+
+    Object locations are single precision, so the target's rounds by up to
+    half a unit in the last place: a millimetre 30 km out. The camera then
+    turns by that much over its distance to the target, and its roll, which
+    comes from the cross product of the aim with world Z, by that turn over
+    the sine of the angle between them. Only the target's rounding is
+    modelled, so the outcome does not hang on the last bits of the camera's
+    computed location, which differ between platforms.
+    """
+    decoy = FakeTransformObject("Decoy", location=target)
+    stored = np.asarray(target, dtype=np.float32).astype(float)
+
+    def solve(matrix: np.ndarray) -> np.ndarray:
+        forward = stored - matrix[:3, 3]
+        forward /= np.linalg.norm(forward)
+        right = np.cross(forward, [0.0, 0.0, 1.0])
+        right /= np.linalg.norm(right)
+        solved = matrix.copy()
+        solved[:3, :3] = np.column_stack(
+            [right, np.cross(right, forward), -forward]
+        ) * np.linalg.norm(matrix[:3, :3], axis=0)
+        return solved
+
+    return FakeConstraint("Track To", "TRACK_TO", solve, target=decoy)
+
+
+def _degenerate_track_to(target: Sequence[float]) -> FakeConstraint:
+    """A Track To on an empty at ``target`` that solves aims without a direction as Blender does.
+
+    Blender's Track To (vectomat) turns the camera's +Z from the target to the
+    camera, world +Z when the camera stands at the target, and its +Y along
+    world Z across that, world +Y when nothing of world Z is left across it:
+    on Blender 5.0.1 a camera straight above or below its target was rolled
+    to world +Y up, and one at its target turned to look straight down.
+    """
+    decoy = FakeTransformObject("Decoy", location=target)
+
+    def solve(matrix: np.ndarray) -> np.ndarray:
+        back = matrix[:3, 3] - np.asarray(target, dtype=float)
+        length = np.linalg.norm(back)
+        back = back / length if length else np.array([0.0, 0.0, 1.0])
+        up = np.array([0.0, 0.0, 1.0]) - back[2] * back
+        size = np.linalg.norm(up)
+        up = up / size if size else np.array([0.0, 1.0, 0.0])
+        solved = matrix.copy()
+        solved[:3, :3] = np.column_stack(
+            [np.cross(up, back), up, back]
+        ) * np.linalg.norm(matrix[:3, :3], axis=0)
+        return solved
+
+    return FakeConstraint("Track To", "TRACK_TO", solve, target=decoy)
+
+
+_EPS = blender_runtime._FLOAT32_EPSILON
+_ORIGIN = (0.0, 0.0, 0.0)
+
+
+def _aim(
+    constraint_type: str,
+    target: Sequence[float] = (4.0, 2.0, -1.0),
+    rotation_euler: Sequence[float] = (0.0, 0.0, 0.0),
+    **state: Any,
+) -> FakeConstraint:
+    """A constraint on an empty at ``target``, turned by ``rotation_euler``; it leaves the pose alone."""
+    empty = FakeTransformObject(
+        "Target", location=target, rotation_euler=rotation_euler
+    )
+    return FakeConstraint(
+        constraint_type, constraint_type, lambda matrix: matrix, target=empty, **state
+    )
+
+
 def _evaluated_rotation(obj: Any) -> np.ndarray:
     """An object's world rotation, its scale divided out."""
     world = np.asarray(obj.matrix_world.rows)[:3, :3]
@@ -348,6 +425,64 @@ class _SinglePrecisionCamera(FakeTransformObject):
         if name == "location":
             value = FakeVector(np.asarray(list(value), dtype=np.float32).tolist())
         super().__setattr__(name, value)
+
+
+class _SinglePrecisionRotationCamera(FakeTransformObject):
+    """A camera that stores the rotation it is placed at in single precision, as Blender does.
+
+    Blender decomposes the rotation into the camera's rotation mode from
+    single-precision matrix entries. Here, near gimbal lock of an Euler
+    order, an entry next to 1 rounds to 1 and the middle angle reads as
+    exactly 90 degrees: placed 2.4e-4 rad from gimbal lock, the camera is
+    stored 2.3e-4 rad off (Blender's own decomposition misses in the other
+    two angles, by up to epsilon over the cosine of the middle one). An
+    axis-angle takes its angle from the arc cosine of a single-precision
+    cosine of half of it, which rounds to 1 below 4.9e-4 rad: the rotation is
+    lost. ``driven`` is a driver, (property, index, value), written into the
+    camera at each evaluation, as background Blender writes a driver's result
+    back to the original object.
+    """
+
+    def __init__(
+        self,
+        rotation_mode: str,
+        driven: Optional[Tuple[str, int, float]] = None,
+        **kwargs: Any,
+    ) -> None:
+        self._driven = driven
+        super().__init__(
+            "Camera",
+            "CAMERA",
+            FakeCameraData(),
+            rotation_mode=rotation_mode,
+            stored=True,
+            **kwargs,
+        )
+
+    def _store_rotation(self, rotation: np.ndarray) -> None:
+        single = np.asarray(rotation, dtype=np.float32).astype(float)
+        if self.rotation_mode != "AXIS_ANGLE":
+            super()._store_rotation(single)
+            return
+        w, *vector = matrix_quaternion(single)
+        half = math.acos(min(1.0, float(np.float32(w))))
+        # quat_to_axis_angle keeps the vector part as the axis rather than
+        # divide by a sine below 0.0005.
+        sine = math.sin(half)
+        axis = vector if sine < 0.0005 else [v / sine for v in vector]
+        self.rotation_axis_angle = FakeVector((2 * half, *axis))
+
+    def evaluate(self) -> None:
+        if self._driven is not None:
+            prop, index, value = self._driven
+            values = list(getattr(self, prop))
+            values[index] = value
+            setattr(
+                self,
+                prop,
+                FakeEuler(values) if prop == "rotation_euler" else FakeVector(values),
+            )
+        super().evaluate()
 
 
 class _PartlyEvaluatedCamera(FakeTransformObject):
@@ -383,6 +518,11 @@ def _world_axes(obj: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     rotation = np.asarray(obj.matrix_world.rows)[:3, :3]
     rotation = rotation / np.linalg.norm(rotation, axis=0)
     return rotation[:, 0], rotation[:, 1], -rotation[:, 2]
+
+
+def _angle(first: Sequence[float], second: Sequence[float]) -> float:
+    """The angle between two directions in radians, exact for small angles too."""
+    return math.atan2(np.linalg.norm(np.cross(first, second)), np.dot(first, second))
 
 
 def _in_frame(
@@ -2237,6 +2377,189 @@ class TestVisualObservationTools:
         assert "a driver on its transform" in warning and "as well" in warning
         assert "its transform holds the placement" not in warning
 
+    @pytest.mark.parametrize(
+        ("rotation_mode", "rotation", "driven", "overridden"),
+        [
+            ("XYZ", (0.3, math.pi / 2 - 2.4e-4, 0.7), None, False),
+            # A driver turns the stored third angle 2e-4 rad further.
+            (
+                "XYZ",
+                (0.3, math.pi / 2 - 2.4e-4, 0.7),
+                ("rotation_euler", 2, 0.7002),
+                True,
+            ),
+            (
+                "AXIS_ANGLE",
+                matrix_euler(axis_angle_matrix((4e-4, 1 / 3, 2 / 3, 2 / 3))),
+                None,
+                False,
+            ),
+            # A driver sets the angle to 8e-4 rad, twice the placement's.
+            (
+                "AXIS_ANGLE",
+                matrix_euler(axis_angle_matrix((4e-4, 1 / 3, 2 / 3, 2 / 3))),
+                ("rotation_axis_angle", 0, 8e-4),
+                True,
+            ),
+        ],
+        ids=[
+            "near_gimbal_lock",
+            "near_gimbal_lock_driven",
+            "axis_angle_near_zero",
+            "axis_angle_near_zero_driven",
+        ],
+    )
+    def test_set_camera_view_tolerates_the_rotation_blender_stores(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        rotation_mode: str,
+        rotation: Tuple[float, float, float],
+        driven: Optional[Tuple[str, int, float]],
+        overridden: bool,
+    ) -> None:
+        """Single precision stores a camera near gimbal lock, or turned by an
+        axis-angle near zero, off its placement; a driver then turns it further.
+
+        The fixed 1e-4 rad tolerance reported such a stored rotation as an
+        override: on Blender 5.0.1, nothing acting on them, for 141 of 1,200
+        cameras placed 4e-5 to 1.1e-3 rad from gimbal lock (up to 4.7e-3 rad
+        off) and 160 of 1,200 axis-angle cameras turned by 1e-4 to 1.7e-3 rad
+        (up to 5.6e-4 rad off). The stored transform is what Blender made of
+        the placement, so only a change to it since is an override. A driver
+        on the rotation of an unparented camera also showed that the stored
+        transform has to be copied: bpy's matrix_basis reads the transform
+        whenever it is used.
+        """
+        cam = _SinglePrecisionRotationCamera(rotation_mode, driven)
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view([1.0, -2.0, 3.0], list(rotation))
+
+        cam.evaluate()
+        placed = euler_matrix(rotation)
+        evaluated = _evaluated_rotation(cam)
+        missed = max(_angle(placed[:, k], evaluated[:, k]) for k in (1, 2))
+        # The camera is evaluated more than twice the former tolerance off.
+        assert missed > 2e-4
+        assert result["placement_overridden"] is overridden
+        if overridden:
+            assert "no constraint acts on it" in result["warning"]
+            assert "a driver on its transform" in result["warning"]
+        else:
+            assert result["warning"] is None
+
+    @pytest.mark.parametrize(
+        ("scale", "tilt", "overridden"),
+        [
+            ((1.0, 100.0, 1.0), 1e-7, True),
+            ((1.0, 1000.0, 1.0), 1e-6, True),
+            # A uniform parent carries any rotation.
+            ((1000.0, 1000.0, 1000.0), 1e-6, False),
+        ],
+        ids=["100_to_1", "1000_to_1", "uniform"],
+    )
+    def test_set_camera_view_reports_what_a_strongly_uneven_parent_does_to_a_tilt(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        scale: Tuple[float, float, float],
+        tilt: float,
+        overridden: bool,
+    ) -> None:
+        """A camera tilted 1e-7 or 1e-6 rad off the axes of a parent scaled 100
+        or 1000 times as much along one of them.
+
+        The tilt skews the placement in the parent's space by 1e-5 to 1e-3,
+        below the bound the skew test scaled with the parent's condition
+        number, while the parent stretches that skew: the camera was
+        evaluated 1e-3 to 0.79 rad off its placement and reported held. On
+        Blender 5.0.1 such cameras ended up 5e-4 to 0.46 rad off.
+        """
+        rig = FakeTransformObject("Rig", scale=scale, stored=True)
+        cam = FakeTransformObject(
+            "Camera", "CAMERA", FakeCameraData(), parent=rig, stored=True
+        )
+        # Parented without keeping the transform: the rig's scale reaches the camera.
+        cam.matrix_parent_inverse = FakeMatrix.Identity(4)
+        cam.evaluate()
+        session = self._session_on(monkeypatch, cam)
+        rotation = [tilt, 0.0, 0.0]
+
+        result = session.set_camera_view([0.0, 0.0, 5.0], rotation)
+
+        cam.evaluate()
+        missed = max(
+            _angle(euler_matrix(rotation)[:, k], _evaluated_rotation(cam)[:, k])
+            for k in (1, 2)
+        )
+        assert (missed > 9e-4) is overridden
+        assert result["placement_overridden"] is overridden
+        if overridden:
+            assert "non-uniform scale" in result["warning"]
+
+    def test_set_camera_view_reports_a_parent_that_shears_a_camera_near_gimbal_lock(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Under a parent scaled (1, 1.5, 1) the axes of a camera placed near
+        gimbal lock are skewed by 0.29: no stored rotation carries them, so
+        that is an override, however single precision stores the rest."""
+        rig = FakeTransformObject("Rig", scale=(1.0, 1.5, 1.0), stored=True)
+        cam = _SinglePrecisionRotationCamera("XYZ", parent=rig)
+        # Parented without keeping the transform: the rig's scale reaches the camera.
+        cam.matrix_parent_inverse = FakeMatrix.Identity(4)
+        cam.evaluate()
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view(
+            [7.0, -7.0, 5.0], [0.3, math.pi / 2 - 2.4e-4, 0.7]
+        )
+
+        assert result["placement_overridden"] is True
+        assert "non-uniform scale" in result["warning"]
+
+    @pytest.mark.parametrize(
+        ("parent_scale", "keep_transform", "sheared"),
+        [
+            (None, False, False),
+            ((2.0, 2.0, 2.0), False, False),
+            ((-2.0, -2.0, -2.0), False, False),
+            ((1.0, 3.0, 1.0), True, False),
+            ((1.0, 3.0, 1.0), False, True),
+            # Any uneven scale can shear a turned camera, however slight.
+            ((1.0, 1.0001, 1.0), False, True),
+            ((1.0, 0.0, 1.0), False, True),
+        ],
+        ids=[
+            "unparented",
+            "uniform",
+            "mirrored_uniform",
+            "stretched_kept",
+            "stretched",
+            "slightly_stretched",
+            "flattened",
+        ],
+    )
+    def test_shears_is_a_parent_matrix_that_is_no_rotation_and_uniform_scale(
+        self,
+        mathutils: Any,
+        parent_scale: Optional[Tuple[float, float, float]],
+        keep_transform: bool,
+        sheared: bool,
+    ) -> None:
+        """A parent carries every placement only as a rotation and a uniform
+        scale; parented keeping the transform, its own scale cancels out."""
+        cam = FakeTransformObject("Camera", "CAMERA")
+        if parent_scale is not None:
+            rig = FakeTransformObject(
+                "Rig", rotation_euler=(0.3, -0.2, 1.1), scale=parent_scale
+            )
+            cam.parent = rig
+            if keep_transform:
+                cam.matrix_parent_inverse = rig.matrix_world.inverted()
+
+        assert blender_runtime.BlenderRuntimeSession._shears(cam) is sheared
+
     def test_set_camera_view_tolerates_single_precision_through_a_far_parent_inverse(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
@@ -2551,6 +2874,231 @@ class TestVisualObservationTools:
         deleted = SimpleNamespace(target=None, subtarget="Bone", weight=1.0)
         assert extent(bone(400.0, 1.0), deleted) == pytest.approx(1.0)
 
+    @pytest.mark.parametrize(
+        ("constraints", "location", "placed", "up", "view"),
+        [
+            ([], _ORIGIN, _ORIGIN, 0.0, 0.0),
+            # Their direction comes from no location.
+            (
+                [_copy_location((3.0, 0.0, 4.0)), _child_of(np.eye(4))],
+                _ORIGIN,
+                _ORIGIN,
+                0.0,
+                0.0,
+            ),
+            # A target 5 m off at (3, 0, 4): an epsilon of each of its coordinates
+            # over the lever, and one for the arithmetic.
+            (
+                [_aim("DAMPED_TRACK", (3.0, 0.0, 4.0))],
+                _ORIGIN,
+                _ORIGIN,
+                2 * _EPS,
+                2 * _EPS,
+            ),
+            (
+                [_aim("LOCKED_TRACK", (3.0, 0.0, 4.0))],
+                _ORIGIN,
+                _ORIGIN,
+                2 * _EPS,
+                2 * _EPS,
+            ),
+            (
+                [_aim("STRETCH_TO", (3.0, 0.0, 4.0))],
+                _ORIGIN,
+                _ORIGIN,
+                2 * _EPS,
+                2 * _EPS,
+            ),
+            # A Track To's roll: no rounding across the aim's part off Z (3, 0, 0),
+            # an epsilon for the arithmetic, and the up axis's lean, epsilon over
+            # the sine of 0.6 between the aim and Z.
+            (
+                [_aim("TRACK_TO", (3.0, 0.0, 4.0))],
+                _ORIGIN,
+                _ORIGIN,
+                3 * _EPS + _EPS / 0.6,
+                2 * _EPS,
+            ),
+            # Target Z: the target's Z axis, here world X, at a sine of 0.8. That
+            # axis is single precision too: turned by 3 epsilons, it shifts the
+            # part (0, 0, 4) by that times the aim's height of 3 along it.
+            (
+                [
+                    _aim(
+                        "TRACK_TO",
+                        (3.0, 0.0, 4.0),
+                        rotation_euler=(0.0, math.pi / 2, 0.0),
+                        use_target_z=True,
+                    )
+                ],
+                _ORIGIN,
+                _ORIGIN,
+                2 * _EPS + 9 * _EPS / (4 - 13 * _EPS) + _EPS + _EPS / 0.8,
+                2 * _EPS,
+            ),
+            # The camera 1 mm off the placement across the aim turns it by that
+            # over the lever, and rolls it by that over the part off Z...
+            (
+                [_aim("TRACK_TO", (3.0, 0.0, 4.0))],
+                _ORIGIN,
+                (0.0, 1e-3, 0.0),
+                1e-3 / 5 + 2 * _EPS + 1e-3 / (3 - 3 * _EPS) + _EPS + _EPS / 0.6,
+                1e-3 / 5 + 2 * _EPS,
+            ),
+            # ...and off it along the aim, by nothing.
+            (
+                [_aim("DAMPED_TRACK", (3.0, 0.0, 4.0))],
+                _ORIGIN,
+                (-0.03, 0.0, -0.04),
+                2 * _EPS,
+                2 * _EPS,
+            ),
+            # A target 1e-5 m beside a camera 10 m above it, both near the origin:
+            # the part off Z is exact, so the roll is fixed to within its lean.
+            (
+                [_aim("TRACK_TO", (1e-5, 0.0, 0.0))],
+                (0.0, 0.0, 10.0),
+                (0.0, 0.0, 10.0),
+                3 * _EPS + 1e-6,
+                2 * _EPS,
+            ),
+            # A millimetre beside a camera 10 km out, which single precision
+            # moves by more: the roll can take any angle.
+            (
+                [_aim("TRACK_TO", (10_000.001, 0.0, 0.0))],
+                (10_000.0, 0.0, 10.0),
+                (10_000.0, 0.0, 10.0),
+                math.pi + 20_000.001 * _EPS / 10 + _EPS,
+                20_000.001 * _EPS / 10 + _EPS,
+            ),
+            # Aimed exactly along world Z, the Track To takes no roll from the
+            # aim: it gives the camera a fixed one, so the roll is not amplified...
+            (
+                [_aim("TRACK_TO", _ORIGIN)],
+                (0.0, 0.0, 10.0),
+                (0.0, 0.0, 10.0),
+                2 * _EPS,
+                2 * _EPS,
+            ),
+            # ...and at its target it has no aim to round, while another
+            # constraint's aim still counts.
+            ([_aim("TRACK_TO", _ORIGIN)], _ORIGIN, _ORIGIN, 0.0, 0.0),
+            (
+                [_aim("TRACK_TO", _ORIGIN), _aim("DAMPED_TRACK", (0.0, 1.0, 0.0))],
+                _ORIGIN,
+                _ORIGIN,
+                2 * _EPS,
+                2 * _EPS,
+            ),
+            # The nearer target turns the camera more: (20, 1, 0) epsilons over
+            # 1 m against (23, 0, 4) over 5 m.
+            (
+                [
+                    _aim("TRACK_TO", (13.0, 0.0, 4.0)),
+                    _aim("DAMPED_TRACK", (10.0, 1.0, 0.0)),
+                ],
+                (10.0, 0.0, 0.0),
+                (10.0, 0.0, 0.0),
+                math.hypot(20.0, 1.0) * _EPS + _EPS,
+                math.hypot(20.0, 1.0) * _EPS + _EPS,
+            ),
+            # A Copy Scale computes nothing of the aim, however far out its target.
+            (
+                [
+                    _aim("TRACK_TO", (3.0, 0.0, 4.0)),
+                    _aim("COPY_SCALE", (50_000.0, 0.0, 0.0)),
+                ],
+                _ORIGIN,
+                _ORIGIN,
+                3 * _EPS + _EPS / 0.6,
+                2 * _EPS,
+            ),
+            # Constraints Blender skips, or whose bone or vertex group only it locates.
+            (
+                [_aim("TRACK_TO", (3.0, 0.0, 4.0), mute=True)],
+                _ORIGIN,
+                _ORIGIN,
+                0.0,
+                0.0,
+            ),
+            (
+                [_aim("TRACK_TO", (3.0, 0.0, 4.0), influence=0.0)],
+                _ORIGIN,
+                _ORIGIN,
+                0.0,
+                0.0,
+            ),
+            (
+                [_aim("TRACK_TO", (3.0, 0.0, 4.0), is_valid=False)],
+                _ORIGIN,
+                _ORIGIN,
+                0.0,
+                0.0,
+            ),
+            (
+                [_target_deleted(_aim("TRACK_TO", (3.0, 0.0, 4.0)))],
+                _ORIGIN,
+                _ORIGIN,
+                0.0,
+                0.0,
+            ),
+            (
+                [_aim("TRACK_TO", (3.0, 0.0, 4.0), subtarget="Bone")],
+                _ORIGIN,
+                _ORIGIN,
+                0.0,
+                0.0,
+            ),
+        ],
+        ids=[
+            "none",
+            "no_aim",
+            "damped_track",
+            "locked_track",
+            "stretch_to",
+            "track_to",
+            "track_to_target_z",
+            "moved_across_the_aim",
+            "moved_along_the_aim",
+            "near_vertical_resolved",
+            "near_vertical_lost",
+            "aimed_along_world_z",
+            "at_the_target",
+            "at_one_target",
+            "nearer_target",
+            "far_copy_scale",
+            "muted",
+            "no_influence",
+            "invalid",
+            "target_deleted",
+            "subtarget",
+        ],
+    )
+    def test_placement_turn_is_the_rounding_of_the_aims_own_locations(
+        self,
+        mathutils: Any,
+        constraints: List[FakeConstraint],
+        location: Tuple[float, float, float],
+        placed: Tuple[float, float, float],
+        up: float,
+        view: float,
+    ) -> None:
+        """The up and view axes may turn by the floor plus these angles: the
+        rounding of the camera's and the target's coordinates, and the camera's
+        move off the placement, across the aim over the lever, and for a Track
+        To across the aim's part off Z over that part's length."""
+        camera = FakeTransformObject(
+            "Camera", "CAMERA", location=location, constraints=constraints
+        )
+
+        turn = blender_runtime.BlenderRuntimeSession._placement_turn(
+            camera, FakeMatrix.Translation(placed)
+        )
+
+        floor = blender_runtime._PLACEMENT_ANGLE_TOLERANCE
+        assert turn[0] - floor == pytest.approx(up, rel=1e-6, abs=1e-15)
+        assert turn[1] - floor == pytest.approx(view, rel=1e-6, abs=1e-15)
+
     def test_focus_on_object_reports_a_track_to_that_turns_the_camera_away(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
@@ -2582,6 +3130,248 @@ class TestVisualObservationTools:
             {"name": "Track To", "type": "TRACK_TO"}
         ]
         assert "'Track To' (TRACK_TO)" in result["warning"]
+
+    @pytest.mark.parametrize(
+        ("beside", "overridden"),
+        [(0.0, False), (0.1, True)],
+        ids=["aimed_at_the_cube", "aimed_10cm_beside"],
+    )
+    def test_focus_on_object_tolerates_a_track_to_on_the_cube_far_out(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        beside: float,
+        overridden: bool,
+    ) -> None:
+        """A camera 40 km out, its Track To aimed at the 10 cm cube it frames.
+
+        Single precision rounds the cube's location by up to a millimetre
+        there, and the camera frames it from 0.46 m, so the Track To turns
+        it 2 mrad off the framing. The fixed 1e-4 rad tolerance reported
+        that as an override: on Blender 5.0.1 for 62 of 300 cameras focused
+        on the object their Track To aims at, 1 m to 100 km out. Aimed 10 cm
+        beside the cube, more than single precision moves it there, the
+        Track To turns the camera 0.22 rad away: an override.
+        """
+        center = (24000.37, -32000.61, 1500.29)
+        aimed = np.add(center, (beside, 0.0, 0.0))
+        cam = self._constrained_camera(_single_precision_track_to(aimed))
+
+        result = self._focus(monkeypatch, self._cube(offset=center, half=0.05), cam)
+
+        assert result["distance"] == pytest.approx(0.458, abs=1e-3)
+        # Blender evaluates the depsgraph before it draws or renders the camera.
+        cam.evaluate()
+        framing = np.negative(blender_runtime._FOCUS_DIRECTION)
+        turned = _angle(_world_axes(cam)[2], framing)
+        assert result["placement_overridden"] is overridden
+        if overridden:
+            assert turned == pytest.approx(0.22, abs=0.01)
+            assert result["constraints_applied"] == [
+                {"name": "Track To", "type": "TRACK_TO"}
+            ]
+            assert "'Track To' (TRACK_TO)" in result["warning"]
+        else:
+            # Rounding turned the camera beyond the former tolerance...
+            assert 1e-3 < turned < 1e-2
+            # ...which is no override.
+            assert result["warning"] is None
+
+    @pytest.mark.parametrize(
+        ("roll", "overridden"),
+        [(0.0, False), (0.5, True)],
+        ids=["level", "rolled"],
+    )
+    def test_set_camera_view_tolerates_the_roll_a_track_to_takes_from_world_z(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        roll: float,
+        overridden: bool,
+    ) -> None:
+        """A camera looking 1.1 mrad off straight down at its Track To's target.
+
+        The Track To rolls the camera along the cross product of the aim and
+        world Z, here 1.1e-3 long, so the 21 micrometres that single precision
+        moves the target 1.4 km out roll the camera by 2 mrad while its view
+        turns by 2 microradians. The fixed 1e-4 rad tolerance reported that
+        as an override: on Blender 5.0.1 for 37 of 300 cameras looking within
+        1 degree of straight up or down at their Track To's target. A
+        placement rolled half a radian, which the Track To levels, is one.
+        """
+        location = [1000.0, 1000.0, 10.0]
+        target = [1000.00712, 1000.00843, 0.0]
+        cam = self._constrained_camera(_single_precision_track_to(target))
+        session = self._session_on(monkeypatch, cam)
+        level = euler_matrix(
+            blender_runtime.BlenderRuntimeSession._look_at_rotation(location, target)
+        )
+        rotation = matrix_euler(level @ euler_matrix((0.0, 0.0, roll)))
+
+        result = session.set_camera_view(location, list(rotation))
+
+        cam.evaluate()
+        _right, up, forward = _world_axes(cam)
+        assert _angle(forward, -level[:, 2]) < 1e-5
+        assert result["placement_overridden"] is overridden
+        if overridden:
+            assert _angle(up, level[:, 1]) < 1e-2
+            assert "'Track To' (TRACK_TO)" in result["warning"]
+        else:
+            # Rounding rolled the camera beyond the former tolerance...
+            assert 1e-3 < _angle(up, level[:, 1]) < 1e-2
+            # ...which is no override.
+            assert result["warning"] is None
+
+    @pytest.mark.parametrize(
+        ("offset", "rotation", "overridden"),
+        [
+            ((0.0, 0.0, 12.0), (0.0, 0.0, 0.0), False),
+            ((0.0, 0.0, 12.0), (0.0, 0.0, 0.5), True),
+            # Looking straight up at a target overhead.
+            ((0.0, 0.0, -6.0), (0.0, math.pi, 0.0), False),
+            ((0.0, 0.0, -6.0), (0.0, math.pi, 0.5), True),
+            # Standing at the target.
+            ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), False),
+            ((0.0, 0.0, 0.0), (1.0, 0.2, 0.3), True),
+        ],
+        ids=[
+            "above_level",
+            "above_rolled",
+            "below_level",
+            "below_rolled",
+            "at_target_level",
+            "at_target_turned",
+        ],
+    )
+    def test_set_camera_view_reports_the_pose_a_track_to_gives_without_an_aim(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        offset: Tuple[float, float, float],
+        rotation: Tuple[float, float, float],
+        overridden: bool,
+    ) -> None:
+        """A Track To aimed exactly along world Z, or at a camera standing at its
+        target, gives the camera a fixed pose that no rounding moves.
+
+        The angle tolerance of a Track To's roll grows as its aim comes to
+        line up with world Z, and it was infinite when they did, as it was
+        for both axes at the target: on Blender 5.0.1 a top-down camera
+        straight above its target, placed rolled by up to 3 rad, and one
+        placed at its target, turned 1 rad, were reported held while the
+        Track To rolled the first to world +Y up and turned the second to
+        look straight down.
+        """
+        target = (5.0, -3.0, 0.0)
+        location = list(np.add(target, offset))
+        cam = self._constrained_camera(_degenerate_track_to(target))
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view(location, list(rotation))
+
+        cam.evaluate()
+        evaluated = _evaluated_rotation(cam)
+        placed = euler_matrix(rotation)
+        missed = max(_angle(placed[:, k], evaluated[:, k]) for k in (1, 2))
+        assert (missed > 0.1) is overridden
+        assert result["placement_overridden"] is overridden
+        if overridden:
+            assert "'Track To' (TRACK_TO)" in result["warning"]
+        else:
+            assert missed < 1e-9
+            assert result["warning"] is None
+
+    @pytest.mark.parametrize("roll", [0.0, 0.3, 0.785], ids=["level", "0.3", "0.785"])
+    @pytest.mark.parametrize("beside", [1e-7, 1e-6, 1e-5])
+    def test_set_camera_view_reports_a_roll_off_a_track_to_that_aims_almost_straight_down(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        beside: float,
+        roll: float,
+    ) -> None:
+        """A camera 10 m straight above a target 1e-7 to 1e-5 m off its axis.
+
+        Both stand near the origin, where single precision holds that offset
+        to within an epsilon of it, so the Track To's roll is fixed, and
+        Blender 5.0.1's Track To computes it to within an epsilon however
+        close the aim comes to world Z. The tolerance divided the rounding of
+        the whole scene's extent by the sine of that angle, 1e-8 to 1e-6, and
+        reported a placement rolled 0.3 or 0.785 rad off it as held.
+        """
+        target = (beside, 0.0, 0.0)
+        location = [0.0, 0.0, 10.0]
+        cam = self._constrained_camera(_track_to(target))
+        session = self._session_on(monkeypatch, cam)
+        level = euler_matrix(
+            blender_runtime.BlenderRuntimeSession._look_at_rotation(location, target)
+        )
+        rotation = matrix_euler(level @ euler_matrix((0.0, 0.0, roll)))
+
+        result = session.set_camera_view(location, list(rotation))
+
+        assert result["placement_overridden"] is (roll > 0.0)
+
+    @pytest.mark.parametrize("off", [0.0, 2e-3], ids=["aimed_at_it", "2mrad_off"])
+    def test_set_camera_view_turns_a_track_to_only_by_its_own_rounding(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, off: float
+    ) -> None:
+        """A Track To 5 m away, its camera placed 2 mrad off it, and a Copy Scale
+        whose target stands 50 km out.
+
+        The tolerance for the aim grew with the farthest target of any
+        constraint, 9.6e-3 rad here, so the 2 mrad turn was reported held. The
+        Copy Scale computes nothing of the aim.
+        """
+        location = [1.0, 2.0, 3.0]
+        target = [4.0, 2.0, -1.0]
+        far = FakeConstraint(
+            "Copy Scale",
+            "COPY_SCALE",
+            lambda matrix: matrix,
+            target=FakeTransformObject("Far", location=(50_000.0, 0.0, 0.0)),
+        )
+        cam = self._constrained_camera(_track_to(target), far)
+        session = self._session_on(monkeypatch, cam)
+        level = euler_matrix(
+            blender_runtime.BlenderRuntimeSession._look_at_rotation(location, target)
+        )
+        rotation = matrix_euler(level @ euler_matrix((off, 0.0, 0.0)))
+
+        result = session.set_camera_view(location, list(rotation))
+
+        assert result["placement_overridden"] is (off > 0.0)
+
+    def test_set_camera_view_blames_only_a_driver_when_a_far_track_to_keeps_the_aim(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """A driver moved a camera 36 km out 1 m back along its view, and its
+        Track To, aimed along that view, turned it only by the 0.9 mm that
+        single precision moves the target: 0.45 mrad.
+
+        The fixed 1e-4 rad tolerance counted that as the Track To overriding
+        the placement too, and the warning said to mute it, which leaves the
+        camera where the driver puts it.
+        """
+        location = [30000.0, 20000.0009, 1000.0003]
+        target = [30001.0, *location[1:]]
+        cam = _DrivenCamera(29999.0)
+        cam.constraints.append(_single_precision_track_to(target))
+        cam.evaluate()
+        session = self._session_on(monkeypatch, cam)
+        rotation = blender_runtime.BlenderRuntimeSession._look_at_rotation(
+            location, target
+        )
+
+        result = session.set_camera_view(location, list(rotation))
+
+        assert result["location"] == pytest.approx([29999.0, *location[1:]])
+        assert result["placement_overridden"] is True
+        warning = result["warning"]
+        assert "placement before its constraints apply" in warning
+        assert "they ('Track To' (TRACK_TO)) leave that pose as it is" in warning
+        assert "mute" not in warning
 
     def test_focus_on_object_reports_the_framing_held_without_constraints(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
@@ -3615,6 +4405,40 @@ class TestVisualObservationTools:
 
         assert (
             blender_runtime.BlenderRuntimeSession._same_view(placed, other, extent)
+            is same
+        )
+
+    @pytest.mark.parametrize(
+        ("turned_by", "turn", "same"),
+        [
+            # A roll about the view axis turns the up axis only...
+            ((0.0, 0.0, 1e-3), (2e-3, 1e-4), True),
+            ((0.0, 0.0, 1e-3), (1e-4, 2e-3), False),
+            # ...and a turn about the camera's X axis the view axis too.
+            ((1e-3, 0.0, 0.0), (2e-3, 1e-4), False),
+            ((1e-3, 0.0, 0.0), (2e-3, 2e-3), True),
+        ],
+        ids=["rolled_within_up", "rolled_beyond_up", "tilted_beyond_view", "tilted"],
+    )
+    def test_same_view_holds_the_up_and_view_axes_to_their_own_angles(
+        self,
+        turned_by: Tuple[float, float, float],
+        turn: Tuple[float, float],
+        same: bool,
+    ) -> None:
+        """A 1 mrad turn, against the angles the up and view axes may turn by."""
+        rotation = euler_matrix((0.4, 0.5, 0.6))
+        placed, other = (
+            FakeMatrix.LocRotScale(
+                FakeVector((1.0, 2.0, 3.0)),
+                FakeMatrix(matrix),
+                FakeVector((1.0, 1.0, 1.0)),
+            )
+            for matrix in (rotation, rotation @ euler_matrix(turned_by))
+        )
+
+        assert (
+            blender_runtime.BlenderRuntimeSession._same_view(placed, other, 4.0, turn)
             is same
         )
 
