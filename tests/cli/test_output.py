@@ -13,7 +13,7 @@ import typer
 from typer.testing import CliRunner
 
 from simul.cli import isaac as isaac_cli
-from simul.cli import output
+from simul.cli import output, unreal_cli
 from simul.cli.main import app as main_app
 
 runner = CliRunner()
@@ -252,9 +252,144 @@ def test_read_script_arg_without_input_fails() -> None:
     assert json.loads(result.stdout)["error_type"] == "InputError"
 
 
+def test_read_script_arg_rejects_a_py_file_that_is_not_utf8(tmp_path: Path) -> None:
+    """Exit 2 naming the file and the byte; the offset counts the CR that universal newlines drop."""
+    script = tmp_path / "job.py"
+    script.write_bytes(b"x = 1\r\n\xff = 2\n")
+
+    result = _invoke(lambda: output.read_script_arg(str(script)))
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout) == {
+        "success": False,
+        "error": f"Script file {script} is not valid UTF-8: byte 0xff (invalid start byte) at offset 7.",
+        "error_type": "InvalidEncoding",
+    }
+
+
+def test_read_script_arg_rejects_piped_stdin_that_is_not_utf8() -> None:
+    """Piped bytes decode as strict UTF-8; the offset counts bytes, not characters."""
+    app = typer.Typer()
+
+    @app.command()
+    def cmd() -> None:
+        output.read_script_arg(None)
+
+    result = runner.invoke(app, [], input="# 한\nx = '".encode("utf-8") + b"\xff'\n")
+
+    assert result.exit_code == 2, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["error_type"] == "InvalidEncoding"
+    assert envelope["error"] == "Script from stdin is not valid UTF-8: byte 0xff (invalid start byte) at offset 11."
+
+
+@pytest.mark.parametrize(
+    ("code", "problem"),
+    [
+        # "# 한" and then the byte 0xff, as POSIX hands argv to Python (surrogateescape).
+        (b"# \xed\x95\x9c\nx = '\xff'".decode("utf-8", "surrogateescape"), "byte 0xff at offset 11"),
+        ("# 한\nx = '\ud800'", "lone surrogate U+D800 at offset 11"),
+    ],
+    ids=["argv-byte", "other-surrogate"],
+)
+def test_read_script_arg_rejects_an_argument_carrying_lone_surrogates(code: str, problem: str) -> None:
+    """A lone surrogate cannot go out as UTF-8 or be sized in it; the error names the byte argv carried."""
+    result = _invoke(lambda: output.read_script_arg(code))
+
+    assert result.exit_code == 2, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["error_type"] == "InvalidEncoding"
+    assert envelope["error"] == f"Script argument is not valid UTF-8: {problem}."
+
+
+def test_read_script_arg_reads_a_multibyte_utf8_file_as_before(tmp_path: Path) -> None:
+    """The BOM stays a leading U+FEFF and universal newlines turn CRLF into LF, as they always did."""
+    script = tmp_path / "job.py"
+    script.write_bytes("\ufeff# 한국어 🙂\r\nprint('héllo')\r\n".encode("utf-8"))
+
+    assert output.read_script_arg(str(script)) == "\ufeff# 한국어 🙂\nprint('héllo')\n"
+
+
+def test_read_script_arg_decodes_piped_stdin_as_utf8_whatever_the_locale() -> None:
+    """Valid UTF-8 on stdin comes back as sent, BOM and CRLF included, even where the text
+    stdin decodes with a legacy code page (cp1252 here, as a pipe does on Windows)."""
+    seen: list[str] = []
+    app = typer.Typer()
+
+    @app.command()
+    def cmd() -> None:
+        seen.append(output.read_script_arg(None))
+
+    script = "\ufeff# 한국어 🙂\r\nprint('héllo')\r\n"
+    result = CliRunner(charset="cp1252").invoke(app, [], input=script.encode("utf-8"))
+
+    assert result.exit_code == 0, result.output
+    assert seen == [script]
+
+
 # ---------------------------------------------------------------------------
 # End to end through a backend command
 # ---------------------------------------------------------------------------
+class _UnrealSession:
+    """Session double for ``unreal exec`` that records the scripts it is sent."""
+
+    settings = unreal_cli.get_settings()
+
+    def __init__(self, sent: list[str]) -> None:
+        self.sent = sent
+
+    async def _execute_python(self, code: str, mode: str) -> Dict[str, Any]:
+        self.sent.append(code)
+        return {"ReturnValue": True, "LogOutput": [], "CommandResult": ""}
+
+    async def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def sent_scripts(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Stand in for Isaac Sim and Unreal behind ``exec``; collects the scripts they receive."""
+    sent: list[str] = []
+
+    async def execute_script(code: str, keep_raw_output: bool = False) -> Dict[str, Any]:
+        sent.append(code)
+        return {"output": ""}
+
+    monkeypatch.setattr(isaac_cli, "_tools", lambda *args, **kwargs: SimpleNamespace(execute_script=execute_script))
+    monkeypatch.setattr(unreal_cli, "_session", lambda *args, **kwargs: _UnrealSession(sent))
+    return sent
+
+
+@pytest.mark.parametrize("backend", ["isaac", "unreal"])
+@pytest.mark.parametrize("source", ["file", "stdin", "argument"])
+def test_exec_rejects_script_input_that_is_not_utf8_before_the_engine(
+    backend: str, source: str, tmp_path: Path, sent_scripts: list[str]
+) -> None:
+    """Every command that takes a script exits 2 on bad bytes, however they arrive, and sends nothing."""
+    not_utf8 = b"x = '\xff'\n"
+    script = tmp_path / "job.py"
+    script.write_bytes(not_utf8)
+    args = {"file": [str(script)], "stdin": [], "argument": [not_utf8.decode("utf-8", "surrogateescape")]}
+
+    result = runner.invoke(
+        main_app, ["--json", backend, "exec", *args[source]], input=not_utf8 if source == "stdin" else None
+    )
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout)["error_type"] == "InvalidEncoding"
+    assert sent_scripts == []
+
+
+@pytest.mark.parametrize("backend", ["isaac", "unreal"])
+def test_exec_sends_a_multibyte_script_unchanged(backend: str, sent_scripts: list[str]) -> None:
+    code = "# 한국어 🙂\r\nprint('héllo')"
+
+    result = runner.invoke(main_app, ["--json", backend, "exec", code])
+
+    assert result.exit_code == 0, result.output
+    assert sent_scripts == [code]
+
+
 def test_isaac_runtime_info_partial_failure_exits_non_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     tools = SimpleNamespace(
         get_runtime_info=AsyncMock(return_value={"kit_version": "107.3", "physics_error": "no PhysicsScene"})
