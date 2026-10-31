@@ -157,6 +157,18 @@ def _copy_location(
     return FakeConstraint(name, "COPY_LOCATION", solve, target=anchor, **state)
 
 
+def _copy_transforms(
+    target: Sequence[float], name: str = "Copy Transforms", **state: Any
+) -> FakeConstraint:
+    """A Copy Transforms: the object takes the whole world matrix of an empty at ``target``."""
+    source = FakeTransformObject("Source", location=target)
+
+    def solve(matrix: np.ndarray) -> np.ndarray:
+        return np.array(source.matrix_world.rows, dtype=float)
+
+    return FakeConstraint(name, "COPY_TRANSFORMS", solve, target=source, **state)
+
+
 def _child_of(
     target_change: np.ndarray, name: str = "Child Of", **state: Any
 ) -> FakeConstraint:
@@ -2850,23 +2862,28 @@ class TestVisualObservationTools:
     def test_set_camera_view_skips_a_disabled_camera_whose_evaluated_pose_did_not_change(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
-        """Placed again where it already is, a disabled camera Blender evaluates
-        keeps its evaluated pose, as one Blender evaluates only in part does;
-        the two cannot be told apart, so the check is skipped."""
-        side, view_layer = self._side_camera("object", _track_to((5.0, 5.0, 0.0)))
+        """Under a constraint that sets its whole transform, a disabled camera
+        Blender evaluates keeps its evaluated pose whatever the placement, as
+        one Blender evaluates only in part does; the two cannot be told apart,
+        so the check is skipped. A camera placed again where it already is can
+        keep its pose too, but whether it does turns on the last bit of the
+        scale the placement keeps (to_scale of its rotation), which differs
+        between platforms, so that case is not asserted here."""
+        side, view_layer = self._side_camera(
+            "object", _copy_transforms((5.0, 5.0, 0.0))
+        )
         session = self._session_in(monkeypatch, view_layer, side)
         location, rotation = [7.0, -7.0, 5.0], [1.1, 0.25, 0.78]
 
-        first = session.set_camera_view(location, rotation, camera_name="Side")
-        again = session.set_camera_view(location, rotation, camera_name="Side")
+        result = session.set_camera_view(location, rotation, camera_name="Side")
 
-        assert first["override_check"] == "done"
-        assert again["override_check"] == "skipped"
-        assert again["placement_overridden"] is None
-        assert again["location"] == pytest.approx(location)
-        warning = again["warning"]
+        assert result["override_check"] == "skipped"
+        assert result["placement_overridden"] is None
+        assert result["location"] == pytest.approx(location)
+        warning = result["warning"]
         assert "Its evaluated pose did not change with the placement" in warning
-        assert "where it already is" in warning
+        assert "constraints that set its whole transform" in warning
+        assert "'Copy Transforms' (COPY_TRANSFORMS)" in warning
 
     def test_skipped_check_warns_that_a_parent_blender_did_not_evaluate_moves_the_camera(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
