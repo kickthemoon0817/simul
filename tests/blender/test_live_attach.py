@@ -385,8 +385,40 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             assert focused["placement_overridden"] is False, focused
             assert focused["constraints_applied"] == [] and focused["warning"] is None
             assert framing("TrackedCamera", "AttachmentProbe") == whole
-            client.delete_object("TrackedCamera")
+            # Unmuted again, then its target deleted: Blender keeps the Track To
+            # valid until it is next edited, though it does nothing. The replies
+            # listed it all the same.
+            client.execute_script(
+                "bpy.data.objects['TrackedCamera'].constraints['Track To'].mute = False"
+            )
             client.delete_object("ProbeDecoy")
+            stale = client.execute_script(
+                "track = bpy.data.objects['TrackedCamera'].constraints['Track To']\n"
+                "__result__ = (track.target, track.is_valid)"
+            )
+            assert stale["return_value"] == "(None, True)", stale
+            focused = tool(
+                "focus_blender_on_object",
+                object_name="AttachmentProbe",
+                camera_name="TrackedCamera",
+            )
+            assert focused["placement_overridden"] is False, focused
+            assert focused["constraints_applied"] == [] and focused["warning"] is None
+            assert framing("TrackedCamera", "AttachmentProbe") == whole
+            placed = tool(
+                "set_blender_camera_view",
+                location=[7, -7, 5],
+                rotation_euler=[1.1, 0.25, 0.78],
+                camera_name="TrackedCamera",
+            )
+            assert placed["placement_overridden"] is False, placed
+            assert placed["constraints_applied"] == [] and placed["warning"] is None
+            assert evaluated_as_reported(
+                "TrackedCamera", [7, -7, 5], [1.1, 0.25, 0.78]
+            ) == (True, True)
+            camera_info = tool("get_blender_camera_info", camera_name="TrackedCamera")
+            assert camera_info["constraints_applied"] == []
+            client.delete_object("TrackedCamera")
             # Each placement doubled the scale of a camera whose Child Of target
             # was scaled after the constraint was set up (1, 2, 4, ...).
             held = client.execute_script(

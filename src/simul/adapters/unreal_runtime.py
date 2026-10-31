@@ -35,6 +35,7 @@ from ._unreal_scripts import (
     EDITOR_WORLD,
     ENGINE_METADATA,
     FIND_ACTORS_BY_TAG,
+    FOCUS_ACTOR,
     INTERCHANGE_INFO,
     LOADED_MAP,
     PIE_ACTIVE,
@@ -132,6 +133,27 @@ _CAPTURE_CHUNK_BYTES = 2 * 1024 * 1024
 
 #: Prints whether Play In Editor runs, as ``{"pie_active": bool}``.
 PIE_STATE = EDITOR_WORLD + "print(json.dumps({'pie_active': pie_active()}))\n"
+
+#: ``focus_on_actor``'s warning when Play In Editor left the actor unselected.
+FOCUS_PIE_WARNING = (
+    "Play In Editor is running, and Unreal's editor cannot select actors until it stops, so "
+    "the actor was not selected; the camera was moved. To select it, stop PIE with "
+    "control_unreal_simulation, action 'stop' (CLI: simul unreal sim stop), and focus again."
+)
+
+#: ``focus_on_actor``'s warning when Unreal did not select the actor outside PIE.
+#: The causes are UE 5.7's: ``UUnrealEdEngine::SelectActor`` skips an actor
+#: with a root selection parent (a ChildActorComponent's child actor, an actor
+#: attached inside a level instance), and the level editor's
+#: ``CanSelectActorElement`` refuses hidden actors, hidden or locked levels,
+#: non-selectable actors, a selection lock and selections the editor mode
+#: disallows.
+FOCUS_NOT_SELECTED_WARNING = (
+    "Unreal did not select the actor. It does not select an actor hidden in the editor or in a "
+    "hidden or locked level, a child actor or other actor it selects only through a parent (an "
+    "actor inside a level instance, for example), or any actor while the active editor mode or "
+    "a selection lock prevents selection"
+)
 
 
 def _outside_pie(script: str, action: str) -> str:
@@ -1775,31 +1797,39 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         distance: float = 0.0,
     ) -> Dict[str, Any]:
         """
-        Focus the editor viewport camera on a specific actor.
+        Focus the editor viewport camera on a specific actor and select it.
 
-        Uses ``EditorActorSubsystem.SetActorSelectionState`` to select the
-        actor, then positions the camera to look at the actor via Python.
+        One editor script adds the actor to the editor selection
+        (``EditorActorSubsystem.set_actor_selection_state``), reads the
+        selection back and reads the actor's location; the camera is then
+        placed behind and above the actor, looking at it, and read back.
+
+        While Play In Editor (or Simulate) runs the actor is not selected:
+        Unreal's editor reports no selection then and clears it when PIE
+        stops (UE 5.7.4). The camera still moves.
 
         Args:
             actor_path: Full actor path to focus on.
             distance: Camera distance from actor (0 = auto-fit).
 
         Returns:
-            Dictionary with actor_path, camera_location, camera_rotation.
+            Dictionary with actor_path, camera_location and camera_rotation
+            (read back), selected (the selection read back), pie_active, and
+            a warning when the actor is not selected: Play In Editor
+            running, or an actor Unreal does not select (hidden in the
+            editor or in a hidden or locked level, a child actor or an actor
+            inside a level instance, or any actor while the editor mode or a
+            selection lock prevents selection). A ``ScriptError`` envelope
+            when the actor cannot be found, before the camera moves.
         """
-        # Select the actor via EditorActorSubsystem
-        await self._call_function(
-            "/Script/UnrealEd.Default__EditorActorSubsystem",
-            "SetActorSelectionState",
-            {"Actor": actor_path, "bShouldBeSelected": True},
-        )
+        args = {"actor_path": actor_path}
+        focus = await self._execute_json_script(f"args = {args!r}\n" + FOCUS_ACTOR)
+        if focus.get("error"):
+            return focus
 
-        # Position camera to look at actor. Read actor location, compute
-        # a camera position offset behind and above, then set camera.
+        # Position camera to look at actor: offset behind and above it.
         dist = distance if distance > 0.0 else 500.0
-        # Simpler approach: read location, set camera via subsystem
-        transform = await self._get_actor_transform(actor_path)
-        actor_loc = transform["location"]
+        actor_loc = focus["location"]
         cam_x = actor_loc[0] - dist
         cam_y = actor_loc[1]
         cam_z = actor_loc[2] + dist * 0.5
@@ -1821,11 +1851,18 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         if info.get("success") is False:
             return info
 
-        return {
+        selected = bool(focus["selected"])
+        pie_active = bool(focus["pie_active"])
+        result: Dict[str, Any] = {
             "actor_path": actor_path,
             "camera_location": info["camera_location"],
             "camera_rotation": info["camera_rotation"],
+            "selected": selected,
+            "pie_active": pie_active,
         }
+        if not selected:
+            result["warning"] = FOCUS_PIE_WARNING if pie_active else FOCUS_NOT_SELECTED_WARNING
+        return result
 
     # ------------------------------------------------------------------
     # Phase 3 — Scene Manipulation
@@ -2337,7 +2374,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Returns:
             Dictionary with instance_path, parent_path, or a ``ScriptError``
             envelope when the parent is missing, the destination exists or
-            the asset could not be created.
+            the asset could not be created, or a ``PIEActive`` envelope while
+            Play In Editor runs, when Unreal's EditorAssetLibrary loads,
+            finds and saves no assets.
         """
         if not save_path:
             # Derive save path from parent: /Game/Materials/M_Base -> /Game/Materials/
@@ -4085,13 +4124,6 @@ if component.is_simulating_physics() != {target!r}:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    async def _get_actor_transform(self, actor_path: str) -> Dict[str, Any]:
-        """Return the world transform, failing when the actor cannot be read."""
-        result = await self.get_actor_info(actor_path)
-        if result.get("error"):
-            raise RuntimeError(result["error"])
-        return {key: tuple(result[key]) for key in ("location", "rotation", "scale")}
 
     async def close(self) -> None:
         """Close the underlying HTTP session if open.

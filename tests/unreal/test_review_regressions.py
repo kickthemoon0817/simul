@@ -416,11 +416,19 @@ async def test_actor_world_state_and_filters(script_session):
 
 
 @pytest.mark.asyncio
-async def test_missing_actor_is_error_and_cannot_focus_origin(script_session):
+async def test_missing_actor_is_error_and_cannot_focus_origin(script_session, monkeypatch):
     session, _, _ = script_session
+    camera_calls = []
+
+    async def call_function(object_path, function_name, parameters=None):
+        camera_calls.append(function_name)
+        return {}
+
+    monkeypatch.setattr(session, "_call_function", call_function)
     assert (await session.get_actor_info("/Missing.Actor"))["success"] is False
-    with pytest.raises(RuntimeError, match="Actor not found"):
-        await session._get_actor_transform("/Missing.Actor")
+    focused = await session.focus_on_actor("/Missing.Actor")
+    assert focused["success"] is False and "Actor not found" in focused["error"]
+    assert camera_calls == []
 
 
 @pytest.mark.asyncio

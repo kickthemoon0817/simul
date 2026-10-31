@@ -310,7 +310,8 @@ bounding box, camera focus that keeps the whole object in the frame and clip ran
 (a 60 m cube included, and a camera parented to a moved rig with a quaternion
 rotation), world-space camera placement, a camera whose Track To constraint
 overrides focus and placement (reported with the evaluated pose and the
-constraint, left unmuted, and held once the user mutes it), a Child Of camera
+constraint, left unmuted, held once the user mutes it, and no longer reported
+once its target is deleted), a Child Of camera
 whose scale placement no longer compounds, a camera disabled in viewports or in
 an excluded collection, whose override check is reported as skipped until it is
 enabled again, refusal of an object-search pattern

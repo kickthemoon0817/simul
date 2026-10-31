@@ -165,6 +165,24 @@ def resolve_deprecated_alias(
     return value
 
 
+def utf8_byte_length(text: str) -> int:
+    """Size of ``text`` in UTF-8 bytes, the unit script sizes are reported and limited in.
+
+    The script tools' usage records (``code_bytes``) and Isaac Sim's
+    ``MAX_SCRIPT_BYTES`` measure through here, so one script has one size
+    whichever backend runs it. ``len(text)`` counts characters, which
+    under-reports Hangul (3 bytes each in UTF-8) or an emoji (4).
+
+    Args:
+        text: The script source.
+
+    Returns:
+        The length of ``text`` encoded as UTF-8. A lone surrogate counts as
+        its 3 bytes instead of raising.
+    """
+    return len(text.encode("utf-8", "surrogatepass"))
+
+
 def surface_tool(
     register: Callable[..., Callable[[WrappedTool], WrappedTool]],
     allowed: Optional[typing.Iterable[str]] = None,

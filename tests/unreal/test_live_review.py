@@ -497,6 +497,40 @@ def test_a_failed_procedural_scene_leaves_no_actor_or_folder(monkeypatch):
     asyncio.run(run())
 
 
+def test_a_material_instance_is_refused_during_play_in_editor_and_created_after():
+    """While PIE ran, EditorAssetLibrary found no assets, so the tool reported
+    the parent material, which exists, as not found."""
+
+    async def run():
+        client = session()
+        folder = "/Game/SimulReview_" + uuid.uuid4().hex[:8]
+        parent = "/Engine/BasicShapes/BasicShapeMaterial"
+        try:
+            started = await client.control_simulation("start")
+            assert started.get("state") == "playing", started
+            refused = await client.create_material_instance(parent, "MI_DuringPIE", folder)
+            assert refused["error_type"] == "PIEActive", refused
+            assert "control_unreal_simulation" in refused["details"]["hint"], refused
+
+            stopped = await client.control_simulation("stop")
+            assert stopped.get("state") == "stopped", stopped
+            leftover = await client._execute_json_script(
+                "import json, unreal\n"
+                f"path = {folder + '/MI_DuringPIE'!r}\n"
+                "print(json.dumps({'exists': unreal.EditorAssetLibrary.does_asset_exist(path)}))"
+            )
+            assert leftover == {"exists": False}, leftover
+            created = await client.create_material_instance(parent, "MI_AfterPIE", folder)
+            assert created["instance_path"] == f"{folder}/MI_AfterPIE.MI_AfterPIE", created
+            assert created["parent_path"] == parent + ".BasicShapeMaterial", created
+        finally:
+            await client.control_simulation("stop")
+            await client._execute_python(f"import unreal\nunreal.EditorAssetLibrary.delete_directory({folder!r})")
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_play_in_editor_refuses_editor_changes_and_flags_reads():
     """While PIE ran, spawn told the agent to pass another class or asset,
     delete reported deleted false, the reads returned 0 actors and the
@@ -534,6 +568,53 @@ def test_play_in_editor_refuses_editor_changes_and_flags_reads():
             assert stopped.get("state") == "stopped", stopped
             assert (await client.get_actor_info(path))["pie_active"] is False
             assert path in [a["path"] for a in (await client.list_actors(tag_filter="simul_review"))["actors"]]
+        finally:
+            await client.control_simulation("stop")
+            await destroy_actor(client, path)
+            await client.close()
+
+    asyncio.run(run())
+
+
+SELECTION = """
+import unreal, json
+subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+print(json.dumps({'selection': [a.get_path_name() for a in subsystem.get_selected_level_actors()]}))
+"""
+
+
+def test_focus_selects_outside_play_in_editor_and_says_why_not_during_it():
+    """While PIE ran, focus reported success as if it had selected the actor;
+    Unreal reads back no selection made then and clears it when PIE stops. The
+    camera move works in and out of PIE."""
+
+    async def run():
+        client = session()
+        path = await spawn_cube(client)
+        # 500 cm behind the cube at (100, 200, 300) and 250 cm above it.
+        framed = pytest.approx((-400.0, 200.0, 550.0))
+        try:
+            outside = await client.focus_on_actor(path)
+            assert (outside["selected"], outside["pie_active"]) == (True, False), outside
+            assert "warning" not in outside and outside["camera_location"] == framed, outside
+            assert path in (await client._execute_json_script(SELECTION))["selection"]
+
+            await client._execute_python(
+                "import unreal\nunreal.get_editor_subsystem(unreal.EditorActorSubsystem).select_nothing()"
+            )
+            await client.set_camera_view(location=(0.0, 0.0, 1000.0), rotation=(0.0, 0.0, 0.0))
+            started = await client.control_simulation("start")
+            assert started.get("state") == "playing", started
+
+            during = await client.focus_on_actor(path)
+            assert (during["selected"], during["pie_active"]) == (False, True), during
+            assert "control_unreal_simulation" in during["warning"], during
+            assert during["camera_location"] == framed, during
+
+            stopped = await client.control_simulation("stop")
+            assert stopped.get("state") == "stopped", stopped
+            assert path not in (await client._execute_json_script(SELECTION))["selection"]
+            assert (await client.get_viewport_info())["camera_location"] == framed
         finally:
             await client.control_simulation("stop")
             await destroy_actor(client, path)

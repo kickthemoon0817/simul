@@ -94,6 +94,7 @@ from ..schemas.unreal import (
     Vector3,
 )
 from ..schemas.unreal_ui import UnrealUIRequest, UnrealUIResponse
+from ._helpers import utf8_byte_length
 
 #: Default of a parameter the caller must supply.
 REQUIRED: Any = inspect.Parameter.empty
@@ -283,14 +284,9 @@ def _all_arguments(arguments: Mapping[str, Any]) -> Dict[str, Any]:
     return dict(arguments)
 
 
-def _utf8_bytes(text: str) -> int:
-    """Length of ``text`` encoded as UTF-8; a lone surrogate counts as its 3 bytes instead of raising."""
-    return len(text.encode("utf-8", "surrogatepass"))
-
-
 def _script_usage(arguments: Mapping[str, Any]) -> Dict[str, Any]:
     """The script's size in UTF-8 bytes and its mode; the source stays out of the log."""
-    return {"code_bytes": _utf8_bytes(str(arguments["code"])), "mode": arguments["mode"]}
+    return {"code_bytes": utf8_byte_length(str(arguments["code"])), "mode": arguments["mode"]}
 
 
 #: Characters of a refused script echoed back in front of its size.
@@ -608,7 +604,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="focus_unreal_on_actor",
-        description="Focus the editor viewport camera on a specific actor.",
+        description=(
+            "Focus the editor viewport camera on a specific actor and select it; selected reports "
+            "whether Unreal selected it. While PIE runs, Unreal's editor selects nothing, so the camera "
+            "moves but selected is false, with pie_active true and a warning."
+        ),
         response=UnrealFocusActorResponse,
         read_only=False,
         method="focus_on_actor",

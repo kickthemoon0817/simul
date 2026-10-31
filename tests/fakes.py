@@ -469,6 +469,34 @@ class FakeMatrix:
         return FakeVector(product[: len(other)])
 
 
+# The constraint types with a target object (``target``) on Blender 5.0.1. An
+# Armature constraint has a list of targets (``targets``) instead.
+TARGET_CONSTRAINT_TYPES = frozenset(
+    {
+        "ACTION",
+        "CHILD_OF",
+        "CLAMP_TO",
+        "COPY_LOCATION",
+        "COPY_ROTATION",
+        "COPY_SCALE",
+        "COPY_TRANSFORMS",
+        "DAMPED_TRACK",
+        "FLOOR",
+        "FOLLOW_PATH",
+        "GEOMETRY_ATTRIBUTE",
+        "IK",
+        "LIMIT_DISTANCE",
+        "LOCKED_TRACK",
+        "PIVOT",
+        "SHRINKWRAP",
+        "SPLINE_IK",
+        "STRETCH_TO",
+        "TRACK_TO",
+        "TRANSFORM",
+    }
+)
+
+
 class FakeConstraint:
     """``bpy.types.Constraint`` stand-in: what Blender reports of it, and its effect.
 
@@ -478,6 +506,17 @@ class FakeConstraint:
     one without influence and an invalid one (``is_valid`` False, e.g. a Track
     To without a target); so does ``apply``. Blender blends a partial influence;
     that is not modeled, and ``apply`` refuses it rather than guess.
+
+    Only a type in ``TARGET_CONSTRAINT_TYPES`` has ``target`` (and may have
+    ``subtarget``), only an Armature has ``targets`` (each with ``target``,
+    ``subtarget`` and ``weight``) and only an Action ``use_eval_time``, as on
+    a real constraint, so code reading them from another type fails here as
+    it does in Blender. Deleting a target object leaves ``target`` None and
+    ``is_valid`` True, since Blender 5.0.1 checks the targets only when the
+    constraint is edited, and Blender's evaluation then does nothing; nor
+    does ``apply``. Likewise for an Armature constraint once a target with
+    weight lacks its object or bone. A Pivot without a target still pivots
+    about its owner, and an Action that uses eval_time needs no target.
     """
 
     def __init__(
@@ -488,17 +527,54 @@ class FakeConstraint:
         mute: bool = False,
         influence: float = 1.0,
         is_valid: bool = True,
+        **settings: Any,
     ) -> None:
+        required = set()
+        optional = set()
+        if constraint_type in TARGET_CONSTRAINT_TYPES:
+            required.add("target")
+            optional.add("subtarget")
+        if constraint_type == "ARMATURE":
+            required.add("targets")
+        if constraint_type == "ACTION":
+            required.add("use_eval_time")
+        if not required <= set(settings) <= required | optional:
+            raise TypeError(
+                f"A {constraint_type} constraint takes {sorted(required)} "
+                f"(optionally {sorted(optional)}), not {sorted(settings)}"
+            )
         self.name = name
         self.type = constraint_type
         self.mute = mute
         self.influence = influence
         self.is_valid = is_valid
         self._solve = solve
+        for setting, value in settings.items():
+            setattr(self, setting, value)
+
+    def _lacks_target(self) -> bool:
+        """Whether Blender's evaluation finds none of the target it acts with."""
+        if self.type == "ARMATURE":
+            return any(
+                entry.weight > 0.0
+                and (
+                    entry.target is None
+                    or entry.subtarget not in entry.target.data.bones
+                )
+                for entry in self.targets
+            )
+        if self.type == "PIVOT" or (self.type == "ACTION" and self.use_eval_time):
+            return False
+        return self.type in TARGET_CONSTRAINT_TYPES and self.target is None
 
     def apply(self, matrix: np.ndarray) -> np.ndarray:
         """Return ``matrix`` with this constraint applied, or unchanged when Blender skips it."""
-        if self.mute or self.influence <= 0.0 or not self.is_valid:
+        if (
+            self.mute
+            or self.influence <= 0.0
+            or not self.is_valid
+            or self._lacks_target()
+        ):
             return matrix
         if self.influence < 1.0:
             raise NotImplementedError("a partial constraint influence is not modeled")
@@ -547,6 +623,9 @@ class FakeTransformObject:
         self.name = name
         self.type = object_type
         self.data = data
+        # Blender gives an object without geometry (an empty, a camera) eight
+        # bound_box corners at its origin; a test sets an armature's or mesh's.
+        self.bound_box: List[FakePropArray] = [FakePropArray((0.0, 0.0, 0.0))] * 8
         self.location: Any = FakeVector(location)
         self.rotation_mode = rotation_mode
         self.rotation_euler: Any = FakeEuler(rotation_euler)

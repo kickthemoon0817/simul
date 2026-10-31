@@ -82,6 +82,34 @@ def test_oversize_payload_is_refused_before_execution() -> None:
     assert client.execute.await_count == 0
 
 
+# Hangul syllables are 3 bytes each in UTF-8, so a script that fills the limit
+# in bytes holds about a third as many characters.
+SCRIPT_AT_LIMIT = "#" * (MAX_SCRIPT_BYTES % 3) + "가" * (MAX_SCRIPT_BYTES // 3)
+
+
+def test_the_size_limit_counts_utf8_bytes_not_characters() -> None:
+    """MAX_SCRIPT_BYTES was compared with len(code), so a multi-byte script got through at up to 4x it."""
+    over = SCRIPT_AT_LIMIT + "#"
+    assert len(over) < MAX_SCRIPT_BYTES < len(over.encode("utf-8"))
+    tools, client = _tools(ScriptResult(success=True, output="{}"))
+
+    result = asyncio.run(tools.execute_script(over))
+
+    assert result["error_type"] == "PayloadTooLarge"
+    assert f"({MAX_SCRIPT_BYTES + 1} bytes" in result["error"]
+    assert client.execute.await_count == 0
+
+
+def test_a_script_of_exactly_the_limit_in_utf8_bytes_runs() -> None:
+    assert len(SCRIPT_AT_LIMIT.encode("utf-8")) == MAX_SCRIPT_BYTES
+    tools, client = _tools(ScriptResult(success=True, output="{}"))
+
+    result = asyncio.run(tools.execute_script(SCRIPT_AT_LIMIT))
+
+    assert result["success"] is True
+    assert client.execute.await_count == 1
+
+
 def test_failed_script_reports_the_traceback() -> None:
     tools, _ = _tools(
         ScriptResult(
