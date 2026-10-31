@@ -178,8 +178,8 @@ Behaviour worth knowing:
   parent), or any actor while the editor mode or a selection lock prevents
   selection. The camera stands `distance` behind the point it looks at and
   half as far above it; the reply's `distance` is the one used. A positive
-  `distance` looks at the actor's location. With `distance` 0 (the default)
-  the camera looks at the center of the actor's bounds and stands back until
+  `distance` looks at the actor's location. With `distance` 0 (the default) or
+  less the camera looks at the center of the actor's bounds and stands back until
   their bounding sphere fills the view's height with 10% to spare. Editor
   Python cannot read the level viewport's field of view, so UE's default is
   assumed: 90 degrees across on a 16:9 viewport; a narrower field of view or a

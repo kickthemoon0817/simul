@@ -1952,7 +1952,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         above it, pitched down at it, and read back.
 
         A positive ``distance`` looks at the actor's location (its pivot).
-        Distance 0 fits the actor in the view, as the editor's own Focus does:
+        Distance 0 or less fits the actor in the view, as the editor's own Focus does:
         the camera looks at the center of the bounds and stands back until
         their bounding sphere fills the view's height with 10% to spare.
         Editor Python cannot read the level viewport's field of view or size,
@@ -1971,14 +1971,14 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Args:
             actor_path: Full actor path to focus on.
             distance: How far behind the actor the camera stands, in cm; it
-                also rises half as far, looking down at the actor. 0 fits the
-                actor's bounds in the view.
+                also rises half as far, looking down at the actor. 0 or less
+                fits the actor's bounds in the view.
 
         Returns:
             Dictionary with actor_path, camera_location and camera_rotation
             (read back), distance (the one used: the distance passed, the
             fitted one, or 500 for an actor without bounds), selected (the
-            selection read back), pie_active, fit_warning when distance 0
+            selection read back), pie_active, fit_warning when auto-fit
             found no bounds to fit, and a warning when the actor is not
             selected: Play In Editor running, or an actor Unreal does not
             select (hidden in the editor or in a hidden or locked level, a

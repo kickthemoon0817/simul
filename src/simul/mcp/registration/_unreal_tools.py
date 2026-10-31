@@ -623,7 +623,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 0.0,
                 description=(
                     "How far behind the actor the camera stands, in cm, rising half as far and looking down at "
-                    "it (0 = auto-fit to the actor's bounds)."
+                    "it (0 or less = auto-fit to the actor's bounds)."
                 ),
             ),
         ),
