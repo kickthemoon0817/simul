@@ -90,8 +90,9 @@ class Actor:
         )
         self.root_component = SimpleNamespace(mobility=SimpleNamespace(name="STATIC"))
         self.world: Any = None
-        # False for an actor Unreal will not select: hidden in the editor, or in
-        # a hidden or locked level.
+        # False for an actor Unreal will not select: hidden in the editor or in
+        # a hidden or locked level, a child actor, an actor inside a level
+        # instance (unreal_runtime.FOCUS_NOT_SELECTED_WARNING lists them).
         self.selectable = True
 
     def get_actor_label(self) -> str:
@@ -733,6 +734,10 @@ def test_focus_reports_an_actor_unreal_does_not_select(
     assert editor.selection_calls == ["Crate"] and editor.selection == []
     assert (result["selected"], result["pie_active"]) == (False, False)
     assert result["warning"] == unreal_runtime.FOCUS_NOT_SELECTED_WARNING
+    # Unreal also skips child actors and actors inside a level instance
+    # (selected only through their parent), so the warning cannot blame
+    # visibility alone.
+    assert "child actor" in result["warning"] and "level instance" in result["warning"]
     assert result["camera_location"] == FOCUS_CAMERA[0]
 
 

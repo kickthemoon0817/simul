@@ -142,8 +142,11 @@ Behaviour worth knowing:
   leaves no folder behind. Props are Movable boxes; everything else is Static.
 - `focus_unreal_on_actor` points the level viewport camera at the actor and
   selects it, reading the selection back: `selected` is false, with a
-  `warning` saying why, for an actor Unreal does not select (hidden in the
-  editor, or in a hidden or locked level) and while PIE runs (below).
+  `warning`, while PIE runs (below) and for an actor Unreal does not select:
+  one hidden in the editor or in a hidden or locked level, a child actor or an
+  actor inside a level instance (Unreal selects those only through their
+  parent), or any actor while the editor mode or a selection lock prevents
+  selection.
 - While Play In Editor (or Simulate In Editor) runs, Unreal's editor refuses
   changes to the editor world: it spawns and destroys no actors, lists and
   selects none, and hands out no editor world. The tools detect it:

@@ -299,8 +299,10 @@ print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}
 # While Play In Editor (or Simulate) runs nothing is selected: Unreal's editor
 # reports no selection then and clears it when PIE stops (observed on UE
 # 5.7.4), so a selection made during PIE would be lost unseen. Outside PIE an
-# actor Unreal will not select (hidden in the editor, in a hidden or locked
-# level) reads back unselected.
+# actor Unreal will not select (hidden in the editor or in a hidden or locked
+# level, a child actor or an actor inside a level instance, which Unreal
+# selects only through its parent, or any actor while the editor mode or a
+# selection lock prevents selection) reads back unselected.
 FOCUS_ACTOR = ACTOR_HELPERS + EDITOR_WORLD + """
 actor = actor_at(args["actor_path"])
 pie = pie_active()

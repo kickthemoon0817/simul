@@ -142,9 +142,17 @@ FOCUS_PIE_WARNING = (
 )
 
 #: ``focus_on_actor``'s warning when Unreal did not select the actor outside PIE.
+#: The causes are UE 5.7's: ``UUnrealEdEngine::SelectActor`` skips an actor
+#: with a root selection parent (a ChildActorComponent's child actor, an actor
+#: attached inside a level instance), and the level editor's
+#: ``CanSelectActorElement`` refuses hidden actors, hidden or locked levels,
+#: non-selectable actors, a selection lock and selections the editor mode
+#: disallows.
 FOCUS_NOT_SELECTED_WARNING = (
-    "Unreal did not select the actor: an actor hidden in the editor, or in a hidden or "
-    "locked level, cannot be selected"
+    "Unreal did not select the actor. It does not select an actor hidden in the editor or in a "
+    "hidden or locked level, a child actor or other actor it selects only through a parent (an "
+    "actor inside a level instance, for example), or any actor while the active editor mode or "
+    "a selection lock prevents selection"
 )
 
 
@@ -1807,11 +1815,12 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Returns:
             Dictionary with actor_path, camera_location and camera_rotation
             (read back), selected (the selection read back), pie_active, and
-            a warning saying why the actor is not selected when it is not:
-            Play In Editor running, or an actor Unreal does not select
-            (hidden in the editor, or in a hidden or locked level). A
-            ``ScriptError`` envelope when the actor cannot be found, before
-            the camera moves.
+            a warning when the actor is not selected: Play In Editor
+            running, or an actor Unreal does not select (hidden in the
+            editor or in a hidden or locked level, a child actor or an actor
+            inside a level instance, or any actor while the editor mode or a
+            selection lock prevents selection). A ``ScriptError`` envelope
+            when the actor cannot be found, before the camera moves.
         """
         args = {"actor_path": actor_path}
         focus = await self._execute_json_script(f"args = {args!r}\n" + FOCUS_ACTOR)
