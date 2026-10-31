@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict
 
@@ -709,51 +710,25 @@ class TestUnrealRuntimeSessionPhase2:
     # -- focus_on_actor --
 
     def test_focus_on_actor_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """focus_on_actor selects actor, positions camera, and reads back camera."""
+        """focus_on_actor selects the actor and reads its location in one script,
+        then positions the camera and reads it back."""
         session = self._make_session(monkeypatch)
+        actor_path = "/Game/Maps/TestMap.TestMap:PersistentLevel.SM_Chair_1"
         calls_made: list = []
+        scripts: list = []
+        camera_set: list = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
-            # _get_actor_transform reads properties via /remote/object/property
-            if path == "/remote/object/property":
-                prop = (json or {}).get("propertyName", "")
-                if "RelativeLocation" in prop:
-                    return FakeResponse(
-                        {
-                            "RootComponent.RelativeLocation": {
-                                "X": 100.0,
-                                "Y": 200.0,
-                                "Z": 50.0,
-                            },
-                        }
-                    )
-                if "RelativeRotation" in prop:
-                    return FakeResponse(
-                        {
-                            "RootComponent.RelativeRotation": {
-                                "Pitch": 0.0,
-                                "Yaw": 45.0,
-                                "Roll": 0.0,
-                            },
-                        }
-                    )
-                if "RelativeScale3D" in prop:
-                    return FakeResponse(
-                        {
-                            "RootComponent.RelativeScale3D": {
-                                "X": 1.0,
-                                "Y": 1.0,
-                                "Z": 1.0,
-                            },
-                        }
-                    )
-                return FakeResponse({})
-            # /remote/object/call dispatched by functionName
             fn = (json or {}).get("functionName", "")
             calls_made.append(fn)
-            if fn == "SetActorSelectionState":
-                return FakeResponse({})
+            parameters = (json or {}).get("parameters", {})
+            if fn == "ExecutePythonCommandEx":
+                scripts.append(parameters["PythonCommand"])
+                return python_json_response(
+                    {"location": [100.0, 200.0, 50.0], "selected": True, "pie_active": False}
+                )
             if fn == "SetLevelViewportCameraInfo":
+                camera_set.append(parameters)
                 return FakeResponse({})
             if fn == "GetLevelViewportCameraInfo":
                 return FakeResponse(
@@ -762,35 +737,36 @@ class TestUnrealRuntimeSessionPhase2:
                         "CameraRotation": {"Pitch": -20.0, "Yaw": 60.0, "Roll": 0.0},
                     }
                 )
-            return FakeResponse({})
+            return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
-        from unittest.mock import AsyncMock
+        result = asyncio.run(session.focus_on_actor(actor_path=actor_path))
 
-        session._get_actor_transform = AsyncMock(
-            return_value={
-                "location": (100.0, 200.0, 50.0),
-                "rotation": (0.0, 45.0, 0.0),
-                "scale": (1.0, 1.0, 1.0),
+        assert result == {
+            "actor_path": actor_path,
+            "camera_location": (150.0, 250.0, 350.0),
+            "camera_rotation": (-20.0, 60.0, 0.0),
+            "selected": True,
+            "pie_active": False,
+        }
+        assert calls_made == [
+            "ExecutePythonCommandEx",
+            "SetLevelViewportCameraInfo",
+            "GetLevelViewportCameraInfo",
+        ]
+        assert repr(actor_path) in scripts[0] and "set_actor_selection_state" in scripts[0]
+        # 500 cm behind the actor and 250 cm above it, pitched down at it.
+        assert camera_set == [
+            {
+                "CameraLocation": {"X": -400.0, "Y": 200.0, "Z": 300.0},
+                "CameraRotation": {
+                    "Pitch": -math.degrees(math.atan2(250.0, 500.0)),
+                    "Yaw": 0.0,
+                    "Roll": 0.0,
+                },
             }
-        )
-
-        result = asyncio.run(
-            session.focus_on_actor(
-                actor_path="/Game/Maps/TestMap.TestMap:PersistentLevel.SM_Chair_1"
-            )
-        )
-
-        assert (
-            result["actor_path"]
-            == "/Game/Maps/TestMap.TestMap:PersistentLevel.SM_Chair_1"
-        )
-        assert result["camera_location"] == (150.0, 250.0, 350.0)
-        assert result["camera_rotation"] == (-20.0, 60.0, 0.0)
-        assert "SetActorSelectionState" in calls_made
-        assert "SetLevelViewportCameraInfo" in calls_made
-        assert "GetLevelViewportCameraInfo" in calls_made
+        ]
 
 
 class TestUnrealRuntimeAdapter:

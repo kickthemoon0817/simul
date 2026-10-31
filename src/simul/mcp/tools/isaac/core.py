@@ -3,7 +3,7 @@
 import json
 from typing import Any, Dict, List, Optional
 
-from ...registration._helpers import apply_success_from_error
+from ...registration._helpers import apply_success_from_error, utf8_byte_length
 from ...schemas.common import ErrorResponse
 from ._shared import (
     MAX_SCRIPT_BYTES,
@@ -118,10 +118,11 @@ class CoreToolsMixin:
                 ),
                 error_type="ScriptExecutionDisabled",
             ).model_dump()
-        if len(code) > MAX_SCRIPT_BYTES:
+        code_bytes = utf8_byte_length(code)
+        if code_bytes > MAX_SCRIPT_BYTES:
             return ErrorResponse(
                 error=(
-                    f"Code payload too large ({len(code)} bytes, "
+                    f"Code payload too large ({code_bytes} bytes in UTF-8, "
                     f"max {MAX_SCRIPT_BYTES})."
                 ),
                 error_type="PayloadTooLarge",
