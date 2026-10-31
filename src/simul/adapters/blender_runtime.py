@@ -4172,8 +4172,8 @@ class BlenderRuntimeSession:
         much over the lever, the distance between them. A Track To then rolls
         the camera to keep its up axis as near world Z (the target's Z axis
         with Target Z) as it can, a roll that the turn changes by about turn /
-        sin(angle between the aim and that Z), and to any angle when they line
-        up. On Blender 5.0.1 a Track To aiming a camera where it was placed
+        sin(angle between the aim and that Z), and to any angle as they come
+        to line up. On Blender 5.0.1 a Track To aiming a camera where it was placed
         turned it by up to 0.047 rad, for 62 of 300 cameras focused on the
         object it tracks 1 m to 100 km out, and rolled it by up to 0.018 rad,
         for 37 of 300 cameras looking within 1 degree of straight up or down
@@ -4182,6 +4182,19 @@ class BlenderRuntimeSession:
         (subtarget) is left out, as only Blender computes the point it aims
         at.
 
+        An aim with no direction adds nothing. When the aim Blender computes
+        lies exactly along that Z, or the camera stands exactly at its target,
+        the Track To has no direction to take the roll, or the aim, from and
+        gives the camera a fixed pose instead: on Blender 5.0.1 it rolled
+        every camera straight above or below its target to world +Y up,
+        whatever roll the camera was placed with, and turned one at its
+        target to look straight down, +Y up; Damped Track and Locked Track
+        leave a camera at its target as it is. That pose does not follow the
+        placement, so a placement off it is an override, also where rounding
+        lined the aim up: a camera within single precision of straight above
+        its target (a millimetre 10 km out) is then rolled by up to half a
+        turn.
+
         Args:
             camera: The placed camera, its transforms evaluated.
             extent: The farthest distance involved (_placement_extent).
@@ -4189,8 +4202,7 @@ class BlenderRuntimeSession:
         Returns:
             The angles, in radians, that the up and view axes may turn by:
             _PLACEMENT_ANGLE_TOLERANCE plus the largest roll and turn of the
-            aim constraints Blender applies. Both are infinite when the camera
-            stands at a target, and the roll when it aims along that Z.
+            aim constraints Blender applies.
         """
         location = list(camera.matrix_world.translation)
         up = view = 0.0
@@ -4207,7 +4219,7 @@ class BlenderRuntimeSession:
                 aim = [t - c for t, c in zip(world.translation, location)]
                 lever = math.hypot(*aim)
                 if lever == 0.0:
-                    return math.inf, math.inf
+                    continue
                 turn = _PLACEMENT_LOCATION_PRECISION * extent / lever
                 roll = turn
                 if constraint.type == "TRACK_TO":
@@ -4223,7 +4235,8 @@ class BlenderRuntimeSession:
                     )
                     norm = lever * math.hypot(*z)
                     sine = math.hypot(*cross) / norm if norm else 0.0
-                    roll = turn / sine if sine else math.inf
+                    if sine:
+                        roll = turn / sine
                 up = max(up, roll)
                 view = max(view, turn)
         return _PLACEMENT_ANGLE_TOLERANCE + up, _PLACEMENT_ANGLE_TOLERANCE + view

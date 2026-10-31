@@ -268,7 +268,10 @@ Behaviour worth knowing:
   precision explains: up to a few milliradians where Blender stores the
   rotation near gimbal lock of the camera's Euler order or as an axis-angle
   near zero, and more where a constraint aims the camera at a target close
-  to it far from the origin, or almost straight up or down. For constraints
+  to it far from the origin, or almost straight up or down. Aimed exactly
+  straight up or down (as single precision stores both locations), or
+  standing at its target, a Track To gives the camera a fixed pose, world
+  +Y up, so a placement off that pose is reported. For constraints
   it says how to disable them: mute them or set their influence to 0, then
   place the camera again. A driver on the camera's transform, or a parent with
   non-uniform scale, is named instead when it moves the camera before the

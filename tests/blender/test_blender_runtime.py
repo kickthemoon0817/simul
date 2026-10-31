@@ -339,6 +339,33 @@ def _single_precision_track_to(target: Sequence[float]) -> FakeConstraint:
     return FakeConstraint("Track To", "TRACK_TO", solve, target=decoy)
 
 
+def _degenerate_track_to(target: Sequence[float]) -> FakeConstraint:
+    """A Track To on an empty at ``target`` that solves aims without a direction as Blender does.
+
+    Blender's Track To (vectomat) turns the camera's +Z from the target to the
+    camera, world +Z when the camera stands at the target, and its +Y along
+    world Z across that, world +Y when nothing of world Z is left across it:
+    on Blender 5.0.1 a camera straight above or below its target was rolled
+    to world +Y up, and one at its target turned to look straight down.
+    """
+    decoy = FakeTransformObject("Decoy", location=target)
+
+    def solve(matrix: np.ndarray) -> np.ndarray:
+        back = matrix[:3, 3] - np.asarray(target, dtype=float)
+        length = np.linalg.norm(back)
+        back = back / length if length else np.array([0.0, 0.0, 1.0])
+        up = np.array([0.0, 0.0, 1.0]) - back[2] * back
+        size = np.linalg.norm(up)
+        up = up / size if size else np.array([0.0, 1.0, 0.0])
+        solved = matrix.copy()
+        solved[:3, :3] = np.column_stack(
+            [np.cross(up, back), up, back]
+        ) * np.linalg.norm(matrix[:3, :3], axis=0)
+        return solved
+
+    return FakeConstraint("Track To", "TRACK_TO", solve, target=decoy)
+
+
 def _aim(
     constraint_type: str,
     target: Sequence[float] = (4.0, 2.0, -1.0),
@@ -2816,10 +2843,20 @@ class TestVisualObservationTools:
             ([_aim("TRACK_TO", subtarget="Bone")], 0.0, 0.0),
             # The nearest target turns the camera most.
             ([_aim("TRACK_TO"), _aim("DAMPED_TRACK", (1.0, 3.0, 3.0))], 100.0, 100.0),
-            # Aimed along world Z, the roll can take any angle...
-            ([_aim("TRACK_TO", (1.0, 2.0, -7.0))], math.inf, 10.0),
-            # ...and standing at the target, so can the aim.
-            ([_aim("TRACK_TO", (1.0, 2.0, 3.0))], math.inf, math.inf),
+            # Aimed exactly along world Z, the Track To takes no roll from the
+            # aim: it gives the camera a fixed one, so the roll is not amplified...
+            ([_aim("TRACK_TO", (1.0, 2.0, -7.0))], 10.0, 10.0),
+            # ...and at its target it has no aim to round...
+            ([_aim("TRACK_TO", (1.0, 2.0, 3.0))], 0.0, 0.0),
+            # ...while another constraint's aim still counts.
+            (
+                [
+                    _aim("TRACK_TO", (1.0, 2.0, 3.0)),
+                    _aim("DAMPED_TRACK", (1.0, 3.0, 3.0)),
+                ],
+                100.0,
+                100.0,
+            ),
         ],
         ids=[
             "none",
@@ -2837,6 +2874,7 @@ class TestVisualObservationTools:
             "nearest_target",
             "aimed_along_world_z",
             "at_the_target",
+            "at_one_target",
         ],
     )
     def test_placement_turn_is_rounding_over_the_lever_of_the_aim(
@@ -2980,6 +3018,65 @@ class TestVisualObservationTools:
             # Rounding rolled the camera beyond the former tolerance...
             assert 1e-3 < _angle(up, level[:, 1]) < 1e-2
             # ...which is no override.
+            assert result["warning"] is None
+
+    @pytest.mark.parametrize(
+        ("offset", "rotation", "overridden"),
+        [
+            ((0.0, 0.0, 12.0), (0.0, 0.0, 0.0), False),
+            ((0.0, 0.0, 12.0), (0.0, 0.0, 0.5), True),
+            # Looking straight up at a target overhead.
+            ((0.0, 0.0, -6.0), (0.0, math.pi, 0.0), False),
+            ((0.0, 0.0, -6.0), (0.0, math.pi, 0.5), True),
+            # Standing at the target.
+            ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), False),
+            ((0.0, 0.0, 0.0), (1.0, 0.2, 0.3), True),
+        ],
+        ids=[
+            "above_level",
+            "above_rolled",
+            "below_level",
+            "below_rolled",
+            "at_target_level",
+            "at_target_turned",
+        ],
+    )
+    def test_set_camera_view_reports_the_pose_a_track_to_gives_without_an_aim(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        offset: Tuple[float, float, float],
+        rotation: Tuple[float, float, float],
+        overridden: bool,
+    ) -> None:
+        """A Track To aimed exactly along world Z, or at a camera standing at its
+        target, gives the camera a fixed pose that no rounding moves.
+
+        The angle tolerance of a Track To's roll grows as its aim comes to
+        line up with world Z, and it was infinite when they did, as it was
+        for both axes at the target: on Blender 5.0.1 a top-down camera
+        straight above its target, placed rolled by up to 3 rad, and one
+        placed at its target, turned 1 rad, were reported held while the
+        Track To rolled the first to world +Y up and turned the second to
+        look straight down.
+        """
+        target = (5.0, -3.0, 0.0)
+        location = list(np.add(target, offset))
+        cam = self._constrained_camera(_degenerate_track_to(target))
+        session = self._session_on(monkeypatch, cam)
+
+        result = session.set_camera_view(location, list(rotation))
+
+        cam.evaluate()
+        evaluated = _evaluated_rotation(cam)
+        placed = euler_matrix(rotation)
+        missed = max(_angle(placed[:, k], evaluated[:, k]) for k in (1, 2))
+        assert (missed > 0.1) is overridden
+        assert result["placement_overridden"] is overridden
+        if overridden:
+            assert "'Track To' (TRACK_TO)" in result["warning"]
+        else:
+            assert missed < 1e-9
             assert result["warning"] is None
 
     def test_set_camera_view_blames_only_a_driver_when_a_far_track_to_keeps_the_aim(
