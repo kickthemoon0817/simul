@@ -873,20 +873,30 @@ class BlenderRuntimeSession:
 
         Returns:
             Dictionary with camera_name, the world-space location and
-            rotation_euler where Blender evaluates the camera, and
-            placement_overridden, constraints_applied and warning
-            (_placement_report).
+            rotation_euler where Blender evaluates the camera (the placement
+            when the check is skipped), and placement_overridden,
+            override_check, constraints_applied and warning (_placement_check).
         """
         cam_obj = self._resolve_camera(camera_name)
         self._evaluate_transforms()
+        disablers = self._viewport_disablers(cam_obj)
+        before = self._evaluated_pose(cam_obj) if disablers else None
         placement = self._place_in_world(cam_obj, location, rotation_euler)
         self._evaluate_transforms()
-        world_location, world_rotation = self._world_placement(cam_obj, rotation_euler)
+        report = self._placement_check(cam_obj, placement, disablers, before)
+        if report["override_check"] == "done":
+            world_location, world_rotation = self._world_placement(
+                cam_obj, rotation_euler
+            )
+        else:
+            # Blender did not evaluate the camera after the placement, so
+            # matrix_world holds no pose it renders.
+            world_location, world_rotation = list(location), list(rotation_euler)
         return {
             "camera_name": cam_obj.name,
             "location": world_location,
             "rotation_euler": world_rotation,
-            **self._placement_report(cam_obj, placement),
+            **report,
         }
 
     def get_camera_info(self, camera_name: Optional[str] = None) -> Dict[str, Any]:
@@ -954,12 +964,12 @@ class BlenderRuntimeSession:
         Returns:
             Dictionary with camera_name, object_name, camera_location and
             camera_rotation_euler (world space, where Blender evaluates the
-            camera), look_at (the bounding-box center the placement aims at),
-            distance (from the placement to look_at), clip_start, clip_end,
-            clip_adjusted (whether the clip range was widened), ortho_scale
-            (None unless the camera is orthographic), and
-            placement_overridden, constraints_applied and warning
-            (_placement_report).
+            camera; the framing placement when the check is skipped), look_at
+            (the bounding-box center the placement aims at), distance (from
+            the placement to look_at), clip_start, clip_end, clip_adjusted
+            (whether the clip range was widened), ortho_scale (None unless the
+            camera is orthographic), and placement_overridden, override_check,
+            constraints_applied and warning (_placement_check).
 
         Raises:
             ValueError: When the camera's lens shift moves its frame off its
@@ -972,6 +982,8 @@ class BlenderRuntimeSession:
         data = cam_obj.data
 
         self._evaluate_transforms()
+        disablers = self._viewport_disablers(cam_obj)
+        before = self._evaluated_pose(cam_obj) if disablers else None
         center, radius = self._bounding_sphere(self._world_bound_box(obj))
         if radius <= 0.0:
             radius = _POINT_RADIUS
@@ -1002,7 +1014,13 @@ class BlenderRuntimeSession:
         placement = self._place_in_world(cam_obj, location, rotation)
         clip_adjusted = self._clip_around(data, distance, radius)
         self._evaluate_transforms()
-        camera_location, camera_rotation = self._world_placement(cam_obj, rotation)
+        report = self._placement_check(cam_obj, placement, disablers, before)
+        if report["override_check"] == "done":
+            camera_location, camera_rotation = self._world_placement(cam_obj, rotation)
+        else:
+            # Blender did not evaluate the camera after the placement, so
+            # matrix_world holds no pose it renders.
+            camera_location, camera_rotation = list(location), list(rotation)
 
         return {
             "camera_name": cam_obj.name,
@@ -1015,7 +1033,7 @@ class BlenderRuntimeSession:
             "clip_end": data.clip_end,
             "clip_adjusted": clip_adjusted,
             "ortho_scale": ortho_scale,
-            **self._placement_report(cam_obj, placement),
+            **report,
         }
 
     def get_viewport_info(self) -> Dict[str, Any]:
@@ -4233,6 +4251,193 @@ class BlenderRuntimeSession:
             obj.rotation_euler if near is None else near, "XYZ"
         )
         return list(matrix.translation), list(matrix.to_euler("XYZ", compatible))
+
+    def _placement_check(
+        self,
+        camera: Any,
+        placement: Any,
+        disablers: List[str],
+        before: Optional[List[List[float]]],
+    ) -> Dict[str, Any]:
+        """
+        Report whether Blender keeps a placed camera at the placement, when it can tell.
+
+        The check compares the placement with the matrix_world Blender
+        evaluates for the camera (_placement_report). Blender's viewport
+        evaluates a camera disabled in viewports (_viewport_disablers) only
+        when something visible depends on it: in full when that reads its
+        transform (a child, a constraint or a driver variable that reads it),
+        in part when only a property, and in part too while its visibility is
+        animated. A camera evaluated in part, or not at all, keeps the
+        matrix_world the placement wrote, or one from an earlier evaluation,
+        whatever its constraints, drivers and parent do in a render. Neither
+        depsgraph.ids nor is_evaluated tells it from one evaluated in full: on
+        Blender 5.0.1 depsgraph.ids, which lists only directly visible IDs,
+        left out a disabled camera a visible object's constraint targets, and
+        a camera evaluated in part reported is_evaluated True. So a disabled
+        camera is checked only when the depsgraph holds an evaluated copy of
+        it whose pose changed with the placement; the check is skipped
+        otherwise, rather than compared with a stale matrix.
+
+        Args:
+            camera: The placed camera, the depsgraph evaluated since.
+            placement: The world matrix written (_place_in_world).
+            disablers: The settings that disable the camera (_viewport_disablers).
+            before: Its evaluated pose before the placement (_evaluated_pose),
+                read when ``disablers`` is not empty.
+
+        Returns:
+            The _placement_report with override_check "done". Otherwise
+            override_check "skipped", placement_overridden None,
+            constraints_applied (the constraints that apply when Blender
+            evaluates it) and a warning that names the settings that disable
+            it.
+        """
+        after = self._evaluated_pose(camera) if disablers else None
+        if not disablers or (after is not None and after != before):
+            return {
+                **self._placement_report(camera, placement),
+                "override_check": "done",
+            }
+        if after is None:
+            unchecked = "Blender did not evaluate it after the placement"
+        else:
+            unchecked = (
+                "Its evaluated pose did not change with the placement: Blender "
+                "evaluates such a camera only in part when nothing visible reads its "
+                "transform (a driver reads one of its properties, or its visibility is "
+                "animated), and a placement that leaves the pose as it was (where it "
+                "already is, or under constraints that set its whole transform) "
+                "changes nothing either"
+            )
+        constraints = self._active_constraints(camera)
+        if constraints:
+            names = ", ".join(f"'{c['name']}' ({c['type']})" for c in constraints)
+            effect = (
+                f"Its constraints ({names}) apply whenever Blender evaluates it, as a "
+                "render through it does, and can move it off the placement; to keep it "
+                "there, mute them or set their influence to 0."
+            )
+        else:
+            effect = (
+                "No constraint acts on it, but a driver on its transform or a parent "
+                "with non-uniform scale would still apply whenever Blender evaluates it."
+            )
+        parent = (
+            " Its transform was solved through the last matrix Blender evaluated for "
+            "its parent, so it lands elsewhere if that parent has moved since."
+            if camera.parent is not None
+            else ""
+        )
+        return {
+            "placement_overridden": None,
+            "override_check": "skipped",
+            "constraints_applied": constraints,
+            "warning": (
+                f"Blender may not evaluate camera {camera.name!r} for the viewport, as "
+                "it is neither the scene camera nor a timeline marker's camera and "
+                f"{' and '.join(disablers)}. {unchecked}, so the placement was not "
+                "checked. The reported pose is the requested placement, unchecked."
+                f"{parent} {effect} To check it, change those settings or make it the "
+                "scene camera, then place it again."
+            ),
+        }
+
+    @staticmethod
+    def _evaluated_pose(obj: Any) -> Optional[List[List[float]]]:
+        """
+        Return the world matrix of the object's copy that the viewport depsgraph evaluated.
+
+        Args:
+            obj: The object, the depsgraph evaluated since its last change.
+
+        Returns:
+            The matrix as rows of floats, a copy: Blender's matrix_world
+            follows later evaluations. None when the depsgraph holds no
+            evaluated copy of the object: evaluated_get then gives back the
+            original, whose is_evaluated is False.
+        """
+        blender_module: Any = bpy
+        depsgraph = blender_module.context.evaluated_depsgraph_get()
+        evaluated = obj.evaluated_get(depsgraph)
+        if not evaluated.is_evaluated:
+            return None
+        matrix = evaluated.matrix_world
+        return [[float(matrix[row][column]) for column in range(4)] for row in range(4)]
+
+    @staticmethod
+    def _viewport_disablers(obj: Any) -> List[str]:
+        """
+        Return the settings that keep Blender from evaluating an object for the viewport.
+
+        evaluated_depsgraph_get() evaluates the scene camera, every camera a
+        timeline marker binds (on Blender 5.0.1 even one disabled in viewports
+        or in an excluded collection, whatever the current frame), and the view
+        layer's objects that are enabled in viewports: not disabled in
+        viewports themselves (hide_viewport, the monitor icon), and in a
+        collection that its own checkbox does not exclude from the view layer
+        (excluding a collection unchecks its children too, but a child checked
+        again counts) and that is not disabled in viewports, nor are its
+        parent collections. Hiding in the view layer (the eye icon) leaves an
+        object evaluated. Blender evaluates another object only when something
+        visible depends on it, and sometimes only in part (_placement_check).
+        A scene camera whose hide_viewport is animated is a rare exception:
+        on Blender 5.0.1, while it was disabled, it kept a stale matrix_world
+        even as the scene camera.
+
+        Args:
+            obj: The object.
+
+        Returns:
+            One description per setting that disables it; empty for the
+            scene camera, a camera a timeline marker binds and an object
+            enabled in viewports.
+        """
+        blender_module: Any = bpy
+        context = blender_module.context
+        scene = context.scene
+        if obj == scene.camera or any(
+            marker.camera == obj for marker in scene.timeline_markers
+        ):
+            return []
+        view_layer = context.view_layer
+        owners = list(obj.users_collection)
+        root = view_layer.layer_collection
+        # The scene's own collection can be neither excluded nor disabled.
+        enabled = root.collection in owners
+        blocked: List[str] = []
+        # Depth first, in outliner order: (layer collection, disabled ancestor).
+        pending: List[Tuple[Any, Optional[str]]] = [
+            (child, None) for child in reversed(list(root.children))
+        ]
+        while pending:
+            layer, disabled_by = pending.pop()
+            collection = layer.collection
+            if disabled_by is None and collection.hide_viewport:
+                disabled_by = collection.name
+            if collection in owners:
+                if not layer.exclude and disabled_by is None:
+                    enabled = True
+                else:
+                    reason = (
+                        f"its collection {collection.name!r} is excluded from view "
+                        f"layer {view_layer.name!r}"
+                        if layer.exclude
+                        else f"collection {disabled_by!r} is disabled in viewports"
+                    )
+                    if reason not in blocked:
+                        blocked.append(reason)
+            pending.extend(
+                (child, disabled_by) for child in reversed(list(layer.children))
+            )
+        reasons = (
+            ["it is disabled in viewports (hide_viewport)"] if obj.hide_viewport else []
+        )
+        if not enabled:
+            reasons.extend(
+                blocked or [f"it is in no collection of view layer {view_layer.name!r}"]
+            )
+        return reasons
 
     @staticmethod
     def _world_bound_box(obj: Any) -> List[List[float]]:
