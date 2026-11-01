@@ -657,7 +657,7 @@ def exec_script(
 
     if mode not in UNREAL_EXEC_MODES:
         msg = f"Invalid mode '{mode}'. Must be one of: {', '.join(sorted(UNREAL_EXEC_MODES))}"
-        fail(msg, "ValueError")
+        fail(msg, "InvalidArgument", exit_code=2)
 
     code = read_script_arg(script)
 

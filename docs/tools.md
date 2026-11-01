@@ -193,10 +193,17 @@ Behaviour worth knowing:
   viewport wider than about 2:1 can crop the actor. An actor whose bounds have
   no size, such as a StaticMeshActor without a mesh, gets 500 cm from its
   location instead, with a `fit_warning`; an empty actor or a light is framed
-  by its editor icon. The frustum the editor draws for a camera or a 2D scene
-  capture is left out of the bounds, as the editor's own Focus leaves it out
-  (its bounds reach 10 m on every side of the camera), so a camera is framed
-  by its editor mesh.
+  by its editor icon. The editor-only components the editor's own Focus leaves
+  out are left out of the bounds too, since theirs can reach far beyond the
+  actor, so a camera is framed by its editor mesh. They include the frustum
+  the editor draws for a camera or a scene capture (10 m on every side of it),
+  a CineCamera's debug focus plane (100 m across at the focus distance, 1 km by
+  default; turning the plane off only hides it) and a spare icon attached to
+  nothing, such as the one a SkyLight leaves at the world origin. A component
+  that is not editor-only always counts, such as a trigger box's collision
+  shape, which the editor's own Focus ignores. An actor whose bounds are not
+  the box around its components, such as a level instance or a NavLinkProxy,
+  is framed by the bounds Unreal reports.
 - While Play In Editor (or Simulate In Editor) runs, Unreal's editor refuses
   changes to the editor world: it spawns and destroys no actors, lists and
   selects none, and hands out no editor world. The tools detect it:
@@ -237,6 +244,26 @@ Behaviour worth knowing:
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.
+- `execute_unreal_script` runs the code you send in the editor's persistent
+  Python console namespace through `PythonScriptLibrary.ExecutePythonCommandEx`,
+  in or out of PIE. On UE 5.7 avoid one engine hazard in that code: Unreal wraps
+  each static-library function
+  (`unreal.MaterialEditingLibrary.get_scalar_parameter_names`,
+  `unreal.EditorAssetLibrary.*`, `unreal.SystemLibrary.*`, every `*Library` /
+  `*Statics` call) and each struct method (`unreal.Vector.length`) in a
+  `builtin_function_or_method_with_closure` object whose weak-reference slot is
+  laid out one pointer past the end of the object. If such an object is left in
+  a reference cycle that becomes unreachable, the first cyclic garbage
+  collection that sweeps it crashes the editor in `_PyWeakref_ClearRef`. That
+  collection is often the editor's own, on autosave or level load, so the script
+  that built the cycle can return cleanly and the crash land minutes later. Call
+  these functions inline (`unreal.MaterialEditingLibrary.get_scalar_parameter_names(mat)`)
+  and don't stash them in a dict, list, closure or object that forms a cycle; a
+  reference that is dropped or stays reachable is safe. Module functions
+  (`unreal.load_asset`) and the common `unreal.Object` accessors
+  (`actor.get_name`, `actor.get_editor_property`) are a different, in-bounds
+  wrapper and are safe, and simul's own tools call the library functions inline,
+  so only `execute_unreal_script` payloads are exposed.
 
 ## Blender
 
