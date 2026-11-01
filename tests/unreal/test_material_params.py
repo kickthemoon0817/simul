@@ -13,11 +13,19 @@ request naming a parameter the material lacks or a texture that does not load
 is refused before anything is written, and a value that reads back different
 fails the call after the write, keeping what did apply.
 
+The setters write by name, which addresses the material's global parameter.
+Observed on UE 5.7.4, on a material with two Material Layers and a blend: a
+name only layer 1 had was written as a global override and reported applied,
+while the layer kept rendering its own value. Such a name is now refused like
+one the material lacks.
+
 The fake editor below answers as UE 5.7.4 did: the MaterialEditingLibrary
 setters return False whether or not they applied the value and add an
 override for any name, a parameter of the material or not; the instance
-getters take only a MaterialInstanceConstant; ``unreal.load_asset`` loads in
-and out of PIE while ``EditorAssetLibrary`` loads nothing during PIE.
+getters take only a MaterialInstanceConstant; a transient Material Instance
+Dynamic parented to a material copies every parameter Unreal lists for it,
+with its association (global, layer or blend) and index; ``unreal.load_asset``
+loads in and out of PIE while ``EditorAssetLibrary`` loads nothing during PIE.
 """
 
 from __future__ import annotations
@@ -31,7 +39,7 @@ import struct
 import sys
 from contextlib import contextmanager, redirect_stdout
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 from unittest.mock import AsyncMock
 
 import pytest
@@ -86,23 +94,49 @@ class StaticMesh(_Object):
     pass
 
 
+#: A parameter as Unreal identifies it: (kind, name, association, layer or blend index).
+Key = Tuple[str, str, str, int]
+
+
 class MaterialInterface(_Object):
     pass
 
 
 class Material(MaterialInterface):
-    def __init__(self, package: str, **parameters: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        package: str,
+        layered: Iterable[Tuple[str, str, str, int, Any]] = (),
+        **parameters: Dict[str, Any],
+    ) -> None:
         super().__init__(package)
+        # The material's own (global) parameters by kind and name.
         self.parameters = {
             kind: dict(parameters.get(kind, {}))
             for kind in ("scalar", "vector", "texture")
         }
-
-    def names(self, kind: str) -> List[str]:
-        return list(self.parameters[kind])
+        # Its Material Layers' and blends' parameters: (kind, name, association, index) -> value.
+        self.layered = {
+            (kind, name, association, index): value
+            for kind, name, association, index, value in layered
+        }
 
     def value(self, kind: str, name: str) -> Any:
         return self.parameters[kind].get(name)
+
+    def listed(self) -> List[Key]:
+        """Every parameter Unreal lists for the material."""
+        return [
+            (kind, name, "GLOBAL_PARAMETER", -1)
+            for kind, names in self.parameters.items()
+            for name in names
+        ] + list(self.layered)
+
+    def rendered(self, key: Key) -> Any:
+        kind, name, association, _ = key
+        if association == "GLOBAL_PARAMETER":
+            return self.value(kind, name)
+        return self.layered[key]
 
 
 class MaterialInstance(MaterialInterface):
@@ -136,13 +170,59 @@ class MaterialInstanceConstant(MaterialInstance):
         self.events.append("modify")
         return True
 
-    def names(self, kind: str) -> List[str]:
-        return self.parent.names(kind)
-
     def value(self, kind: str, name: str) -> Any:
         if name in self.overrides[kind]:
             return self.overrides[kind][name]
         return self.parent.value(kind, name)
+
+    def listed(self) -> List[Key]:
+        # An instance has its parent's parameters.
+        return self.parent.listed()
+
+    def rendered(self, key: Key) -> Any:
+        kind, name, association, _ = key
+        # The setters store global overrides by name.
+        if association == "GLOBAL_PARAMETER" and name in self.overrides[kind]:
+            return self.overrides[kind][name]
+        return self.parent.rendered(key)
+
+
+class MaterialInstanceDynamic(MaterialInstance):
+    def __init__(self, parent: MaterialInterface) -> None:
+        super().__init__("/Engine/Transient/MID_" + parent.package.rsplit("/", 1)[-1])
+        self.parent = parent
+        self.values: List[Tuple[str, SimpleNamespace]] = []
+
+    def copy_material_instance_parameters(
+        self, source: MaterialInterface, quick_parameters_only: bool = False
+    ) -> None:
+        """Every parameter the parent lists, with its association, index and
+        the source's value; the quick copy keeps names only."""
+        self.values = []
+        for key in self.parent.listed():
+            kind, name, association, index = key
+            if quick_parameters_only:
+                association, index = "GLOBAL_PARAMETER", -1
+            info = SimpleNamespace(
+                name=_Name(name), association=SimpleNamespace(name=association), index=index
+            )
+            entry = SimpleNamespace(parameter_info=info, parameter_value=source.rendered(key))
+            self.values.append((kind, entry))
+
+    def get_editor_property(self, name: str) -> Any:
+        kind = name.replace("_parameter_values", "")
+        return [entry for k, entry in self.values if k == kind]
+
+
+class MaterialLibrary:
+    @staticmethod
+    def create_dynamic_material_instance(
+        world_context_object: Any,
+        parent: MaterialInterface,
+        optional_name: str = "None",
+        creation_flags: Any = None,
+    ) -> MaterialInstanceDynamic:
+        return MaterialInstanceDynamic(parent)
 
 
 class LinearColor:
@@ -165,17 +245,22 @@ def _instance_only(instance: Any) -> None:
 
 
 class MaterialEditingLibrary:
+    # The name getters list each parameter's name, a Material Layer's too.
+    @staticmethod
+    def _names(material: MaterialInterface, kind: str) -> List[_Name]:
+        return [_Name(name) for k, name, _, _ in material.listed() if k == kind]
+
     @staticmethod
     def get_scalar_parameter_names(material: MaterialInterface) -> List[_Name]:
-        return [_Name(name) for name in material.names("scalar")]
+        return MaterialEditingLibrary._names(material, "scalar")
 
     @staticmethod
     def get_vector_parameter_names(material: MaterialInterface) -> List[_Name]:
-        return [_Name(name) for name in material.names("vector")]
+        return MaterialEditingLibrary._names(material, "vector")
 
     @staticmethod
     def get_texture_parameter_names(material: MaterialInterface) -> List[_Name]:
-        return [_Name(name) for name in material.names("texture")]
+        return MaterialEditingLibrary._names(material, "texture")
 
     # The setters return False whether or not they applied the value, and
     # store an override under any name they are given.
@@ -301,6 +386,8 @@ class _Editor:
             MaterialInstance=MaterialInstance,
             MaterialInstanceConstant=MaterialInstanceConstant,
             MaterialEditingLibrary=MaterialEditingLibrary,
+            MaterialLibrary=MaterialLibrary,
+            MIDCreationFlags=SimpleNamespace(NONE="NONE", TRANSIENT="TRANSIENT"),
             Texture=Texture,
             LinearColor=LinearColor,
             ScopedEditorTransaction=scoped_transaction,
@@ -466,6 +553,114 @@ def test_every_refused_parameter_is_named(editor: SimpleNamespace) -> None:
     )
     assert editor.fake.transactions == []
     assert editor.fake.instance.updates == 0
+
+
+LAYERED_INSTANCE = "/Game/LayerTest/MI_Layered"
+
+
+def _add_layered(editor: SimpleNamespace) -> MaterialInstanceConstant:
+    """An instance of the material built live on UE 5.7.4: two Material
+    Layers and a blend, a name the material shares with layer 0 and one both
+    layers have."""
+    material = Material(
+        "/Game/LayerTest/M_Layered",
+        scalar={"GlobalRough": 0.4, "Shared": 0.1},
+        vector={"GlobalTint": [1.0] * 4},
+        layered=[
+            ("scalar", "LayerRough", "LAYER_PARAMETER", 0, 0.25),
+            ("scalar", "Shared", "LAYER_PARAMETER", 0, 0.7),
+            ("vector", "LayerTint", "LAYER_PARAMETER", 0, [1.0, 0.0, 0.0, 1.0]),
+            ("texture", "LayerTex", "LAYER_PARAMETER", 0, editor.fake.assets[TEXTURE]),
+            ("scalar", "TopOnly", "LAYER_PARAMETER", 1, 0.5),
+            ("scalar", "LayerRough", "LAYER_PARAMETER", 1, 0.75),
+            ("vector", "LayerTint", "LAYER_PARAMETER", 1, [0.0, 0.0, 1.0, 1.0]),
+            ("scalar", "BlendAlpha", "BLEND_PARAMETER", 0, 0.5),
+        ],
+    )
+    instance = MaterialInstanceConstant(LAYERED_INSTANCE, material, editor.fake.events)
+    for asset in (material, instance):
+        editor.fake.assets[asset.package] = asset
+    return instance
+
+
+def _only_layers(kind: str, name: str, where: str) -> str:
+    return (
+        f"only the material's Material Layers have a {kind} parameter named {name!r} ({where}), and "
+        "this tool sets global parameters only: a global override by that name would not change them"
+    )
+
+
+def test_a_name_only_the_material_layers_have_refuses_the_request_and_nothing_is_written(
+    editor: SimpleNamespace,
+) -> None:
+    """The live regression: TopOnly, which only layer 1 has, was written as a
+    global override and reported applied while the layer kept rendering 0.5."""
+    instance = _add_layered(editor)
+
+    result = _set(
+        editor,
+        LAYERED_INSTANCE,
+        scalar_params={"TopOnly": 0.3, "BlendAlpha": 0.3, "LayerRough": 0.1, "GlobalRough": 0.2},
+        vector_params={"LayerTint": [0.0, 1.0, 0.0]},
+        texture_params={"LayerTex": TEXTURE},
+    )
+
+    assert result.get("error_type") == "ValidationError", result
+    assert result["success"] is False
+    assert (result["params_set"], result["applied"]) == (0, {})
+    assert result["not_applied"] == {
+        "scalar": {
+            "TopOnly": _only_layers("scalar", "TopOnly", "layer 1"),
+            "BlendAlpha": _only_layers("scalar", "BlendAlpha", "blend 0"),
+            "LayerRough": _only_layers("scalar", "LayerRough", "layer 0, layer 1"),
+        },
+        "vector": {"LayerTint": _only_layers("vector", "LayerTint", "layer 0, layer 1")},
+        "texture": {"LayerTex": _only_layers("texture", "LayerTex", "layer 0")},
+    }
+    assert result["error"].startswith(
+        "Nothing was written to /Game/LayerTest/MI_Layered.MI_Layered: TopOnly (scalar): "
+        + _only_layers("scalar", "TopOnly", "layer 1")
+    )
+    # Not the material's own GlobalRough either: the request is all or nothing.
+    assert instance.overrides == NO_OVERRIDES
+    assert editor.fake.transactions == []
+    assert instance.updates == 0
+
+
+def test_a_name_the_material_shares_with_a_layer_sets_the_materials_own(
+    editor: SimpleNamespace,
+) -> None:
+    instance = _add_layered(editor)
+
+    result = _set(editor, LAYERED_INSTANCE, scalar_params={"shared": 0.55})
+
+    assert result == {
+        "material_path": LAYERED_INSTANCE + ".MI_Layered",
+        "params_set": 1,
+        "applied": {"scalar": {"Shared": _f32(0.55)}},
+        "not_applied": {},
+    }
+    assert instance.overrides["scalar"] == {"Shared": _f32(0.55)}
+
+
+def test_a_name_a_layered_material_lacks_lists_its_global_parameters(
+    editor: SimpleNamespace,
+) -> None:
+    instance = _add_layered(editor)
+
+    result = _set(
+        editor, LAYERED_INSTANCE, scalar_params={"Bogus": 1.0}, texture_params={"Albedo": TEXTURE}
+    )
+
+    assert result["error_type"] == "ValidationError"
+    assert result["not_applied"] == {
+        "scalar": {
+            "Bogus": "the material has no scalar parameter named 'Bogus' "
+            "(its global scalar parameters: GlobalRough, Shared)"
+        },
+        "texture": {"Albedo": "the material has no global texture parameters"},
+    }
+    assert instance.overrides == NO_OVERRIDES
 
 
 def test_a_value_unreal_does_not_take_fails_the_call(editor: SimpleNamespace) -> None:

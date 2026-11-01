@@ -383,8 +383,10 @@ print(json.dumps({{'roughness': MEL.get_material_instance_scalar_parameter_value
                 info = await client.get_material_info(path)
                 assert info["parent_path"] == parent + ".BasicShapeMaterial", info
                 roughness, color = info["parameters"]
-                assert roughness == {"name": "Roughness", "param_type": "scalar", "value": 0.25, "overridden": True}
-                assert (color["name"], color["param_type"], color["overridden"]) == ("Color", "vector", False)
+                assert roughness == {"name": "Roughness", "param_type": "scalar", "association": "global",
+                                     "index": None, "value": 0.25, "overridden": True}
+                assert (color["name"], color["param_type"], color["association"], color["overridden"]) == (
+                    "Color", "vector", "global", False)
                 assert color["value"] == pytest.approx([0.9, 0.9, 0.9, 1.0]), color
                 assert info["material_path"] == path, info
                 assert info["class_name"] == "MaterialInstanceConstant", info
@@ -398,6 +400,201 @@ print(json.dumps({{'roughness': MEL.get_material_instance_scalar_parameter_value
             assert missing["error_type"] == "NotFoundError", missing
             mesh = await client.get_material_info("/Engine/BasicShapes/Cube")
             assert mesh["error_type"] == "InvalidAssetType", mesh
+        finally:
+            await client.control_simulation("stop")
+            await client._execute_python(f"import unreal\nunreal.EditorAssetLibrary.delete_directory({folder!r})")
+            await client.close()
+
+    asyncio.run(run())
+
+
+# Builds args["folder"]/M_Layered: GlobalRough and Shared of its own, and a
+# layer stack of ML_Base (LayerRough 0.25, Shared 0.7), ML_Top (LayerRough
+# 0.75, TopOnly 0.5, and NestedParam 0.33 in a function it calls) and MLB_Mix
+# (BlendAlpha 0.5); and MI_Layered overriding GlobalRough, LayerRough on layer
+# 0, TopOnly on layer 1 and BlendAlpha on blend 0. The layer stack is built as
+# a standalone struct and assigned once: the struct get_editor_property returns
+# is bound to the expression, so setting its fields one at a time validates
+# each half-built stack, and Runtime.Layers.Num() == EditorOnly.LayerStates.Num()
+# asserted and took the editor down (UE 5.7.4). MaterialEditingLibrary writes a
+# layer parameter on layer 0 only, so the layer 1 and blend overrides go into
+# the instance's parameter array, also written once.
+LAYERED_MATERIAL = """
+import json, unreal
+MEL = unreal.MaterialEditingLibrary
+A = unreal.MaterialParameterAssociation
+tools = unreal.AssetToolsHelpers.get_asset_tools()
+folder = args["folder"]
+
+def asset(name, cls, factory):
+    return tools.create_asset(name, folder, cls, factory)
+
+def node(function, cls, **properties):
+    expression = MEL.create_material_expression_in_function(function, cls, 0, 0)
+    for key, value in properties.items():
+        expression.set_editor_property(key, value)
+    return expression
+
+def scalar(function, name, value):
+    return node(function, unreal.MaterialExpressionScalarParameter, parameter_name=name, default_value=value)
+
+def link(source, target, pin, output=""):
+    assert MEL.connect_material_expressions(source, output, target, pin), (pin, output)
+
+helper = asset("MF_Helper", unreal.MaterialFunction, unreal.MaterialFunctionFactoryNew())
+result = node(helper, unreal.MaterialExpressionFunctionOutput, output_name="Result")
+link(scalar(helper, "NestedParam", 0.33), result, "")
+MEL.update_material_function(helper)
+
+layers = []
+for name, rough, extra in (("ML_Base", 0.25, ("Shared", 0.7)), ("ML_Top", 0.75, ("TopOnly", 0.5))):
+    layer = asset(name, unreal.MaterialFunctionMaterialLayer, unreal.MaterialFunctionMaterialLayerFactory())
+    attributes = node(layer, unreal.MaterialExpressionMakeMaterialAttributes)
+    link(scalar(layer, "LayerRough", rough), attributes, "Roughness")
+    link(scalar(layer, *extra), attributes, "Specular")
+    if name == "ML_Top":
+        link(node(layer, unreal.MaterialExpressionMaterialFunctionCall, material_function=helper), attributes,
+             "Metallic", "Result")
+    link(attributes, node(layer, unreal.MaterialExpressionFunctionOutput), "")
+    MEL.update_material_function(layer)
+    layers.append(layer)
+
+blend = asset("MLB_Mix", unreal.MaterialFunctionMaterialLayerBlend, unreal.MaterialFunctionMaterialLayerBlendFactory())
+mix = node(blend, unreal.MaterialExpressionBlendMaterialAttributes)
+for pin, (input_name, priority) in zip(("A", "B"), (("Bottom Layer", 0), ("Top Layer", 1))):
+    link(node(blend, unreal.MaterialExpressionFunctionInput, input_name=input_name, sort_priority=priority,
+              input_type=unreal.FunctionInputType.FUNCTION_INPUT_MATERIAL_ATTRIBUTES), mix, pin)
+link(scalar(blend, "BlendAlpha", 0.5), mix, "Alpha")
+link(mix, node(blend, unreal.MaterialExpressionFunctionOutput), "")
+MEL.update_material_function(blend)
+
+material = asset("M_Layered", unreal.Material, unreal.MaterialFactoryNew())
+material.set_editor_property("use_material_attributes", True)
+for name, value in (("GlobalRough", 0.4), ("Shared", 0.1)):
+    own = MEL.create_material_expression(material, unreal.MaterialExpressionScalarParameter, -600, 0)
+    own.set_editor_property("parameter_name", name)
+    own.set_editor_property("default_value", value)
+stack = MEL.create_material_expression(material, unreal.MaterialExpressionMaterialAttributeLayers, -300, 0)
+background = stack.get_editor_property("default_layers").get_editor_property("editor_only")
+background_guid = unreal.GuidLibrary.parse_string_to_guid(
+    unreal.GuidLibrary.conv_guid_to_string(background.get_editor_property("layer_guids")[0]))[0]
+editor_only = unreal.MaterialLayersFunctionsEditorOnlyData()
+for key, value in (("layer_states", [True, True]),
+                   ("layer_names", [unreal.Text("Background"), unreal.Text("Layer 1")]),
+                   ("restrict_to_layer_relatives", [False, False]), ("restrict_to_blend_relatives", [False]),
+                   ("layer_guids", [background_guid, unreal.GuidLibrary.new_guid()]),
+                   ("layer_link_states", [unreal.MaterialLayerLinkState.NOT_FROM_PARENT] * 2)):
+    editor_only.set_editor_property(key, value)
+functions = unreal.MaterialLayersFunctions()
+functions.set_editor_property("layers", layers)
+functions.set_editor_property("blends", [blend])
+functions.set_editor_property("editor_only", editor_only)
+stack.set_editor_property("default_layers", functions)
+assert MEL.connect_material_property(stack, "", unreal.MaterialProperty.MP_MATERIAL_ATTRIBUTES)
+MEL.recompile_material(material)
+
+instance = asset("MI_Layered", unreal.MaterialInstanceConstant, unreal.MaterialInstanceConstantFactoryNew())
+MEL.set_material_instance_parent(instance, material)
+MEL.set_material_instance_scalar_parameter_value(instance, "GlobalRough", 0.9)
+MEL.set_material_instance_scalar_parameter_value(instance, "LayerRough", 0.05, A.LAYER_PARAMETER)
+overrides = []
+for name, association, index, value in [(str(e.parameter_info.name), e.parameter_info.association,
+                                         e.parameter_info.index, e.parameter_value)
+                                        for e in instance.get_editor_property("scalar_parameter_values")] + [
+        ("TopOnly", A.LAYER_PARAMETER, 1, 0.2), ("BlendAlpha", A.BLEND_PARAMETER, 0, 0.8)]:
+    entry = unreal.ScalarParameterValue()
+    entry.set_editor_property("parameter_info", unreal.MaterialParameterInfo(name, association, index))
+    entry.set_editor_property("parameter_value", value)
+    overrides.append(entry)
+instance.set_editor_property("scalar_parameter_values", overrides)
+MEL.update_material_instance(instance)
+print(json.dumps({"material": material.get_path_name(), "instance": instance.get_path_name()}))
+"""
+
+# The scalar overrides an instance holds: [name, association, index, value].
+INSTANCE_OVERRIDES = """
+import json, unreal
+m = unreal.load_asset(args['path'])
+print(json.dumps({'overrides': sorted([str(v.parameter_info.name), v.parameter_info.association.name,
+                                       v.parameter_info.index, round(v.parameter_value, 4)]
+                                      for v in m.get_editor_property('scalar_parameter_values'))}))
+"""
+
+
+def test_material_layer_parameters_are_reported_per_layer_and_refused_by_set_in_and_out_of_play_in_editor():
+    """A parameter inside a Material Layer was read and written by name, which
+    addresses the material's global parameter: TopOnly (layer 1 only) and
+    BlendAlpha (blend 0 only) read 0 with overridden false despite the
+    instance's 0.2 and 0.8, and setting TopOnly reported it applied while
+    adding a global override that left layer 1 rendering 0.5."""
+
+    async def run():
+        client = session()
+        folder = "/Game/SimulReview_" + uuid.uuid4().hex[:8]
+        try:
+            built = await client._execute_json_script(f"args = {{'folder': {folder!r}}}\n" + LAYERED_MATERIAL)
+            assert not built.get("error"), built
+            material, instance = built["material"], built["instance"]
+
+            async def overrides():
+                return await client._execute_json_script(f"args = {{'path': {instance!r}}}\n" + INSTANCE_OVERRIDES)
+
+            before = await overrides()
+            assert before["overrides"] == [
+                ["BlendAlpha", "BLEND_PARAMETER", 0, 0.8],
+                ["GlobalRough", "GLOBAL_PARAMETER", -1, 0.9],
+                ["LayerRough", "LAYER_PARAMETER", 0, 0.05],
+                ["TopOnly", "LAYER_PARAMETER", 1, 0.2],
+            ], before
+            defaults = await client.get_material_info(material)
+            assert [(p["name"], p["association"], p["index"], round(p["value"], 4), p["overridden"])
+                    for p in defaults["parameters"]] == [
+                ("GlobalRough", "global", None, 0.4, None),
+                ("Shared", "global", None, 0.1, None),
+                ("LayerRough", "layer", 0, 0.25, None),
+                ("Shared", "layer", 0, 0.7, None),
+                ("LayerRough", "layer", 1, 0.75, None),
+                ("NestedParam", "layer", 1, 0.33, None),
+                ("TopOnly", "layer", 1, 0.5, None),
+                ("BlendAlpha", "blend", 0, 0.5, None),
+            ], defaults
+            for pie in (False, True):
+                if pie:
+                    started = await client.control_simulation("start")
+                    assert started.get("state") == "playing", started
+                info = await client.get_material_info(instance)
+                assert [(p["name"], p["association"], p["index"], round(p["value"], 4), p["overridden"])
+                        for p in info["parameters"]] == [
+                    ("GlobalRough", "global", None, 0.9, True),
+                    ("Shared", "global", None, 0.1, False),
+                    ("LayerRough", "layer", 0, 0.05, True),
+                    ("Shared", "layer", 0, 0.7, False),
+                    ("LayerRough", "layer", 1, 0.75, False),
+                    ("NestedParam", "layer", 1, 0.33, False),
+                    ("TopOnly", "layer", 1, 0.2, True),
+                    ("BlendAlpha", "blend", 0, 0.8, True),
+                ], info
+                refused = await client.set_material_params(
+                    instance, scalar_params={"TopOnly": 0.3, "BlendAlpha": 0.3, "GlobalRough": 0.5}
+                )
+                assert refused["error_type"] == "ValidationError", refused
+                assert (refused["params_set"], refused["applied"]) == (0, {}), refused
+                assert sorted(refused["not_applied"]["scalar"]) == ["BlendAlpha", "TopOnly"], refused
+                assert "(layer 1)" in refused["not_applied"]["scalar"]["TopOnly"], refused
+                assert "(blend 0)" in refused["not_applied"]["scalar"]["BlendAlpha"], refused
+                # Nothing written: no global TopOnly or BlendAlpha, and GlobalRough kept.
+                assert await overrides() == before
+            stopped = await client.control_simulation("stop")
+            assert stopped.get("state") == "stopped", stopped
+            # A name the material shares with layer 0 sets the material's own.
+            shared = await client.set_material_params(instance, scalar_params={"Shared": 0.55})
+            assert shared["applied"] == {"scalar": {"Shared": pytest.approx(0.55)}}, shared
+            expected = sorted(before["overrides"] + [["Shared", "GLOBAL_PARAMETER", -1, 0.55]])
+            assert (await overrides())["overrides"] == expected
+            info = await client.get_material_info(instance)
+            shared_entries = [(p["association"], round(p["value"], 4), p["overridden"])
+                              for p in info["parameters"] if p["name"] == "Shared"]
+            assert shared_entries == [("global", 0.55, True), ("layer", 0.7, False)], info
         finally:
             await client.control_simulation("stop")
             await client._execute_python(f"import unreal\nunreal.EditorAssetLibrary.delete_directory({folder!r})")
