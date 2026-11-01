@@ -9,6 +9,12 @@ level viewport's field of view, so UE's default is assumed: 90 degrees across
 on a 16:9 viewport. An actor without bounds (zero extent) keeps the 500 cm and
 the reply says so; an explicit distance places the camera as before.
 
+The bounds leave out the editor-only components the editor's own Focus leaves
+out, whose bounds can reach far beyond the actor: the frustum the editor draws
+for a camera, a CineCamera's debug focus plane, an icon not attached to the
+actor. A component that is not editor-only always counts, and an actor that
+reports bounds other than the box around its components keeps them.
+
 The adapter tests run the real editor script against a stand-in for the
 ``unreal`` module and the camera calls against a stand-in level viewport. The
 fit is checked geometrically: the actor's bounding box is projected through the
@@ -55,19 +61,51 @@ class _Vector:
         self.x, self.y, self.z = x, y, z
 
 
-class PrimitiveComponent:
-    """A primitive component and its world bounds (``Bounds``) as a center and a half-size."""
+class SceneComponent:
+    """A scene component and the component it is attached to (None: attached to nothing)."""
 
-    def __init__(self, center: Sequence[float], extent: Sequence[float]) -> None:
+    def __init__(self, parent: Any = None) -> None:
+        self.parent: Any = parent
+
+    def get_attach_parent(self) -> Any:
+        return self.parent
+
+
+class PrimitiveComponent(SceneComponent):
+    """A primitive component and its world bounds (``Bounds``) as a center and a half-size.
+
+    ``editor_only`` is ``bIsEditorOnly`` and ``ignore_focus`` what
+    ``GetIgnoreBoundsForEditorFocus`` returns. An ``attached`` component is attached
+    under the root of the actor it is given to; any other one is attached to nothing.
+    """
+
+    def __init__(
+        self,
+        center: Sequence[float],
+        extent: Sequence[float],
+        editor_only: bool = False,
+        ignore_focus: bool = False,
+        attached: bool = True,
+    ) -> None:
+        super().__init__()
         self.center, self.extent = tuple(center), tuple(extent)
+        self.editor_only, self.ignore_focus = editor_only, ignore_focus
+        self.attached = attached
+
+    def get_editor_property(self, name: str) -> Any:
+        return {"is_editor_only": self.editor_only}[name]
+
+    def get_ignore_bounds_for_editor_focus(self) -> bool:
+        return self.ignore_focus
 
 
 class DrawFrustumComponent(PrimitiveComponent):
     """The frustum the editor draws for a camera: a cube reaching its far end (1000 cm by
-    default) on every side of the camera (UDrawFrustumComponent::CalcBounds, UE 5.7)."""
+    default) on every side of the camera (UDrawFrustumComponent::CalcBounds, UE 5.7). It is
+    editor-only, and the editor's own Focus ignores its bounds."""
 
     def __init__(self, camera: Sequence[float], far: float = 1000.0) -> None:
-        super().__init__(camera, (far, far, far))
+        super().__init__(camera, (far, far, far), editor_only=True, ignore_focus=True)
 
 
 def get_component_bounds(
@@ -93,6 +131,17 @@ def _union(
     )
 
 
+def _reported(
+    components: Sequence[PrimitiveComponent],
+) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+    """The same box as GetActorBounds reports it: FBox::GetCenterAndExtents puts the center
+    at Min + 0.5 * (Max - Min), which can differ from ``_union``'s in the last bit."""
+    low = [min(c.center[i] - c.extent[i] for c in components) for i in range(3)]
+    high = [max(c.center[i] + c.extent[i] for c in components) for i in range(3)]
+    half = [0.5 * (hi - lo) for lo, hi in zip(low, high)]
+    return tuple(lo + h for lo, h in zip(low, half)), tuple(half)
+
+
 class Actor:
     """An actor with a location and the bounds ``get_actor_bounds`` reports.
 
@@ -114,6 +163,10 @@ class Actor:
         self.location = tuple(location)
         self.origin, self.extent = tuple(origin), tuple(extent)
         self.components, self.children = list(components), list(children)
+        self.root_component = SceneComponent()
+        for component in self.components:
+            if component.attached:
+                component.parent = self.root_component
         self.bounds_calls: List[Tuple[bool, bool]] = []
 
     def get_path_name(self) -> str:
@@ -442,10 +495,117 @@ def test_the_frustum_of_a_child_actor_camera_is_left_out_too(
     )
 
 
-def test_without_a_frustum_the_bounds_are_those_unreal_reports(
+def test_distance_0_frames_a_cine_camera_by_its_mesh_not_by_its_debug_focus_plane(
     editor: Editor, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """get_actor_bounds stays the source of the box whenever no frustum is left out: it is
+    """A CineCamera's "Draw Debug Focus Plane" adds an editor-only plane, 100 m across at
+    the focus distance (1 km by default), and get_actor_bounds includes it: the camera
+    stood 1 km away and the CineCamera was out of sight (UE 5.7.4), also once the plane
+    was turned off, which only hides it. The editor's own Focus ignores the plane's
+    bounds, and so does the fit: the CineCamera is framed by its mesh, which is
+    editor-only as well but counts, as in the editor.
+
+    As in the editor, the mesh, the frustum and the plane hang from the
+    CineCameraComponent, which is attached to the actor's root, and get_actor_bounds
+    centers its box as Unreal does, here a last bit off the center of the box around
+    the components. The mesh still counts as attached under the root, and the box
+    Unreal reports still counts as the box around the components."""
+    camera = (250.6, 10000.0, 200.0)
+    mesh = PrimitiveComponent(
+        (204.6, 10000.0, 202.0), (47.4, 21.6, 27.7), editor_only=True
+    )
+    frustum = DrawFrustumComponent(camera)
+    plane = PrimitiveComponent(
+        (100250.6, 10000.0, 200.0),
+        (0.0, 5000.0, 5000.0),
+        editor_only=True,
+        ignore_focus=True,
+    )
+    components = [mesh, frustum, plane]
+    assert _reported(components) != _union(components)
+    actor = Actor(
+        "CineCameraActor_0", camera, *_reported(components), components=components
+    )
+    cine_camera_component = SceneComponent(parent=actor.root_component)
+    for component in components:
+        component.parent = cine_camera_component
+    path = editor.add(actor)
+
+    result = _focus(editor, monkeypatch, path)
+
+    nearest, reach = _box_in_view(result, mesh.center, mesh.extent)
+    assert nearest > NEAR_CLIP and 0.4 < reach <= 1.0
+    assert result["distance"] == pytest.approx(
+        unreal_runtime._focus_fit_distance(mesh.extent)
+    )
+    _, across, up = _in_view(
+        result["camera_location"], result["camera_rotation"], mesh.center
+    )
+    assert (across, up) == pytest.approx((0.0, 0.0), abs=1e-9)
+    assert "fit_warning" not in result
+
+
+def test_an_editor_only_component_not_attached_to_the_actor_is_left_out(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SkyLight keeps a spare editor icon attached to nothing, so it sits at the world
+    origin, and get_actor_bounds includes it: a SkyLight 800 m from the origin was framed
+    from 805 m away (UE 5.7.4). The editor's own Focus visits only the components
+    attached under the actor's root, and the fit leaves out an editor-only one that is
+    not: the SkyLight is framed by its own icon."""
+    light = (0.0, 80000.0, 200.0)
+    icon = PrimitiveComponent(light, (256.0,) * 3, editor_only=True)
+    spare = PrimitiveComponent(
+        (0.0, 0.0, 0.0), (1.0,) * 3, editor_only=True, attached=False
+    )
+    actor = Actor("SkyLight_0", light, *_union([spare, icon]), components=[spare, icon])
+
+    result = _focus(editor, monkeypatch, editor.add(actor))
+
+    assert result["distance"] == pytest.approx(
+        unreal_runtime._focus_fit_distance(icon.extent)
+    )
+    assert result["camera_location"] == pytest.approx(
+        _placement(light, result["distance"])[0]
+    )
+
+
+def test_a_component_that_is_not_editor_only_counts_even_where_the_editor_focus_skips_it(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The editor's own Focus ignores collision shapes too, and frames a trigger box by
+    its icon. The shape is the trigger's volume, not an editor-only drawing, so it
+    counts, like any component that is not editor-only, attached to the actor or not."""
+    volume = PrimitiveComponent(
+        (0.0, 0.0, 200.0), (500.0, 500.0, 200.0), ignore_focus=True
+    )
+    icon = PrimitiveComponent((0.0, 0.0, 200.0), (128.0,) * 3, editor_only=True)
+    loose = PrimitiveComponent((2000.0, 0.0, 200.0), (10.0,) * 3, attached=False)
+    components = [volume, icon, loose]
+    path = editor.add(
+        Actor(
+            "TriggerBox_0",
+            (0.0, 0.0, 200.0),
+            *_union(components),
+            components=components,
+        )
+    )
+
+    result = _focus(editor, monkeypatch, path)
+
+    origin, extent = _union(components)
+    assert result["distance"] == pytest.approx(
+        unreal_runtime._focus_fit_distance(extent)
+    )
+    assert result["camera_location"] == pytest.approx(
+        _placement(origin, result["distance"])[0]
+    )
+
+
+def test_with_nothing_left_out_the_bounds_are_those_unreal_reports(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """get_actor_bounds stays the source of the box whenever nothing is left out: it is
     virtual, and a level instance adds its level's content to its own components', so
     the components alone would frame less than Unreal reports."""
     icon = PrimitiveComponent((0.0, 0.0, 0.0), (64.0, 64.0, 64.0))
@@ -472,6 +632,32 @@ def test_without_a_frustum_the_bounds_are_those_unreal_reports(
         assert result["camera_location"] == pytest.approx(
             _placement(origin, result["distance"])[0]
         )
+
+
+def test_an_actor_reporting_bounds_of_its_own_keeps_them(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A NavLinkProxy reports the box around its links, not around its components, and
+    its editor-only drawing of the links is one whose bounds the editor's own Focus
+    ignores. Leaving that out would frame a 12 m link by the proxy's icon: components
+    are left out only while get_actor_bounds is the box around all of them."""
+    links = ((0.0, 0.0, 100.0), (0.0, 600.0, 10.0))
+    drawing = PrimitiveComponent(
+        (0.0, 0.0, 100.0), (0.0, 600.0, 0.0), editor_only=True, ignore_focus=True
+    )
+    icon = PrimitiveComponent((0.0, 0.0, 100.0), (128.0,) * 3, editor_only=True)
+    proxy = Actor(
+        "NavLinkProxy_0", (0.0, 0.0, 100.0), *links, components=[drawing, icon]
+    )
+
+    result = _focus(editor, monkeypatch, editor.add(proxy))
+
+    assert result["distance"] == pytest.approx(
+        unreal_runtime._focus_fit_distance(links[1])
+    )
+    assert result["camera_location"] == pytest.approx(
+        _placement(links[0], result["distance"])[0]
+    )
 
 
 def test_distance_0_on_an_actor_without_bounds_keeps_500_cm_and_says_so(

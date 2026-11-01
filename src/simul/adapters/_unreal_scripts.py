@@ -304,13 +304,22 @@ print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}
 # its child actors' included, as a center and a half-size. The half-size is
 # zero when no primitive component has a size (a StaticMeshActor without a
 # mesh); the center is then where such a component sits, or the world origin
-# when the actor has none. The frustum the editor draws for a camera or a 2D
-# scene capture is left out, as the editor's own Focus leaves it out: that
-# editor-only DrawFrustumComponent belongs to the actor, and its bounds are a
-# cube reaching the frustum's far end, 10 m, on every side of the camera,
-# whatever the actor's size (UE 5.7 source). Such an actor's box is drawn
-# around the bounds of its other primitive components and its child actors';
-# one with nothing but frustums keeps GetActorBounds' box.
+# when the actor has none. The editor-only components the editor's own Focus
+# leaves out are left out too, since their bounds can reach far beyond the
+# actor (UE 5.7 source, UE 5.7.4). Its Focus ignores the bounds of some
+# (GetIgnoreBoundsForEditorFocus): the frustum the editor draws for a camera
+# or a scene capture, a cube reaching the frustum's far end, 10 m, on every
+# side of it, and a CineCamera's debug focus plane, 100 m across at the focus
+# distance (1 km by default), which turning the plane off only hides. It never
+# visits those not attached under their actor's root, such as the spare icon a
+# SkyLight or a PlanarReflection leaves at the world origin. The box is then
+# drawn around the bounds of the other primitive components, provided
+# GetActorBounds is the box around all of them: GetActorBounds is virtual, and
+# an actor reporting other bounds, such as a level instance (its level's
+# content) or a NavLinkProxy (its links), keeps them, as does an actor with
+# nothing but such components. A component that is not editor-only always
+# counts, such as a trigger box's collision shape, which the editor's Focus
+# ignores.
 # While Play In Editor (or Simulate) runs nothing is selected: Unreal's editor
 # reports no selection then and clears it when PIE stops (observed on UE
 # 5.7.4), so a selection made during PIE would be lost unseen. Outside PIE an
@@ -319,20 +328,39 @@ print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}
 # selects only through its parent, or any actor while the editor mode or a
 # selection lock prevents selection) reads back unselected.
 FOCUS_ACTOR = ACTOR_HELPERS + EDITOR_WORLD + """
-def focus_bounds(actor):
-    actors = [actor] + list(actor.get_all_child_actors())
-    components = [c for a in actors for c in a.get_components_by_class(unreal.PrimitiveComponent)]
-    kept = [c for c in components if not isinstance(c, unreal.DrawFrustumComponent)]
-    if not kept or len(kept) == len(components):
-        origin, extent = actor.get_actor_bounds(only_colliding_components=False, include_from_child_actors=True)
-        return [origin.x, origin.y, origin.z], [extent.x, extent.y, extent.z]
+import math
+
+def left_out_by_editor_focus(component, root):
+    if not component.get_editor_property("is_editor_only"):
+        return False
+    if component.get_ignore_bounds_for_editor_focus():
+        return True
+    while component is not None and component != root:
+        component = component.get_attach_parent()
+    return component is None
+
+def box_around(components):
     low, high = [float("inf")] * 3, [float("-inf")] * 3
-    for component in kept:
+    for component in components:
         center, half, _ = unreal.SystemLibrary.get_component_bounds(component)
         for axis, (mid, size) in enumerate(((center.x, half.x), (center.y, half.y), (center.z, half.z))):
             low[axis], high[axis] = min(low[axis], mid - size), max(high[axis], mid + size)
     return ([(lo + hi) / 2 for lo, hi in zip(low, high)],
             [(hi - lo) / 2 for lo, hi in zip(low, high)])
+
+def focus_bounds(actor):
+    origin, extent = actor.get_actor_bounds(only_colliding_components=False, include_from_child_actors=True)
+    reported = ([origin.x, origin.y, origin.z], [extent.x, extent.y, extent.z])
+    actors = [actor] + list(actor.get_all_child_actors())
+    components = [(c, a.root_component) for a in actors for c in a.get_components_by_class(unreal.PrimitiveComponent)]
+    kept = [c for c, root in components if not left_out_by_editor_focus(c, root)]
+    if not kept or len(kept) == len(components):
+        return reported
+    every = box_around([c for c, _ in components])
+    if not all(math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-3)
+               for a, b in zip(every[0] + every[1], reported[0] + reported[1])):
+        return reported
+    return box_around(kept)
 
 actor = actor_at(args["actor_path"])
 pie = pie_active()

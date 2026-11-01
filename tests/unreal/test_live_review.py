@@ -998,6 +998,14 @@ def tagged(actor, scale=1.0):
     actor.set_actor_scale3d(unreal.Vector(scale, scale, scale))
     actor.set_editor_property('tags', [unreal.Name('simul_review_focus')])
     return actor.get_path_name()
+def cine_camera(y, *focus_plane):
+    actor = subsystem.spawn_actor_from_class(unreal.CineCameraActor, unreal.Vector(0, y, 200))
+    component = actor.get_cine_camera_component()
+    for drawn in focus_plane:
+        settings = component.get_editor_property('focus_settings')
+        settings.set_editor_property('draw_debug_focus_plane', drawn)
+        component.set_editor_property('focus_settings', settings)
+    return actor
 print(json.dumps({
     # A 20 m cube and a 10 cm one, centered on their locations.
     'large': tagged(subsystem.spawn_actor_from_object(cube, unreal.Vector(0, 3000, 1000)), 20.0),
@@ -1009,6 +1017,13 @@ print(json.dumps({
     'no_mesh': tagged(subsystem.spawn_actor_from_class(unreal.StaticMeshActor, unreal.Vector(0, 12000, 100))),
     # A camera, whose editor-only frustum get_actor_bounds includes.
     'camera': tagged(subsystem.spawn_actor_from_class(unreal.CameraActor, unreal.Vector(0, 15000, 200))),
+    # CineCameras: plain, with the debug focus plane drawn, and with it turned off
+    # again, which only hides it.
+    'cine': tagged(cine_camera(18000)),
+    'cine_plane': tagged(cine_camera(21000, True)),
+    'cine_plane_off': tagged(cine_camera(24000, True, False)),
+    # A SkyLight, which leaves a spare editor icon at the world origin.
+    'sky_light': tagged(subsystem.spawn_actor_from_class(unreal.SkyLight, unreal.Vector(0, 27000, 200))),
 }))
 """
 
@@ -1044,9 +1059,10 @@ def test_focus_distance_0_fits_the_actor_and_an_explicit_distance_looks_at_its_l
     """Distance 0 put the camera a fixed 500 cm from the actor: inside a 20 m
     cube, and a 10 cm cube was a speck. Now it fits the actor's bounds in UE's
     default view, looking at their center, and frames a camera by its mesh,
-    not by the frustum the editor draws for it; an actor without bounds keeps
-    the 500 cm and says so, and an explicit distance looks at the actor's
-    location as before."""
+    not by the frustum the editor draws for it or a CineCamera's debug focus
+    plane, and a SkyLight by its icon, not by the spare one it leaves at the
+    world origin; an actor without bounds keeps the 500 cm and says so, and
+    an explicit distance looks at the actor's location as before."""
 
     async def run():
         client = session()
@@ -1071,6 +1087,28 @@ def test_focus_distance_0_fits_the_actor_and_an_explicit_distance_looks_at_its_l
             assert min(frustum["extent"]) >= 1000.0, frustum
             camera = await client.focus_on_actor(spawned["camera"])
             assert camera["distance"] < 500.0 and "fit_warning" not in camera, camera
+
+            # A CineCamera's debug focus plane, 100 m across at the focus distance (1 km
+            # by default), put the camera 1 km away, also after the plane was turned off,
+            # which only hides it. The fit leaves the plane out, as the editor's own Focus
+            # does, and frames the CineCamera by its mesh, as without the plane.
+            cine = await client.focus_on_actor(spawned["cine"])
+            assert cine["distance"] < 500.0 and "fit_warning" not in cine, cine
+            for name in ("cine_plane", "cine_plane_off"):
+                plane = await client._execute_json_script(f"args = {{'path': {spawned[name]!r}}}\n" + ACTOR_BOUNDS)
+                assert max(plane["extent"]) >= 5000.0, (name, plane)
+                focused = await client.focus_on_actor(spawned[name])
+                assert focused["distance"] == pytest.approx(cine["distance"]), (name, focused)
+                assert "fit_warning" not in focused, (name, focused)
+
+            # The spare icon a SkyLight leaves at the world origin stretched its bounds to
+            # the origin; the fit leaves it out, and the SkyLight is framed by its icon.
+            sky = await client._execute_json_script(f"args = {{'path': {spawned['sky_light']!r}}}\n" + ACTOR_BOUNDS)
+            assert sky["origin"][1] < 27000.0 - 5000.0, sky
+            sky_light = await client.focus_on_actor(spawned["sky_light"])
+            d = sky_light["distance"]
+            assert d < 1000.0 and "fit_warning" not in sky_light, sky_light
+            assert sky_light["camera_location"] == pytest.approx((-d, 27000.0, 200.0 + d / 2)), sky_light
 
             no_mesh = await client.focus_on_actor(spawned["no_mesh"])
             assert no_mesh["distance"] == 500.0 and "no bounds" in no_mesh["fit_warning"], no_mesh
