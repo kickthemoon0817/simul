@@ -4,7 +4,7 @@ import json
 import math
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pytest
@@ -25,6 +25,7 @@ from tests.fakes import (
     FakeMatrix,
     FakeNlaStrip,
     FakeNlaTrack,
+    FakeObjectModifier,
     FakePropArray,
     FakeTransformObject,
     FakeVector,
@@ -1547,6 +1548,7 @@ class TestVisualObservationTools:
                 view_layer=view_layer,
                 evaluated_depsgraph_get=evaluated_depsgraph_get,
             ),
+            types=SimpleNamespace(Object=FakeTransformObject),
         )
 
     # -- set_camera_view ---------------------------------------------------
@@ -2234,14 +2236,17 @@ class TestVisualObservationTools:
         assert result["warning"] is None
 
     @pytest.mark.parametrize(
-        ("setup", "scale"),
+        ("setup", "scale", "parent_type"),
         [
-            ("unparented", (1.0, 1.0, 1.0)),
-            ("parented", (1.0, 1.0, 1.0)),
+            ("unparented", (1.0, 1.0, 1.0), None),
+            ("parented", (1.0, 1.0, 1.0), "OBJECT"),
             # A scale of the camera's own stays as it was, not reset to 1.
-            ("unparented", (0.5, 0.5, 0.5)),
+            ("unparented", (0.5, 0.5, 0.5), None),
+            # Blender gives these parent types the parent's matrix_world too.
+            ("parented", (1.0, 1.0, 1.0), "ARMATURE"),
+            ("parented", (1.0, 1.0, 1.0), "LATTICE"),
         ],
-        ids=["unparented", "parented", "own_scale"],
+        ids=["unparented", "parented", "own_scale", "armature", "lattice"],
     )
     def test_set_camera_view_keeps_the_scale_of_a_camera_its_child_of_scales(
         self,
@@ -2249,6 +2254,7 @@ class TestVisualObservationTools:
         mathutils: Any,
         setup: str,
         scale: Tuple[float, float, float],
+        parent_type: Optional[str],
     ) -> None:
         """Each call doubled the scale of a camera whose Child Of target had
         been scaled by 2 after the constraint was set up.
@@ -2257,11 +2263,17 @@ class TestVisualObservationTools:
         the camera's own scale, where the constraint applied it again: 2, 4
         and 8 on Blender 5.0.1, the camera evaluated at (14, -14, 10) each
         time and the reply at (7, -7, 5). A camera of scale 0.5 kept 0.5 on
-        Blender 5.0.1.
+        Blender 5.0.1. Under an armature or a lattice of that parent type the
+        scale still went 2, 4 and 8 on Blender 5.0.1, as only Blender was
+        taken to know that parent matrix.
         """
         cam = self._constrained_camera(
             _child_of(np.diag([2.0, 2.0, 2.0, 1.0])), setup=setup, scale=scale
         )
+        if parent_type is not None:
+            if parent_type != "OBJECT":
+                cam.parent.type = parent_type
+            cam.parent_type = parent_type
         own_scale = list(cam.scale)
         session = self._session_on(monkeypatch, cam)
 
@@ -4328,7 +4340,7 @@ class TestVisualObservationTools:
         warning = result["warning"]
         assert (
             f"timeline marker's camera, {reason}, and nothing Blender evaluates "
-            "depends on it through a child or a constraint"
+            "depends on it through a child, a constraint or a modifier"
         ) in warning
         assert (
             "The reported pose is the one its own transform gives (its location, "
@@ -4492,9 +4504,10 @@ class TestVisualObservationTools:
                 Copy Location targets Side: "bone_constraint" (Rig2 enabled),
                 "bone_constraint_through_child" (Rig2 enabled, the Copy
                 Location targeting a disabled child of Side),
-                "muted_bone_constraint" (Rig2 enabled, the Copy Location muted)
-                or "disabled_armature_read" (Rig2 disabled, an enabled object's
-                Copy Location targeting Rig2).
+                "muted_bone_constraint" (Rig2 enabled, the Copy Location muted),
+                "disabled_armature_read" (Rig2 disabled, an enabled object's
+                Copy Location targeting Rig2) or "disabled_armature_child"
+                (Rig2 disabled, with an enabled child).
             how: How Side is disabled (_side_camera).
             constraints: Side's constraints.
 
@@ -4529,11 +4542,13 @@ class TestVisualObservationTools:
             rig.pose = SimpleNamespace(
                 bones=[SimpleNamespace(name="Bone", constraints=[following])]
             )
-            rig.hide_viewport = dependent == "disabled_armature_read"
+            rig.hide_viewport = dependent.startswith("disabled_armature")
             root.link(rig)
             objects.append(rig)
             if dependent == "disabled_armature_read":
                 reader.constraints.append(self._following(rig))
+            elif dependent == "disabled_armature_child":
+                reader.parent = rig
         reader.hide_viewport = dependent in ("disabled_child", "disabled_owner")
         root.link(reader)
         return side, view_layer, objects
@@ -4587,6 +4602,7 @@ class TestVisualObservationTools:
             "muted_constraint",
             "muted_bone_constraint",
             "disabled_armature_read",
+            "disabled_armature_child",
         ],
     )
     def test_get_camera_info_composes_a_camera_only_unevaluated_or_muted_dependents_need(
@@ -4597,7 +4613,11 @@ class TestVisualObservationTools:
 
         So did a disabled armature whose bone's Copy Location targeted the
         camera, although a visible object's Copy Location targeted the
-        armature: that needs the armature's transform, not its pose.
+        armature: that needs the armature's transform, not its pose. With a
+        visible child of the armature instead, Blender 5.0.1 evaluated the
+        camera when the child came first in the view layer, and left it stale
+        when an object reading the child came first, which built the armature
+        without its pose; Python cannot tell those apart.
 
         A muted constraint needs nothing of its target. Blender 5.0.1 evaluated
         the camera for one all the same, on an object or a bone, but nothing
@@ -4610,11 +4630,13 @@ class TestVisualObservationTools:
         )
         # Blender leaves out the camera and its disabled dependent, evaluates
         # the camera that a muted constraint targets, and evaluates the
-        # disabled armature a visible object reads, but not the camera.
+        # disabled armature a visible object reads or is a child of, but not
+        # the camera.
         left_out = {
             "muted_constraint": [],
             "muted_bone_constraint": [],
             "disabled_armature_read": [side],
+            "disabled_armature_child": [side],
         }.get(dependent, objects)
         session = self._session_in(monkeypatch, view_layer, *objects, left_out=left_out)
         self._move(side)
@@ -4624,6 +4646,267 @@ class TestVisualObservationTools:
         assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
         assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
         assert result["pose_source"] == "transform"
+        assert "'Track To' (TRACK_TO)" in result["warning"]
+
+    @staticmethod
+    def _modifier_naming(
+        source: FakeTransformObject, setup: str
+    ) -> Tuple[str, FakeObjectModifier]:
+        """
+        A modifier set up as on Blender 5.0.1, naming ``source``, and its owner's type.
+
+        Args:
+            source: The object the modifier names.
+            setup: Read its transform: "hook", "array_offset_off" (with
+                use_object_offset off), "uv_project", "displace_texture" (a
+                texture mapped through it), "warp" (from it), "volume_displace",
+                "lineart_camera" (with use_custom_camera), "nodes_input" (a
+                Geometry Nodes input), "grease_pencil_hook", "boolean" and
+                "data_transfer" (with use_object_transform). Do not:
+                "hook_disabled" (disabled in viewports), "displace_no_texture",
+                "displace_local" (LOCAL mapping), "warp_from_only",
+                "volume_displace_local", "lineart_scene_camera"
+                (use_custom_camera off), "nodes_without_group",
+                "nodes_missing_group" (its linked group missing),
+                "boolean_collection" (COLLECTION operand),
+                "data_transfer_geometry" (use_object_transform off) and
+                "array_cap" (an Array's start cap).
+
+        Returns:
+            The owner's object type and the modifier.
+        """
+        texture = SimpleNamespace(name="Texture")
+        # Each setting the runtime reads of the type, as the strict fake needs.
+        mapped = {"texture_coords_object": source}
+        warp = {"object_from": source, "texture": None, "texture_coords": "LOCAL"}
+        warp["texture_coords_object"] = None
+        lineart = {"light_contour_object": None, "source_camera": source}
+        # A Geometry Nodes modifier's inputs are its custom properties.
+        nodes = {"inputs": {"Socket_2": source, "Socket_3": 0.5}}
+        group = SimpleNamespace(is_missing=False)
+        missing = SimpleNamespace(is_missing=True)
+        volume = {"texture_map_object": source}
+        # Owner type, modifier type and settings.
+        setups: Dict[str, Tuple[str, str, Dict[str, Any]]] = {
+            "hook": ("MESH", "HOOK", {"object": source}),
+            "hook_disabled": (
+                "MESH",
+                "HOOK",
+                {"object": source, "show_viewport": False},
+            ),
+            "array_offset_off": (
+                "MESH",
+                "ARRAY",
+                {"offset_object": source, "use_object_offset": False},
+            ),
+            "array_cap": (
+                "MESH",
+                "ARRAY",
+                {"offset_object": None, "start_cap": source},
+            ),
+            "uv_project": (
+                "MESH",
+                "UV_PROJECT",
+                {"projectors": [SimpleNamespace(object=source)]},
+            ),
+            "displace_texture": (
+                "MESH",
+                "DISPLACE",
+                {**mapped, "texture": texture, "texture_coords": "OBJECT"},
+            ),
+            "displace_no_texture": (
+                "MESH",
+                "DISPLACE",
+                {**mapped, "texture": None, "texture_coords": "OBJECT"},
+            ),
+            "displace_local": (
+                "MESH",
+                "DISPLACE",
+                {**mapped, "texture": texture, "texture_coords": "LOCAL"},
+            ),
+            "warp": ("MESH", "WARP", {**warp, "object_to": FakeTransformObject("To")}),
+            "warp_from_only": ("MESH", "WARP", {**warp, "object_to": None}),
+            "volume_displace": (
+                "VOLUME",
+                "VOLUME_DISPLACE",
+                {**volume, "texture_map_mode": "OBJECT"},
+            ),
+            "volume_displace_local": (
+                "VOLUME",
+                "VOLUME_DISPLACE",
+                {**volume, "texture_map_mode": "LOCAL"},
+            ),
+            "lineart_camera": (
+                "GREASEPENCIL",
+                "LINEART",
+                {**lineart, "use_custom_camera": True},
+            ),
+            "lineart_scene_camera": (
+                "GREASEPENCIL",
+                "LINEART",
+                {**lineart, "use_custom_camera": False},
+            ),
+            "nodes_input": ("MESH", "NODES", {**nodes, "node_group": group}),
+            "nodes_without_group": ("MESH", "NODES", {**nodes, "node_group": None}),
+            "nodes_missing_group": ("MESH", "NODES", {**nodes, "node_group": missing}),
+            "grease_pencil_hook": (
+                "GREASEPENCIL",
+                "GREASE_PENCIL_HOOK",
+                {"object": source},
+            ),
+            "boolean": (
+                "MESH",
+                "BOOLEAN",
+                {"operand_type": "OBJECT", "object": source},
+            ),
+            "boolean_collection": (
+                "MESH",
+                "BOOLEAN",
+                {"operand_type": "COLLECTION", "object": source},
+            ),
+            "data_transfer": (
+                "MESH",
+                "DATA_TRANSFER",
+                {"use_object_transform": True, "object": source},
+            ),
+            "data_transfer_geometry": (
+                "MESH",
+                "DATA_TRANSFER",
+                {"use_object_transform": False, "object": source},
+            ),
+        }
+        owner_type, modifier_type, settings = setups[setup]
+        return owner_type, FakeObjectModifier(modifier_type, **settings)
+
+    def _side_camera_a_modifier_names(
+        self, setup: str, through_child: bool, owner_disabled: bool = False
+    ) -> Tuple[FakeTransformObject, FakeViewLayer, List[FakeTransformObject]]:
+        """
+        Camera "Side", disabled (_side_camera), and an object whose modifier names it.
+
+        Args:
+            setup: The modifier (_modifier_naming).
+            through_child: Name a disabled mesh "Child" of Side instead of Side.
+            owner_disabled: Disable the modifier's owner too.
+
+        Returns:
+            Side, with a Track To, the view layer and every object to put in
+            the scene.
+        """
+        side, view_layer = self._side_camera("object", _track_to((5.0, 5.0, 0.0)))
+        root = view_layer.layer_collection.collection
+        objects = [side]
+        source = side
+        if through_child:
+            source = FakeTransformObject("Child", "MESH", parent=side)
+            source.hide_viewport = True
+            root.link(source)
+            objects.append(source)
+        owner_type, modifier = self._modifier_naming(source, setup)
+        owner = FakeTransformObject("Owner", owner_type)
+        owner.modifiers.append(modifier)
+        owner.hide_viewport = owner_disabled
+        root.link(owner)
+        objects.append(owner)
+        return side, view_layer, objects
+
+    @pytest.mark.parametrize(
+        ("setup", "through_child"),
+        [
+            ("hook", False),
+            ("array_offset_off", False),
+            ("uv_project", False),
+            ("displace_texture", False),
+            ("warp", False),
+            ("volume_displace", False),
+            ("lineart_camera", False),
+            ("nodes_input", False),
+            ("grease_pencil_hook", False),
+            ("hook", True),
+            ("boolean", True),
+            ("data_transfer", True),
+        ],
+    )
+    def test_get_camera_info_keeps_the_evaluated_pose_of_a_disabled_camera_a_visible_modifier_reads(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        setup: str,
+        through_child: bool,
+    ) -> None:
+        """Blender evaluates the transform of each object that a modifier of a visible
+        object reads, so it evaluates a disabled camera read so, or the parent of a
+        disabled object read so, in full.
+
+        On Blender 5.0.1 such a camera, moved after it was disabled, kept the
+        matrix_world a render gave it, its Track To included, for each of
+        these modifiers on a visible object, and a Hook, a Boolean or a Data
+        Transfer naming a disabled child of the camera; the reply composed its
+        pose and left the Track To out (0.355 rad).
+        """
+        side, view_layer, objects = self._side_camera_a_modifier_names(
+            setup, through_child
+        )
+        # Not left out: the fake depsgraph evaluates the camera, as Blender does.
+        session = self._session_in(monkeypatch, view_layer, *objects)
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "evaluated"
+        assert result["warning"] is None
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert self._looks_at(result, (5.0, 5.0, 0.0))
+
+    @pytest.mark.parametrize(
+        ("setup", "through_child", "owner_disabled"),
+        [
+            ("hook_disabled", False, False),
+            ("hook", False, True),
+            ("displace_no_texture", False, False),
+            ("displace_local", False, False),
+            ("warp_from_only", False, False),
+            ("volume_displace_local", False, False),
+            ("lineart_scene_camera", False, False),
+            ("nodes_without_group", False, False),
+            ("nodes_missing_group", False, False),
+            ("boolean_collection", True, False),
+            ("data_transfer_geometry", True, False),
+            ("array_cap", True, False),
+        ],
+    )
+    def test_get_camera_info_composes_a_camera_a_modifier_names_without_reading_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        setup: str,
+        through_child: bool,
+        owner_disabled: bool,
+    ) -> None:
+        """A modifier reads the transform of an object it names only under its
+        settings, while it is enabled in viewports, and only for an object
+        Blender evaluates in full.
+
+        On Blender 5.0.1 a disabled camera named by such a modifier, short of
+        its condition, kept a stale matrix_world, 11 m from where a render
+        put it; so did one a Hook of a disabled mesh named. A Boolean without
+        the OBJECT operand, a Data Transfer without use_object_transform and
+        an Array cap read only the geometry of a disabled child of the camera.
+        A Geometry Nodes modifier without a group, or whose linked group is
+        missing, relates nothing.
+        """
+        side, view_layer, objects = self._side_camera_a_modifier_names(
+            setup, through_child, owner_disabled
+        )
+        left_out = objects[:2] if through_child else [side]
+        session = self._session_in(monkeypatch, view_layer, *objects, left_out=left_out)
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "transform"
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
         assert "'Track To' (TRACK_TO)" in result["warning"]
 
     def test_get_camera_info_composes_a_camera_blender_evaluates_only_in_part(
@@ -4752,6 +5035,111 @@ class TestVisualObservationTools:
         assert "Its parent 'Rig' may not be evaluated either" in result["warning"]
         assert "Rig" in checked
         assert [name for name in checked if name.startswith("Prop")] == []
+
+    def test_get_camera_info_scans_the_scene_once_for_the_camera_and_its_parent(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """The check of a disabled parent searched the scene's dependents again.
+
+        Each scan reads every object's parent and constraints, and an
+        armature's pose or another object's modifiers: on Blender 5.0.1, for
+        a disabled camera under a disabled parent among 20 000 objects, the
+        two scans took 24 ms and one takes 19 ms.
+        """
+        rig = FakeTransformObject("Rig", location=(1.0, 0.0, 0.0), stored=True)
+        side = FakeTransformObject(
+            "Side", "CAMERA", FakeCameraData(), parent=rig, stored=True
+        )
+        root = FakeCollection("Scene Collection")
+        for obj in (rig, side):
+            obj.hide_viewport = True
+            root.link(obj)
+        session = self._session_in(
+            monkeypatch,
+            FakeViewLayer(FakeLayerCollection(root)),
+            rig,
+            side,
+            left_out=[rig, side],
+        )
+        scene = blender_runtime.bpy.context.scene
+        objects = scene.objects
+        scans: List[int] = []
+
+        class CountedObjects:
+            """scene.objects, counting each pass over it."""
+
+            def __iter__(self) -> Iterator[Any]:
+                scans.append(1)
+                return iter(objects)
+
+            def get(self, name: str) -> Optional[Any]:
+                return objects.get(name)
+
+        monkeypatch.setattr(scene, "objects", CountedObjects())
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert "Its parent 'Rig' may not be evaluated either" in result["warning"]
+        assert len(scans) == 1
+
+    @pytest.mark.parametrize("parent_type", ["ARMATURE", "LATTICE"])
+    def test_get_camera_info_composes_the_pose_under_an_armature_or_lattice_parent_type(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, parent_type: str
+    ) -> None:
+        """Parent types ARMATURE and LATTICE give the parent's matrix_world, as OBJECT does.
+
+        Blender 5.0.1 (BKE_object_get_parent_matrix, PARSKEL) takes the
+        parent's world matrix for them; their deform moves only geometry. The
+        reply kept the stale matrix_world of such a camera, saying that only
+        Blender computes its parent matrix: on Blender 5.0.1 a camera parented
+        so to a posed armature, or to a lattice, both moved after it was
+        disabled, was reported 11 m from where a render put it, and the
+        composed pose was at the render's location, without its Track To.
+        """
+        rig = FakeTransformObject(
+            "Rig",
+            parent_type,
+            location=(2.0, -1.0, 0.5),
+            rotation_euler=(0.2, 0.1, 0.7),
+            scale=(1.5, 1.5, 1.5),
+            stored=True,
+        )
+        side = FakeTransformObject(
+            "Side",
+            "CAMERA",
+            FakeCameraData(),
+            location=(1.0, 2.0, 3.0),
+            parent=rig,
+            stored=True,
+            constraints=[_track_to((5.0, 5.0, 0.0))],
+        )
+        side.parent_type = parent_type
+        side.hide_viewport = True
+        root = FakeCollection("Scene Collection")
+        root.link(rig)
+        root.link(side)
+        session = self._session_in(
+            monkeypatch,
+            FakeViewLayer(FakeLayerCollection(root)),
+            rig,
+            side,
+            left_out=[side],
+        )
+        # The rig, enabled, is evaluated where it moved to.
+        rig.location = FakeVector((3.0, 1.0, -2.0))
+        rig.rotation_euler = FakeEuler((0.3, -0.2, 1.2))
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        rendered = self._rendered(side)
+        assert result["pose_source"] == "transform"
+        assert result["location"] == pytest.approx(list(rendered[:3, 3]))
+        warning = result["warning"]
+        assert "(its location, rotation and scale, through its parent)" in warning
+        assert "'Track To' (TRACK_TO)" in warning
+        assert "Only Blender computes" not in warning
 
     @pytest.mark.parametrize(
         ("parent_type", "parent_object", "kind"),
