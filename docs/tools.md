@@ -335,9 +335,10 @@ Behaviour worth knowing:
   camera that is disabled in viewports (the monitor icon on the camera or on a
   collection holding it, or its collection excluded from the view layer)
   unless it is the scene camera, a timeline marker binds it, or something
-  visible depends on its transform (a child, or a constraint or driver that
-  reads it); its constraints then do not run there, although a render through
-  it applies them. The scene camera and a marker's camera lose that exception
+  visible depends on its transform (a child, or a constraint, driver or
+  modifier that reads it); its constraints then do not run there, although a
+  render through it applies them. The scene camera and a marker's camera
+  lose that exception
   while their `hide_viewport` is animated (keyframes, a driver, or a strip in
   an NLA track that plays: not muted, or the solo track when there is one)
   and a collection not excluded from the view layer holds them: Blender then
@@ -367,17 +368,38 @@ Behaviour worth knowing:
   drivers and keys, which a render through it applies, and `warning` names the
   settings that disable it and the constraints left out. A parent disabled too
   may not have been evaluated since it moved, and `warning` then says the pose
-  was composed through that parent's last evaluated matrix. A parent whose
-  matrix only Blender computes (a bone or a curve, for instance) leaves the
-  camera's last evaluated pose, with a warning that it may be stale. A disabled
-  camera that an object Blender evaluates needs through a child or a constraint,
-  also through other disabled objects, is evaluated in full and keeps its
-  evaluated pose; a constraint on a bone counts while its armature is enabled.
-  One that only a driver, a modifier (a Hook, for instance), or a constraint
+  was composed through that parent's last evaluated matrix. Parent types
+  ARMATURE and LATTICE give the camera its parent's `matrix_world`, as an
+  object parent does (their deform moves only geometry), so the pose is
+  composed through them too. A parent whose matrix only Blender computes (a
+  bone, vertices or a curve, for instance) leaves the camera's last evaluated
+  pose, with a warning that it may be stale. A disabled camera that an object
+  Blender evaluates needs, also through other disabled objects, is evaluated
+  in full and keeps its evaluated pose. That object needs it through a child,
+  a constraint, or a modifier enabled in viewports that reads its transform:
+  a Hook, an Array's offset object, a UV Project projector, a texture mapped
+  through it, and so on. Before reading that pose the reply tags the camera
+  and has Blender evaluate again, which evaluates what depends on it again
+  too: Blender 5.0.1 kept the stale `matrix_world` of a camera it came to
+  need without rebuilding relations (a modifier's `show_viewport` switched
+  on or keyed, or the keyed `hide_viewport` of the object that needs it)
+  through later evaluations, until the camera was tagged. A camera the
+  depsgraph does not hold is composed. A Boolean's object operand and a Data
+  Transfer's object transform are not followed, as Blender rebuilds no
+  relations when `operand_type` or `use_object_transform` changes. Geometry
+  Nodes object inputs are not followed either: Blender relates an input that
+  a script sets (`modifier[key] = object`) only at its next relations update,
+  as such a write tags nothing, so a camera that only a Geometry Nodes input
+  needs is composed. A constraint on a bone, and a modifier,
+  count while their armature or object is enabled: through a disabled one,
+  Blender 5.0.1 evaluated the camera or left it stale depending on the order
+  of the view layer's objects alone. One that only a driver, or a constraint
   that is muted or has no influence, depends on is composed: Blender 5.0.1
   evaluated it for those too, but such a constraint needs nothing of its
-  target, and a driver that reads only a custom property of the camera left its
-  matrix stale. An add-on built before this report answers without
+  target, and a driver that reads only a custom property of the camera left
+  its matrix stale. Objects named inside a Geometry Nodes group, or through a
+  collection, are not followed, so a camera that only they need is composed
+  as well. An add-on built before this report answers without
   `pose_source` and `warning`, and the server returns them as `null`.
 - `search_blender_objects` refuses a `name_pattern` that repeats a group holding
   a quantifier or alternatives, such as `(\w+)+`: Python's regex search

@@ -147,6 +147,75 @@ _TARGET_AXIS_ROUNDING = 3 * _FLOAT32_EPSILON
 # as it was, so their targets do not enter it.
 _IN_PLACE_CONSTRAINT_TYPES = _AIM_CONSTRAINT_TYPES | {"COPY_ROTATION", "COPY_SCALE"}
 
+# The object types with a modifier stack (BKE_object_supports_modifiers,
+# Blender 5.0.1).
+_MODIFIER_OWNER_TYPES = frozenset(
+    {
+        "CURVE",
+        "CURVES",
+        "FONT",
+        "GREASEPENCIL",
+        "LATTICE",
+        "MESH",
+        "POINTCLOUD",
+        "SURFACE",
+        "VOLUME",
+    }
+)
+
+# The settings of each modifier type that name an object whose world matrix
+# the modifier reads whenever one is set: Blender 5.0.1 relates the modifier to
+# that object's transform (its update_depsgraph). _modifier_transform_sources
+# adds the settings that some types read only under a condition.
+_MODIFIER_TRANSFORM_SETTINGS: Dict[str, Tuple[str, ...]] = {
+    "ARMATURE": ("object",),
+    "ARRAY": ("offset_object",),
+    "CAST": ("object",),
+    "CURVE": ("object",),
+    "GREASE_PENCIL_ARMATURE": ("object",),
+    "GREASE_PENCIL_ARRAY": ("offset_object",),
+    "GREASE_PENCIL_BUILD": ("object",),
+    "GREASE_PENCIL_HOOK": ("object",),
+    "GREASE_PENCIL_LATTICE": ("object",),
+    "GREASE_PENCIL_MIRROR": ("object",),
+    "GREASE_PENCIL_OUTLINE": ("object",),
+    "GREASE_PENCIL_SHRINKWRAP": ("target", "auxiliary_target"),
+    "GREASE_PENCIL_TINT": ("object",),
+    "GREASE_PENCIL_VERTEX_WEIGHT_PROXIMITY": ("object",),
+    "HOOK": ("object",),
+    "LATTICE": ("object",),
+    "LINEART": ("light_contour_object",),
+    "MASK": ("armature",),
+    "MESH_DEFORM": ("object",),
+    "MESH_TO_VOLUME": ("object",),
+    "MIRROR": ("mirror_object",),
+    "NORMAL_EDIT": ("target",),
+    "PARTICLE_INSTANCE": ("object",),
+    "SCREW": ("object",),
+    "SHRINKWRAP": ("target", "auxiliary_target"),
+    "SIMPLE_DEFORM": ("origin",),
+    "UV_WARP": ("object_from", "object_to"),
+    "VERTEX_WEIGHT_PROXIMITY": ("target",),
+    "VOLUME_TO_MESH": ("object",),
+    "WAVE": ("start_position_object",),
+}
+
+# Modifier types that map a texture through an object's space, as (texture,
+# mapping, object) settings: they read the object's transform only with a
+# texture and the OBJECT mapping.
+_MODIFIER_TEXTURE_SETTINGS: Dict[str, Tuple[str, str, str]] = {
+    "DISPLACE": ("texture", "texture_coords", "texture_coords_object"),
+    "VERTEX_WEIGHT_EDIT": ("mask_texture", "mask_tex_mapping", "mask_tex_map_object"),
+    "VERTEX_WEIGHT_MIX": ("mask_texture", "mask_tex_mapping", "mask_tex_map_object"),
+    "VERTEX_WEIGHT_PROXIMITY": (
+        "mask_texture",
+        "mask_tex_mapping",
+        "mask_tex_map_object",
+    ),
+    "WARP": ("texture", "texture_coords", "texture_coords_object"),
+    "WAVE": ("texture", "texture_coords", "texture_coords_object"),
+}
+
 # Output-format settings a capture changes and restores, in restore order:
 # media_type first, so that the saved file_format is valid again.
 _IMAGE_FORMAT_FIELDS = (
@@ -929,9 +998,9 @@ class BlenderRuntimeSession:
         camera, and the matrix_world of a camera it skips keeps the pose of
         an earlier evaluation: on Blender 5.0.1 a camera moved after it was
         disabled was reported 11 m from where its transform and a render
-        through it put it. Unless a child or a constraint of an object
-        Blender evaluates needs the camera (_evaluated_dependent), its pose
-        is composed from its own transform instead
+        through it put it. Unless a child, a constraint or a modifier of an
+        object Blender evaluates needs the camera (_evaluated_dependent), its
+        pose is composed from its own transform instead
         (_matrix_without_constraints), and the warning says what that leaves
         out (_transform_pose_warning).
 
@@ -952,15 +1021,28 @@ class BlenderRuntimeSession:
         cam_data = cam_obj.data
         self._evaluate_transforms()
         constraints = self._active_constraints(cam_obj)
-        matrix, pose_source, warning = cam_obj.matrix_world, "evaluated", None
+        pose_source, warning, composed = "evaluated", None, None
         disablers = self._viewport_disablers(cam_obj)
-        if disablers and self._evaluated_dependent(cam_obj) is None:
-            composed = self._matrix_without_constraints(cam_obj)
-            if composed is not None:
-                matrix, pose_source = composed, "transform"
-            warning = self._transform_pose_warning(
-                cam_obj, disablers, constraints, composed is not None
-            )
+        if disablers:
+            # One scan of the scene serves the camera and its parent.
+            needs = self._scene_dependents()
+            if self._evaluated_dependent(cam_obj, needs) is None:
+                parent = cam_obj.parent
+                # Before composing: a parent found needed is evaluated again
+                # (_evaluated_dependent), and the pose is composed through it.
+                stale_parent = (
+                    parent is not None
+                    and bool(self._viewport_disablers(parent))
+                    and self._evaluated_dependent(parent, needs) is None
+                )
+                composed = self._matrix_without_constraints(cam_obj)
+                if composed is not None:
+                    pose_source = "transform"
+                warning = self._transform_pose_warning(
+                    cam_obj, disablers, constraints, composed is not None, stale_parent
+                )
+        # Read only now: a camera found needed has just been evaluated again.
+        matrix = cam_obj.matrix_world if composed is None else composed
         location, rotation = self._world_placement(cam_obj, matrix=matrix)
         return {
             "camera_name": cam_obj.name,
@@ -3948,18 +4030,28 @@ class BlenderRuntimeSession:
         do, so the matrix returned is a copy: on Blender 5.0.1 one read
         before an evaluation held a driver's value after it.
 
+        The parent's matrix is its matrix_world for parent type OBJECT, and
+        for ARMATURE and LATTICE too: Blender 5.0.1 (BKE_object_get_parent_matrix,
+        PARSKEL) takes the parent's world matrix for them, and their deform
+        moves only the child's geometry, so a posed bone leaves the object
+        where it is. On Blender 5.0.1 a camera without constraints, parented
+        so to a posed armature or to a lattice, both moved, was composed
+        exactly where a render put it.
+
         Args:
             obj: The object, its transforms evaluated.
 
         Returns:
-            The matrix, or None when the object has a curve parent or a parent
-            type other than OBJECT (a bone or vertices, for instance), whose
-            parent matrix only Blender computes.
+            The matrix, or None when the object has a curve parent (it can
+            follow the curve's path) or parent type BONE, VERTEX or VERTEX_3,
+            whose parent matrix only Blender computes.
         """
         parent = obj.parent
         if parent is None:
             return obj.matrix_basis.copy()
-        if obj.parent_type == "OBJECT" and parent.type != "CURVE":
+        if obj.parent_type in ("ARMATURE", "LATTICE") or (
+            obj.parent_type == "OBJECT" and parent.type != "CURVE"
+        ):
             return parent.matrix_world @ obj.matrix_parent_inverse @ obj.matrix_basis
         return None
 
@@ -4477,8 +4569,8 @@ class BlenderRuntimeSession:
         Rounding leaves a uniform parent uniform to a few epsilons.
 
         Args:
-            camera: The placed camera; its parent, if any, is an object other
-                than a curve.
+            camera: The placed camera; its parent, if any, gives it that
+                parent's matrix_world (_matrix_without_constraints).
 
         Returns:
             True when the parent matrix's axes differ in length, or lean off
@@ -4804,41 +4896,29 @@ class BlenderRuntimeSession:
             )
         return reasons
 
-    def _evaluated_dependent(self, obj: Any) -> Optional[Any]:
+    def _scene_dependents(self) -> Tuple[Dict[Any, List[Any]], Dict[Any, List[Any]]]:
         """
-        Return an object Blender evaluates that computes with this one's world matrix.
+        Map each object to the objects of the scene that compute with its world matrix.
 
-        Blender evaluates an object disabled in viewports (_viewport_disablers)
-        in full when an object it evaluates needs its world matrix: a child of
-        it, or the owner of a constraint Blender applies that targets it. That
-        dependent can be disabled too and evaluated through a dependent of its
-        own. A constraint on an armature's bone needs its target for the
-        armature's pose, which counts only while the armature is enabled: on
-        Blender 5.0.1, through a disabled armature, a visible child of it got
-        the target evaluated and a visible object's Copy Location of it did
-        not. Blender 5.0.1 kept the matrix_world a render gave a disabled
-        camera with a child, with a grandchild through a disabled child, or
-        targeted by another object's Copy Location or by one on a bone of an
-        enabled armature, its Track To included; one whose only child was
-        disabled kept a stale one. Blender evaluated it in full for a muted
-        constraint, for a driver that read its transform and for a Hook
-        modifier too, which this leaves out: nothing needs the target of a
-        muted constraint, and a driver that read only a custom property of the
-        camera got it evaluated in part, its matrix_world stale, so drivers
-        are not counted.
-
-        Args:
-            obj: The object.
+        A child needs its parent's world matrix and the owner of a constraint
+        Blender applies its targets', whenever Blender evaluates the child's or
+        the owner's transform. An armature needs the targets of its bones'
+        constraints for its pose, and an object those its modifiers read
+        (_modifier_transform_sources) for its geometry, which Blender
+        evaluates with the whole object. get_camera_info scans the scene once
+        for a camera and its parent: on Blender 5.0.1 a scan of 20 000
+        objects, 2 000 of them meshes with two modifiers, took 16 ms. Only an
+        armature has a pose, and only the types of _MODIFIER_OWNER_TYPES a
+        modifier stack; reading every object's took 6 ms more.
 
         Returns:
-            The first dependent found that is enabled in viewports, or None.
+            (dependents, readers): for each object, the children and
+            constraint owners that need it; and the armatures and modifier
+            owners that need it.
         """
         blender_module: Any = bpy
-        context = blender_module.context
-        depsgraph = context.evaluated_depsgraph_get()
         dependents: Dict[Any, List[Any]] = {}
-        # The armatures whose bones have a constraint that targets an object.
-        posers: Dict[Any, List[Any]] = {}
+        readers: Dict[Any, List[Any]] = {}
 
         def targets(constraints: Any) -> List[Any]:
             return [
@@ -4848,15 +4928,173 @@ class BlenderRuntimeSession:
                 for target, _ in self._constraint_targets(constraint)
             ]
 
-        for other in context.scene.objects:
+        for other in blender_module.context.scene.objects:
             sources = [] if other.parent is None else [other.parent]
             for source in sources + targets(other.constraints):
                 dependents.setdefault(source, []).append(other)
-            if other.pose is not None:
-                for bone in other.pose.bones:
-                    for source in targets(bone.constraints):
-                        posers.setdefault(source, []).append(other)
+            kind = other.type
+            if kind == "ARMATURE":
+                pose = other.pose
+                bones = [] if pose is None else pose.bones
+                read = [s for bone in bones for s in targets(bone.constraints)]
+            elif kind in _MODIFIER_OWNER_TYPES:
+                read = [
+                    source
+                    for modifier in other.modifiers
+                    for source in self._modifier_transform_sources(modifier)
+                ]
+            else:
+                continue
+            for source in read:
+                readers.setdefault(source, []).append(other)
+        return dependents, readers
 
+    @staticmethod
+    def _modifier_transform_sources(modifier: Any) -> List[Any]:
+        """
+        Return the objects whose world matrix a modifier reads.
+
+        Blender 5.0.1 relates a modifier to the transform of each object it
+        reads (its update_depsgraph) and evaluates that transform whenever it
+        evaluates the modifier's object, unless the modifier is disabled in
+        viewports. Most types read the object a setting names whenever one is
+        set (_MODIFIER_TRANSFORM_SETTINGS), an Array its offset object even
+        with use_object_offset off. A texture mapped through an object's space
+        needs a texture and the OBJECT mapping (_MODIFIER_TEXTURE_SETTINGS),
+        a Volume Displace the OBJECT mapping, a Warp both its from and to
+        objects and a Line Art use_custom_camera for its camera, and a UV
+        Project the projectors it counts. On Blender 5.0.1 each of these, on a
+        visible object, got a disabled camera it read, or a disabled child of
+        the camera, evaluated in full; none did short of its condition or
+        disabled in viewports.
+
+        A Boolean's OBJECT operand and a Data Transfer's use_object_transform
+        are left out: Blender rebuilds no relations when operand_type or
+        use_object_transform changes, and keeps evaluating as before until
+        something else rebuilds them. On Blender 5.0.1 a disabled camera
+        whose disabled child such a modifier named, switched to the OBJECT
+        operand or to use_object_transform after the camera moved, kept a
+        matrix_world 11 m from a render, while Blender held the camera through
+        the modifier's object (_evaluated_dependent cannot tell). A Geometry
+        Nodes modifier's object inputs are left out too: Blender relates an
+        input that a script sets (modifier[key] = object) only at its next
+        relations update, as such a write tags nothing. On Blender 5.0.1 a
+        disabled camera so named after it moved, while a muted Hook of another
+        mesh held it in the depsgraph, kept a matrix_world 11 m from a render.
+
+        Args:
+            modifier: The modifier.
+
+        Returns:
+            The objects; empty for a modifier disabled in viewports.
+        """
+        if not modifier.show_viewport:
+            return []
+        kind = modifier.type
+        sources = [
+            getattr(modifier, setting)
+            for setting in _MODIFIER_TRANSFORM_SETTINGS.get(kind, ())
+        ]
+        if kind in _MODIFIER_TEXTURE_SETTINGS:
+            texture, mapping, setting = _MODIFIER_TEXTURE_SETTINGS[kind]
+            if (
+                getattr(modifier, texture) is not None
+                and getattr(modifier, mapping) == "OBJECT"
+            ):
+                sources.append(getattr(modifier, setting))
+        if kind == "LINEART" and modifier.use_custom_camera:
+            sources.append(modifier.source_camera)
+        elif kind == "VOLUME_DISPLACE" and modifier.texture_map_mode == "OBJECT":
+            sources.append(modifier.texture_map_object)
+        elif kind == "WARP":
+            if modifier.object_from is not None and modifier.object_to is not None:
+                sources.extend((modifier.object_from, modifier.object_to))
+        elif kind == "UV_PROJECT":
+            sources.extend(projector.object for projector in modifier.projectors)
+        return [source for source in sources if source is not None]
+
+    def _evaluated_dependent(
+        self, obj: Any, needs: Tuple[Dict[Any, List[Any]], Dict[Any, List[Any]]]
+    ) -> Optional[Any]:
+        """
+        Return an object Blender evaluates that computes with this one's world matrix.
+
+        Blender evaluates an object disabled in viewports (_viewport_disablers)
+        in full when an object it evaluates needs its world matrix
+        (_scene_dependents): a child of it, or the owner of a constraint
+        Blender applies that targets it. That dependent can be disabled too
+        and evaluated through a dependent of its own. An armature's pose needs
+        the targets of its bones' constraints, and an object's geometry what
+        its modifiers read, which count only while that armature or object is
+        enabled: whether Blender evaluates a disabled one in full can depend
+        on the order of the view layer's objects alone. On Blender 5.0.1 a
+        visible child of a disabled armature got the target of a bone's Copy
+        Location evaluated when the child came first in the view layer, and
+        left it stale when an object reading the child came first, which
+        built the child, and the armature with it, as not visible; a disabled
+        mesh's Hook alike. A visible Copy Location of the armature itself left
+        it stale. Blender 5.0.1 kept the matrix_world a render gave a disabled
+        camera with a child, with a grandchild through a disabled child,
+        targeted by another object's Copy Location or by one on a bone of an
+        enabled armature, or read by a visible mesh's Hook, its Track To
+        included; one whose only child was disabled kept a stale one. Blender
+        evaluated it in full for a muted constraint and for a driver that read
+        its transform too, which this leaves out: nothing needs the target of a
+        muted constraint, and a driver that read only a custom property of the
+        camera got it evaluated in part, its matrix_world stale, so drivers
+        are not counted.
+
+        Blender's viewport depsgraph can lag behind those settings. An object
+        it does not hold at all is evaluated by nothing, whatever names it: on
+        Blender 5.0.1 a camera that only a reference not yet related named (a
+        Geometry Nodes input a script had set) was not in the depsgraph. An
+        object Blender comes to need without a relations update (a modifier's
+        show_viewport switched on, or keyed; the keyed hide_viewport of the
+        object that reads it) is evaluated again only once it is tagged
+        itself: on Blender 5.0.1 such a camera kept its stale matrix_world
+        through later evaluations, and was evaluated where a render put it
+        once tagged. So an object found needed is tagged and the depsgraph
+        evaluated again before this returns, which evaluates what computes
+        with it again too. In a GUI session that evaluation also runs the
+        depsgraph_update handlers, as any other evaluation does.
+
+        Args:
+            obj: The object.
+            needs: The scene's dependents and readers (_scene_dependents).
+
+        Returns:
+            The first dependent or reader found that is enabled in viewports,
+            or None, also when the depsgraph does not hold the object.
+        """
+        blender_module: Any = bpy
+        depsgraph = blender_module.context.evaluated_depsgraph_get()
+        if not obj.evaluated_get(depsgraph).is_evaluated:
+            return None
+        found = self._enabled_dependent(obj, needs, depsgraph)
+        if found is not None:
+            obj.update_tag(refresh={"OBJECT"})
+            blender_module.context.evaluated_depsgraph_get()
+        return found
+
+    def _enabled_dependent(
+        self,
+        obj: Any,
+        needs: Tuple[Dict[Any, List[Any]], Dict[Any, List[Any]]],
+        depsgraph: Any,
+    ) -> Optional[Any]:
+        """
+        Search the scene's dependents for one that Blender evaluates (_evaluated_dependent).
+
+        Args:
+            obj: The object.
+            needs: The scene's dependents and readers (_scene_dependents).
+            depsgraph: The evaluated viewport depsgraph.
+
+        Returns:
+            The first dependent or reader found that is enabled in viewports,
+            or None.
+        """
+        dependents, readers = needs
         enabled: Dict[Any, bool] = {}
 
         def is_enabled(candidate: Any) -> bool:
@@ -4874,9 +5112,9 @@ class BlenderRuntimeSession:
         pending, seen = [obj], {obj}
         while pending:
             source = pending.pop()
-            for poser in posers.get(source, []):
-                if is_enabled(poser):
-                    return poser
+            for reader in readers.get(source, []):
+                if is_enabled(reader):
+                    return reader
             for dependent in dependents.get(source, []):
                 if dependent in seen:
                     continue
@@ -4892,6 +5130,7 @@ class BlenderRuntimeSession:
         disablers: List[str],
         constraints: List[Dict[str, str]],
         composed: bool,
+        stale_parent: bool,
     ) -> str:
         """
         Explain the pose get_camera_info reports for a camera Blender may not evaluate.
@@ -4904,6 +5143,8 @@ class BlenderRuntimeSession:
             composed: Whether the pose was composed from its transform
                 (_matrix_without_constraints); False when only Blender
                 computes its parent matrix, and the pose is its matrix_world.
+            stale_parent: Whether its parent is disabled in viewports and
+                needed by nothing Blender evaluates (_evaluated_dependent).
 
         Returns:
             The warning: why Blender may not evaluate the camera and what the
@@ -4929,9 +5170,9 @@ class BlenderRuntimeSession:
             remedy = "remove the animation of its hide_viewport"
         unevaluated = (
             f"Blender may not evaluate camera {camera.name!r} for the viewport, "
-            f"{cause}, and nothing Blender evaluates depends on it through a child "
-            "or a constraint, so its matrix_world may hold the pose of an earlier "
-            "evaluation."
+            f"{cause}, and nothing Blender evaluates depends on it through a child, "
+            "a constraint or a modifier, so its matrix_world may hold the pose of an "
+            "earlier evaluation."
         )
         remedy = f"Change those settings or {remedy} to have Blender evaluate it."
         parent = camera.parent
@@ -4960,21 +5201,17 @@ class BlenderRuntimeSession:
                 "would apply whenever Blender evaluates it, as a render through it "
                 "does."
             )
-        stale_parent = ""
-        if (
-            parent is not None
-            and self._viewport_disablers(parent)
-            and self._evaluated_dependent(parent) is None
-        ):
-            stale_parent = (
-                f" Its parent {parent.name!r} may not be evaluated either, so the "
-                "pose was composed through the last matrix Blender evaluated for "
-                "that parent: it is elsewhere if the parent has moved since."
-            )
+        parent_clause = (
+            f" Its parent {parent.name!r} may not be evaluated either, so the "
+            "pose was composed through the last matrix Blender evaluated for "
+            "that parent: it is elsewhere if the parent has moved since."
+            if stale_parent
+            else ""
+        )
         through = ", through its parent" if parent is not None else ""
         return (
             f"{unevaluated} The reported pose is the one its own transform gives "
-            f"(its location, rotation and scale{through}). {left_out}{stale_parent} "
+            f"(its location, rotation and scale{through}). {left_out}{parent_clause} "
             f"{remedy}"
         )
 

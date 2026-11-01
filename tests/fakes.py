@@ -12,7 +12,8 @@ tools; ``BlenderSessionAdapter`` hands it to the server.
 for Blender's ``mathutils`` types and ``bpy_prop_array``; ``fake_mathutils``
 packages the first three as the module the Blender runtime imports.
 ``FakeTransformObject`` is an object whose ``matrix_world`` follows its parent,
-rotation mode and ``FakeConstraint`` stack as a Blender object's does.
+rotation mode and ``FakeConstraint`` stack as a Blender object's does;
+``FakeObjectModifier`` is an entry of its modifier stack.
 """
 
 from __future__ import annotations
@@ -592,6 +593,35 @@ class FakeConstraint:
         return self._solve(matrix)
 
 
+class FakeObjectModifier:
+    """``bpy.types.Modifier`` stand-in: its type, viewport toggle and the settings a test gives.
+
+    A real modifier has the settings of its type only, so the stand-in has
+    only those given: reading another raises AttributeError, as Blender does
+    for a setting of another type. ``inputs`` are a Geometry Nodes modifier's
+    custom properties (socket identifier to value), which ``values()``
+    returns as ``bpy_struct.values()`` does.
+    """
+
+    def __init__(
+        self,
+        modifier_type: str,
+        show_viewport: bool = True,
+        inputs: Optional[Mapping[str, Any]] = None,
+        **settings: Any,
+    ) -> None:
+        self.name = modifier_type.title()
+        self.type = modifier_type
+        self.show_viewport = show_viewport
+        self._inputs = dict(inputs or {})
+        for setting, value in settings.items():
+            setattr(self, setting, value)
+
+    def values(self) -> List[Any]:
+        """The custom properties' values, in order."""
+        return list(self._inputs.values())
+
+
 class FakeLiveMatrix(FakeMatrix):
     """A ``FakeMatrix`` that reads its values from its source whenever it is used.
 
@@ -661,6 +691,8 @@ class FakeTransformObject:
         self.rotation_axis_angle: Any = FakeVector((0.0, 0.0, 1.0, 0.0))
         self.scale: Any = FakeVector(scale)
         self.constraints: List[FakeConstraint] = list(constraints)
+        # Object.modifiers: empty, as on a camera, unless a test gives it some.
+        self.modifiers: List["FakeObjectModifier"] = []
         # Object.pose: an armature's pose bones, each with its constraints; None otherwise.
         self.pose: Any = None
         # Disable in Viewports (the monitor icon), and the collections that hold it.
@@ -678,7 +710,13 @@ class FakeTransformObject:
         )
         self._stores_matrix = stored
         self._stored: Optional[FakeMatrix] = None
+        # The refresh set of each ID.update_tag call, in order.
+        self.update_tags: List[set] = []
         self.evaluate()
+
+    def update_tag(self, refresh: Iterable[str] = ()) -> None:
+        """``ID.update_tag``: ask the next depsgraph evaluation to evaluate the object again."""
+        self.update_tags.append(set(refresh))
 
     def evaluate(self) -> None:
         """Recompute a stored matrix_world, the parent's first, as a depsgraph evaluation does."""
