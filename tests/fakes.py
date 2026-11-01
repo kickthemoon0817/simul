@@ -710,7 +710,13 @@ class FakeTransformObject:
         )
         self._stores_matrix = stored
         self._stored: Optional[FakeMatrix] = None
+        # The refresh set of each ID.update_tag call, in order.
+        self.update_tags: List[set] = []
         self.evaluate()
+
+    def update_tag(self, refresh: Iterable[str] = ()) -> None:
+        """``ID.update_tag``: ask the next depsgraph evaluation to evaluate the object again."""
+        self.update_tags.append(set(refresh))
 
     def evaluate(self) -> None:
         """Recompute a stored matrix_world, the parent's first, as a depsgraph evaluation does."""

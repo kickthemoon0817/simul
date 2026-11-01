@@ -1437,6 +1437,7 @@ class TestVisualObservationTools:
         view_layer: Optional[FakeViewLayer] = None,
         left_out: Sequence[Any] = (),
         marker_cameras: Sequence[Any] = (),
+        lagging: Sequence[Any] = (),
     ) -> SimpleNamespace:
         """
         Build a bpy mock with camera and render settings.
@@ -1448,6 +1449,10 @@ class TestVisualObservationTools:
                 evaluate, as Blender leaves out a camera disabled in viewports.
             marker_cameras: The cameras the scene's timeline markers bind,
                 one marker each.
+            lagging: Objects the depsgraph holds but evaluates again only
+                when tagged (update_tag) since its last evaluation, as Blender
+                5.0.1 left a camera that a modifier's show_viewport switched
+                on made needed.
 
         Returns:
             SimpleNamespace mimicking bpy module.
@@ -1520,13 +1525,21 @@ class TestVisualObservationTools:
             def get(self, name: str) -> Optional[Any]:
                 return None
 
+        # How many of each lagging object's tags an evaluation has consumed.
+        consumed: Dict[int, int] = {}
+
         def evaluated_depsgraph_get() -> FakeDepsgraph:
             """Recompute every stored matrix_world, as Blender's evaluation does."""
             for obj in all_objects:
-                if isinstance(obj, FakeTransformObject) and not any(
+                if not isinstance(obj, FakeTransformObject) or any(
                     obj is out for out in left_out
                 ):
-                    obj.evaluate()
+                    continue
+                if any(obj is late for late in lagging):
+                    if len(obj.update_tags) == consumed.get(id(obj), 0):
+                        continue
+                    consumed[id(obj)] = len(obj.update_tags)
+                obj.evaluate()
             return FakeDepsgraph(left_out)
 
         return SimpleNamespace(
@@ -3511,6 +3524,7 @@ class TestVisualObservationTools:
         marker_cameras: Sequence[Any] = (),
         scene_camera: str = "Camera",
         version: tuple = (4, 1, 0),
+        lagging: Sequence[Any] = (),
     ) -> blender_runtime.BlenderRuntimeSession:
         """A session on Blender ``version`` whose scene camera is ``scene_camera``
         (by default "Camera", added here), in ``view_layer``."""
@@ -3521,6 +3535,7 @@ class TestVisualObservationTools:
             view_layer=view_layer,
             left_out=left_out,
             marker_cameras=marker_cameras,
+            lagging=lagging,
         )
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
@@ -4628,17 +4643,21 @@ class TestVisualObservationTools:
         side, view_layer, objects = self._side_camera_needed_by(
             dependent, "object", _track_to(target)
         )
-        # Blender leaves out the camera and its disabled dependent, evaluates
-        # the camera that a muted constraint targets, and evaluates the
-        # disabled armature a visible object reads or is a child of, but not
-        # the camera.
-        left_out = {
-            "muted_constraint": [],
-            "muted_bone_constraint": [],
-            "disabled_armature_read": [side],
-            "disabled_armature_child": [side],
-        }.get(dependent, objects)
-        session = self._session_in(monkeypatch, view_layer, *objects, left_out=left_out)
+        # Blender evaluates the camera that a muted constraint targets. It
+        # holds the camera the others name without evaluating it (lagging,
+        # which _evaluated_dependent's own conditions then decide), and leaves
+        # out a disabled child or constraint owner that nothing names.
+        muted = dependent.startswith("muted")
+        left_out = (
+            objects[1:] if dependent in ("disabled_child", "disabled_owner") else []
+        )
+        session = self._session_in(
+            monkeypatch,
+            view_layer,
+            *objects,
+            left_out=left_out,
+            lagging=[] if muted else [side],
+        )
         self._move(side)
 
         result = session.get_camera_info("Side")
@@ -4661,8 +4680,9 @@ class TestVisualObservationTools:
                 use_object_offset off), "uv_project", "displace_texture" (a
                 texture mapped through it), "warp" (from it), "volume_displace",
                 "lineart_camera" (with use_custom_camera), "nodes_input" (a
-                Geometry Nodes input), "grease_pencil_hook", "boolean" and
-                "data_transfer" (with use_object_transform). Do not:
+                Geometry Nodes input) and "grease_pencil_hook". Read it too,
+                under a setting Blender rebuilds no relations for: "boolean"
+                and "data_transfer" (with use_object_transform). Do not:
                 "hook_disabled" (disabled in viewports), "displace_no_texture",
                 "displace_local" (LOCAL mapping), "warp_from_only",
                 "volume_displace_local", "lineart_scene_camera"
@@ -4823,8 +4843,6 @@ class TestVisualObservationTools:
             ("nodes_input", False),
             ("grease_pencil_hook", False),
             ("hook", True),
-            ("boolean", True),
-            ("data_transfer", True),
         ],
     )
     def test_get_camera_info_keeps_the_evaluated_pose_of_a_disabled_camera_a_visible_modifier_reads(
@@ -4840,9 +4858,9 @@ class TestVisualObservationTools:
 
         On Blender 5.0.1 such a camera, moved after it was disabled, kept the
         matrix_world a render gave it, its Track To included, for each of
-        these modifiers on a visible object, and a Hook, a Boolean or a Data
-        Transfer naming a disabled child of the camera; the reply composed its
-        pose and left the Track To out (0.355 rad).
+        these modifiers on a visible object, and a Hook naming a disabled
+        child of the camera; the reply composed its pose and left the Track
+        To out (0.355 rad).
         """
         side, view_layer, objects = self._side_camera_a_modifier_names(
             setup, through_child
@@ -4898,8 +4916,10 @@ class TestVisualObservationTools:
         side, view_layer, objects = self._side_camera_a_modifier_names(
             setup, through_child, owner_disabled
         )
-        left_out = objects[:2] if through_child else [side]
-        session = self._session_in(monkeypatch, view_layer, *objects, left_out=left_out)
+        # Blender holds the camera (and the child) that the modifier names
+        # without evaluating it, so only the modifier's conditions decide.
+        lagging = objects[:2] if through_child else [side]
+        session = self._session_in(monkeypatch, view_layer, *objects, lagging=lagging)
         self._move(side)
 
         result = session.get_camera_info("Side")
@@ -4908,6 +4928,140 @@ class TestVisualObservationTools:
         assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
         assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
         assert "'Track To' (TRACK_TO)" in result["warning"]
+
+    @pytest.mark.parametrize("setup", ["boolean", "data_transfer"])
+    def test_get_camera_info_composes_a_camera_a_boolean_or_data_transfer_reads_through_a_child(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, setup: str
+    ) -> None:
+        """A Boolean's OBJECT operand and a Data Transfer's use_object_transform are
+        not followed: Blender rebuilds no relations when they change.
+
+        On Blender 5.0.1 a visible Boolean naming a disabled child of a
+        disabled camera, switched from the COLLECTION operand to OBJECT after
+        the camera moved, and a Data Transfer switched to use_object_transform
+        so, left the camera 11 m from a render while Blender held it through
+        the modifier's object, and the reply said 'evaluated' with that stale
+        pose. The camera is held here as there, and its pose composed.
+        """
+        side, view_layer, objects = self._side_camera_a_modifier_names(
+            setup, through_child=True
+        )
+        session = self._session_in(monkeypatch, view_layer, *objects)
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "transform"
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert "'Track To' (TRACK_TO)" in result["warning"]
+        assert side.update_tags == []
+
+    @pytest.mark.parametrize("setup", ["nodes_input", "hook"])
+    def test_get_camera_info_composes_a_camera_the_depsgraph_does_not_hold(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, setup: str
+    ) -> None:
+        """A camera the viewport depsgraph does not hold is evaluated by nothing,
+        whatever names it.
+
+        A script that sets a Geometry Nodes modifier's object input
+        (modifier[key] = object) leaves it unrelated until Blender next
+        rebuilds relations: on Blender 5.0.1 the camera so named, moved
+        before, was not in the depsgraph and kept a matrix_world 11 m from a
+        render, also after the script's owner.update_tag(), while the reply
+        said 'evaluated' with that stale pose.
+        """
+        side, view_layer, objects = self._side_camera_a_modifier_names(
+            setup, through_child=False
+        )
+        session = self._session_in(monkeypatch, view_layer, *objects, left_out=[side])
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "transform"
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert "'Track To' (TRACK_TO)" in result["warning"]
+        assert side.update_tags == []
+
+    @pytest.mark.parametrize("needed_by", ["hook", "constraint"])
+    def test_get_camera_info_has_blender_evaluate_again_a_camera_it_finds_needed(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, needed_by: str
+    ) -> None:
+        """Blender evaluates a camera it comes to need without a relations update only
+        once the camera is tagged, so the reply tags it and evaluates again.
+
+        On Blender 5.0.1 a disabled camera kept a matrix_world 11 m from a
+        render, through later evaluations, after a visible mesh's Hook naming
+        it was switched on in viewports, or keyed so; and after the keyed
+        hide_viewport of a visible empty whose Copy Location targets it, or of
+        the Hook's mesh, turned on. The reply said 'evaluated' with that stale
+        pose. Tagged, the camera was evaluated where a render put it.
+        """
+        if needed_by == "hook":
+            side, view_layer, objects = self._side_camera_a_modifier_names(
+                "hook", through_child=False
+            )
+        else:
+            side, view_layer, objects = self._side_camera_needed_by(
+                "constraint", "object", _track_to((5.0, 5.0, 0.0))
+            )
+        session = self._session_in(monkeypatch, view_layer, *objects, lagging=[side])
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "evaluated"
+        assert result["warning"] is None
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert self._looks_at(result, (5.0, 5.0, 0.0))
+        assert side.update_tags == [{"OBJECT"}]
+
+    def test_get_camera_info_composes_through_a_parent_it_finds_needed_once_evaluated(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """The pose of a camera under a disabled parent that something Blender evaluates
+        needs is composed through that parent after Blender evaluates it again.
+
+        On Blender 5.0.1 a disabled camera under a disabled empty that a
+        visible Hook, switched on in viewports after the empty moved, names
+        was composed 2.958 m from a render: through the empty's stale matrix,
+        and without the clause that says so.
+        """
+        rig = FakeTransformObject("Rig", location=(1.0, 0.0, 0.0), stored=True)
+        side = FakeTransformObject(
+            "Side",
+            "CAMERA",
+            FakeCameraData(),
+            location=(1.0, 2.0, 3.0),
+            parent=rig,
+            stored=True,
+            constraints=[_track_to((5.0, 5.0, 0.0))],
+        )
+        owner = FakeTransformObject("Owner", "MESH")
+        owner.modifiers.append(FakeObjectModifier("HOOK", object=rig))
+        root = FakeCollection("Scene Collection")
+        for obj in (rig, side, owner):
+            obj.hide_viewport = obj is not owner
+            root.link(obj)
+        session = self._session_in(
+            monkeypatch,
+            FakeViewLayer(FakeLayerCollection(root)),
+            rig,
+            side,
+            owner,
+            left_out=[side],
+            lagging=[rig],
+        )
+        rig.location = FakeVector((3.0, -1.0, 0.0))
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        rendered = self._rendered(side)
+        assert result["pose_source"] == "transform"
+        assert result["location"] == pytest.approx(list(rendered[:3, 3]))
+        assert "may not be evaluated either" not in result["warning"]
+        assert rig.update_tags == [{"OBJECT"}]
 
     def test_get_camera_info_composes_a_camera_blender_evaluates_only_in_part(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
@@ -5013,11 +5167,14 @@ class TestVisualObservationTools:
         for obj in disabled:
             obj.hide_viewport = True
             root.link(obj)
+        # The rig and the camera held, so that the search runs, and every prop
+        # left out.
         session = self._session_in(
             monkeypatch,
             FakeViewLayer(FakeLayerCollection(root)),
             *disabled,
-            left_out=disabled,
+            left_out=props,
+            lagging=[rig, side],
         )
         checked: List[str] = []
         disablers = session._viewport_disablers
