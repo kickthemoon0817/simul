@@ -351,18 +351,19 @@ Behaviour worth knowing:
   in full and keeps its evaluated pose. That object needs it through a child,
   a constraint, or a modifier enabled in viewports that reads its transform:
   a Hook, an Array's offset object, a UV Project projector, a texture mapped
-  through it, a Geometry Nodes object input, and so on. Before reading that
-  pose the reply tags the camera and has Blender evaluate again, which
-  evaluates what depends on it again too: Blender 5.0.1 kept the stale
-  `matrix_world` of a camera it came to need without rebuilding relations (a
-  modifier's `show_viewport` switched on or keyed, or the keyed
-  `hide_viewport` of the object that needs it) through later evaluations,
-  until the camera was tagged. A camera the depsgraph does not hold is
-  composed: Blender relates an object input that a script sets on a Geometry
-  Nodes modifier (`modifier[key] = object`) only at its next relations
-  update. A Boolean's object operand and a Data Transfer's object transform
-  are not followed, as Blender rebuilds no relations when `operand_type` or
-  `use_object_transform` changes. A constraint on a bone, and a modifier,
+  through it, and so on. Before reading that pose the reply tags the camera
+  and has Blender evaluate again, which evaluates what depends on it again
+  too: Blender 5.0.1 kept the stale `matrix_world` of a camera it came to
+  need without rebuilding relations (a modifier's `show_viewport` switched
+  on or keyed, or the keyed `hide_viewport` of the object that needs it)
+  through later evaluations, until the camera was tagged. A camera the
+  depsgraph does not hold is composed. A Boolean's object operand and a Data
+  Transfer's object transform are not followed, as Blender rebuilds no
+  relations when `operand_type` or `use_object_transform` changes. Geometry
+  Nodes object inputs are not followed either: Blender relates an input that
+  a script sets (`modifier[key] = object`) only at its next relations update,
+  as such a write tags nothing, so a camera that only a Geometry Nodes input
+  needs is composed. A constraint on a bone, and a modifier,
   count while their armature or object is enabled: through a disabled one,
   Blender 5.0.1 evaluated the camera or left it stale depending on the order
   of the view layer's objects alone. One that only a driver, or a constraint
@@ -370,8 +371,8 @@ Behaviour worth knowing:
   evaluated it for those too, but such a constraint needs nothing of its
   target, and a driver that reads only a custom property of the camera left
   its matrix stale. Objects named inside a Geometry Nodes group, or through a
-  collection, are not followed either, so a camera that only they need is
-  composed as well. An add-on built before this report answers without
+  collection, are not followed, so a camera that only they need is composed
+  as well. An add-on built before this report answers without
   `pose_source` and `warning`, and the server returns them as `null`.
 - `search_blender_objects` refuses a `name_pattern` that repeats a group holding
   a quantifier or alternatives, such as `(\w+)+`: Python's regex search

@@ -4962,12 +4962,11 @@ class BlenderRuntimeSession:
         with use_object_offset off. A texture mapped through an object's space
         needs a texture and the OBJECT mapping (_MODIFIER_TEXTURE_SETTINGS),
         a Volume Displace the OBJECT mapping, a Warp both its from and to
-        objects and a Line Art use_custom_camera for its camera. A UV Project
-        reads the projectors it counts, and a Geometry Nodes modifier with a
-        node group every object among its inputs, used or not. On Blender
-        5.0.1 each of these, on a visible object, got a disabled camera it
-        read, or a disabled child of the camera, evaluated in full; none did
-        short of its condition or disabled in viewports.
+        objects and a Line Art use_custom_camera for its camera, and a UV
+        Project the projectors it counts. On Blender 5.0.1 each of these, on a
+        visible object, got a disabled camera it read, or a disabled child of
+        the camera, evaluated in full; none did short of its condition or
+        disabled in viewports.
 
         A Boolean's OBJECT operand and a Data Transfer's use_object_transform
         are left out: Blender rebuilds no relations when operand_type or
@@ -4976,7 +4975,12 @@ class BlenderRuntimeSession:
         whose disabled child such a modifier named, switched to the OBJECT
         operand or to use_object_transform after the camera moved, kept a
         matrix_world 11 m from a render, while Blender held the camera through
-        the modifier's object (_evaluated_dependent cannot tell).
+        the modifier's object (_evaluated_dependent cannot tell). A Geometry
+        Nodes modifier's object inputs are left out too: Blender relates an
+        input that a script sets (modifier[key] = object) only at its next
+        relations update, as such a write tags nothing. On Blender 5.0.1 a
+        disabled camera so named after it moved, while a muted Hook of another
+        mesh held it in the depsgraph, kept a matrix_world 11 m from a render.
 
         Args:
             modifier: The modifier.
@@ -5007,15 +5011,6 @@ class BlenderRuntimeSession:
                 sources.extend((modifier.object_from, modifier.object_to))
         elif kind == "UV_PROJECT":
             sources.extend(projector.object for projector in modifier.projectors)
-        elif kind == "NODES":
-            group = modifier.node_group
-            if group is not None and not group.is_missing:
-                blender_module: Any = bpy
-                sources.extend(
-                    value
-                    for value in modifier.values()
-                    if isinstance(value, blender_module.types.Object)
-                )
         return [source for source in sources if source is not None]
 
     def _evaluated_dependent(
@@ -5050,18 +5045,18 @@ class BlenderRuntimeSession:
         are not counted.
 
         Blender's viewport depsgraph can lag behind those settings. An object
-        it does not hold at all is evaluated by nothing, which covers an
-        object input that a script sets on a Geometry Nodes modifier
-        (modifier[key] = object): Blender relates it only at its next
-        relations update, and on Blender 5.0.1 the camera so named kept a
-        stale matrix_world 11 m from a render until then. An object Blender
-        comes to need without that update (a modifier's show_viewport switched
-        on, or keyed; the keyed hide_viewport of the object that reads it) is
-        evaluated again only once it is tagged itself: on Blender 5.0.1 such a
-        camera kept its stale matrix_world through later evaluations, and was
-        evaluated where a render put it once tagged. So an object found needed
-        is tagged and the depsgraph evaluated again before this returns, which
-        evaluates what computes with it again too.
+        it does not hold at all is evaluated by nothing, whatever names it: on
+        Blender 5.0.1 a camera that only a reference not yet related named (a
+        Geometry Nodes input a script had set) was not in the depsgraph. An
+        object Blender comes to need without a relations update (a modifier's
+        show_viewport switched on, or keyed; the keyed hide_viewport of the
+        object that reads it) is evaluated again only once it is tagged
+        itself: on Blender 5.0.1 such a camera kept its stale matrix_world
+        through later evaluations, and was evaluated where a render put it
+        once tagged. So an object found needed is tagged and the depsgraph
+        evaluated again before this returns, which evaluates what computes
+        with it again too. In a GUI session that evaluation also runs the
+        depsgraph_update handlers, as any other evaluation does.
 
         Args:
             obj: The object.

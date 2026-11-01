@@ -1438,6 +1438,7 @@ class TestVisualObservationTools:
         left_out: Sequence[Any] = (),
         marker_cameras: Sequence[Any] = (),
         lagging: Sequence[Any] = (),
+        held: Sequence[Any] = (),
     ) -> SimpleNamespace:
         """
         Build a bpy mock with camera and render settings.
@@ -1453,6 +1454,9 @@ class TestVisualObservationTools:
                 when tagged (update_tag) since its last evaluation, as Blender
                 5.0.1 left a camera that a modifier's show_viewport switched
                 on made needed.
+            held: Objects the depsgraph holds but never evaluates, tagged or
+                not, as Blender 5.0.1 held a camera that only a muted
+                modifier, or one it had not related yet, named.
 
         Returns:
             SimpleNamespace mimicking bpy module.
@@ -1532,7 +1536,7 @@ class TestVisualObservationTools:
             """Recompute every stored matrix_world, as Blender's evaluation does."""
             for obj in all_objects:
                 if not isinstance(obj, FakeTransformObject) or any(
-                    obj is out for out in left_out
+                    obj is out for out in [*left_out, *held]
                 ):
                     continue
                 if any(obj is late for late in lagging):
@@ -3525,6 +3529,7 @@ class TestVisualObservationTools:
         scene_camera: str = "Camera",
         version: tuple = (4, 1, 0),
         lagging: Sequence[Any] = (),
+        held: Sequence[Any] = (),
     ) -> blender_runtime.BlenderRuntimeSession:
         """A session on Blender ``version`` whose scene camera is ``scene_camera``
         (by default "Camera", added here), in ``view_layer``."""
@@ -3536,6 +3541,7 @@ class TestVisualObservationTools:
             left_out=left_out,
             marker_cameras=marker_cameras,
             lagging=lagging,
+            held=held,
         )
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
@@ -4679,15 +4685,14 @@ class TestVisualObservationTools:
             setup: Read its transform: "hook", "array_offset_off" (with
                 use_object_offset off), "uv_project", "displace_texture" (a
                 texture mapped through it), "warp" (from it), "volume_displace",
-                "lineart_camera" (with use_custom_camera), "nodes_input" (a
-                Geometry Nodes input) and "grease_pencil_hook". Read it too,
-                under a setting Blender rebuilds no relations for: "boolean"
-                and "data_transfer" (with use_object_transform). Do not:
-                "hook_disabled" (disabled in viewports), "displace_no_texture",
-                "displace_local" (LOCAL mapping), "warp_from_only",
-                "volume_displace_local", "lineart_scene_camera"
-                (use_custom_camera off), "nodes_without_group",
-                "nodes_missing_group" (its linked group missing),
+                "lineart_camera" (with use_custom_camera) and
+                "grease_pencil_hook". Read it too, through a setting Blender
+                rebuilds no relations for: "boolean", "data_transfer" (with
+                use_object_transform) and "nodes_input" (a Geometry Nodes
+                input). Do not: "hook_disabled" (disabled in viewports),
+                "displace_no_texture", "displace_local" (LOCAL mapping),
+                "warp_from_only", "volume_displace_local",
+                "lineart_scene_camera" (use_custom_camera off),
                 "boolean_collection" (COLLECTION operand),
                 "data_transfer_geometry" (use_object_transform off) and
                 "array_cap" (an Array's start cap).
@@ -4704,7 +4709,6 @@ class TestVisualObservationTools:
         # A Geometry Nodes modifier's inputs are its custom properties.
         nodes = {"inputs": {"Socket_2": source, "Socket_3": 0.5}}
         group = SimpleNamespace(is_missing=False)
-        missing = SimpleNamespace(is_missing=True)
         volume = {"texture_map_object": source}
         # Owner type, modifier type and settings.
         setups: Dict[str, Tuple[str, str, Dict[str, Any]]] = {
@@ -4767,8 +4771,6 @@ class TestVisualObservationTools:
                 {**lineart, "use_custom_camera": False},
             ),
             "nodes_input": ("MESH", "NODES", {**nodes, "node_group": group}),
-            "nodes_without_group": ("MESH", "NODES", {**nodes, "node_group": None}),
-            "nodes_missing_group": ("MESH", "NODES", {**nodes, "node_group": missing}),
             "grease_pencil_hook": (
                 "GREASEPENCIL",
                 "GREASE_PENCIL_HOOK",
@@ -4840,7 +4842,6 @@ class TestVisualObservationTools:
             ("warp", False),
             ("volume_displace", False),
             ("lineart_camera", False),
-            ("nodes_input", False),
             ("grease_pencil_hook", False),
             ("hook", True),
         ],
@@ -4886,8 +4887,6 @@ class TestVisualObservationTools:
             ("warp_from_only", False, False),
             ("volume_displace_local", False, False),
             ("lineart_scene_camera", False, False),
-            ("nodes_without_group", False, False),
-            ("nodes_missing_group", False, False),
             ("boolean_collection", True, False),
             ("data_transfer_geometry", True, False),
             ("array_cap", True, False),
@@ -4910,8 +4909,6 @@ class TestVisualObservationTools:
         put it; so did one a Hook of a disabled mesh named. A Boolean without
         the OBJECT operand, a Data Transfer without use_object_transform and
         an Array cap read only the geometry of a disabled child of the camera.
-        A Geometry Nodes modifier without a group, or whose linked group is
-        missing, relates nothing.
         """
         side, view_layer, objects = self._side_camera_a_modifier_names(
             setup, through_child, owner_disabled
@@ -4956,22 +4953,19 @@ class TestVisualObservationTools:
         assert "'Track To' (TRACK_TO)" in result["warning"]
         assert side.update_tags == []
 
-    @pytest.mark.parametrize("setup", ["nodes_input", "hook"])
     def test_get_camera_info_composes_a_camera_the_depsgraph_does_not_hold(
-        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, setup: str
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
         """A camera the viewport depsgraph does not hold is evaluated by nothing,
         whatever names it.
 
-        A script that sets a Geometry Nodes modifier's object input
-        (modifier[key] = object) leaves it unrelated until Blender next
-        rebuilds relations: on Blender 5.0.1 the camera so named, moved
-        before, was not in the depsgraph and kept a matrix_world 11 m from a
-        render, also after the script's owner.update_tag(), while the reply
-        said 'evaluated' with that stale pose.
+        Blender holds every object that something it evaluates relates to it.
+        On Blender 5.0.1 a camera that only a reference Blender had not
+        related yet named (a Geometry Nodes input a script had set) was not in
+        the depsgraph, and kept a matrix_world 11 m from a render.
         """
         side, view_layer, objects = self._side_camera_a_modifier_names(
-            setup, through_child=False
+            "hook", through_child=False
         )
         session = self._session_in(monkeypatch, view_layer, *objects, left_out=[side])
         self._move(side)
@@ -4980,6 +4974,45 @@ class TestVisualObservationTools:
 
         assert result["pose_source"] == "transform"
         assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert "'Track To' (TRACK_TO)" in result["warning"]
+        assert side.update_tags == []
+
+    @pytest.mark.parametrize("state", ["related", "script_set_while_held"])
+    def test_get_camera_info_composes_a_camera_only_a_geometry_nodes_input_names(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any, state: str
+    ) -> None:
+        """Geometry Nodes object inputs are not followed: Blender relates an input a
+        script sets (modifier[key] = object) only at its next relations update.
+
+        "related": an input set before Blender rebuilt relations. Blender
+        5.0.1 evaluated the camera then, and the reply composes it all the
+        same, as it cannot tell such an input from one a script set since.
+        "script_set_while_held": a script set the input after the camera
+        moved, while a muted Hook of another mesh named the camera, so the
+        depsgraph held it without evaluating it. On Blender 5.0.1 the camera
+        kept a matrix_world 11 m from a render, and the reply said
+        'evaluated' with that stale pose.
+        """
+        side, view_layer, objects = self._side_camera_a_modifier_names(
+            "nodes_input", through_child=False
+        )
+        held: List[Any] = []
+        if state == "script_set_while_held":
+            other = FakeTransformObject("Other", "MESH")
+            other.modifiers.append(
+                FakeObjectModifier("HOOK", show_viewport=False, object=side)
+            )
+            view_layer.layer_collection.collection.link(other)
+            objects.append(other)
+            held = [side]
+        session = self._session_in(monkeypatch, view_layer, *objects, held=held)
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert result["pose_source"] == "transform"
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
         assert "'Track To' (TRACK_TO)" in result["warning"]
         assert side.update_tags == []
 
