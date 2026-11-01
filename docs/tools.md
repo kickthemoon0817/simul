@@ -237,6 +237,26 @@ Behaviour worth knowing:
 - Screenshots need console-command execution enabled in Remote Control. When
   upgrading an older project, re-run `simul unreal setup` and restart the
   editor.
+- `execute_unreal_script` runs the code you send in the editor's persistent
+  Python console namespace through `PythonScriptLibrary.ExecutePythonCommandEx`,
+  in or out of PIE. On UE 5.7 avoid one engine hazard in that code: Unreal wraps
+  each static-library function
+  (`unreal.MaterialEditingLibrary.get_scalar_parameter_names`,
+  `unreal.EditorAssetLibrary.*`, `unreal.SystemLibrary.*`, every `*Library` /
+  `*Statics` call) and each struct method (`unreal.Vector.length`) in a
+  `builtin_function_or_method_with_closure` object whose weak-reference slot is
+  laid out one pointer past the end of the object. If such an object is left in
+  a reference cycle that becomes unreachable, the first cyclic garbage
+  collection that sweeps it crashes the editor in `_PyWeakref_ClearRef`. That
+  collection is often the editor's own, on autosave or level load, so the script
+  that built the cycle can return cleanly and the crash land minutes later. Call
+  these functions inline (`unreal.MaterialEditingLibrary.get_scalar_parameter_names(mat)`)
+  and don't stash them in a dict, list, closure or object that forms a cycle; a
+  reference that is dropped or stays reachable is safe. Module functions
+  (`unreal.load_asset`) and the common `unreal.Object` accessors
+  (`actor.get_name`, `actor.get_editor_property`) are a different, in-bounds
+  wrapper and are safe, and simul's own tools call the library functions inline,
+  so only `execute_unreal_script` payloads are exposed.
 
 ## Blender
 
