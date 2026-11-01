@@ -382,7 +382,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "Execute arbitrary Python code inside the Unreal Engine editor. "
             "Use for operations not covered by other tools. The code runs via "
             "PythonScriptLibrary.ExecutePythonCommandEx. Print JSON to return "
-            "structured data. For granular CLI operations see: simul unreal --help"
+            "structured data. UE 5.7 hazard: do not leave a reference to an "
+            "unreal static-library function (e.g. unreal.MaterialEditingLibrary.*, "
+            "unreal.EditorAssetLibrary.*) or a struct method (e.g. unreal.Vector.length) "
+            "in a reference cycle; a later garbage collection, including the editor's "
+            "own on autosave, crashes the editor. Call them inline. "
+            "For granular CLI operations see: simul unreal --help"
         ),
         response=UnrealExecuteScriptResponse,
         read_only=False,
