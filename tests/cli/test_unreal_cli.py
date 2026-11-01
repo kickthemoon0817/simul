@@ -436,6 +436,21 @@ def _stub_session_factory(monkeypatch, raw_result):
     return stub
 
 
+@pytest.mark.parametrize("flag", ["--mode", "-m"])
+def test_exec_unknown_mode_is_a_bad_invocation(monkeypatch, flag: str) -> None:
+    """An unknown --mode exits 2, the usage-error code, naming the modes, before any session exists."""
+    monkeypatch.setattr(unreal_cli, "_session", lambda *a, **kw: pytest.fail("exec reached the editor"))
+
+    result = runner.invoke(app, ["--json", "unreal", "exec", "print(1)", flag, "Bogus"])
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout) == {
+        "success": False,
+        "error": "Invalid mode 'Bogus'. Must be one of: EvaluateStatement, ExecuteFile, ExecuteStatement",
+        "error_type": "InvalidArgument",
+    }
+
+
 def test_exec_refuses_when_script_execution_disabled(monkeypatch):
     from unittest.mock import AsyncMock
 

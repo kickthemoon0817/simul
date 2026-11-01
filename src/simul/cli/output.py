@@ -275,13 +275,16 @@ def _require_utf8_argument(script: str) -> str:
 def _names_a_path(script: str) -> bool:
     """Whether a ``.py`` argument names something on disk, so it is a path and not code.
 
-    It does when ``stat`` finds it, whatever it is, or is refused permission
-    to look, as under a directory that can't be searched. Any other failure
-    leaves it code: no such file, or no possible file name, such as a long
-    inline script ending in ``.py`` (``OSError``, file name too long).
+    It does when ``lstat`` finds it, whatever it is, or is refused permission
+    to look, as under a directory that can't be searched. ``lstat`` does not
+    follow a symlink, so a broken one or a loop counts as a path too, and
+    then fails to read. A named pipe is read as ``python`` would read it,
+    waiting for its writer. Any other failure leaves it code: no such file,
+    or no possible file name, such as a long inline script ending in ``.py``
+    (``OSError``, file name too long).
     """
     try:
-        Path(script).stat()
+        Path(script).lstat()
     except PermissionError:
         return True
     except (OSError, ValueError):
@@ -295,13 +298,13 @@ def read_script_arg(script: Optional[str]) -> str:
     ``None`` reads stdin when it is piped. With nothing to read there (a
     terminal, or no stdin at all), it exits 2 with ``InputError``, since that
     is a bad invocation. A value ending in ``.py`` that names something on
-    disk is read as a file. When the read fails (a directory, no read
-    permission), it exits 2 with ``ReadError``, naming the path and the OS
-    reason, instead of sending the path to the engine as code. Anything else
-    is the code itself, including a ``.py`` value that names nothing. The
-    suffix is checked before touching the filesystem, and a long inline
-    script that does end in ``.py`` stays code: its stat fails with file name
-    too long.
+    disk is read as a file. When the read fails (a directory, a broken
+    symlink, no read permission), it exits 2 with ``ReadError``, naming the
+    path and the OS reason, instead of sending the path to the engine as
+    code. Anything else is the code itself, including a ``.py`` value that
+    names nothing. The suffix is checked before touching the filesystem, and
+    a long inline script that does end in ``.py`` stays code: its ``lstat``
+    fails with file name too long.
 
     The script must be UTF-8 however it arrives, and stdin is read as bytes
     so that neither the locale nor UTF-8 mode decides how it decodes. Input

@@ -46,11 +46,14 @@ _needs_file_modes = pytest.mark.skipif(
     sys.platform == "win32" or os.geteuid() == 0,
     reason="mode 000 binds neither root nor Windows",
 )
+_needs_symlinks = pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink on Windows needs a privilege")
 
 
 @pytest.fixture(
     params=[
         "directory",
+        pytest.param("broken-symlink", marks=_needs_symlinks),
+        pytest.param("symlink-loop", marks=_needs_symlinks),
         pytest.param("no-read-permission", marks=_needs_file_modes),
         pytest.param("unsearchable-parent", marks=_needs_file_modes),
     ]
@@ -62,6 +65,13 @@ def unreadable_py(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[tu
         script.mkdir()
         # Windows refuses to open a directory with EACCES rather than EISDIR.
         yield script, os.strerror(errno.EACCES if sys.platform == "win32" else errno.EISDIR)
+        return
+    if request.param in ("broken-symlink", "symlink-loop"):
+        # The link itself is on disk; opening it follows it to nothing, or round and round.
+        script = tmp_path / "job.py"
+        broken = request.param == "broken-symlink"
+        script.symlink_to(tmp_path / "gone.py" if broken else script)
+        yield script, os.strerror(errno.ENOENT if broken else errno.ELOOP)
         return
     folder = tmp_path / "locked" if request.param == "unsearchable-parent" else tmp_path
     folder.mkdir(exist_ok=True)

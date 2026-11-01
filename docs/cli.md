@@ -120,13 +120,16 @@ simul isaac capture shot.png --eye 3,3,2 --target 0,0,0
 ```
 
 `exec` takes the code itself, a path ending in `.py`, or, with no argument,
-code piped on stdin (`simul isaac exec < job.py`). A `.py` argument that names
-nothing on disk is taken as code. The command exits 2, a bad invocation, and
-sends nothing to Isaac Sim when:
+code piped on stdin (`simul isaac exec < job.py`). A redirected stdin is the
+script even when it is empty, so `< /dev/null` sends an empty script. A `.py`
+argument that names nothing on disk is taken as code. The command exits 2, a
+bad invocation, and sends nothing to Isaac Sim when:
 
-- there is no argument and nothing is piped on stdin (`error_type: InputError`);
-- the `.py` path exists but can't be read, such as a directory or a file
-  without read permission (`ReadError`, naming the path and the reason);
+- there is no argument and stdin is a terminal or closed
+  (`error_type: InputError`);
+- the `.py` path can't be read: a directory, a broken symlink, a file without
+  read permission, or a path under a directory that can't be searched
+  (`ReadError`, naming the path and the reason);
 - the script is not UTF-8, however it arrives (`InvalidEncoding`, naming the
   first bad byte). Under a locale whose encoding is not UTF-8, an argument
   that encoding can't decode is refused the same way, and the error names the
@@ -149,7 +152,7 @@ Commands accept `-H/--host` and `-p/--port` for the Remote Control endpoint
 | `sim ACTION`, `sim-status` | Play-In-Editor: `start`, `stop`, `pause`, `resume`, `step` |
 | `capture [OUTPUT] [--width] [--height] [--format png\|jpeg]` | Viewport screenshot |
 | `materials MATERIAL_PATH` | Parameters (with values and, for an instance, overrides), parent, domain and blend mode of a material or material instance |
-| `exec CODE_OR_FILE [--mode] [--raw]` | Run Python inside the editor; the script arrives as for [`simul isaac exec`](#simul-isaac) |
+| `exec CODE_OR_FILE [--mode] [--raw]` | Run Python inside the editor; the script arrives as for [`simul isaac exec`](#simul-isaac). `--mode` is `ExecuteFile` (the default), `ExecuteStatement` or `EvaluateStatement`; any other value exits 2 with `InvalidArgument` |
 
 `setup` flags: `--port` (default 30010), `--engine-path`, `--no-launch`,
 `--no-headless`, `--agent-overlay`, `--wait-timeout`, `--poll-interval`,
