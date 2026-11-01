@@ -3861,6 +3861,62 @@ class TestVisualObservationTools:
         assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
         assert result["pose_source"] == "transform"
 
+    @pytest.mark.parametrize(
+        ("role", "name"),
+        [("scene", "the scene camera"), ("marker", "a timeline marker's camera")],
+    )
+    def test_get_camera_info_composes_the_pose_of_a_scene_camera_whose_animated_hide_viewport_is_on(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mathutils: Any,
+        anim_utils: Any,
+        role: str,
+        name: str,
+    ) -> None:
+        """The scene camera, or a marker's, keeps a stale matrix_world while its
+        animated hide_viewport is on, and the warning names that role.
+
+        On Blender 5.0.1 such a camera, its hide_viewport keyframed on and
+        moved after its last evaluation, was reported 11 m from where a render
+        through it put it, and the composed pose was where the render put it.
+        The warning called it neither the scene camera nor a marker's camera,
+        and said to make it the scene camera.
+        """
+        side = _PartlyEvaluatedCamera(_track_to((5.0, 5.0, 0.0)))
+        side.animation_data = self._visibility_animation("keyframed")
+        root = FakeCollection("Scene Collection")
+        root.link(side)
+        bound: Dict[str, Any] = (
+            {"scene_camera": "Side"} if role == "scene" else {"marker_cameras": [side]}
+        )
+        session = self._session_in(
+            monkeypatch,
+            FakeViewLayer(FakeLayerCollection(root)),
+            side,
+            version=BLENDER_5_0,
+            **bound,
+        )
+        self._move(side)
+
+        result = session.get_camera_info("Side")
+
+        assert list(side.matrix_world.translation) == pytest.approx([1.0, 2.0, 3.0])
+        assert result["location"] == pytest.approx([7.0, -7.0, 5.0])
+        assert result["rotation_euler"] == pytest.approx([1.1, 0.25, 0.78])
+        assert result["pose_source"] == "transform"
+        warning = result["warning"]
+        assert warning.startswith(
+            "Blender may not evaluate camera 'Side' for the viewport, although it is "
+            f"{name}, as its hide_viewport is animated and on at this frame (Blender "
+            "evaluates a camera whose hide_viewport is animated only while it is "
+            "enabled in viewports), and nothing Blender evaluates depends on it"
+        )
+        assert "It leaves out its constraints ('Track To' (TRACK_TO))" in warning
+        assert warning.endswith(
+            "Change those settings or remove the animation of its hide_viewport to "
+            "have Blender evaluate it."
+        )
+
     def test_get_camera_info_checks_no_dependent_the_depsgraph_leaves_out(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:

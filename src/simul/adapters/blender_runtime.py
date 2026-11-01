@@ -4608,18 +4608,30 @@ class BlenderRuntimeSession:
             pose then misses. For a composed pose, that is its constraints
             (named), drivers and keys, and, when its parent may not be
             evaluated either, the parent's moves since its last evaluation.
+            For the scene camera or a marker's camera, it names the role and
+            its animated hide_viewport (_viewport_disablers).
         """
+        role = self._camera_role(camera)
+        if role is None:
+            cause = (
+                "as it is neither the scene camera nor a timeline marker's camera, "
+                f"{' and '.join(disablers)}"
+            )
+            remedy = "make it the scene camera"
+        else:
+            cause = (
+                f"although it is {role}, as {' and '.join(disablers)} (Blender "
+                "evaluates a camera whose hide_viewport is animated only while it is "
+                "enabled in viewports)"
+            )
+            remedy = "remove the animation of its hide_viewport"
         unevaluated = (
-            f"Blender may not evaluate camera {camera.name!r} for the viewport, as "
-            "it is neither the scene camera nor a timeline marker's camera, "
-            f"{' and '.join(disablers)}, and nothing Blender evaluates depends on "
-            "it through a child or a constraint, so its matrix_world may hold the "
-            "pose of an earlier evaluation."
+            f"Blender may not evaluate camera {camera.name!r} for the viewport, "
+            f"{cause}, and nothing Blender evaluates depends on it through a child "
+            "or a constraint, so its matrix_world may hold the pose of an earlier "
+            "evaluation."
         )
-        remedy = (
-            "Change those settings or make it the scene camera to have Blender "
-            "evaluate it."
-        )
+        remedy = f"Change those settings or {remedy} to have Blender evaluate it."
         parent = camera.parent
         if not composed:
             kind = (
