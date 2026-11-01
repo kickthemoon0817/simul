@@ -120,10 +120,18 @@ simul isaac capture shot.png --eye 3,3,2 --target 0,0,0
 ```
 
 `exec` takes the code itself, a path ending in `.py`, or, with no argument,
-code piped on stdin (`simul isaac exec < job.py`). The script must be UTF-8
-however it arrives: otherwise the command exits 2 with
-`error_type: InvalidEncoding`, naming the first bad byte, and sends nothing to
-Isaac Sim.
+code piped on stdin (`simul isaac exec < job.py`). A `.py` argument that names
+nothing on disk is taken as code. The command exits 2, a bad invocation, and
+sends nothing to Isaac Sim when:
+
+- there is no argument and nothing is piped on stdin (`error_type: InputError`);
+- the `.py` path exists but can't be read, such as a directory or a file
+  without read permission (`ReadError`, naming the path and the reason);
+- the script is not UTF-8, however it arrives (`InvalidEncoding`, naming the
+  first bad byte). Under a locale whose encoding is not UTF-8, an argument
+  that encoding can't decode is refused the same way, and the error names the
+  encoding. Pass such a script in a `.py` file or on stdin, which are always
+  read as UTF-8.
 
 ## `simul unreal`
 
