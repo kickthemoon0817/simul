@@ -1945,11 +1945,18 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         (``EditorActorSubsystem.set_actor_selection_state``), reads the
         selection back and reads the actor's location and bounds
         (``get_actor_bounds``: every primitive component, child actors'
-        included, less the frustum the editor draws for a camera or a 2D
-        scene capture, whose bounds reach 10 m on every side of it; the
-        editor's own Focus leaves it out too). The camera is then placed
-        ``distance`` behind the point it looks at (toward -X) and half as far
-        above it, pitched down at it, and read back.
+        included). The editor-only components the editor's own Focus leaves
+        out are left out of the bounds too, since theirs can reach far beyond
+        the actor: the frustum the editor draws for a camera or a scene
+        capture (10 m on every side of it), a CineCamera's debug focus plane
+        (100 m across at the focus distance, 1 km by default, and still there,
+        hidden, once turned off) and a spare icon attached to nothing, which a
+        SkyLight leaves at the world origin. A component that is not
+        editor-only always counts, such as a trigger box's collision shape,
+        and an actor whose ``get_actor_bounds`` is not the box around its
+        components (a level instance, a NavLinkProxy) keeps it. The camera is
+        then placed ``distance`` behind the point it looks at (toward -X) and
+        half as far above it, pitched down at it, and read back.
 
         A positive ``distance`` looks at the actor's location (its pivot).
         Distance 0 or less fits the actor in the view, as the editor's own Focus does:
