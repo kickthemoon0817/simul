@@ -261,6 +261,24 @@ def test_invalid_input_reports_the_check_and_the_input(monkeypatch: pytest.Monke
     ]
 
 
+def test_execute_script_description_warns_of_the_gc_cycle_hazard() -> None:
+    """The exec tool warns, in its own description, about the UE 5.7 Python GC crash.
+
+    On UE 5.7 a reference cycle that captures an unreal static-library function
+    or struct method (a ``builtin_function_or_method_with_closure``) crashes the
+    editor the next time Python's cyclic collector sweeps it — including the
+    editor's own autosave GC, after the offending script has returned. Simul's
+    own scripts call these functions inline and are safe, so the hazard only
+    reaches ``execute_unreal_script`` payloads; its description is where the
+    agent writing such a payload will see it.
+    """
+    description = SPECS["execute_unreal_script"].description.lower()
+
+    assert "5.7" in description
+    assert "cycle" in description
+    assert "inline" in description
+
+
 def test_invalid_input_spends_a_rate_limit_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """With one token, the invalid call spends it and the valid one after it is refused."""
     instance, session = _capture_server(monkeypatch, tmp_path, burst_size=1)
