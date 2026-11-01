@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import io
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Iterator, Optional
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -38,6 +40,49 @@ async def _returns(payload: Any) -> Any:
 
 async def _raises() -> Dict[str, Any]:
     raise ConnectionRefusedError("refused")
+
+
+_needs_file_modes = pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="mode 000 binds neither root nor Windows",
+)
+_needs_symlinks = pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink on Windows needs a privilege")
+
+
+@pytest.fixture(
+    params=[
+        "directory",
+        pytest.param("broken-symlink", marks=_needs_symlinks),
+        pytest.param("symlink-loop", marks=_needs_symlinks),
+        pytest.param("no-read-permission", marks=_needs_file_modes),
+        pytest.param("unsearchable-parent", marks=_needs_file_modes),
+    ]
+)
+def unreadable_py(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[tuple[Path, str]]:
+    """A ``.py`` path that exists but can't be read, and the reason the OS gives."""
+    if request.param == "directory":
+        script = tmp_path / "job.py"
+        script.mkdir()
+        # Windows refuses to open a directory with EACCES rather than EISDIR.
+        yield script, os.strerror(errno.EACCES if sys.platform == "win32" else errno.EISDIR)
+        return
+    if request.param in ("broken-symlink", "symlink-loop"):
+        # The link itself is on disk; opening it follows it to nothing, or round and round.
+        script = tmp_path / "job.py"
+        broken = request.param == "broken-symlink"
+        script.symlink_to(tmp_path / "gone.py" if broken else script)
+        yield script, os.strerror(errno.ENOENT if broken else errno.ELOOP)
+        return
+    folder = tmp_path / "locked" if request.param == "unsearchable-parent" else tmp_path
+    folder.mkdir(exist_ok=True)
+    script = folder / "job.py"
+    script.write_text("print(1)\n", encoding="utf-8")
+    closed = folder if request.param == "unsearchable-parent" else script
+    closed.chmod(0)
+    try:
+        yield script, os.strerror(errno.EACCES)
+    finally:
+        closed.chmod(0o755)
 
 
 @pytest.fixture
@@ -228,6 +273,20 @@ def test_read_script_arg_missing_py_file_is_treated_as_code() -> None:
     assert output.read_script_arg("does_not_exist.py") == "does_not_exist.py"
 
 
+def test_read_script_arg_refuses_a_py_path_it_cannot_read(unreadable_py: tuple[Path, str]) -> None:
+    """Exit 2 naming the path and the OS reason; the path must not go to the engine as code."""
+    script, reason = unreadable_py
+
+    result = _invoke(lambda: output.read_script_arg(str(script)))
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout) == {
+        "success": False,
+        "error": f"Script file {script} could not be read: {reason}.",
+        "error_type": "ReadError",
+    }
+
+
 def test_read_script_arg_reads_piped_stdin() -> None:
     seen: list[str] = []
     app = typer.Typer()
@@ -242,16 +301,27 @@ def test_read_script_arg_reads_piped_stdin() -> None:
     assert seen == ["print('piped')\n"]
 
 
-def test_read_script_arg_without_input_fails() -> None:
+@pytest.mark.parametrize("stdin", ["terminal", "closed"])
+def test_read_script_arg_without_input_is_a_bad_invocation(stdin: str) -> None:
+    """No script and nothing piped exits 2, the usage-error code, whether stdin is a terminal or absent."""
+
     def body() -> None:
-        # CliRunner swaps sys.stdin in during invoke, so pretend it's a terminal here.
-        with patch.object(output.sys.stdin, "isatty", return_value=True):
+        # CliRunner swaps sys.stdin in during invoke, so make it a terminal, or take it away, here.
+        if stdin == "terminal":
+            no_input = patch.object(output.sys.stdin, "isatty", return_value=True)
+        else:
+            no_input = patch.object(output.sys, "stdin", None)
+        with no_input:
             output.read_script_arg(None)
 
     result = _invoke(body)
 
-    assert result.exit_code == 1
-    assert json.loads(result.stdout)["error_type"] == "InputError"
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout) == {
+        "success": False,
+        "error": "Provide a script string, .py file path, or pipe code via stdin.",
+        "error_type": "InputError",
+    }
 
 
 def test_read_script_arg_rejects_a_py_file_that_is_not_utf8(tmp_path: Path) -> None:
@@ -286,22 +356,57 @@ def test_read_script_arg_rejects_piped_stdin_that_is_not_utf8() -> None:
 
 
 @pytest.mark.parametrize(
-    ("code", "problem"),
+    ("platform", "encoding", "code", "message"),
     [
-        # "# 한" and then the byte 0xff, as POSIX hands argv to Python (surrogateescape).
-        (b"# \xed\x95\x9c\nx = '\xff'".decode("utf-8", "surrogateescape"), "byte 0xff at offset 11"),
-        ("# 한\nx = '\ud800'", "lone surrogate U+D800 at offset 11"),
+        # POSIX hands argv to Python as bytes, decoded with the filesystem encoding and surrogateescape.
+        # Under UTF-8, "# 한" and then the byte 0xff arrive with U+DCFF standing for that byte.
+        (
+            "linux",
+            "utf-8",
+            b"# \xed\x95\x9c\nx = '\xff'".decode("utf-8", "surrogateescape"),
+            "Script argument is not valid UTF-8: byte 0xff at offset 11.",
+        ),
+        # Under ASCII the bytes of "한" can't be decoded either, though they are valid UTF-8.
+        (
+            "linux",
+            "ascii",
+            "print('한')".encode("utf-8").decode("ascii", "surrogateescape"),
+            "Script argument could not be decoded in the filesystem encoding (ascii); "
+            "pass the script in a .py file or on stdin, which are read as UTF-8.",
+        ),
+        # Windows hands argv over as UTF-16, so U+DCFF there is a lone surrogate, not a byte.
+        (
+            "win32",
+            "utf-8",
+            "# 한\nx = '\udcff'",
+            "Script argument is not valid UTF-8: lone surrogate U+DCFF at offset 11.",
+        ),
+        # No decoding of bytes yields U+D800, so it is named as itself.
+        (
+            "linux",
+            "utf-8",
+            "# 한\nx = '\ud800'",
+            "Script argument is not valid UTF-8: lone surrogate U+D800 at offset 11.",
+        ),
     ],
-    ids=["argv-byte", "other-surrogate"],
+    ids=["posix-utf8", "posix-ascii", "windows", "other-surrogate"],
 )
-def test_read_script_arg_rejects_an_argument_carrying_lone_surrogates(code: str, problem: str) -> None:
-    """A lone surrogate cannot go out as UTF-8 or be sized in it; the error names the byte argv carried."""
-    result = _invoke(lambda: output.read_script_arg(code))
+def test_read_script_arg_rejects_an_argument_carrying_lone_surrogates(
+    platform: str, encoding: str, code: str, message: str
+) -> None:
+    """A lone surrogate cannot go out as UTF-8 or be sized in it; the error names a byte only where argv's
+    decoding makes that byte and its offset exact."""
+
+    def body() -> None:
+        with patch.object(output.sys, "platform", platform), patch.object(
+            output.sys, "getfilesystemencoding", return_value=encoding
+        ):
+            output.read_script_arg(code)
+
+    result = _invoke(body)
 
     assert result.exit_code == 2, result.output
-    envelope = json.loads(result.stdout)
-    assert envelope["error_type"] == "InvalidEncoding"
-    assert envelope["error"] == f"Script argument is not valid UTF-8: {problem}."
+    assert json.loads(result.stdout) == {"success": False, "error": message, "error_type": "InvalidEncoding"}
 
 
 def test_read_script_arg_reads_a_multibyte_utf8_file_as_before(tmp_path: Path) -> None:
@@ -403,6 +508,42 @@ def test_exec_rejects_script_input_that_is_not_utf8_before_the_engine(
 
     assert result.exit_code == 2, result.output
     assert json.loads(result.stdout)["error_type"] == "InvalidEncoding"
+    assert sent_scripts == []
+
+
+@pytest.mark.parametrize("backend", ["isaac", "unreal"])
+def test_exec_refuses_a_py_path_it_cannot_read_before_the_engine(
+    backend: str, unreadable_py: tuple[Path, str], sent_scripts: list[str]
+) -> None:
+    script, reason = unreadable_py
+
+    result = runner.invoke(main_app, ["--json", backend, "exec", str(script)])
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout) == {
+        "success": False,
+        "error": f"Script file {script} could not be read: {reason}.",
+        "error_type": "ReadError",
+    }
+    assert sent_scripts == []
+
+
+@pytest.mark.parametrize("backend", ["isaac", "unreal"])
+def test_exec_without_a_script_or_piped_stdin_exits_2_before_the_engine(
+    backend: str, sent_scripts: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def from_a_terminal(script: Optional[str]) -> str:
+        # CliRunner swaps sys.stdin in during invoke, so make it a terminal from inside the command.
+        with patch.object(output.sys.stdin, "isatty", return_value=True):
+            return output.read_script_arg(script)
+
+    monkeypatch.setattr(isaac_cli, "read_script_arg", from_a_terminal)
+    monkeypatch.setattr(unreal_cli, "read_script_arg", from_a_terminal)
+
+    result = runner.invoke(main_app, ["--json", backend, "exec"])
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout)["error_type"] == "InputError"
     assert sent_scripts == []
 
 
