@@ -252,9 +252,10 @@ Behaviour worth knowing:
   that built the cycle can return cleanly and the crash land minutes later. Call
   these functions inline (`unreal.MaterialEditingLibrary.get_scalar_parameter_names(mat)`)
   and don't stash them in a dict, list, closure or object that forms a cycle; a
-  reference that is dropped or stays reachable is safe. Bound instance methods
-  (`actor.get_name`) and module functions (`unreal.load_asset`) use a different
-  wrapper and are unaffected, and simul's own tools call these functions inline,
+  reference that is dropped or stays reachable is safe. Module functions
+  (`unreal.load_asset`) and the common `unreal.Object` accessors
+  (`actor.get_name`, `actor.get_editor_property`) are a different, in-bounds
+  wrapper and are safe, and simul's own tools call the library functions inline,
   so only `execute_unreal_script` payloads are exposed.
 
 ## Blender
