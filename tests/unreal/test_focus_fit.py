@@ -64,8 +64,8 @@ class _Vector:
 class SceneComponent:
     """A scene component and the component it is attached to (None: attached to nothing)."""
 
-    def __init__(self) -> None:
-        self.parent: Any = None
+    def __init__(self, parent: Any = None) -> None:
+        self.parent: Any = parent
 
     def get_attach_parent(self) -> Any:
         return self.parent
@@ -129,6 +129,17 @@ def _union(
         tuple((lo + hi) / 2 for lo, hi in zip(low, high)),
         tuple((hi - lo) / 2 for lo, hi in zip(low, high)),
     )
+
+
+def _reported(
+    components: Sequence[PrimitiveComponent],
+) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+    """The same box as GetActorBounds reports it: FBox::GetCenterAndExtents puts the center
+    at Min + 0.5 * (Max - Min), which can differ from ``_union``'s in the last bit."""
+    low = [min(c.center[i] - c.extent[i] for c in components) for i in range(3)]
+    high = [max(c.center[i] + c.extent[i] for c in components) for i in range(3)]
+    half = [0.5 * (hi - lo) for lo, hi in zip(low, high)]
+    return tuple(lo + h for lo, h in zip(low, half)), tuple(half)
 
 
 class Actor:
@@ -492,22 +503,33 @@ def test_distance_0_frames_a_cine_camera_by_its_mesh_not_by_its_debug_focus_plan
     stood 1 km away and the CineCamera was out of sight (UE 5.7.4), also once the plane
     was turned off, which only hides it. The editor's own Focus ignores the plane's
     bounds, and so does the fit: the CineCamera is framed by its mesh, which is
-    editor-only as well but counts, as in the editor."""
-    camera = (0.0, 10000.0, 200.0)
+    editor-only as well but counts, as in the editor.
+
+    As in the editor, the mesh, the frustum and the plane hang from the
+    CineCameraComponent, which is attached to the actor's root, and get_actor_bounds
+    centers its box as Unreal does, here a last bit off the center of the box around
+    the components. The mesh still counts as attached under the root, and the box
+    Unreal reports still counts as the box around the components."""
+    camera = (250.6, 10000.0, 200.0)
     mesh = PrimitiveComponent(
-        (-46.0, 10000.0, 202.0), (47.4, 21.6, 27.7), editor_only=True
+        (204.6, 10000.0, 202.0), (47.4, 21.6, 27.7), editor_only=True
     )
     frustum = DrawFrustumComponent(camera)
     plane = PrimitiveComponent(
-        (100000.0, 10000.0, 200.0),
+        (100250.6, 10000.0, 200.0),
         (0.0, 5000.0, 5000.0),
         editor_only=True,
         ignore_focus=True,
     )
     components = [mesh, frustum, plane]
-    path = editor.add(
-        Actor("CineCameraActor_0", camera, *_union(components), components=components)
+    assert _reported(components) != _union(components)
+    actor = Actor(
+        "CineCameraActor_0", camera, *_reported(components), components=components
     )
+    cine_camera_component = SceneComponent(parent=actor.root_component)
+    for component in components:
+        component.parent = cine_camera_component
+    path = editor.add(actor)
 
     result = _focus(editor, monkeypatch, path)
 
