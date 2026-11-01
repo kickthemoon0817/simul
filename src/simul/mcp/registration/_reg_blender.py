@@ -793,7 +793,13 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         description=(
             "Get a Blender camera's world-space location and XYZ Euler rotation where "
             "Blender evaluates it (constraints included), the constraints that act on it "
-            "(constraints_applied), lens and clip range (the active camera by default)."
+            "(constraints_applied), lens and clip range (the active camera by default). "
+            "Blender keeps a stale pose for a camera disabled in viewports unless it is "
+            "needed by something visible through a child or a constraint, or is the "
+            "scene camera or a timeline marker's camera and its hide_viewport is not "
+            "animated: its pose is then composed from its own transform (pose_source "
+            "'transform'), without its constraints, drivers and keys, and warning says "
+            "what that leaves out."
         ),
         hints=READ_ONLY,
         operation="get_camera_info",
