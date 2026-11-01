@@ -49,6 +49,9 @@ def clean_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("CONFIG_FILE", raising=False)
     monkeypatch.delenv("ISAAC_SIM_PATH", raising=False)
     monkeypatch.delenv("ISAAC_SIM__PATH", raising=False)
+    # tests/conftest.py points the log files away from ~/.simul for the suite.
+    monkeypatch.delenv("LOGGING__FILE_PATH", raising=False)
+    monkeypatch.delenv("LOGGING__AUDIT_PATH", raising=False)
     config_module._get_cached_settings.cache_clear()
     yield
     config_module._get_cached_settings.cache_clear()

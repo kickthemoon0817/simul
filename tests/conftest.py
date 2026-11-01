@@ -52,6 +52,34 @@ def isaac_platform_supported() -> Iterator[None]:
         yield
 
 
+@pytest.fixture(autouse=True, scope="session")
+def simul_state_outside_home(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Keep the session records and logs the suite writes out of ``~/.simul``.
+
+    The session manager and the usage tracker default to directories under
+    ``~/.simul``, and ``setup_logging`` writes the log and audit files
+    ``Settings.logging`` names, so every run of the suite added test sessions
+    to ``~/.simul/sessions`` and test calls to ``~/.simul/logs``. This points
+    them all at one temporary directory: the two module defaults directly, the
+    two logging paths through their environment overrides, which the
+    subprocesses a test starts inherit too. The settings ``get_settings``
+    cached while the suite was imported predate those overrides, so the cache
+    is cleared. A test of the documented defaults removes the overrides first.
+    """
+    from simul import config
+    from simul.mcp import session_manager, usage_tracker
+
+    state = tmp_path_factory.mktemp("simul-state")
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(session_manager, "_DEFAULT_SESSION_DIR", state / "sessions")
+        patcher.setattr(usage_tracker, "_DEFAULT_LOG_DIR", state / "logs")
+        patcher.setenv("LOGGING__FILE_PATH", str(state / "logs" / "simul.log"))
+        patcher.setenv("LOGGING__AUDIT_PATH", str(state / "logs" / "audit.jsonl"))
+        config._get_cached_settings.cache_clear()
+        yield
+    config._get_cached_settings.cache_clear()
+
+
 @pytest.fixture
 def fake_fastmcp(monkeypatch: pytest.MonkeyPatch) -> Iterator[Type[FakeFastMCP]]:
     """Have the server build a recording ``FakeFastMCP`` instead of a real FastMCP.
