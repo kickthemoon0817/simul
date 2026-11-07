@@ -12,7 +12,6 @@ from typing import Any, Callable
 
 from ..blender_bridge.protocol import BridgeFiles, BridgeRemoteError, BridgeWire
 from ..config import Settings
-from ..resources import find_checkout_root
 from ..utils.discovery import DiscoveryDir
 from ..utils.errors import ScriptExecutionDisabled
 from ..utils.paths import PathPolicy, SandboxDenied
@@ -109,7 +108,9 @@ class BlenderConnection:
                 "path_policy": {
                     "enabled": policy.enabled,
                     "allowed_paths": [str(p) for p in policy.allowed_roots],
-                    "project_root": str(find_checkout_root() or Path.cwd()),
+                    # The add-on resolves a relative path against this, as
+                    # the server's own policy does.
+                    "project_root": str(policy.relative_base),
                     "allowed_url_schemes": policy.allowed_url_schemes,
                     "allowed_write_url_schemes": policy.allowed_write_url_schemes,
                 },

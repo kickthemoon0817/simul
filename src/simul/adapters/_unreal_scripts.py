@@ -1027,13 +1027,143 @@ def set_visibility(actor_path, visible, scope, propagate, persistent):
 print(json.dumps(set_visibility(**args)))
 """
 
-# Expects ``args`` = {"label", "match_mode", "max_results"}. Semantic labels
-# are actor tags. Matching ignores case, as Unreal's tag comparison (FName)
-# does: "exact" compares whole tags, "contains" looks for the label inside a
-# tag and "regex" searches each tag for the regular expression. Every match is
-# counted; the first max_results are returned as actor_info entries. While PIE
-# runs the editor world is searched (level_actors) and pie_active says so.
-FIND_ACTORS_BY_TAG = ACTOR_HELPERS + EDITOR_WORLD + """
+#: Most child actor paths a listing entry names; its ``child_count`` counts
+#: them all, and ``get_unreal_actor_info`` names more.
+LISTED_CHILDREN = 20
+
+#: Most child actor paths ``get_actor_info`` names; ``child_count`` counts them all.
+INFO_CHILDREN = 200
+
+# Helpers of the paged scene reads, after ACTOR_HELPERS (which holds EDITOR_WORLD).
+#
+# hierarchy(actor, listed): the attachment hierarchy as Unreal keeps it. The
+# parent is the actor whose component the actor's root component is attached
+# to (Actor.get_attach_parent_actor), or None; the children are the actors
+# attached to any of its components (Actor.get_attached_actors, direct ones
+# only), the first ``listed`` of them by path, with their count.
+#
+# class_matcher(class_filter, include_subclasses, actors): a test of a UClass,
+# and a warning or None. A class matches when its name (StaticMeshActor,
+# BP_Door_C) or path (/Script/Engine.StaticMeshActor) is the filter. With
+# include_subclasses a class also matches when it derives from the filter's
+# class (MathLibrary.class_is_child_of, so a Blueprint class derived from
+# PointLight matches Light). The filter's class is a /Script/ or Blueprint
+# class path, a Blueprint asset path, the name of a native class
+# (getattr(unreal, name)), or the name of the class of one of ``actors``, which
+# is how a Blueprint class name resolves; a filter that resolves to no class
+# matches by name only and comes with a warning.
+#
+# page(items, offset, limit, budget, render): the entries ``render`` makes of
+# items[offset:], stopping before the limit-th entry or before the entry that
+# would take the entries' JSON past ``budget`` characters (the first entry
+# always fits, so every page moves on). Returns the entries, the offset of the
+# next page (None when none is left) and what ended the page: "max_results",
+# "response_budget" or None.
+SCENE_READ_HELPERS = """
+def hierarchy(actor, listed):
+    parent = actor.get_attach_parent_actor()
+    children = list(actor.get_attached_actors())
+    return {"parent": parent.get_path_name() if parent is not None else None,
+            "children": [child.get_path_name() for child in children[:listed]],
+            "child_count": len(children)}
+
+def resolve_class(name, actors):
+    if "/" in name:
+        found = unreal.load_class(None, name)
+        if found is None and not name.endswith("_C"):
+            asset = name if "." in name.rpartition("/")[2] else name + "." + name.rpartition("/")[2]
+            found = unreal.load_class(None, asset + "_C")
+        return found
+    native = getattr(unreal, name, None)
+    if isinstance(native, type) and hasattr(native, "static_class"):
+        found = native.static_class()
+        if isinstance(found, unreal.Class):
+            return found
+    for actor in actors:
+        cls = actor.get_class()
+        if cls.get_name() == name:
+            return cls
+    return None
+
+def class_matcher(class_filter, include_subclasses, actors):
+    if not class_filter:
+        return (lambda cls: True), None
+    base, warning = None, None
+    if include_subclasses:
+        base = resolve_class(class_filter, actors)
+        if base is None:
+            warning = ("No class named " + repr(class_filter) + " was found, so only actors of a class "
+                       "with that name or path match. Pass a class path such as /Script/Engine.Light "
+                       "or /Game/Blueprints/BP_Door.BP_Door_C")
+    seen = {}
+
+    def matches(cls):
+        key = cls.get_path_name()
+        if key not in seen:
+            seen[key] = (class_filter in (cls.get_name(), key)
+                         or (base is not None and unreal.MathLibrary.class_is_child_of(cls, base)))
+        return seen[key]
+    return matches, warning
+
+def page(items, offset, limit, budget, render):
+    entries, used, index, ended = [], 0, offset, None
+    while index < len(items):
+        if len(entries) == limit:
+            ended = "max_results"
+            break
+        entry = render(items[index])
+        size = len(json.dumps(entry)) + 2
+        if entries and used + size > budget:
+            ended = "response_budget"
+            break
+        entries.append(entry)
+        used += size
+        index += 1
+    return entries, (index if index < len(items) else None), ended
+
+def listing_entry(actor, listed):
+    entry = {key: value for key, value in actor_info(actor).items() if key != "components"}
+    entry.update(hierarchy(actor, listed))
+    return entry
+"""
+
+# Expects ``args`` = {"class_filter", "include_subclasses", "tag_filter",
+# "label_filter", "offset", "max_results", "budget", "listed_children"}. Every
+# level actor is tested (class_matcher; an actor tag equal to tag_filter, as
+# Unreal's actor_has_tag compares; label_filter inside the actor label,
+# ignoring case) and counted in ``total``; one page of the matches, from
+# ``offset``, is rendered (page). While PIE runs the editor world is read
+# (level_actors) and pie_active says so.
+LIST_ACTORS = ACTOR_HELPERS + SCENE_READ_HELPERS + """
+actors = level_actors()
+matches_class, warning = class_matcher(args["class_filter"], args["include_subclasses"], actors)
+label = (args["label_filter"] or "").lower()
+found = [actor for actor in actors
+         if matches_class(actor.get_class())
+         and (not args["tag_filter"] or actor.actor_has_tag(args["tag_filter"]))
+         and (not label or label in actor.get_actor_label().lower())]
+entries, next_offset, ended = page(found, args["offset"], args["max_results"], args["budget"],
+                                   lambda actor: listing_entry(actor, args["listed_children"]))
+print(json.dumps({"actors": entries, "count": len(entries), "total": len(found), "offset": args["offset"],
+                  "next_offset": next_offset, "page_ended_by": ended,
+                  "warnings": [warning] if warning else [], "pie_active": pie_active()}))
+"""
+
+# Expects ``args`` = {"actor_path", "listed_children"}: actor_info with the
+# attachment hierarchy (hierarchy) and pie_active.
+ACTOR_INFO = ACTOR_HELPERS + SCENE_READ_HELPERS + """
+actor = actor_at(args["actor_path"])
+print(json.dumps(dict(actor_info(actor), **hierarchy(actor, args["listed_children"]), pie_active=pie_active())))
+"""
+
+# Expects ``args`` = {"label", "match_mode", "offset", "max_results",
+# "budget", "listed_children"}. Semantic labels are actor tags. Matching
+# ignores case, as Unreal's tag comparison (FName) does: "exact" compares whole
+# tags, "contains" looks for the label inside a tag and "regex" searches each
+# tag for the regular expression. Every match is counted; one page of them,
+# from ``offset``, is returned as listing entries (page). While PIE runs the
+# editor world is searched (level_actors) and pie_active says so.
+FIND_ACTORS_BY_TAG = ACTOR_HELPERS + SCENE_READ_HELPERS + """
 label, mode = args["label"], args["match_mode"]
 if mode == "regex":
     pattern = re.compile(label, re.IGNORECASE)
@@ -1045,15 +1175,175 @@ def matches(tag):
         return label.lower() in tag.lower()
     return tag.lower() == label.lower()
 
-actors = []
-total = 0
-for actor in level_actors():
-    if any(matches(str(tag)) for tag in actor.get_editor_property("tags")):
-        total += 1
-        if len(actors) < args["max_results"]:
-            actors.append(actor_info(actor))
-print(json.dumps({"actors": actors, "total_matches": total,
-                  "truncated": total > len(actors), "label_searched": label,
+found = [actor for actor in level_actors()
+         if any(matches(str(tag)) for tag in actor.get_editor_property("tags"))]
+entries, next_offset, ended = page(found, args["offset"], args["max_results"], args["budget"],
+                                   lambda actor: listing_entry(actor, args["listed_children"]))
+print(json.dumps({"actors": entries, "count": len(entries), "total_matches": len(found),
+                  "offset": args["offset"], "next_offset": next_offset, "page_ended_by": ended,
+                  "label_searched": label, "pie_active": pie_active()}))
+"""
+
+# Expects ``args`` = {"root_path", "max_depth", "include_components",
+# "class_filter", "include_subclasses", "offset", "max_results", "budget"}.
+# The attachment hierarchy of the level actors: an actor's parent is the
+# actor its root component is attached to (get_attach_parent_actor), and an
+# actor attached to nothing, or to an actor the level does not list, is a top
+# actor. The root is the level, whose children are the top actors, or the
+# actor at root_path, whose children are the actors attached to it. With a
+# class filter (class_matcher) an actor is kept when it matches or when one of
+# its descendants does, so the path down to every match stays; a kept actor
+# that does not match has matches_filter false. One page of the root's kept
+# children, from ``offset``, is rendered with their descendants down to
+# max_depth levels below the root (the root's children are level 1); an actor
+# whose children are below that has children_truncated. When the first
+# subtree of a page alone is over the budget, it is rendered shallower until it
+# fits, and depth_limited names it. total_actors and total_depth count every
+# kept actor below the root, whatever the page and max_depth. Components, with
+# include_components, are each actor's components with their class and the
+# component of the same actor they are attached to (None for the root and for
+# components that are not scene components). While PIE runs the editor world is
+# read (level_actors) and pie_active says so.
+SCENE_GRAPH = ACTOR_HELPERS + SCENE_READ_HELPERS + """
+actors = level_actors()
+listed = {actor.get_path_name() for actor in actors}
+children, tops = {}, []
+for actor in actors:
+    parent = actor.get_attach_parent_actor()
+    if parent is not None and parent.get_path_name() in listed:
+        children.setdefault(parent.get_path_name(), []).append(actor)
+    else:
+        tops.append(actor)
+matches_class, warning = class_matcher(args["class_filter"], args["include_subclasses"], actors)
+filtering = bool(args["class_filter"])
+keeps = {}
+
+def kept(actor):
+    path = actor.get_path_name()
+    if path not in keeps:
+        keeps[path] = True
+        keeps[path] = (matches_class(actor.get_class())
+                       or any([kept(child) for child in children.get(path, [])]))
+    return keeps[path]
+
+def kept_children(actor):
+    return [child for child in children.get(actor.get_path_name(), []) if kept(child)]
+
+def components_of(actor):
+    root = actor.root_component
+    listed_components = []
+    for component in actor.get_components_by_class(unreal.ActorComponent):
+        attach = component.get_attach_parent() if isinstance(component, unreal.SceneComponent) else None
+        listed_components.append({
+            "name": component.get_name(), "class_name": component.get_class().get_name(),
+            "is_root": component == root,
+            "attach_parent": attach.get_name() if attach is not None and component != root else None})
+    return listed_components
+
+def node(actor, depth, max_depth):
+    below = kept_children(actor)
+    entry = {"name": actor.get_actor_label(), "path": actor.get_path_name(),
+             "class_name": actor.get_class().get_name(), "child_count": len(below), "children": []}
+    if filtering:
+        entry["matches_filter"] = matches_class(actor.get_class())
+    if args["include_components"]:
+        entry["components"] = components_of(actor)
+    if depth < max_depth:
+        entry["children"] = [node(child, depth + 1, max_depth) for child in below]
+    elif below:
+        entry["children_truncated"] = True
+    return entry
+
+if args["root_path"]:
+    root_actor = actor_at(args["root_path"])
+    top = kept_children(root_actor)
+    root = node(root_actor, 0, 0)
+    root.pop("children_truncated", None)
+else:
+    world = editor_world()
+    top = [actor for actor in tops if kept(actor)]
+    root = {"name": world.get_name() if world else "", "path": world.get_path_name() if world else "",
+            "class_name": "World", "child_count": len(top), "children": []}
+
+total_actors, total_depth, stack = 0, 0, [(actor, 1) for actor in top]
+while stack:
+    actor, depth = stack.pop()
+    total_actors += 1
+    total_depth = max(total_depth, depth)
+    stack.extend((child, depth + 1) for child in kept_children(actor))
+
+shallower = {}
+
+def render(actor):
+    depth = args["max_depth"]
+    entry = node(actor, 1, depth)
+    while depth > 1 and len(json.dumps(entry)) > args["budget"]:
+        depth -= 1
+        entry = node(actor, 1, depth)
+        shallower[entry["path"]] = depth
+    return entry
+
+entries, next_offset, ended = page(top, args["offset"], args["max_results"], args["budget"], render)
+root["children"] = entries
+
+def count_nodes(entry):
+    return 1 + sum(count_nodes(child) for child in entry["children"])
+
+print(json.dumps({"root": root, "total_actors": total_actors, "total_depth": total_depth,
+                  "returned_actors": sum(count_nodes(entry) for entry in entries),
+                  "count": len(entries), "total": len(top), "offset": args["offset"],
+                  "next_offset": next_offset, "page_ended_by": ended,
+                  "depth_limited": [{"path": entry["path"], "depth": shallower[entry["path"]]}
+                                    for entry in entries if entry["path"] in shallower],
+                  "warnings": [warning] if warning else [], "pie_active": pie_active()}))
+"""
+
+# Expects ``args`` = {"actor_path", "class_filter", "offset", "max_results",
+# "budget"}. Every component of the actor (get_components_by_class
+# ActorComponent, editor-only ones such as sprites included), or those whose
+# class name or path is class_filter or derives from it (class_matcher with
+# subclasses). Scene components report the component they are attached to
+# (its name when it is the actor's own, its path when it belongs to another
+# actor: the root of an attached actor), their world location, mobility and
+# visibility; primitive components also their world bounds
+# (SystemLibrary.get_component_bounds: the box's center and half-size and the
+# bounding sphere's radius, in cm). One page, from ``offset`` (page).
+ACTOR_COMPONENTS = ACTOR_HELPERS + SCENE_READ_HELPERS + """
+actor = actor_at(args["actor_path"])
+root = actor.root_component
+found = list(actor.get_components_by_class(unreal.ActorComponent))
+if args["class_filter"]:
+    matches_class, warning = class_matcher(args["class_filter"], True, [])
+    found = [component for component in found if matches_class(component.get_class())]
+else:
+    warning = None
+
+def vector(value):
+    return [value.x, value.y, value.z]
+
+def component_entry(component):
+    entry = {"name": component.get_name(), "path": component.get_path_name(),
+             "class_name": component.get_class().get_name(), "is_root": component == root,
+             "is_scene_component": isinstance(component, unreal.SceneComponent),
+             "editor_only": bool(component.get_editor_property("is_editor_only")),
+             "attach_parent": None, "location": None, "mobility": None, "visible": None, "bounds": None}
+    if isinstance(component, unreal.SceneComponent):
+        attach = component.get_attach_parent()
+        if attach is not None:
+            entry["attach_parent"] = (attach.get_name() if attach.get_owner() == actor
+                                      else attach.get_path_name())
+        entry["location"] = vector(component.get_world_location())
+        entry["mobility"] = component.mobility.name.title()
+        entry["visible"] = bool(component.is_visible())
+    if isinstance(component, unreal.PrimitiveComponent):
+        origin, extent, radius = unreal.SystemLibrary.get_component_bounds(component)
+        entry["bounds"] = {"origin": vector(origin), "extent": vector(extent), "sphere_radius": radius}
+    return entry
+
+entries, next_offset, ended = page(found, args["offset"], args["max_results"], args["budget"], component_entry)
+print(json.dumps({"actor_path": actor.get_path_name(), "components": entries, "count": len(entries),
+                  "total": len(found), "offset": args["offset"], "next_offset": next_offset,
+                  "page_ended_by": ended, "warnings": [warning] if warning else [],
                   "pie_active": pie_active()}))
 """
 

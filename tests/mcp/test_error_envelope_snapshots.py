@@ -503,7 +503,7 @@ def test_blender_missing_object_is_not_found(
         "success": False,
         "error": "Object not found: Ghost",
         "error_type": "NotFoundError",
-        "details": None,
+        "details": {"code": "object_not_found", "object_name": "Ghost"},
     }
 
 

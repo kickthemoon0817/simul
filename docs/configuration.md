@@ -135,6 +135,7 @@ variable, so Blender must see the same `SIMUL_HOME` as the server (or set
 | `VIEWPORT__MAX_SIZE` | `2048` | Largest capture dimension |
 | `USD__ALLOWED_EXTENSIONS` | `[".usd",".usda",".usdc",".usdz"]` | Extensions the headless USD tools and `simul usd` commands open; load and validate share the list |
 | `USD__MAX_FILE_SIZE_MB` | `500` | Largest file they open; a bigger one fails with `FileTooLarge` |
+| `SECURITY__RELATIVE_PATH_BASE` | unset | Directory a relative tool path resolves against; unset uses the server's working directory ([File sandbox](#file-sandbox)) |
 
 `simul logs paths` prints the log locations the current settings resolve
 to, and `simul logs tail --follow` streams them.
@@ -150,7 +151,12 @@ Unreal's `call_unreal_actor_function` and `batch_unreal_operations`
 dispatchers, and `simul isaac exec` / `simul unreal exec` return a
 `ScriptExecutionDisabled` error. The server's instructions and the other
 tools' descriptions then no longer point at the script tools. The fixed
-granular tools, including `control_unreal_ui`, keep working.
+granular tools, including `control_unreal_ui`, keep working. The Isaac prim
+tools refuse the writes that would plant code instead
+(`ScriptExecutionDisabled`): code-carrying attributes such as
+`inputs:script*` and `inputs:codeStr`, a `node:type` that runs code
+(ScriptNode, omni.warp's WarpKernel, Replicator's OgnAugment), any write to
+such a node, creating one and duplicating a subtree that holds one.
 
 Isaac Sim also runs Python that an OmniGraph node carries as data:
 `omni.graph.scriptnode.ScriptNode` runs its `inputs:script`,
@@ -159,18 +165,23 @@ augmentation and condition nodes run their `*Script` inputs. Both
 `omni.graph.scriptnode` and `omni.warp` are enabled in Isaac Sim's own
 `.kit`. With the switch off, these tools refuse with `ScriptExecutionDisabled`:
 
-- `create_isaac_graph_node` refuses those node types and any type with
-  `script` or `warp` in its name.
-- `set_isaac_graph_node_values` refuses code attributes (any name containing
-  `script` or `code`, without regard to case) and any write to a
-  script-capable node.
+- `create_isaac_graph_node` refuses those node types and any type whose
+  name has a word starting with `script`.
+- `set_isaac_graph_node_values` refuses code attributes (a name with a word
+  starting with `script` or `code`) and any write to a script-capable node.
 - `connect_isaac_graph_nodes` refuses a connection into a code attribute or
   into a script-capable node.
 - `import_isaac_asset` and `add_isaac_reference` refuse an asset whose
   composed content holds such a node.
 - `enable_isaac_extension` refuses `omni.graph.scriptnode`,
-  `omni.kit.scripting`, `omni.warp` and any extension with `script` or
-  `warp` in its name.
+  `omni.kit.scripting`, `omni.warp` and any extension whose name has a word
+  starting with `script`.
+
+Names are split into words at `.`, `:`, `_`, `-` and camelCase boundaries,
+so `inputs:codeStr` and `inputs:augmentationScript` count as code
+attributes while `inputs:usdTimecode` does not, and
+`omni.isaac.robot_description_editor` is not a script extension. The other
+`omni.warp` nodes, which run fixed kernels, stay usable.
 
 Routes this does not close: the prim-editing tools (`set_isaac_prim_attribute`
 on a node's code attribute or `node:type`, `create_isaac_prim` and
@@ -253,6 +264,21 @@ schemes in `allowed_url_schemes` (reads, default `omniverse`) and
 `SECURITY__ALLOWED_PATHS='["/abs/project","/tmp/simul-work"]'` to widen it.
 The `simul` CLI is operated by you and is not sandboxed.
 
+A relative path passed to a tool resolves against
+`security.sandbox.relative_path_base` (`SECURITY__RELATIVE_PATH_BASE`). When
+it is unset, the path resolves against the directory the server was started
+in. Over stdio that is the directory the client launched it from, so
+`scenes/robot.usda` names the client's file. This replaces the source
+checkout, which an editable install used to resolve against. Relative
+`allowed_paths` entries still resolve against the checkout, because they name
+its directories. A `SandboxError` reports the path as given (`file_path`),
+made absolute without following symlinks (`absolute_path`), and for a
+relative path the base it resolved against (`relative_to`). When the path
+sits inside an allowed root, it also reports where it leads with symlinks
+followed (`resolved_path`), so a link inside the sandbox that points out of
+it is visible. A path outside the sandbox is never followed, so a refusal
+cannot reveal where symlinks elsewhere on disk point.
+
 An allowed root inside a world-writable directory, such as the default
 `/tmp/simul-work`, must belong to you. Any local user can create a directory
 in `/tmp` first and read or plant what agents write there, so before the
@@ -302,13 +328,21 @@ URL passes when its scheme is in `allowed_url_schemes`. To use a file whose
 references or textures live elsewhere, add that directory to
 `security.allowed_paths`.
 
+The headless USD tools open a URL only through an asset resolver registered
+for its scheme. usd-core installs none, so `load_usd_file` refuses an
+`omniverse://` URL with `LoadError`, `details.reason: UnsupportedURL` (and
+`validate_usd_file` reports that code), although the scheme passes the
+sandbox. Copy the asset into the sandbox and pass its local path. Isaac Sim
+tools hand such URLs to Isaac Sim, which can resolve them.
+
 ### Refusals
 
 Some operations refuse by default to protect the running application and
 your data. Each refusal is a structured `RefusedOperation` error:
 
 - `delete_isaac_prim` refuses `/`, and refuses `/World` unless
-  `allow_root_delete=true`.
+  `allow_root_delete=true`. A prim from a referenced asset is deactivated
+  rather than removed (`mode="remove"` refuses it instead).
 - `disable_isaac_extension` refuses the transport extensions
   (`khemoo.simul`, `isaacsim.code_editor.python_server`,
   `isaacsim.code_editor.vscode`).
@@ -330,8 +364,18 @@ your data. Each refusal is a structured `RefusedOperation` error:
 ### Rate limiting
 
 `security.rate_limiting` limits calls per agent session and per tool
-(`SECURITY__REQUESTS_PER_MINUTE`, `SECURITY__BURST_SIZE`), with an overall
-per-agent cap across all tools. An Unreal tool's own argument checks (such as
+(`SECURITY__REQUESTS_PER_MINUTE`, default 60, `SECURITY__BURST_SIZE`,
+default 10), with an overall per-agent cap across all tools
+(`SECURITY__GLOBAL_REQUESTS_PER_MINUTE`, default 600, burst a sixth of it).
+The headless USD per-prim queries (`get_prim_info`, `get_mesh_info`,
+`get_bounding_box`, `search_prims`) count only against that per-agent cap.
+They are local reads an agent issues once per prim while it inspects an
+asset, and the per-tool burst refused most of a prim-by-prim pass over a
+small robot. Every other tool, including `load_usd_file`,
+`validate_usd_file`, `summarize_scene` and the USD edit tools, spends from
+both buckets. Raise `SECURITY__REQUESTS_PER_MINUTE` and
+`SECURITY__BURST_SIZE`, or set `SECURITY__RATE_LIMITING_ENABLED=false` for a
+trusted single-agent setup, if a workflow needs more. An Unreal tool's own argument checks (such as
 `capture_unreal_viewport`'s format, `execute_unreal_script`'s mode, the
 all-or-none camera groups of `set_unreal_camera_view` and `control_unreal_ui`'s
 control and property names) run inside the shared envelope, so a call they

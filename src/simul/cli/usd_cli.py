@@ -185,6 +185,10 @@ def validate(
         ...,
         help="Path to USD file to validate",
     ),
+    config: Optional[Path] = typer.Option(
+        None, "--config", "-c", help="Configuration file",
+        exists=True, file_okay=True, dir_okay=False,
+    ),
 ) -> None:
     """Open a USD file with pxr and report what is wrong with it.
 
@@ -194,7 +198,7 @@ def validate(
     leave the file valid.
     """
     _require_usd()
-    settings = get_settings()
+    settings = load_settings(config) if config else get_settings()
 
     from simul.usd.validation import validate_usd_file
 
@@ -292,6 +296,7 @@ def summary(
         # JSON output: --json flag OR --format json
         if is_json_mode() or format == "json":
             out = {
+                "success": True,
                 "file_path": result.file_path,
                 "total_prims": result.total_prims,
                 "prim_type_counts": result.prim_type_counts,
@@ -301,8 +306,9 @@ def summary(
                 "hierarchy_depth": result.hierarchy_depth,
                 "mesh_statistics": result.mesh_statistics,
             }
-            # BUG FIX: write JSON to stdout, not stderr via Rich console
-            print(json.dumps(out, indent=2))
+            # stdout, not the Rich console (stderr); --json gets one line like
+            # every other command, --format json keeps the indented form.
+            print(json.dumps(out) if is_json_mode() else json.dumps(out, indent=2))
             return
 
         console.print(Panel.fit(

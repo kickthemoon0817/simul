@@ -30,7 +30,13 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # Version 10: setup_rigid_body, add_force_field and add_rigid_body_constraint take new settings
 # (kinematic, direction, axis, limits, springs, motors, ...) and check them up front;
 # bake_simulation takes allow_long_bake and refuses a bake over its work budget without it.
-PROTOCOL_VERSION = 10
+# Version 11: assign_material replaces the object's material instead of appending a slot, reuses
+# a material of the same name, and takes slot_index, face_indices, link, single_user,
+# reuse_existing and texture files; get_material_info takes max_nodes; set_light_params takes
+# light_type, angle, size, size_y and shape and refuses settings of another light type;
+# uv_unwrap_mesh is new. An older add-on would reject the arguments, or, left without them,
+# append a slot no face uses (the bug the new assignment fixes).
+PROTOCOL_VERSION = 11
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 
