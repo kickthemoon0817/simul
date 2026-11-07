@@ -35,6 +35,7 @@ from ._pxr import Sdf, Tf, Usd, UsdGeom
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..config import USDConfig
+    from .sandbox import CompositionSandbox
 
 ERROR = "error"
 WARNING = "warning"
@@ -775,18 +776,26 @@ def _file_size(file_path: str) -> int:
     return info.st_size if stat.S_ISREG(info.st_mode) else 0
 
 
-def validate_usd_file(file_path: str, usd_config: "USDConfig") -> ValidationReport:
+def validate_usd_file(
+    file_path: str, usd_config: "USDConfig", sandbox: Optional["CompositionSandbox"] = None
+) -> ValidationReport:
     """Open a USD file the way the loader does and report every problem found.
 
     Args:
         file_path: Absolute path of the file. The MCP tool passes the path the
             sandbox resolved; the CLI passes the resolved argument.
         usd_config: The ``usd`` settings shared with the loader.
+        sandbox: Holds every layer and asset the stage draws on to the file
+            sandbox, as the loader does; None (the CLI) checks nothing beyond
+            the file.
 
     Returns:
         The report. ``can_read`` says whether pxr opened the file (and so
         whether ``load_usd_file`` can); ``is_valid`` additionally needs no
         error-severity issue.
+
+    Raises:
+        SandboxDenied: The file's composition reaches outside the sandbox.
     """
     report = ValidationReport(
         file_path=file_path,
@@ -802,6 +811,7 @@ def validate_usd_file(file_path: str, usd_config: "USDConfig") -> ValidationRepo
 
     file_format = root_layer.GetFileFormat()
     report.layer_format = file_format.formatId
+    walked = sandbox.check_layers(root_layer) if sandbox is not None else []
     try:
         stage = Usd.Stage.Open(root_layer, Usd.Stage.LoadAll)
     except Tf.ErrorException as exc:
@@ -820,6 +830,9 @@ def validate_usd_file(file_path: str, usd_config: "USDConfig") -> ValidationRepo
         )
         return report
 
+    if sandbox is not None:
+        sandbox.check_stage(stage)
+    del walked
     report.can_read = True
     default_prim = stage.GetDefaultPrim()
     report.default_prim = str(default_prim.GetPath()) if default_prim else None

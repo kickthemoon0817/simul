@@ -246,3 +246,65 @@ class TestCaptureDirectory:
         policy = _policy(tmp_path, enabled=False)
         expected = str(Path(tempfile.gettempdir()) / "simul" / "captures")
         assert policy.default_capture_dir() == expected
+
+
+class TestReadCheck:
+    """``read_check`` gives ``is_allowed``'s verdict for file-named paths, memoised."""
+
+    def test_agrees_with_is_allowed(self, tmp_path: Path) -> None:
+        policy = _policy(tmp_path)
+        inside = tmp_path / "sandbox"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.usda").write_text("x")
+        (inside / "real.usda").write_text("x")
+        (inside / "dir").mkdir()
+        (inside / "to_outside.usda").symlink_to(outside / "secret.usda")
+        (inside / "dir_link").symlink_to(outside, target_is_directory=True)
+        (inside / "to_inside.usda").symlink_to(inside / "real.usda")
+        candidates = [
+            str(inside / "real.usda"),
+            str(inside / "missing.usda"),
+            str(inside / "dir" / "missing" / "deep.usda"),
+            str(inside / "to_outside.usda"),
+            str(inside / "dir_link" / "secret.usda"),
+            str(inside / "dir_link" / ".." / "sandbox" / "real.usda"),
+            str(inside / "dir" / ".." / "real.usda"),
+            str(inside / "to_inside.usda"),
+            str(outside / "secret.usda"),
+            str(inside),
+            (inside / "real.usda").as_uri(),
+            "omniverse://nucleus/a.usd",
+            "https://example.com/a.usd",
+            "relative_root/a.usda",
+            "",
+        ]
+        check = policy.read_check()
+        for candidate in candidates:
+            assert check(candidate) is policy.is_allowed(candidate), candidate
+            assert check(candidate) is policy.is_allowed(candidate), candidate  # memoised
+
+    def test_takes_file_named_paths_literally(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A directory literally named ``$VAR`` is not expanded the way a caller's path is.
+
+        A layer naming ``<sandbox>/$SIMUL_TEST_DIR/secret.usda``, where that
+        directory is a symlink out of the sandbox, makes pxr read outside it;
+        expanding the variable to a path inside would pass it.
+        """
+        policy = _policy(tmp_path)
+        inside = tmp_path / "sandbox"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.usda").write_text("x")
+        (inside / "$SIMUL_TEST_DIR").symlink_to(outside, target_is_directory=True)
+        monkeypatch.setenv("SIMUL_TEST_DIR", str(inside))
+        named = str(inside / "$SIMUL_TEST_DIR" / "secret.usda")
+
+        assert policy.is_allowed(named)  # a caller's path: $VARS expand
+        assert policy.read_check()(named) is False
+
+    def test_disabled_policy_allows_everything(self, tmp_path: Path) -> None:
+        check = _policy(tmp_path, enabled=False).read_check()
+        assert check("/etc/shadow") is True

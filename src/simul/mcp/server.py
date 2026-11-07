@@ -1360,7 +1360,7 @@ class SimulMCPServer(LoggerMixin):
             The error envelope.
         """
         if isinstance(exc, SandboxDenied):
-            return sandbox_error(exc.details)
+            return sandbox_error(exc.details, error=exc.error_message)
         error_type = exception_type_name(exc)
         message = exception_message(exc)
         self.logger.error("Tool %s failed: %s: %s", tool_name, error_type, message)
