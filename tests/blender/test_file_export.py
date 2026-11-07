@@ -200,7 +200,7 @@ class FakeBlender:
                 gltf=self._op("import_scene.gltf", {"filepath": None}, self._import),
                 fbx=self._op(
                     "import_scene.fbx",
-                    {"filepath": None, "global_scale": None},
+                    {"filepath": None, "global_scale": None, "use_image_search": None},
                     self._import,
                 ),
             ),
@@ -1386,7 +1386,10 @@ def test_an_fbx_texture_found_beside_it_imports(
 
     session.import_file(str(fbx), "FBX")
 
-    assert _call(fake, "import_scene.fbx") == {"filepath": str(fbx)}
+    assert _call(fake, "import_scene.fbx") == {
+        "filepath": str(fbx),
+        "use_image_search": False,
+    }
 
 
 def test_a_usd_texture_or_layer_outside_the_sandbox_is_refused(
@@ -1487,3 +1490,170 @@ def test_references_are_not_checked_with_the_sandbox_off(
     session.import_file(str(gltf), "GLTF")
 
     assert _call(fake, "import_scene.gltf") == {"filepath": str(gltf)}
+
+
+# -- review of #324: searches and fallbacks the importers make ----------------
+
+
+def test_fbx_import_switches_blenders_recursive_image_search_off_in_the_sandbox(
+    fake: FakeBlender, session: Any, tmp_path: Path, outside: Path, fbx_parser: Any
+) -> None:
+    """use_image_search walked the texture's folder and found a same-named image
+    deeper down, outside the sandbox, which a GLB export then embedded."""
+    (outside / "tex" / "deep").mkdir(parents=True)
+    (outside / "tex" / "deep" / "missing.png").write_bytes(b"\\x89PNG secret")
+    fbx = tmp_path / "model.fbx"
+    fbx.write_bytes(b"Kaydara FBX Binary")
+    relative = os.path.relpath(outside / "tex" / "missing.png", tmp_path)
+    fbx_parser.textures.append({b"RelativeFilename": relative})
+
+    session.import_file(str(fbx), "FBX")
+
+    assert _call(fake, "import_scene.fbx")["use_image_search"] is False
+
+
+def test_fbx_import_keeps_the_image_search_with_the_sandbox_off(
+    fake: FakeBlender, tmp_path: Path, fbx_parser: Any
+) -> None:
+    session = blender_runtime.BlenderRuntimeSession(
+        settings=Settings(security={"sandbox_enabled": False})
+    )
+    fbx = tmp_path / "model.fbx"
+    fbx.write_bytes(b"Kaydara FBX Binary")
+
+    session.import_file(str(fbx), "FBX")
+
+    assert "use_image_search" not in _call(fake, "import_scene.fbx")
+
+
+def test_an_fbx_texture_named_only_by_its_object_name_is_checked(
+    fake: FakeBlender, session: Any, tmp_path: Path, outside: Path, fbx_parser: Any
+) -> None:
+    """Without a file name the importer loads the texture's own name as a path."""
+    fbx = tmp_path / "model.fbx"
+    fbx.write_bytes(b"Kaydara FBX Binary")
+    fbx_parser.textures.append({b"name": str(outside / "secret.png")})
+
+    with pytest.raises(PermissionError) as raised:
+        session.import_file(str(fbx), "FBX")
+
+    _assert_refused(raised, outside / "secret.png", fbx)
+
+
+def test_an_fbx_texture_spelled_in_another_case_is_checked(
+    fake: FakeBlender, session: Any, tmp_path: Path, outside: Path, fbx_parser: Any
+) -> None:
+    """load_image resolves the case of a path that does not exist (resolve_ncase)."""
+    fbx = tmp_path / "model.fbx"
+    fbx.write_bytes(b"Kaydara FBX Binary")
+    fbx_parser.textures.append({b"FileName": str(outside / "SECRET.PNG")})
+
+    with pytest.raises(PermissionError) as raised:
+        session.import_file(str(fbx), "FBX")
+
+    (reported,) = raised.value.details["references_outside"]
+    assert reported.lower() == str(outside / "secret.png").lower()
+
+
+def test_resolve_ncase_matches_blenders_on_a_case_sensitive_file_system(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """bpy.path.resolve_ncase, which load_image tries for each path."""
+    tree = {"/r": ["Textures"], "/r/Textures": ["Wood.PNG", "x"]}
+    files = {"/r", "/r/Textures", "/r/Textures/Wood.PNG", "/r/Textures/x"}
+    monkeypatch.setattr(blender_runtime.os.path, "exists", lambda p: p in files)
+    monkeypatch.setattr(blender_runtime.os.path, "isdir", lambda p: p in tree)
+    monkeypatch.setattr(blender_runtime.os, "listdir", lambda p: tree[p])
+
+    resolve = blender_runtime._resolve_ncase
+    assert resolve("/r/textures/wood.png") == "/r/Textures/Wood.PNG"
+    assert resolve("/r/Textures/Wood.PNG") == "/r/Textures/Wood.PNG"
+    assert resolve("/r/textures/stone.png") == "/r/textures/stone.png"
+    assert resolve("/elsewhere/a.png") == "/elsewhere/a.png"
+
+
+@pytest.mark.parametrize("fmt", ["GLTF", "FBX", "OBJ"])
+def test_references_outside_name_the_resolved_file(
+    fake: FakeBlender,
+    session: Any,
+    tmp_path: Path,
+    outside: Path,
+    fbx_parser: Any,
+    fmt: str,
+) -> None:
+    """They listed the ../../ path as the reference spelled it."""
+    folder = tmp_path / "deep"
+    folder.mkdir()
+    climb = os.path.relpath(outside / "secret.png", folder)
+    if fmt == "GLTF":
+        imported = folder / "model.gltf"
+        _write_gltf(imported, [climb.replace(os.sep, "/")])
+    elif fmt == "FBX":
+        imported = folder / "model.fbx"
+        imported.write_bytes(b"Kaydara FBX Binary")
+        fbx_parser.textures.append({b"RelativeFilename": climb})
+    else:
+        imported = folder / "mesh.obj"
+        (folder / "mesh.mtl").write_text(f"newmtl M\nmap_Kd {climb}\n")
+        imported.write_text("mtllib mesh.mtl\no M\n")
+
+    with pytest.raises(PermissionError) as raised:
+        session.import_file(str(imported), fmt)
+
+    assert raised.value.details["references_outside"] == [str(outside / "secret.png")]
+    assert ".." not in raised.value.details["file_path"]
+
+
+def test_a_usd_asset_the_resolver_finds_on_its_search_path_is_checked(
+    monkeypatch: pytest.MonkeyPatch,
+    fake: FakeBlender,
+    session: Any,
+    tmp_path: Path,
+    outside: Path,
+) -> None:
+    """A search-path asset missing beside the layer resolves through
+    PXR_AR_DEFAULT_SEARCH_PATH, which may point outside the sandbox."""
+    stage = tmp_path / "scene.usda"
+    stage.write_text('#usda 1.0\ndef "T" {\n    asset inputs:file = @textures/secret.png@\n}\n')
+    hits = {"textures/secret.png": str(outside / "secret.png")}
+    monkeypatch.setattr(
+        blender_runtime,
+        "_usd_search_path_hit",
+        lambda ar, asset, layer, anchored: hits.get(asset),
+    )
+
+    with pytest.raises(PermissionError) as raised:
+        session.import_file(str(stage), "USD")
+
+    _assert_refused(raised, outside / "secret.png", stage)
+
+
+def test_usd_search_path_hit_asks_the_resolver_only_for_missing_anchored_paths(
+    tmp_path: Path,
+) -> None:
+    class Resolver:
+        def __init__(self) -> None:
+            self.asked: List[Any] = []
+
+        def CreateIdentifier(self, asset: str, anchor: Any) -> str:  # noqa: N802
+            self.asked.append((asset, anchor))
+            return asset
+
+        def Resolve(self, identifier: str) -> str:  # noqa: N802
+            return "/search/textures/a.png"
+
+    resolver = Resolver()
+    ar = SimpleNamespace(
+        GetResolver=lambda: resolver,
+        ResolvedPath=lambda path: ("resolved", path),
+        SplitPackageRelativePathOuter=lambda path: (path, ""),
+    )
+    (tmp_path / "here.png").write_bytes(b"x")
+
+    hit = blender_runtime._usd_search_path_hit
+    assert hit(ar, "here.png", "/l.usda", str(tmp_path / "here.png")) is None
+    assert resolver.asked == []
+    assert hit(ar, "textures/a.png", "/l.usda", str(tmp_path / "textures/a.png")) == (
+        "/search/textures/a.png"
+    )
+    assert resolver.asked == [("textures/a.png", ("resolved", "/l.usda"))]

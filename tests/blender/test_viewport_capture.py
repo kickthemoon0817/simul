@@ -859,7 +859,14 @@ def _sequence_session(
     """A session whose captures are recorded and return a tiny JPEG."""
     fake = FakeBlender(tmp_path)
     fake.scene.frame_current = 7
-    fake.scene.frame_set = lambda frame: setattr(fake.scene, "frame_current", frame)
+    fake.scene.frame_subframe = 0.0
+    fake.frames_set: List[Tuple[int, float]] = []
+
+    def frame_set(frame: int, subframe: float = 0.0) -> None:
+        fake.frames_set.append((frame, subframe))
+        fake.scene.frame_current, fake.scene.frame_subframe = frame, subframe
+
+    fake.scene.frame_set = frame_set
     session = _session(monkeypatch, fake, tmp_path)
     calls: List[Dict[str, Any]] = []
 
@@ -900,6 +907,19 @@ def test_sequence_writes_each_frame_to_a_file_and_returns_its_path(
     assert (result["width"], result["height"], result["format"]) == (512, 256, "jpeg")
     assert result["capture_method"] == "viewport"
     assert len(json.dumps(result)) < 2_000
+
+
+def test_a_sequence_restores_the_subframe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Frame 7.25 came back as 7.0."""
+    fake, session, _calls = _sequence_session(monkeypatch, tmp_path)
+    fake.scene.frame_subframe = 0.25
+
+    session.capture_viewport_sequence(1, 2)
+
+    assert fake.frames_set[-1] == (7, 0.25)
+    assert (fake.scene.frame_current, fake.scene.frame_subframe) == (7, 0.25)
 
 
 def test_a_reversed_frame_range_is_refused(

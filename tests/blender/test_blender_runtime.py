@@ -1517,7 +1517,7 @@ class TestVisualObservationTools:
                 for frame, camera in enumerate(marker_cameras, start=frame_current)
             ],
         )
-        scene.frame_set = lambda f: setattr(scene, "frame_current", f)
+        scene.frame_set = lambda f, subframe=0.0: setattr(scene, "frame_current", f)
 
         class MaterialStore:
             def get(self, name: str) -> Optional[Any]:
@@ -1919,29 +1919,29 @@ class TestVisualObservationTools:
         )
 
     @pytest.mark.parametrize(
-        "half",
+        ("half", "start_moved", "end_moved"),
         [
             # A 60 m cube stands about 275 m away, past the 100 m clip_end.
-            30.0,
+            (30.0, False, True),
             # A 1 cm cube stands about 5 cm away, nearer than the 10 cm clip_start.
-            0.005,
-            # The default cube.
-            1.0,
+            (0.005, True, False),
+            # The default cube inside the default clip range changes nothing.
+            (1.0, False, False),
         ],
-        ids=["far", "near", "default"],
+        ids=["far", "near", "inside"],
     )
-    def test_focus_on_object_sets_a_clip_range_for_the_object(
+    def test_focus_on_object_widens_a_clip_range_that_cuts_the_object_away(
         self,
         monkeypatch: pytest.MonkeyPatch,
         mathutils: Any,
         half: float,
+        start_moved: bool,
+        end_moved: bool,
     ) -> None:
         """Every corner lies inside the clip range afterwards, and the reply says so.
 
         The 60 m cube used to land 165 to 250 m away, beyond clip_end, so the
-        camera saw nothing while the tool reported success. The range starts
-        half way to the object's bounding sphere and spans a ratio of 1000,
-        as Blender's default camera does.
+        camera saw nothing while the tool reported success.
         """
         cam = self._make_camera_object(clip_start=0.1, clip_end=100.0)
 
@@ -1956,36 +1956,9 @@ class TestVisualObservationTools:
             cam.data.clip_start,
             cam.data.clip_end,
         )
-        radius = half * math.sqrt(3)
-        assert cam.data.clip_start == pytest.approx((result["distance"] - radius) / 2)
-        assert cam.data.clip_end == pytest.approx(1000 * cam.data.clip_start)
-        assert result["clip_adjusted"] is True
-
-    def test_focus_on_a_tiny_object_after_a_huge_one_narrows_the_clip_range(
-        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
-    ) -> None:
-        """Only widening left a 2 mm object framed at 0.0037 to 2577 m."""
-        cam = self._make_camera_object(clip_start=0.1, clip_end=100.0)
-        self._focus(monkeypatch, self._cube(half=250.0), cam)
-        assert cam.data.clip_end > 2000.0
-
-        result = self._focus(monkeypatch, self._cube(half=0.001), cam)
-
-        assert cam.data.clip_start == pytest.approx(
-            (result["distance"] - 0.001 * math.sqrt(3)) / 2
-        )
-        assert cam.data.clip_end < 10.0
-        assert result["clip_adjusted"] is True
-
-    def test_focusing_again_on_the_same_object_changes_no_clip_range(
-        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
-    ) -> None:
-        cam = self._make_camera_object(clip_start=0.1, clip_end=100.0)
-        self._focus(monkeypatch, self._cube(), cam)
-
-        again = self._focus(monkeypatch, self._cube(), cam)
-
-        assert again["clip_adjusted"] is False
+        assert (cam.data.clip_start != 0.1) is start_moved
+        assert (cam.data.clip_end != 100.0) is end_moved
+        assert result["clip_adjusted"] is (start_moved or end_moved)
 
     def test_focus_on_object_fits_an_orthographic_camera_by_its_scale(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
@@ -7207,6 +7180,9 @@ class TestFileIOTools:
             fake_bpy._ops_calls.append({"op": "import_scene.fbx", **kwargs})
             objs["FBXObj"] = FakeObject("FBXObj", "MESH", True)
 
+        fake_fbx_import.get_rna_type = lambda: SimpleNamespace(  # type: ignore[attr-defined]
+            properties={"filepath": None, "use_image_search": None}
+        )
         fake_bpy.ops.import_scene.fbx = fake_fbx_import
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -7216,6 +7192,8 @@ class TestFileIOTools:
 
         assert result["file_format"] == "FBX"
         assert "FBXObj" in result["imported_objects"]
+        # The sandbox keeps the importer from searching folders for textures.
+        assert fake_bpy._ops_calls[0]["use_image_search"] is False
 
     def test_import_unsupported_format(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Importing an unsupported format raises ValueError."""

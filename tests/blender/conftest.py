@@ -49,7 +49,8 @@ def fbx_parser(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 
     import_file reads an FBX's texture paths through it before importing.
     Append ``{b"FileName": ..., b"RelativeFilename": ...}`` dicts to the
-    returned module's ``textures`` for the Texture objects the file holds.
+    returned module's ``textures`` for the Texture objects the file holds; a
+    ``b"name"`` entry is the object's name, which the importer falls back to.
 
     Returns:
         The installed ``parse_fbx`` module.
@@ -66,8 +67,12 @@ def fbx_parser(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
         objects = [
             element(
                 b"Texture",
-                [],
-                [element(key, [value.encode()], []) for key, value in texture.items()],
+                [0, texture.get(b"name", "").encode() + b"\x00\x01Texture", b""],
+                [
+                    element(key, [value.encode()], [])
+                    for key, value in texture.items()
+                    if key != b"name"
+                ],
             )
             for texture in textures
         ]

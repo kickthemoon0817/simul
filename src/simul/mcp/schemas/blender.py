@@ -730,7 +730,7 @@ class BlenderFocusOnObjectResponse(BaseModel):
     )
     clip_adjusted: Optional[bool] = Field(
         None,
-        description="True when the clip range changed: it is set for the object",
+        description="True when the clip range was widened so it spans the object",
     )
     ortho_scale: Optional[float] = Field(
         None,

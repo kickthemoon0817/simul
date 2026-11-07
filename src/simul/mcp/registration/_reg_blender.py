@@ -828,8 +828,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Frame a Blender object with a camera (the active one by default): aim it from "
             "the front and above at the object's bounding-box center, at the distance where "
             "the object fits the frame (an orthographic camera gets the ortho_scale that fits "
-            "it), and set the clip range for it: from half way to the object to 1000 times "
-            "that, at least twice its far side (clip_adjusted when that changed it). As with "
+            "it), widening the clip range when it would cut the object away. As with "
             "set_blender_camera_view, success means the framing is in the camera's "
             "transform and its constraints still apply: camera_location and "
             "camera_rotation_euler report where Blender evaluates the camera, and "
@@ -977,7 +976,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         name="import_blender_file",
         description=(
             "Import an OBJ, FBX, glTF, USD, STL or PLY file into the Blender scene, "
-            "optionally scaled about the world origin (scale)."
+            "optionally scaled about the world origin (scale). The textures, buffers, MTL "
+            "libraries and USD layers it would read must be inside the sandbox too, or it is "
+            "refused with SandboxError; within the sandbox the FBX importer does not search "
+            "folders for textures."
         ),
         hints=ADDITIVE,
         operation="import_file",

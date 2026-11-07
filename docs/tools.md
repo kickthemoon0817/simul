@@ -422,9 +422,15 @@ Behaviour worth knowing:
   the layers inside the sandbox. An existing file outside the sandbox is refused
   with `SandboxError` before anything is imported; `details.references_outside`
   lists those files and `details.referenced_by` the imported file. A reference to
-  a missing file reads nothing and passes. USD files are read through pxr, which
-  Blender bundles; without pxr a binary USD file, or a text one that composes
-  other layers, is refused.
+  a missing file reads nothing and passes. The check follows the importers'
+  fallbacks: an FBX texture's case-insensitive match (Blender's
+  `resolve_ncase`) and its name when it stores no path, an MTL texture's base
+  name beside the MTL, and USD's resolver search paths. The FBX importer's
+  recursive image search (`use_image_search`), which walked the texture's
+  folder and found a same-named image outside the sandbox, is switched off
+  while the sandbox is on, so an FBX texture must be at the path it stores or
+  beside the FBX. USD files are read through pxr, which Blender bundles; without
+  pxr a binary USD file, or a text one that composes other layers, is refused.
 - `set_blender_camera_view` and `get_blender_camera_info` work in world space:
   `location` and an XYZ Euler `rotation_euler` in radians, whatever the
   camera's parent and rotation mode (glTF imports store quaternions).
@@ -433,11 +439,8 @@ Behaviour worth knowing:
   the frame through the camera's field of view, the render aspect ratio, sensor
   fit and lens shift (`distance_factor: 1.0`, the default; 2.0 shows the object
   at half that size). An orthographic camera gets the `ortho_scale` that fits
-  instead. The clip range is set for the object rather than only widened (a
-  2 mm object framed after a 500 m one kept 0.0037 to 2577 m): `clip_start` half
-  way to its bounding sphere, `clip_end` 1000 times that (the depth ratio of
-  Blender's default camera) and at least twice the sphere's far side. The reply
-  reports `distance`, `clip_start`, `clip_end` and `clip_adjusted`.
+  instead. A clip range that would cut the object away is widened, and the
+  reply reports `distance`, `clip_start`, `clip_end` and `clip_adjusted`.
 - Both placing tools write the camera's own transform; Blender then applies
   the camera's constraints (Track To, Copy Location, Child Of, ...) and drivers
   on top, so success does not mean the camera ends up at the placement. The

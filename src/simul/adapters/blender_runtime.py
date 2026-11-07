@@ -100,10 +100,6 @@ DEFAULT_SEQUENCE_FRAMES = 50
 MAX_SEQUENCE_FRAMES = 100
 SEQUENCE_TIME_BUDGET_SECONDS = 10.0
 
-# focus_on_object's clip range spans this ratio, as Blender's default camera
-# does (0.1 m to 100 m), from half way to the framed object.
-_FOCUS_CLIP_RATIO = 1000.0
-
 # Engines the draw manager draws itself, so an offscreen redraw of a 3D View
 # shows them. An external engine (Cycles, third-party) draws its Rendered view
 # only into the on-screen editor; offscreen, only the overlays would appear.
@@ -631,13 +627,65 @@ def _obj_reads(path: Path) -> List[List[str]]:
     return reads
 
 
+def _resolve_ncase(path: str) -> str:
+    """Find a path's real spelling on a case-sensitive file system.
+
+    Mirrors ``bpy.path.resolve_ncase`` (Blender 4.2 through 5.0.1), which
+    ``bpy_extras.image_utils.load_image`` tries after each path: a component
+    that does not exist is matched case-insensitively among its folder's
+    entries. Returns the path unchanged when nothing matches.
+    """
+
+    def found(candidate: str) -> Tuple[str, bool]:
+        if not candidate or os.path.exists(candidate):
+            return candidate, True
+        filename, folder = os.path.basename(candidate), os.path.dirname(candidate)
+        suffix = ""
+        if not filename:
+            if len(folder) < len(candidate):
+                suffix = candidate[len(folder) :]
+            filename, folder = os.path.basename(folder), os.path.dirname(folder)
+        if not os.path.exists(folder):
+            if folder == candidate:
+                return candidate, False
+            folder, ok = found(folder)
+            if not ok:
+                return candidate, False
+        if not os.path.isdir(folder):
+            return candidate, False
+        try:
+            entries = os.listdir(folder)
+        except OSError:
+            return candidate, False
+        lower = filename.lower()
+        match = next((entry for entry in entries if entry.lower() == lower), None)
+        if match is None:
+            return candidate, False
+        return os.path.join(folder, match) + suffix, True
+
+    return found(path)[0]
+
+
+def _fbx_element_name(element: Any) -> str:
+    """An FBX object's name: the part of its name property before the class."""
+    props = getattr(element, "props", None) or []
+    if len(props) < 2 or not isinstance(props[-2], bytes):
+        return ""
+    return props[-2].split(b"\x00\x01")[0].decode("utf-8", "replace")
+
+
 def _fbx_reads(path: Path, allowed: Callable[[str], bool]) -> List[List[str]]:
     """List the texture files an FBX names, as Blender's FBX importer looks for them.
 
-    It takes a texture's RelativeFilename joined to the FBX's folder, or its
-    FileName, then tries that path, the path joined to the folder, and its
-    base name there (bpy_extras.image_utils.load_image). Blender's own FBX
-    parser reads the file; a file it cannot parse fails the import itself.
+    blen_read_texture_image takes a texture's RelativeFilename joined to the
+    FBX's folder (stripped of a leading separator), else its FileName or
+    Filename, else the texture's name. bpy_extras.image_utils.load_image then
+    tries that path, the path joined to the folder and its base name there,
+    each also with its case resolved (resolve_ncase). Its recursive search of
+    folders, the importer's use_image_search, is switched off for an import
+    the sandbox checks (import_file), so it reads nothing found that way.
+    Blender's own FBX parser reads the file; a file it cannot parse fails the
+    import itself.
     """
     try:
         from io_scene_fbx import parse_fbx  # type: ignore[import-not-found]
@@ -665,19 +713,22 @@ def _fbx_reads(path: Path, allowed: Callable[[str], bool]) -> List[List[str]]:
                     names.setdefault(prop.id, str(value))
             relative = names.get(b"RelativeFilename")
             if relative:
-                image = os.path.join(base, relative.lstrip("/\\"))
+                # str.lstrip(None) strips whitespace, as the importer's
+                # lstrip(os.path.altsep) does where altsep is None.
+                image = os.path.join(base, relative.lstrip(os.path.sep).lstrip(os.path.altsep))
             else:
                 image = names.get(b"FileName") or names.get(b"Filename") or ""
             if not image:
+                image = _fbx_element_name(element)
+            if not image:
                 continue
+            # bpy.path.native_pathsep, as load_image applies it.
             image = image.replace("\\", "/") if os.sep == "/" else image.replace("/", "\\")
-            reads.append(
-                [
-                    os.path.abspath(image),
-                    os.path.join(base, image),
-                    os.path.join(base, os.path.basename(image)),
-                ]
-            )
+            short = image[2:] if image[:2] == "//" else image
+            candidates = [image]
+            for variant in (image, os.path.join(base, image), os.path.join(base, os.path.basename(short))):
+                candidates.extend((variant, _resolve_ncase(variant)))
+            reads.append(list(dict.fromkeys(candidates)))
     return reads
 
 
@@ -727,14 +778,40 @@ def _usd_reads(path: Path, allowed: Callable[[str], bool]) -> List[List[str]]:
                 tiles = glob.glob(outer.replace("<UDIM>", "[0-9][0-9][0-9][0-9]"))
                 reads.extend([tile] for tile in tiles)
                 continue
-            reads.append([outer])
-            if not (outer.lower().endswith(_USD_LAYER_EXTENSIONS) and allowed(outer)):
+            # A path such as "textures/a.png" that does not exist beside the
+            # layer is looked up in the resolver's search paths
+            # (PXR_AR_DEFAULT_SEARCH_PATH), as the import's stage does.
+            found = _usd_search_path_hit(Ar, asset, identifier, outer)
+            reads.append([outer] if found is None else [outer, found])
+            target = found if found is not None and not os.path.exists(outer) else outer
+            if not (target.lower().endswith(_USD_LAYER_EXTENSIONS) and allowed(target)):
                 continue
-            if inner:
+            if inner and target == outer:
                 pending.append(resolved)
-            elif os.path.isfile(outer):
-                pending.append(outer)
+            elif os.path.isfile(target):
+                pending.append(target)
     return reads
+
+
+def _usd_search_path_hit(ar: Any, asset: str, layer_path: str, anchored: str) -> Optional[str]:
+    """Where the USD resolver finds ``asset`` for a layer, when that is not beside it.
+
+    Returns:
+        The file the resolver resolves the asset to, outside its package if
+        it is in one, or None when that is the anchored path or nothing.
+    """
+    if os.path.exists(anchored):
+        return None
+    try:
+        resolver = ar.GetResolver()
+        identifier = resolver.CreateIdentifier(asset, ar.ResolvedPath(layer_path))
+        hit = str(resolver.Resolve(identifier))
+    except Exception:
+        return None
+    if not hit:
+        return None
+    outer = os.path.normpath(ar.SplitPackageRelativePathOuter(hit)[0])
+    return None if outer == anchored else outer
 
 
 def _usda_text_reads(path: Path) -> List[List[str]]:
@@ -764,6 +841,13 @@ def _usda_text_reads(path: Path) -> List[List[str]]:
 class UncheckableReferences(Exception):
     """The files an import would read cannot be listed, so the sandbox cannot vouch for them."""
 
+
+# Importer options that search folders for a file a reference names, set off
+# while the sandbox is on: the FBX importer's use_image_search walks the
+# texture's folder and the FBX's, subfolders included, for any file of the
+# same name (bpy_extras.image_utils.load_image), which found and loaded an
+# image outside the sandbox. No other importer searches.
+_IMPORT_SEARCH_OPTIONS: Dict[str, Tuple[str, ...]] = {"FBX": ("use_image_search",)}
 
 _IMPORT_READS: Dict[str, Callable[[Path, Callable[[str], bool]], List[List[str]]]] = {
     "GLTF": lambda path, _allowed: _gltf_reads(path),
@@ -1507,11 +1591,10 @@ class BlenderRuntimeSession:
         view side) and turns level toward it. It stands where the box's
         bounding sphere fits its frame: its field of view through the scene's
         render aspect ratio, sensor fit and lens shift. An orthographic camera
-        gets the ortho_scale that fits the sphere instead. The clip range is
-        set for the object (_clip_around): from half way to the sphere to a
-        thousand times that, at least twice the sphere's far side. The
-        transform is world space whatever the camera's parent and rotation
-        mode.
+        gets the ortho_scale that fits the sphere instead. A clip range that
+        does not span the sphere is widened, so the object is not clipped
+        away. The transform is world space whatever the camera's parent and
+        rotation mode.
 
         As with set_camera_view, the camera's constraints and drivers apply on
         top of this placement and are left as they are; the reply reports
@@ -1532,7 +1615,7 @@ class BlenderRuntimeSession:
             camera; the framing placement when the check is skipped), look_at
             (the bounding-box center the placement aims at), distance (from
             the placement to look_at), clip_start, clip_end, clip_adjusted
-            (whether the clip range changed), ortho_scale (None unless the
+            (whether the clip range was widened), ortho_scale (None unless the
             camera is orthographic), and placement_overridden, override_check,
             constraints_applied and warning (_placement_check).
 
@@ -1738,7 +1821,9 @@ class BlenderRuntimeSession:
         folder = self._sequence_folder(output_dir)
         blender_module: Any = bpy
         scene = blender_module.context.scene
+        # frame_set(7) alone would turn frame 7.25 into 7.0.
         original_frame = scene.frame_current
+        original_subframe = float(getattr(scene, "frame_subframe", 0.0))
         requested = range(start_frame, end_frame + 1, step)
 
         frames: List[Dict[str, Any]] = []
@@ -1768,7 +1853,7 @@ class BlenderRuntimeSession:
                 capture_method = result.get("capture_method", capture_method)
                 size = (result.get("width"), result.get("height"))
         finally:
-            scene.frame_set(original_frame)
+            scene.frame_set(original_frame, subframe=original_subframe)
 
         next_start = requested[len(frames)] if len(frames) < len(requested) else None
         return {
@@ -2274,8 +2359,15 @@ class BlenderRuntimeSession:
             Dict with file_path, file_format, imported_objects, scale and
             warning (None unless something needs attention).
 
+        Files the import would read besides file_path (textures, buffers, MTL
+        libraries, USD layers) must be inside the sandbox too
+        (_refuse_reads_outside_sandbox). While the sandbox is on, the FBX
+        importer's recursive image search (use_image_search) is off: a texture
+        must be at the path the FBX stores, or beside the FBX.
+
         Raises:
-            PermissionError: If the path is outside the sandbox policy.
+            PermissionError: If the path, or a file the import would read, is
+                outside the sandbox policy.
             FileNotFoundError: If the file does not exist.
             ValueError: If the format is unsupported or scale is not positive.
         """
@@ -2302,6 +2394,11 @@ class BlenderRuntimeSession:
                 scale_roots = scale
             else:
                 kwargs[prop] = scale
+        if self._path_policy.enabled:
+            # Search options that find files the reference check cannot vouch for.
+            for option in _IMPORT_SEARCH_OPTIONS.get(fmt, ()):
+                if self._operator_property(op_func, (option,)):
+                    kwargs[option] = False
         _bpy_op(f"Failed to import {fmt} file '{file_path}'", op_func, **kwargs)
 
         new_names = [
@@ -3102,8 +3199,10 @@ class BlenderRuntimeSession:
         for candidates in reads:
             found = next((c for c in candidates if os.path.exists(c)), None)
             if found is not None and not self._path_policy.is_allowed(found):
-                if found not in outside:
-                    outside.append(found)
+                # Reported as the file it is, without ../ steps or symlinks.
+                real = str(self._path_policy.resolve(found))
+                if real not in outside:
+                    outside.append(real)
         if not outside:
             return
         details = self._path_policy.denial_details(outside[0])
@@ -5329,14 +5428,7 @@ class BlenderRuntimeSession:
     @staticmethod
     def _clip_around(data: Any, distance: float, radius: float) -> bool:
         """
-        Give a camera a clip range for a sphere ``distance`` ahead of it.
-
-        clip_start lies half way to the sphere's front and clip_end
-        _FOCUS_CLIP_RATIO times further, at least twice the sphere's far side,
-        so the object and the scene around it are in range with the depth
-        precision of Blender's default camera. Only widening the range, as
-        before, kept a 2 mm object framed after a 500 m one at 0.0037 to
-        2577 m.
+        Widen a camera's clip range to span a sphere ``distance`` ahead of it.
 
         Args:
             data: The camera's data.
@@ -5346,16 +5438,15 @@ class BlenderRuntimeSession:
         Returns:
             Whether the clip range changed.
         """
-        far = distance + radius
+        near, far = distance - radius, distance + radius
+        changed = False
+        if far > data.clip_end:
+            data.clip_end = far + radius
+            changed = True
         # A camera inside the sphere sees only part of it, whatever its clip_start.
-        start = (distance - radius) / 2 if distance > radius else distance / 100
-        end = max(2.0 * far, start * _FOCUS_CLIP_RATIO)
-        changed = not (
-            math.isclose(data.clip_start, start, rel_tol=1e-6)
-            and math.isclose(data.clip_end, end, rel_tol=1e-6)
-        )
-        data.clip_start = start
-        data.clip_end = end
+        if 0.0 < near < data.clip_start:
+            data.clip_start = near / 2
+            changed = True
         return changed
 
     @staticmethod
