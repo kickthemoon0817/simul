@@ -281,4 +281,3 @@ class IsaacScriptBase(LoggerMixin):
         stock socket stays as the fallback ``execute`` already provides.
         """
         return "default"
-

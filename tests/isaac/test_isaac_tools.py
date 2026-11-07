@@ -4,8 +4,6 @@ import json
 from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 
 from simul.adapters.isaac_socket_client import ScriptResult
 from simul.config import Settings
@@ -578,10 +576,11 @@ class TestPrimManipulation:
         assert result["success"] is True
         assert result["visibility"] == "invisible"
 
-
     def test_set_isaac_prim_attribute(self) -> None:
         """set_isaac_prim_attribute sets a named attribute."""
-        data = {"prim_path": "/World/Cube", "attribute": "size", "value_set": 200, "value_read": "200"}
+        data = {
+            "prim_path": "/World/Cube", "attribute": "size", "value_set": 200, "value_read": "200"
+        }
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(
             tools.set_isaac_prim_attribute(prim_path="/World/Cube", attribute_name="size", value=200)
@@ -600,7 +599,12 @@ class TestPrimManipulation:
 
     def test_reparent_isaac_prim(self) -> None:
         """reparent_isaac_prim moves a prim under a new parent."""
-        data = {"old_path": "/World/Cube", "new_path": "/World/Group/Cube", "parent": "/World/Group", "reparented": True}
+        data = {
+            "old_path": "/World/Cube",
+            "new_path": "/World/Group/Cube",
+            "parent": "/World/Group",
+            "reparented": True,
+        }
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(tools.reparent_isaac_prim(prim_path="/World/Cube", new_parent_path="/World/Group"))
         assert result["success"] is True
@@ -666,7 +670,12 @@ class TestPhysics:
 
     def test_get_isaac_collision_info(self) -> None:
         """get_isaac_collision_info returns collision details."""
-        data = {"prim_path": "/World/Cube", "collision_enabled": True, "has_mesh_collision": False, "approximation": "convexHull"}
+        data = {
+            "prim_path": "/World/Cube",
+            "collision_enabled": True,
+            "has_mesh_collision": False,
+            "approximation": "convexHull",
+        }
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(tools.get_isaac_collision_info(prim_path="/World/Cube"))
         assert result["success"] is True
@@ -707,7 +716,6 @@ class TestPhysics:
         assert result["success"] is True
         assert result["mass"] == 5.0
         assert result["density"] == 1000.0
-
 
     def test_add_isaac_rigid_body(self) -> None:
         """add_isaac_rigid_body applies the rigid body API."""
@@ -897,7 +905,11 @@ class TestMaterials:
 
     def test_set_isaac_material_property(self) -> None:
         """set_isaac_material_property updates a shader input."""
-        data = {"material_path": "/World/Looks/Mat1", "property_name": "diffuse_color_constant", "value_set": "[0.5, 0.5, 0.5]"}
+        data = {
+            "material_path": "/World/Looks/Mat1",
+            "property_name": "diffuse_color_constant",
+            "value_set": "[0.5, 0.5, 0.5]",
+        }
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(
             tools.set_isaac_material_property(
@@ -964,7 +976,12 @@ class TestStageAssetOps:
 
     def test_add_isaac_reference(self) -> None:
         """add_isaac_reference adds a USD reference to a prim."""
-        data = {"prim_path": "/World/Ref", "reference_path": "/tmp/simul-work/model.usd", "added": True, "total_references": 1}
+        data = {
+            "prim_path": "/World/Ref",
+            "reference_path": "/tmp/simul-work/model.usd",
+            "added": True,
+            "total_references": 1,
+        }
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(
             tools.add_isaac_reference(prim_path="/World/Ref", reference_path="/tmp/simul-work/model.usd")
