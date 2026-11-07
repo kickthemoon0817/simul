@@ -305,8 +305,12 @@ def test_sigterm_runs_shutdown_and_exits_0(tmp_path: Path, transport: str) -> No
         env=env, cwd=str(tmp_path), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     try:
-        # Logged inside SimulMCPServer.run, after the CLI installed its handler.
-        _wait_for(lambda: log.exists() and f"with {transport} transport" in log.read_text() or proc.poll() is not None)
+        # The CLI logs this line once before it installs its SIGTERM handler and
+        # SimulMCPServer.run logs it again afterwards; only the second one means
+        # the handler is in place, so a signal sent after the first can still
+        # kill the process with -15.
+        started = f"with {transport} transport"
+        _wait_for(lambda: log.exists() and log.read_text().count(started) >= 2 or proc.poll() is not None)
         if transport == "http":
             _wait_for(lambda: _connects(port) or proc.poll() is not None)
         assert proc.poll() is None, proc.stderr.read().decode() if proc.stderr else ""

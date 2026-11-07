@@ -169,11 +169,21 @@ def test_save_as_script_carries_the_overwrite_override() -> None:
 
 
 def test_save_in_place_has_no_overwrite_gate() -> None:
-    tools, execute = _tools({"file_path": SANDBOX_USD, "saved": True})
-    asyncio.run(tools.save_isaac_stage())
-    script = _sent_script(execute)
+    tools, execute = _tools()
+    execute.side_effect = [
+        ScriptResult(
+            success=True,
+            output=json.dumps({"stage_url": SANDBOX_USD, "dirty_layers": [], "timeline_stopped": True}),
+        ),
+        ScriptResult(success=True, output=json.dumps({"file_path": SANDBOX_USD, "saved": True})),
+    ]
+    payload = asyncio.run(tools.save_isaac_stage())
+    assert payload["saved"] is True
+    assert execute.await_count == 2
+    script = execute.await_args.args[0]
+    ast.parse(script)
     assert "save_stage_async()" in script
-    assert "RefusedOperation" not in script
+    assert '"override": "overwrite"' not in script
 
 
 @pytest.mark.parametrize("discard", [False, True])
