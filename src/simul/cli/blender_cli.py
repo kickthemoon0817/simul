@@ -7,6 +7,7 @@ import typer
 
 from ..adapters.blender_connection import BlenderAttachments, BlenderConnection
 from ..config import get_settings
+from ..utils.paths import state_dir
 from .output import emit, emit_error
 
 app = typer.Typer(
@@ -18,15 +19,16 @@ app = typer.Typer(
 
 @app.command("install-bridge")
 def install_bridge(
-    output: Path = typer.Option(
-        Path("~/.simul/blender/simul_blender_bridge.zip"),
+    output: Optional[Path] = typer.Option(
+        None,
         "--output",
-        help="Add-on ZIP destination",
+        help="Add-on ZIP destination (default: $SIMUL_HOME/blender/simul_blender_bridge.zip, "
+        "else ~/.simul/blender/simul_blender_bridge.zip)",
     ),
 ) -> None:
     """Build the add-on ZIP to install and enable in an already running Blender."""
     try:
-        path = BlenderAttachments.build_addon(output)
+        path = BlenderAttachments.build_addon(output or state_dir() / "blender" / "simul_blender_bridge.zip")
         emit(
             {
                 "addon_zip": str(path),

@@ -6,7 +6,7 @@ version: 0.1.0
 
 # Physics Configuration Workflow
 
-Isaac Sim physics is built on top of USD physics schemas (UsdPhysics) with NVIDIA PhysX as the backend (PhysxSchema). The MCP tools wrap the most common operations. Use `execute_isaac_script` for joint creation, articulation setup, and advanced PhysxSchema properties.
+Isaac Sim physics is built on top of USD physics schemas (UsdPhysics) with NVIDIA PhysX as the backend (PhysxSchema). The MCP tools wrap the most common operations, including joint drives, joint limits and articulation discovery. Use `execute_isaac_script` for joint creation and the PhysxSchema properties no tool covers.
 
 ## Step 1: Verify Physics Scene Exists
 
@@ -16,28 +16,21 @@ Physics simulation requires a `UsdPhysics.Scene` prim on the stage. Without it, 
 mcp__simul__get_isaac_physics_scene
 ```
 
-If the result shows no physics scene, create one:
+It reports each scene's gravity (resolved as the simulation reads it, in stage units and m/s^2), the stage's up axis and meters per unit, and the PhysX solver settings authored on the scene. If there is no scene, create one:
 
 ```
-mcp__simul__execute_isaac_script
-  script: |
-    import json, traceback
-    try:
-        from pxr import UsdPhysics
-        import omni.usd
-        stage = omni.usd.get_context().get_stage()
-        scene_prim = stage.GetPrimAtPath("/physicsScene")
-        if not scene_prim.IsValid():
-            scene = UsdPhysics.Scene.Define(stage, "/physicsScene")
-            scene.CreateGravityDirectionAttr().Set((0, 0, -1))
-            scene.CreateGravityMagnitudeAttr().Set(9.81)
-            result = {"success": True, "created": True}
-        else:
-            result = {"success": True, "created": False, "note": "already exists"}
-    except Exception as e:
-        import traceback
-        result = {"success": False, "error": str(e), "traceback": traceback.format_exc()}
-    print(json.dumps(result))
+mcp__simul__create_isaac_physics_scene
+```
+
+A new scene gets Earth gravity along the stage's negative up axis, scaled to its units: a Y-up centimetre stage gets `[0, -1, 0]` at 981 units/s^2. Pass `gravity_magnitude` in m/s^2 and `gravity_direction` in stage axes to override. A prim of another type at `prim_path` is refused, not retyped.
+
+Solver settings (physics rate, TGS/PGS, iteration clamps, GPU dynamics, broadphase, CCD, enhanced determinism):
+
+```
+mcp__simul__configure_isaac_physics_scene
+  time_steps_per_second: 120
+  solver_type: "TGS"
+  enable_enhanced_determinism: true
 ```
 
 ## Step 2: Add a Rigid Body
@@ -67,18 +60,21 @@ A rigid body without a collision shape passes through other objects. Add a colli
 ```
 mcp__simul__add_isaac_collision
   prim_path: "/World/Box"
-  collision_type: "convexHull"
+  approximation: "convexHull"
 ```
 
-**Collision type selection:**
+Collision goes on geometry (Mesh, Cube, Sphere, Capsule, Cylinder, Cone, Plane, Points): pointed at an asset root Xform, the tool applies it to the geometry under it (`recursive`, on by default) and lists every shape in `shapes`. A CollisionAPI on the Xform itself would make no collision shape. It fails when there is no geometry.
 
-| collision_type | Use when |
-|----------------|----------|
+**Approximation selection** (meshes only; Cube, Sphere and the other implicit shapes always collide with their exact shape):
+
+| approximation | Use when |
+|---------------|----------|
 | `"convexHull"` | Simple convex objects (boxes, capsules, most single-part assets). Fast and stable. |
+| `"convexDecomposition"` | Concave meshes on dynamic bodies. |
 | `"meshSimplification"` | Complex concave meshes that need moderate accuracy. Slower than convexHull. |
-| `"none"` | Planes and analytic primitives (Sphere, Cylinder, Cube) — they use their exact shape automatically. |
+| `"none"` | The triangle mesh itself; static or kinematic bodies only (PhysX simulates it as convexHull on a dynamic body, and the tool warns). |
 
-For articulated robots with per-link geometry, apply collision to each link prim individually using the appropriate type for that link's shape.
+Omit `approximation` to keep each mesh's authored one.
 
 Verify collision was applied:
 
@@ -140,21 +136,18 @@ mcp__simul__set_isaac_physics_material
   restitution: 0.1
 ```
 
-This creates a `UsdPhysics.MaterialAPI` on the prim. For shared materials applied to multiple objects, create the material prim once and bind it:
+`prim_path` is the collider, or an asset root whose colliders should share the material. The tool creates (or reuses) a Material prim with `UsdPhysics.MaterialAPI`, by default at `/World/PhysicsMaterials/Box_PhysicsMaterial`, and binds it with purpose `physics` to every collision shape at or under `prim_path`; the visual material binding is untouched. `bound_to` lists the colliders. Add collision first: with no collision shapes the call fails.
+
+For one material shared by several objects, pass the same `material_path` on each call:
 
 ```
-mcp__simul__set_isaac_material_property
-  prim_path: "/World/Materials/IceMaterial"
-  property_name: "physics:staticFriction"
-  value: 0.05
+mcp__simul__set_isaac_physics_material
+  prim_path: "/World/Crate"
+  material_path: "/World/PhysicsMaterials/Ice"
+  static_friction: 0.05
 ```
 
-Read current material settings:
-
-```
-mcp__simul__get_isaac_prim_detail  aspects: ["material"]
-  prim_path: "/World/Box"
-```
+Don't bind a physics material with `assign_isaac_material`: its all-purpose binding replaces the visual material and is not the binding the physics parser reads.
 
 ## Step 6: Query All Physics Objects
 
@@ -168,7 +161,7 @@ Returns paths of all prims with RigidBodyAPI, CollisionAPI, or JointAPI. Useful 
 
 ## Step 7: Joint Configuration (via execute_isaac_script)
 
-Joints are not covered by granular tools — create them via `execute_isaac_script`. All joint types live under `pxr.UsdPhysics`:
+Creating joints goes through `execute_isaac_script`; drives, limits and articulation discovery have granular tools (below). All joint types live under `pxr.UsdPhysics`:
 
 **Fixed joint** (weld two bodies together):
 
@@ -230,21 +223,47 @@ except Exception as e:
 print(json.dumps(result))
 ```
 
-Query joint state after creation:
+Query joint state after creation (bodies, limits, drives; infinite values such as "no limit" read as null with a `*_note`):
 
 ```
 mcp__simul__get_isaac_prim_detail  aspects: ["joint"]
   prim_path: "/World/Joints/HingeJoint"
 ```
 
+Drive a joint (revolute joints default to the `angular` drive, prismatic to `linear`; angular targets are degrees):
+
+```
+mcp__simul__set_isaac_joint_drive
+  joint_path: "/World/Joints/HingeJoint"
+  stiffness: 1000
+  damping: 50
+  target_position: 45
+```
+
+Limit it (degrees for revolute joints, stage units for prismatic; a D6 joint takes `limit_axis`):
+
+```
+mcp__simul__set_isaac_joint_limits
+  joint_path: "/World/Joints/HingeJoint"
+  lower: -90
+  upper: 90
+```
+
+List a robot's joints in kinematic order, with body0/body1, limits and drives:
+
+```
+mcp__simul__list_isaac_articulations
+  root_path: "/World/Robot"
+```
+
 ## Typical Physics Setup Sequence for a Dynamic Object
 
 1. `mcp__simul__create_isaac_prim` — create the geometry (e.g. Cube at `/World/Box`)
-2. `mcp__simul__get_isaac_physics_scene` — verify physics scene exists; create if missing
+2. `mcp__simul__get_isaac_physics_scene` — verify physics scene exists; create it with `create_isaac_physics_scene` if missing
 3. `mcp__simul__add_isaac_rigid_body` — enable physics simulation on `/World/Box`
-4. `mcp__simul__add_isaac_collision` — add `convexHull` collider to `/World/Box`
+4. `mcp__simul__add_isaac_collision` — add a collider to `/World/Box` (a Cube collides as a box; meshes take `approximation`)
 5. `mcp__simul__set_isaac_mass_properties` — set mass to known value
-6. `mcp__simul__set_isaac_physics_material` — set friction and restitution
+6. `mcp__simul__set_isaac_physics_material` — set friction and restitution on the collider
 7. `mcp__simul__get_isaac_prim_detail` with `aspects=["rigid_body"]` — verify everything applied
 8. `mcp__simul__start_isaac_simulation` — run and observe
 

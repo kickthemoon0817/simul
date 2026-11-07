@@ -12,6 +12,7 @@ import pytest
 
 from simul.adapters import blender_runtime
 from simul.config import SecurityConfig, Settings
+from tests.blender.mesh_fakes import FakeRNAProp, FakeRNAProperties
 from tests.fakes import (
     FakeAction,
     FakeActionSlot,
@@ -578,7 +579,10 @@ class FakeObject:
         self._visible = visible
         self.hide_viewport = not visible
         self.location = FakeVector(location)
-        self.rotation_euler = FakeVector(rotation_euler)
+        self.rotation_mode = "XYZ"
+        self.rotation_euler = FakeEuler(rotation_euler)
+        self.rotation_quaternion = FakeVector((1.0, 0.0, 0.0, 0.0))
+        self.rotation_axis_angle = FakeVector((0.0, 0.0, 1.0, 0.0))
         self.scale = FakeVector(scale)
         self.parent = parent
         self.children = children or []
@@ -872,7 +876,9 @@ class TestObservationTools:
 
     # -- get_object_info --------------------------------------------------
 
-    def test_get_object_info_basic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_get_object_info_basic(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
         """Full object info is returned with transforms and metadata."""
         parent_obj = FakeObject(name="Parent", object_type="EMPTY", visible=True)
         child_obj = FakeObject(name="Child", object_type="MESH", visible=True)
@@ -925,15 +931,19 @@ class TestObservationTools:
     # -- get_mesh_info ----------------------------------------------------
 
     def test_get_mesh_info_basic(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Counts-only mesh info returned for a MESH object."""
+        """Mesh info counts a MESH object's base mesh and what its modifiers make of it."""
         mesh_data = SimpleNamespace(
             vertices=[None] * 8,
             edges=[None] * 12,
             polygons=[None] * 6,
+            loops=[None] * 24,
             uv_layers=[SimpleNamespace(name="UVMap")],
             shape_keys=None,
         )
         obj = FakeObject(name="Cube", object_type="MESH", visible=True, data=mesh_data)
+        obj.evaluated_get = lambda depsgraph: SimpleNamespace(  # type: ignore[attr-defined]
+            is_evaluated=True, to_mesh=lambda: mesh_data, to_mesh_clear=lambda: None
+        )
         fake_bpy = self._make_fake_bpy_with_objects([obj])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
@@ -944,6 +954,8 @@ class TestObservationTools:
         assert result["vertex_count"] == 8
         assert result["edge_count"] == 12
         assert result["face_count"] == 6
+        assert result["triangle_count"] == 12
+        assert result["evaluated_face_count"] == 6
         assert result["uv_layer_names"] == ["UVMap"]
         assert result["has_shape_keys"] is False
 
@@ -6339,13 +6351,21 @@ class FakeMaterial:
 
 
 class FakeModifier:
-    """Minimal Blender modifier mock."""
+    """Minimal Blender modifier mock with the RNA of its two level settings."""
 
     def __init__(self, name: str, mod_type: str) -> None:
         self.name = name
         self.type = mod_type
         self.levels = 1
         self.render_levels = 2
+        self.bl_rna = SimpleNamespace(
+            properties=FakeRNAProperties(
+                [
+                    FakeRNAProp("levels", "INT", hard=(0, 11)),
+                    FakeRNAProp("render_levels", "INT", hard=(0, 11)),
+                ]
+            )
+        )
 
 
 class TestSceneManipulationTools:
@@ -6391,7 +6411,10 @@ class TestSceneManipulationTools:
 
         # bpy.ops — record calls and set active_object
         ops_calls: List[Dict[str, Any]] = []
-        context_holder = SimpleNamespace(active_object=active_object)
+        # Real bpy always has it; world-space reads evaluate transforms first.
+        context_holder = SimpleNamespace(
+            active_object=active_object, evaluated_depsgraph_get=lambda: "depsgraph"
+        )
 
         def _make_op(op_name: str):
             def op_fn(**kwargs: Any) -> None:
@@ -6520,7 +6543,9 @@ class TestSceneManipulationTools:
 
     # -- set_object_transform ------------------------------------------------
 
-    def test_set_transform_location_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_set_transform_location_only(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
         """Setting only location leaves rotation and scale untouched."""
         obj = FakeObject("Cube", "MESH", True, scale=(2.0, 2.0, 2.0))
         fake_bpy = self._make_fake_bpy_with_manipulation(objects={"Cube": obj})
@@ -6533,7 +6558,9 @@ class TestSceneManipulationTools:
         assert result["location"] == [5.0, 6.0, 7.0]
         assert result["scale"] == [2.0, 2.0, 2.0]
 
-    def test_set_transform_full(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_set_transform_full(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
         """Setting all three transform components."""
         obj = FakeObject("Cube", "MESH", True)
         fake_bpy = self._make_fake_bpy_with_manipulation(objects={"Cube": obj})
@@ -6554,7 +6581,9 @@ class TestSceneManipulationTools:
 
     # -- set_object_parent / clear_object_parent ------------------------------
 
-    def test_set_parent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_set_parent(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
         """Parent child to parent."""
         child = FakeObject("Child", "MESH", True)
         parent = FakeObject("Parent", "MESH", True)
@@ -7791,6 +7820,9 @@ class TestCreateMeshFromData:
             def update(self) -> None:
                 pass
 
+            def validate(self, verbose: bool = False) -> bool:
+                return False
+
         def _new_mesh(name: str) -> FakeMeshData:
             mesh = FakeMeshData(name)
             created_meshes.append(mesh)
@@ -7809,21 +7841,24 @@ class TestCreateMeshFromData:
             created_objects.append(obj)
             return obj
 
+        cols = collections or {}
+
         scene_col = SimpleNamespace(
             objects=SimpleNamespace(
                 link=lambda obj: linked_objects.append(obj),
             ),
+            # The given collections belong to the scene.
+            children_recursive=list(cols.values()),
         )
-
-        cols = collections or {}
 
         fake_bpy = SimpleNamespace(
             app=SimpleNamespace(version=(4, 0, 0)),
             data=SimpleNamespace(
-                meshes=SimpleNamespace(new=_new_mesh),
+                meshes=SimpleNamespace(new=_new_mesh, remove=created_meshes.remove),
                 objects=SimpleNamespace(
                     new=_new_object,
                     get=lambda name: None,
+                    remove=lambda obj, do_unlink=True: created_objects.remove(obj),
                 ),
                 collections=SimpleNamespace(
                     get=lambda name: cols.get(name),

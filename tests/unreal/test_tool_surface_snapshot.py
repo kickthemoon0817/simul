@@ -137,8 +137,13 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "generate_transaction": False,
     },
     "call_unreal_actor_function": {"actor_path": ACTOR, "function_name": "SetSpeed", "parameters": '{"Speed": 2}'},
-    "set_unreal_actor_parent": {"actor_path": ACTOR, "parent_path": PARENT},
-    "add_unreal_component": {"actor_path": ACTOR, "component_class": "PointLightComponent", "component_name": "Lamp"},
+    "set_unreal_actor_parent": {"actor_path": ACTOR, "parent_path": PARENT, "detach": False},
+    "add_unreal_component": {
+        "actor_path": ACTOR,
+        "component_class": "PointLightComponent",
+        "component_name": "Lamp",
+        "parent_component": "Base",
+    },
     "set_unreal_actor_visibility": {"actor_path": ACTOR, "visible": False, "propagate": False},
     "get_unreal_material_info": {"material_path": MATERIAL},
     "set_unreal_material_params": {
@@ -146,11 +151,13 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "scalar_params_json": '{"Roughness": 0.4}',
         "vector_params_json": '{"Tint": [1, 0.5, 0, 1]}',
         "texture_params_json": '{"Albedo": "/Game/Textures/T_Wood"}',
+        "allow_engine_content": True,
     },
     "create_unreal_material_instance": {
         "parent_path": MATERIAL,
         "instance_name": "MI_Chair",
         "save_path": "/Game/Materials",
+        "allow_engine_content": True,
     },
     "assign_unreal_material": {"actor_path": ACTOR, "material_path": MATERIAL, "slot_index": 2},
     "set_unreal_light_params": {
@@ -194,6 +201,7 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "usd_path": "/tmp/in.usd",
         "destination_path": "/Game/USD",
         "import_options": {"import_lights": False},
+        "replace_existing": True,
     },
     "export_unreal_usd": {
         "actor_paths": f"{ACTOR}, {PARENT}",
@@ -290,6 +298,8 @@ ERROR_CASES: Tuple[Tuple[str, Dict[str, Any]], ...] = (
     ("set_unreal_camera_view", {"location_x": 1.0, "location_y": 2.0}),
     ("set_unreal_camera_view", {"location_x": 1.0, "location_y": 2.0, "location_z": 3.0, "rotation_roll": 4.0}),
     ("focus_unreal_on_actor", {"actor_path": ACTOR, "fov": 180.0}),
+    ("set_unreal_actor_parent", {"actor_path": ACTOR, "parent_path": ""}),
+    ("set_unreal_actor_parent", {"actor_path": ACTOR, "parent_path": PARENT, "detach": True}),
     ("control_unreal_ui", {"agent_control": "bogus"}),
     ("control_unreal_ui", {"agent_control": "set_property", "property_name": "color", "value": [1.0, 2.0, 3.0]}),
     ("set_unreal_material_params", {"material_path": MATERIAL, "scalar_params_json": "{bad"}),

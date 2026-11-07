@@ -75,7 +75,11 @@ class StageAssetMixin:
                 else:
                     print(json.dumps({{"error": f"Failed to open stage: {{error}}"}}))
         """)
-        return await self._execute_json_script(script)
+        # A large stage takes longer to load than the default budget, and an
+        # interrupted open still finishes loading inside Kit.
+        return await self._execute_json_script(
+            script, timeout_seconds=self._heavy_script_timeout()
+        )
 
     @tool_meta(
         name="save_isaac_stage",
@@ -204,7 +208,10 @@ class StageAssetMixin:
                 else:
                     print(json.dumps({{"error": f"Failed to create new stage: {{error}}"}}))
         """)
-        return await self._execute_json_script(script)
+        # Closing a large stage first is what takes the time.
+        return await self._execute_json_script(
+            script, timeout_seconds=self._heavy_script_timeout()
+        )
 
     @tool_meta(
         name="import_isaac_asset",
@@ -327,4 +334,3 @@ class StageAssetMixin:
             """,
         )
         return await self._execute_json_script(script)
-

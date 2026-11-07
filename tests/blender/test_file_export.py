@@ -1105,21 +1105,12 @@ def test_a_blender_relative_path_resolves_against_the_open_file(
     assert session._export_target("//out/model.glb") == "/blend-dir/out/model.glb"
 
 
-def test_simready_export_selects_its_objects_for_the_export_only(
-    fake: FakeBlender, session: Any, tmp_path: Path
-) -> None:
-    objects = _scene(fake)
-    objects["Light"].select_set(True)
-
-    session.export_simready_usd(
-        str(tmp_path / "asset.usda"),
-        object_names=["Cube"],
-        validate_before_export=False,
-    )
-
-    assert json.loads((tmp_path / "asset.usda").read_text()) == ["Cube"]
-    assert _call(fake, "wm.usd_export")["selected_objects_only"] is True
-    assert [o.name for o in fake.objects.values() if o.selected] == ["Light"]
+# export_simready_usd selects its objects for the export only, through the same
+# _run_export: tests/blender/test_simready_export.py covers that against an
+# exporter that writes real USD, which its SimReady authoring then reads
+# (test_export_restores_the_selection_and_active_object,
+# test_the_exporter_options_follow_the_request,
+# test_export_without_children_writes_only_the_listed_objects).
 
 
 # -- save_blend_file (B1-21) ---------------------------------------------------

@@ -8,13 +8,17 @@ optional `bpy` Python module.
 from __future__ import annotations
 
 import base64
+import difflib
 import io
 import json
 import logging
 import math
+import numbers
 import os
 import re
+import shutil
 import tempfile
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,8 +36,10 @@ from typing import (
     overload,
 )
 
-# The Blender add-on bundles this standard-library module next to this one.
+# The Blender add-on bundles these modules next to this one; simready_usd
+# imports pxr only when it is called.
 from ..utils.regex_guard import exponential_regex_construct
+from .simready_usd import author_simready_layer, usd_identifier
 
 try:
     import bpy
@@ -308,6 +314,37 @@ _IMAGE_FORMAT_FIELDS = (
     "quality",
 )
 
+# Settings of a modifier that add_modifier takes from its own arguments rather
+# than from params: the name comes from modifier_name, the type from
+# modifier_type, and rna_type is Blender's description of the struct.
+_RESERVED_MODIFIER_SETTINGS = frozenset({"name", "type", "rna_type"})
+
+# Where a datablock named for a pointer setting is looked up: the bpy.data
+# collection of each ID type such a setting can point to, by its RNA struct
+# identifier. A subtype (GeometryNodeTree, say) is found through its base.
+_ID_COLLECTIONS: Dict[str, str] = {
+    "Action": "actions",
+    "CacheFile": "cache_files",
+    "Camera": "cameras",
+    "Collection": "collections",
+    "Curve": "curves",
+    "Image": "images",
+    "Light": "lights",
+    "Material": "materials",
+    "Mesh": "meshes",
+    "NodeTree": "node_groups",
+    "Object": "objects",
+    "Texture": "textures",
+    "VectorFont": "fonts",
+}
+
+# Modifier types whose viewport and render results can differ through a
+# second level setting: (viewport setting, render setting).
+_RENDER_LEVEL_SETTINGS: Dict[str, Tuple[str, str]] = {
+    "MULTIRES": ("levels", "render_levels"),
+    "SUBSURF": ("levels", "render_levels"),
+}
+
 
 class UnsavedChangesError(RuntimeError):
     """Opening a file would discard the open file's unsaved changes.
@@ -428,6 +465,236 @@ def _mathutils() -> Any:
     return mathutils
 
 
+# The order of the Euler angles that set_object_transform and control_ui's
+# set_property take, and that get_object_info and set_object_transform report
+# as rotation_euler, whatever the object's rotation_mode; the camera tools'
+# world-space rotation_euler is XYZ as well.
+TRANSFORM_EULER_ORDER = "XYZ"
+
+
+def _finite(values: Sequence[float], count: int, name: str) -> Tuple[float, ...]:
+    """Return ``count`` finite floats, or raise ValueError naming ``name``."""
+    numbers = tuple(float(v) for v in values)
+    if len(numbers) != count or not all(math.isfinite(v) for v in numbers):
+        raise ValueError(f"{name} must be {count} finite numbers")
+    return numbers
+
+
+def local_rotation_quaternion(obj: Any) -> Any:
+    """
+    Return the rotation of an object's own transform as a unit quaternion.
+
+    Blender keeps one rotation per object, in the property its
+    ``rotation_mode`` names: ``rotation_euler`` (its angles applied in the
+    mode's order), ``rotation_quaternion`` or ``rotation_axis_angle``. The
+    other two keep whatever they held when the mode changed, so on a glTF
+    import (QUATERNION) ``rotation_euler`` stays [0, 0, 0] however the object
+    is turned. Blender normalizes the quaternion, and takes an axis-angle
+    with a zero axis for no rotation, when it builds the matrix.
+
+    Args:
+        obj: The Blender object.
+
+    Returns:
+        A ``mathutils.Quaternion`` (w, x, y, z), before parenting, deltas and
+        constraints.
+    """
+    mathutils = _mathutils()
+    mode = obj.rotation_mode
+    if mode == "QUATERNION":
+        quaternion = mathutils.Quaternion(tuple(obj.rotation_quaternion))
+        if quaternion.magnitude == 0.0:
+            return mathutils.Quaternion()
+        return quaternion.normalized()
+    if mode == "AXIS_ANGLE":
+        angle, *axis = tuple(obj.rotation_axis_angle)
+        direction = mathutils.Vector(axis)
+        if direction.length == 0.0:
+            return mathutils.Quaternion()
+        return mathutils.Quaternion(direction.normalized(), angle)
+    return mathutils.Euler(tuple(obj.rotation_euler), mode).to_quaternion()
+
+
+def local_rotation_euler(obj: Any) -> List[float]:
+    """
+    Return the rotation of an object's own transform as XYZ Euler angles in radians.
+
+    An XYZ object's own angles come back as Blender stores them; any other
+    rotation mode is converted.
+
+    Args:
+        obj: The Blender object.
+
+    Returns:
+        [x, y, z] in TRANSFORM_EULER_ORDER.
+    """
+    if obj.rotation_mode == TRANSFORM_EULER_ORDER:
+        return [float(a) for a in obj.rotation_euler]
+    return [
+        float(a) for a in local_rotation_quaternion(obj).to_euler(TRANSFORM_EULER_ORDER)
+    ]
+
+
+def stored_rotation(obj: Any) -> List[float]:
+    """
+    Return the rotation as Blender stores it for the object's rotation_mode.
+
+    Args:
+        obj: The Blender object.
+
+    Returns:
+        Euler angles [x, y, z] (applied in the mode's order), a quaternion
+        [w, x, y, z] for QUATERNION, or [angle, x, y, z] for AXIS_ANGLE.
+    """
+    mode = obj.rotation_mode
+    if mode == "QUATERNION":
+        return [float(v) for v in obj.rotation_quaternion]
+    if mode == "AXIS_ANGLE":
+        return [float(v) for v in obj.rotation_axis_angle]
+    return [float(v) for v in obj.rotation_euler]
+
+
+def write_rotation(
+    obj: Any,
+    rotation_euler: Optional[Sequence[float]] = None,
+    rotation_quaternion: Optional[Sequence[float]] = None,
+) -> None:
+    """
+    Give an object's own transform a rotation, whatever its rotation_mode.
+
+    Blender reads only the property of the object's rotation mode, so a
+    write to ``rotation_euler`` changes nothing on a QUATERNION or
+    AXIS_ANGLE object, and another Euler order reads the angles in its own
+    order. The rotation is converted to the mode's property instead, and the
+    mode is kept. A converted Euler rotation takes the angles nearest the
+    object's current ones, and a quaternion converted from Euler angles the
+    sign of its current one, so a small turn stays a small change of the
+    stored values (no flip by a whole turn or to the opposite quaternion).
+
+    Args:
+        obj: The Blender object.
+        rotation_euler: XYZ Euler angles [x, y, z] in radians
+            (TRANSFORM_EULER_ORDER).
+        rotation_quaternion: A quaternion [w, x, y, z]; it is normalized.
+
+    Raises:
+        ValueError: Neither or both are given, a value is not finite, or the
+            quaternion has zero length.
+    """
+    if (rotation_euler is None) == (rotation_quaternion is None):
+        raise ValueError("Give either rotation_euler or rotation_quaternion")
+    mathutils = _mathutils()
+    mode = obj.rotation_mode
+    if rotation_euler is not None:
+        angles = _finite(rotation_euler, 3, "rotation_euler")
+        if mode == TRANSFORM_EULER_ORDER:
+            obj.rotation_euler = angles
+            return
+        quaternion = mathutils.Euler(angles, TRANSFORM_EULER_ORDER).to_quaternion()
+        if mode == "QUATERNION":
+            quaternion.make_compatible(local_rotation_quaternion(obj))
+    else:
+        values = _finite(rotation_quaternion or (), 4, "rotation_quaternion")
+        quaternion = mathutils.Quaternion(values)
+        if quaternion.magnitude == 0.0:
+            raise ValueError("rotation_quaternion must not have zero length")
+        quaternion = quaternion.normalized()
+    if mode == "QUATERNION":
+        obj.rotation_quaternion = quaternion
+    elif mode == "AXIS_ANGLE":
+        axis, angle = quaternion.to_axis_angle()
+        obj.rotation_axis_angle = (float(angle), *(float(v) for v in axis))
+    else:
+        obj.rotation_euler = quaternion.to_euler(mode, obj.rotation_euler)
+
+
+def _nearest_rotation(linear: List[List[float]]) -> Optional[List[List[float]]]:
+    """
+    Return the rotation nearest a 3x3 matrix: the orthogonal factor of its polar decomposition.
+
+    A turned child of a parent with non-uniform scale has a sheared world
+    matrix, which no rotation and scale rebuild. ``Matrix.decompose`` and
+    ``to_euler`` then read the rotation from some of its entries, and the two
+    disagree: on Blender 5.0.1 a glTF link under a parent scaled 0.5 on Z
+    came out 0.19 and 0.15 rad from the rotation of its axes. Newton's
+    iteration U = (U + U^-T) / 2 converges to the orthogonal factor, which for
+    such a matrix is the parent's rotation times the child's. A mirroring
+    matrix gives an orthogonal factor that mirrors too; it is negated into a
+    rotation, the scale negative on every axis, as Blender decomposes it.
+
+    Args:
+        linear: The matrix's rows.
+
+    Returns:
+        The rotation's rows, or None for a singular matrix.
+    """
+    current = [[float(v) for v in row] for row in linear]
+    for _ in range(64):
+        a = current
+        # A^-T is the cofactor matrix divided by the determinant.
+        cofactors = [
+            [
+                a[(i + 1) % 3][(j + 1) % 3] * a[(i + 2) % 3][(j + 2) % 3]
+                - a[(i + 1) % 3][(j + 2) % 3] * a[(i + 2) % 3][(j + 1) % 3]
+                for j in range(3)
+            ]
+            for i in range(3)
+        ]
+        determinant = sum(a[0][j] * cofactors[0][j] for j in range(3))
+        if determinant == 0.0 or not math.isfinite(determinant):
+            return None
+        following = [
+            [(a[i][j] + cofactors[i][j] / determinant) / 2 for j in range(3)]
+            for i in range(3)
+        ]
+        change = max(abs(following[i][j] - a[i][j]) for i in range(3) for j in range(3))
+        current = following
+        if change < 1e-12:
+            break
+    mirrored = (
+        current[0][0] * (current[1][1] * current[2][2] - current[1][2] * current[2][1])
+        - current[0][1] * (current[1][0] * current[2][2] - current[1][2] * current[2][0])
+        + current[0][2] * (current[1][0] * current[2][1] - current[1][1] * current[2][0])
+    ) < 0
+    return [[-v for v in row] for row in current] if mirrored else current
+
+
+def world_transform(obj: Any) -> Dict[str, Any]:
+    """
+    Report an object's world matrix, and that matrix decomposed.
+
+    The caller evaluates transforms first (_evaluate_transforms): matrix_world
+    lags a transform written since the last depsgraph evaluation in
+    background Blender and embedded mode. The location and scale are
+    ``Matrix.decompose``'s, which gives a mirrored matrix a scale negative on
+    every axis. The rotation is the one nearest the matrix (_nearest_rotation),
+    which also holds for the sheared matrix of a turned child under a parent
+    with non-uniform scale; ``matrix_world`` is exact.
+
+    Args:
+        obj: The Blender object.
+
+    Returns:
+        world_location, world_rotation_euler (XYZ), world_rotation_quaternion
+        (w, x, y, z), world_scale and matrix_world (four rows of four).
+    """
+    matrix = obj.matrix_world
+    location, rotation, scale = matrix.decompose()
+    rows = [[float(v) for v in row] for row in matrix]
+    nearest = _nearest_rotation([row[:3] for row in rows[:3]])
+    if nearest is not None:
+        rotation = _mathutils().Matrix(nearest).to_quaternion()
+    return {
+        "world_location": [float(v) for v in location],
+        "world_rotation_euler": [
+            float(a) for a in rotation.to_euler(TRANSFORM_EULER_ORDER)
+        ],
+        "world_rotation_quaternion": [float(v) for v in rotation],
+        "world_scale": [float(v) for v in scale],
+        "matrix_world": rows,
+    }
+
+
 # Blender 4.4 introduced slotted actions: one action can animate several IDs,
 # each through its own slot, and keeps each slot's F-curves in a channelbag
 # inside the action's layers and strips. Blender 5.0 removed Action.fcurves,
@@ -474,6 +741,80 @@ def action_fcurves(
 def _channel_name(data_path: str, index: int) -> str:
     """Name a keyframed property, or one element of it, as ``location[2]``."""
     return data_path if index < 0 else f"{data_path}[{index}]"
+
+
+def _did_you_mean(name: str, choices: Sequence[str]) -> str:
+    """``; did you mean 'a' or 'b'?`` for the choices closest to a mistyped name."""
+    close = difflib.get_close_matches(name, list(choices), n=3, cutoff=0.6)
+    if not close:
+        return ""
+    return "; did you mean " + " or ".join(f"'{choice}'" for choice in close) + "?"
+
+
+def _enum_item(value: Any, items: Sequence[str], what: str) -> str:
+    """The enum item identifier a value names, matched case-insensitively.
+
+    An empty ``items`` means the enum lists its items only at run time, so the
+    value passes through for Blender to check.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{what} takes one of {', '.join(items)}, got {value!r}")
+    if not items or value in items:
+        return value
+    folded = [item for item in items if item.lower() == value.lower()]
+    if len(folded) == 1:
+        return folded[0]
+    raise ValueError(
+        f"{what} must be one of {', '.join(items)}, got '{value}'{_did_you_mean(value.upper(), items)}"
+    )
+
+
+def _check_rna_number(prop: Any, value: Any, what: str) -> None:
+    """Refuse a value outside an INT or FLOAT property's hard limits.
+
+    Blender clamps such a value without an error, so a DECIMATE ratio of 7
+    would silently become 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise ValueError(f"{what} takes a number, got {value!r}")
+    if not math.isfinite(value):
+        raise ValueError(f"{what} must be finite, got {value!r}")
+    if prop.type == "INT" and not float(value).is_integer():
+        raise ValueError(f"{what} takes a whole number, got {value!r}")
+    if value < prop.hard_min or value > prop.hard_max:
+        raise ValueError(
+            f"{what} must lie between {prop.hard_min:g} and {prop.hard_max:g}, got {value!r}"
+        )
+
+
+def _finite_triple(value: Any, what: str) -> Tuple[float, float, float]:
+    """Three finite coordinates as floats, or a ValueError naming ``what``.
+
+    ``from_pydata`` flattens its vertex list before storing it, so a vertex
+    of two or four numbers shifted every later vertex instead of failing.
+    """
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__len__"):
+        raise ValueError(f"{what} must be [x, y, z], got {value!r}")
+    if len(value) != 3:
+        raise ValueError(f"{what} must have exactly 3 coordinates [x, y, z], got {len(value)}")
+    triple = []
+    for component in value:
+        if isinstance(component, bool) or not isinstance(component, numbers.Real):
+            raise ValueError(f"{what} coordinates must be numbers, got {component!r}")
+        if not math.isfinite(component):
+            raise ValueError(f"{what} coordinates must be finite, got {component!r}")
+        triple.append(float(component))
+    return (triple[0], triple[1], triple[2])
+
+
+def _mesh_index(value: Any, what: str, vertex_count: int) -> int:
+    """A vertex index of an edge or face, checked to be an integer within the vertex list."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise ValueError(f"{what} index {value!r} is not an integer")
+    index = int(value)
+    if index < 0 or index >= vertex_count:
+        raise ValueError(f"{what} index {index} out of range [0, {vertex_count})")
+    return index
 
 
 @dataclass
@@ -709,18 +1050,25 @@ class BlenderRuntimeSession:
         """
         Get detailed information about a single Blender object.
 
+        ``location``, ``rotation_euler`` and ``scale`` are the object's own
+        transform, as Blender's Location, Rotation and Scale fields show it:
+        relative to its parent, before constraints. The ``world_*`` values
+        and ``matrix_world`` give where it is in the scene.
+
         Args:
             object_name: Name of the target object.
 
         Returns:
-            Dictionary with transforms, parent, modifiers, constraints,
-            material slots, and visibility.
+            Dictionary with local and world transforms, rotation mode, parent,
+            modifiers, constraints, material slots, and visibility.
         """
         obj = self._get_object_or_raise(object_name)
+        # matrix_world lags a transform written by an earlier call until the
+        # depsgraph is evaluated (background Blender / embedded mode).
+        self._evaluate_transforms()
 
-        location = list(obj.location)
-        rotation = list(obj.rotation_euler)
-        scale = list(obj.scale)
+        location = [float(v) for v in obj.location]
+        scale = [float(v) for v in obj.scale]
 
         parent_name: Optional[str] = obj.parent.name if obj.parent else None
         children_names = [child.name for child in getattr(obj, "children", [])]
@@ -745,8 +1093,12 @@ class BlenderRuntimeSession:
             "name": obj.name,
             "object_type": obj.type,
             "location": location,
-            "rotation_euler": rotation,
+            "rotation_euler": local_rotation_euler(obj),
             "scale": scale,
+            "rotation_mode": obj.rotation_mode,
+            "rotation_quaternion": [float(v) for v in local_rotation_quaternion(obj)],
+            "rotation_in_mode": stored_rotation(obj),
+            **world_transform(obj),
             "parent_name": parent_name,
             "children_names": children_names,
             "modifiers": modifiers,
@@ -757,30 +1109,105 @@ class BlenderRuntimeSession:
 
     def get_mesh_info(self, object_name: str) -> Dict[str, Any]:
         """
-        Get counts-only mesh geometry information (O(1) attribute access).
+        Get a mesh object's geometry counts, before and after its modifiers.
+
+        The base counts are the mesh data as stored; the evaluated counts are
+        what Blender's depsgraph makes of it with the modifiers enabled in the
+        viewport, which is the geometry an export writes. A mesh in Edit Mode
+        is written back from the edit mesh first, so neither count is stale.
 
         Args:
             object_name: Name of the mesh object.
 
         Returns:
-            Dictionary with vertex/edge/face counts and UV layer names.
+            Dictionary with vertex/edge/face/triangle counts of the base and
+            of the evaluated mesh, the modifiers evaluated, UV layer names and
+            warnings.
         """
         obj = self._get_object_or_raise(object_name)
         if obj.type != "MESH":
             raise ValueError(f"Object '{object_name}' is not a MESH (type={obj.type})")
 
+        edit_mode = getattr(obj, "mode", "OBJECT") == "EDIT"
+        if edit_mode:
+            # Edit Mode keeps its changes in an edit mesh that the mesh data
+            # sees only once they are written back.
+            obj.update_from_editmode()
         mesh_data: Any = obj.data
-        uv_layer_names = [layer.name for layer in mesh_data.uv_layers]
-        has_shape_keys = mesh_data.shape_keys is not None
+        base = self._mesh_counts(mesh_data)
+        evaluated = self._evaluated_mesh_counts(obj)
+        modifiers = list(getattr(obj, "modifiers", []))
+        warnings: List[str] = []
+        if evaluated is None:
+            warnings.append(
+                f"Blender does not evaluate '{obj.name}' (it is not in the view "
+                "layer), so the counts after its modifiers are unknown"
+            )
+        render_differs = [mod.name for mod in modifiers if self._render_differs(mod)]
+        if render_differs:
+            warnings.append(
+                "The evaluated counts are the viewport's, and these modifiers are set "
+                f"differently for render, which USD export evaluates: {', '.join(render_differs)}"
+            )
 
         return {
             "object_name": object_name,
-            "vertex_count": len(mesh_data.vertices),
-            "edge_count": len(mesh_data.edges),
-            "face_count": len(mesh_data.polygons),
-            "uv_layer_names": uv_layer_names,
-            "has_shape_keys": has_shape_keys,
+            **base,
+            **{
+                f"evaluated_{key}": (None if evaluated is None else evaluated[key])
+                for key in base
+            },
+            "evaluated_modifiers": [mod.name for mod in modifiers if mod.show_viewport],
+            "edit_mode": edit_mode,
+            "uv_layer_names": [layer.name for layer in mesh_data.uv_layers],
+            "has_shape_keys": mesh_data.shape_keys is not None,
+            "warnings": warnings,
         }
+
+    @staticmethod
+    def _mesh_counts(mesh: Any) -> Dict[str, int]:
+        """Vertex, edge, face and triangle counts of one mesh datablock.
+
+        A face of n corners triangulates into n - 2 triangles, so the triangle
+        count is the corner (loop) count less two per face.
+        """
+        faces = len(mesh.polygons)
+        return {
+            "vertex_count": len(mesh.vertices),
+            "edge_count": len(mesh.edges),
+            "face_count": faces,
+            "triangle_count": len(mesh.loops) - 2 * faces,
+        }
+
+    def _evaluated_mesh_counts(self, obj: Any) -> Optional[Dict[str, int]]:
+        """Counts of the mesh Blender evaluates for ``obj``, its modifiers applied.
+
+        Returns:
+            The counts, or None when the depsgraph holds no evaluated copy of
+            the object (it is not in the view layer).
+        """
+        blender_module: Any = bpy
+        depsgraph = blender_module.context.evaluated_depsgraph_get()
+        evaluated = obj.evaluated_get(depsgraph)
+        if not getattr(evaluated, "is_evaluated", False):
+            return None
+        mesh = evaluated.to_mesh()
+        try:
+            return self._mesh_counts(mesh)
+        finally:
+            evaluated.to_mesh_clear()
+
+    @staticmethod
+    def _render_differs(modifier: Any) -> bool:
+        """Whether a modifier gives render a different result than the viewport."""
+        if bool(modifier.show_render) != bool(modifier.show_viewport):
+            return True
+        if not modifier.show_render:
+            return False
+        levels = _RENDER_LEVEL_SETTINGS.get(modifier.type)
+        return levels is not None and getattr(modifier, levels[0], None) != getattr(
+            modifier, levels[1], None
+        )
 
     def get_bounding_box(
         self, object_name: str, world_space: bool = True
@@ -971,9 +1398,12 @@ class BlenderRuntimeSession:
         """
         obj_a = self._get_object_or_raise(object_name_a)
         obj_b = self._get_object_or_raise(object_name_b)
+        # matrix_world lags a transform written by an earlier call until the
+        # depsgraph is evaluated (background Blender / embedded mode).
+        self._evaluate_transforms()
 
-        loc_a = list(obj_a.matrix_world.translation)
-        loc_b = list(obj_b.matrix_world.translation)
+        loc_a = [float(v) for v in obj_a.matrix_world.translation]
+        loc_b = [float(v) for v in obj_b.matrix_world.translation]
         distance = math.sqrt(sum((a - b) ** 2 for a, b in zip(loc_a, loc_b)))
 
         return {
@@ -1002,7 +1432,8 @@ class BlenderRuntimeSession:
             Dictionary with within_bounds flag and object location.
         """
         obj = self._get_object_or_raise(object_name)
-        loc = list(obj.matrix_world.translation)
+        self._evaluate_transforms()
+        loc = [float(v) for v in obj.matrix_world.translation]
 
         within = all(bounds_min[i] <= loc[i] <= bounds_max[i] for i in range(3))
 
@@ -1474,49 +1905,137 @@ class BlenderRuntimeSession:
         location: Optional[List[float]] = None,
         rotation_euler: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
+        rotation_quaternion: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
         """
-        Set an object's location, rotation, and/or scale.
+        Set an object's own location, rotation, and/or scale.
+
+        These are the values of Blender's Location, Rotation and Scale fields:
+        relative to the object's parent, before its constraints. The rotation
+        is written in the object's rotation_mode, which is kept: a glTF import
+        stores quaternions, and Blender ignores rotation_euler on a QUATERNION
+        or AXIS_ANGLE object. Every value is checked before any is written.
 
         Args:
             object_name: Object to transform.
-            location: New location [x, y, z] or None to keep current.
-            rotation_euler: New rotation [rx, ry, rz] or None to keep current.
+            location: New location [x, y, z] relative to the parent, or None to keep current.
+            rotation_euler: New rotation as XYZ Euler angles [rx, ry, rz] in radians,
+                converted to the object's rotation_mode; None to keep current.
             scale: New scale [sx, sy, sz] or None to keep current.
+            rotation_quaternion: New rotation as a quaternion [w, x, y, z], normalized
+                and converted to the object's rotation_mode; instead of rotation_euler.
 
         Returns:
-            Dictionary with final transform values.
+            Dictionary with the object's own transform after the change, its
+            rotation mode, the rotation as a quaternion, and its world location.
+
+        Raises:
+            ValueError: A value is not finite, the quaternion has zero length,
+                or both rotation_euler and rotation_quaternion are given.
         """
         obj = self._get_object_or_raise(object_name)
-        if location is not None:
-            obj.location = tuple(location)
+        if rotation_euler is not None and rotation_quaternion is not None:
+            raise ValueError("Give either rotation_euler or rotation_quaternion, not both")
+        new_location = None if location is None else _finite(location, 3, "location")
+        new_scale = None if scale is None else _finite(scale, 3, "scale")
         if rotation_euler is not None:
-            obj.rotation_euler = tuple(rotation_euler)
-        if scale is not None:
-            obj.scale = tuple(scale)
+            _finite(rotation_euler, 3, "rotation_euler")
+        if rotation_quaternion is not None:
+            quaternion = _finite(rotation_quaternion, 4, "rotation_quaternion")
+            if not any(quaternion):
+                raise ValueError("rotation_quaternion must not have zero length")
+        if new_location is not None:
+            obj.location = new_location
+        if rotation_euler is not None or rotation_quaternion is not None:
+            write_rotation(obj, rotation_euler, rotation_quaternion)
+        if new_scale is not None:
+            obj.scale = new_scale
+        self._evaluate_transforms()
 
         return {
             "object_name": object_name,
-            "location": list(obj.location),
-            "rotation_euler": list(obj.rotation_euler),
-            "scale": list(obj.scale),
+            "location": [float(v) for v in obj.location],
+            "rotation_euler": local_rotation_euler(obj),
+            "scale": [float(v) for v in obj.scale],
+            "rotation_mode": obj.rotation_mode,
+            "rotation_quaternion": [float(v) for v in local_rotation_quaternion(obj)],
+            "world_location": [float(v) for v in obj.matrix_world.translation],
         }
 
-    def set_object_parent(self, child_name: str, parent_name: str) -> Dict[str, Any]:
+    def set_object_parent(
+        self, child_name: str, parent_name: str, keep_transform: bool = True
+    ) -> Dict[str, Any]:
         """
         Parent one object to another.
+
+        With keep_transform, as Blender's Object > Parent > Object (Keep
+        Transform), the child stays where it is: its parent inverse matrix
+        cancels the parent's current world transform. A child without a
+        previous parent keeps its Location, Rotation and Scale values too; one
+        moved from another parent gets the values of its world transform
+        before constraints, which still apply on top. Without keep_transform
+        the parent inverse is cleared: the child's own values become relative
+        to the parent, and it moves with the parent's transform.
 
         Args:
             child_name: Object to parent.
             parent_name: Object to be the parent.
+            keep_transform: Keep the child's world transform (default); false clears
+                the parent inverse, so the child's own values become relative to the
+                parent and it moves.
 
         Returns:
-            Dictionary with child_name and parent_name.
+            Dictionary with child_name, parent_name, keep_transform, the
+            previous parent and the child's world location afterwards.
+
+        Raises:
+            ValueError: The parent is the child itself or one of its
+                descendants, which would make a parent loop (Blender refuses
+                such a parent without an error).
         """
         child = self._get_object_or_raise(child_name)
         parent = self._get_object_or_raise(parent_name)
+        if parent == child:
+            raise ValueError(f"Object '{child_name}' cannot be its own parent")
+        ancestor, seen = parent.parent, [parent]
+        while ancestor is not None and ancestor not in seen:
+            if ancestor == child:
+                raise ValueError(
+                    f"Cannot parent '{child_name}' to '{parent_name}': '{parent_name}' is a "
+                    f"descendant of '{child_name}', so the parenting would make a loop. "
+                    f"Clear the parent of '{parent_name}' (or of the object between them) first"
+                )
+            seen.append(ancestor)
+            ancestor = ancestor.parent
+        # The world matrices below must hold transforms written by earlier calls.
+        self._evaluate_transforms()
+        previous = child.parent
+        previous_name = previous.name if previous is not None else None
+        world = (
+            self._matrix_before_constraints(child).copy()
+            if keep_transform
+            else None
+        )
         child.parent = parent
-        return {"child_name": child_name, "parent_name": parent_name}
+        child.parent_type = "OBJECT"
+        if world is None:
+            child.matrix_parent_inverse = _mathutils().Matrix.Identity(4)
+        else:
+            child.matrix_parent_inverse = parent.matrix_world.inverted_safe()
+            # Without a previous parent the child's own values already give the
+            # world matrix; rewriting them could only round them. A curve
+            # parent's matrix can include its path, which only Blender computes
+            # when matrix_world is assigned.
+            if previous is not None or parent.type == "CURVE":
+                child.matrix_world = world
+        self._evaluate_transforms()
+        return {
+            "child_name": child_name,
+            "parent_name": parent_name,
+            "keep_transform": keep_transform,
+            "previous_parent": previous_name,
+            "world_location": [float(v) for v in child.matrix_world.translation],
+        }
 
     def clear_object_parent(
         self, object_name: str, keep_transform: bool = True
@@ -1534,9 +2053,13 @@ class BlenderRuntimeSession:
         obj = self._get_object_or_raise(object_name)
         prev_parent = obj.parent.name if obj.parent else None
         if keep_transform and obj.parent:
+            # matrix_world lags a transform written by an earlier call until
+            # the depsgraph is evaluated (background Blender / embedded mode).
+            self._evaluate_transforms()
             # Keep rotation and scale as well as translation: the full world
             # matrix, not just its translation, becomes the local transform.
-            world_matrix = obj.matrix_world.copy()
+            # Its constraints stay out of it, as they apply on top again.
+            world_matrix = self._matrix_before_constraints(obj).copy()
             obj.parent = None
             obj.matrix_world = world_matrix
         else:
@@ -1605,33 +2128,343 @@ class BlenderRuntimeSession:
         """
         Add a modifier to an object.
 
+        Every key of ``params`` must be a writable setting of the modifier
+        type, checked against Blender's RNA: an unknown key is refused with
+        the closest setting names, an enum value must be one of its items, a
+        number must lie within the setting's limits, and an object, collection
+        or other datablock setting takes the datablock's name. When a setting
+        fails, the modifier is removed again, so a refused call leaves the
+        object as it was. Decimate is refused on a mesh with invalid geometry
+        (faces repeating a vertex, duplicate faces or edges), which can make
+        Blender's collapse loop forever; clean_mesh repairs such a mesh.
+
         Args:
             object_name: Object to add modifier to.
             modifier_type: Modifier type (SUBSURF, MIRROR, ARRAY, etc.).
             modifier_name: Modifier display name.
-            params: Modifier-specific parameters to set.
+            params: Modifier settings by RNA name, e.g. {"ratio": 0.5} for
+                DECIMATE or {"object": "Cutter"} for BOOLEAN.
 
         Returns:
-            Dictionary with object_name, modifier_name, modifier_type.
+            Dictionary with object_name, modifier_name, modifier_type and the
+            settings as Blender stored them.
         """
+        blender_module: Any = bpy
         obj = self._get_object_or_raise(object_name)
-        mod_name = modifier_name or modifier_type.title()
-        mod = obj.modifiers.new(name=mod_name, type=modifier_type.upper())
+        if obj.type not in _MODIFIER_OWNER_TYPES:
+            raise ValueError(
+                f"Object '{object_name}' is a {obj.type} object, which has no modifier "
+                f"stack; modifiers go on {', '.join(sorted(_MODIFIER_OWNER_TYPES))} objects"
+            )
+        mod_type = modifier_type.upper()
+        known_types = self._enum_items(
+            getattr(getattr(blender_module, "types", None), "Modifier", None), "type"
+        )
+        if known_types and mod_type not in known_types:
+            raise ValueError(
+                f"Unknown modifier type '{modifier_type}'{_did_you_mean(mod_type, known_types)}"
+            )
+        if mod_type == "DECIMATE" and obj.type == "MESH":
+            self._refuse_invalid_geometry(obj, "Decimate")
 
-        if params:
-            for key, value in params.items():
-                if hasattr(mod, key):
-                    setattr(mod, key, value)
-                else:
-                    self.logger.warning(
-                        "Modifier %s has no attribute '%s'", mod.type, key
-                    )
+        mod = obj.modifiers.new(name=modifier_name or modifier_type.title(), type=mod_type)
+        if mod is None:
+            raise ValueError(
+                f"Blender cannot add a {mod_type} modifier to {obj.type} object '{object_name}'"
+            )
+        try:
+            applied = self._set_rna_settings(mod, params or {}, f"{mod_type} modifier")
+        except Exception:
+            obj.modifiers.remove(mod)
+            raise
 
         return {
             "object_name": object_name,
             "modifier_name": mod.name,
             "modifier_type": mod.type,
+            "params": applied,
         }
+
+    def apply_modifier(self, object_name: str, modifier_name: str) -> Dict[str, Any]:
+        """
+        Apply one modifier to a mesh object's data, baking its result.
+
+        Blender's own Apply: the modifier's result replaces the mesh data and
+        the modifier leaves the stack. A modifier below others is applied to
+        the base mesh as if the ones above it were not there, and the reply
+        warns about it. Mesh data that other objects share is first copied for
+        this object, so their geometry does not change. A modifier disabled in
+        the viewport is refused, since Blender would drop it unapplied, and
+        Decimate is refused on a mesh with invalid geometry, as by
+        add_modifier. The object must be in Object Mode.
+
+        Args:
+            object_name: Mesh object holding the modifier.
+            modifier_name: Name of the modifier to apply.
+
+        Returns:
+            Dictionary with the applied modifier, the mesh counts afterwards,
+            the remaining modifiers, made_single_user and warnings.
+        """
+        blender_module: Any = bpy
+        obj = self._get_object_or_raise(object_name)
+        if obj.type != "MESH":
+            raise ValueError(
+                f"Object '{object_name}' is a {obj.type} object; only mesh modifiers can be applied"
+            )
+        self._require_object_mode(obj, "apply a modifier")
+        mod = self._modifier_or_raise(obj, modifier_name)
+        mod_type = mod.type
+        if not mod.show_viewport:
+            # Blender 5.0.1 answers FINISHED and drops such a modifier from
+            # the stack without applying it.
+            raise ValueError(
+                f"Modifier '{modifier_name}' of '{object_name}' is disabled in the viewport, "
+                "so Blender would remove it without applying it; enable it (show_viewport) "
+                "first, or use remove_blender_modifier"
+            )
+        if mod_type == "DECIMATE":
+            self._refuse_invalid_geometry(obj, "Decimate")
+        warnings: List[str] = []
+        names = [other.name for other in obj.modifiers]
+        above = names[: names.index(mod.name)]
+        if above:
+            warnings.append(
+                f"'{modifier_name}' was not first in the stack: Blender applied it to the "
+                f"base mesh without the modifiers above it ({', '.join(above)})"
+            )
+        shared = obj.data.users > 1
+        with blender_module.context.temp_override(object=obj, active_object=obj):
+            result = _bpy_op(
+                f"Failed to apply modifier '{modifier_name}' to '{object_name}'",
+                blender_module.ops.object.modifier_apply,
+                modifier=mod.name,
+                single_user=shared,
+            )
+        if "FINISHED" not in result:
+            raise RuntimeError(
+                f"Blender did not apply modifier '{modifier_name}' to '{object_name}' "
+                f"({', '.join(sorted(result))})"
+            )
+        return {
+            "object_name": object_name,
+            "modifier_name": modifier_name,
+            "modifier_type": mod_type,
+            **self._mesh_counts(obj.data),
+            "remaining_modifiers": [other.name for other in obj.modifiers],
+            "made_single_user": shared,
+            "warnings": warnings,
+        }
+
+    def remove_modifier(self, object_name: str, modifier_name: str) -> Dict[str, Any]:
+        """
+        Remove one modifier from an object's stack without applying it.
+
+        Args:
+            object_name: Object holding the modifier.
+            modifier_name: Name of the modifier to remove.
+
+        Returns:
+            Dictionary with the removed modifier and the remaining modifiers.
+        """
+        obj = self._get_object_or_raise(object_name)
+        mod = self._modifier_or_raise(obj, modifier_name)
+        mod_type = mod.type
+        obj.modifiers.remove(mod)
+        return {
+            "object_name": object_name,
+            "modifier_name": modifier_name,
+            "modifier_type": mod_type,
+            "remaining_modifiers": [other.name for other in obj.modifiers],
+        }
+
+    @staticmethod
+    def _modifier_or_raise(obj: Any, modifier_name: str) -> Any:
+        """The object's modifier of that name, or a ValueError listing its modifiers."""
+        modifiers = getattr(obj, "modifiers", None)
+        mod = None if modifiers is None else modifiers.get(modifier_name)
+        if mod is None:
+            names = [other.name for other in modifiers or []]
+            raise ValueError(
+                f"Object '{obj.name}' has no modifier '{modifier_name}'; "
+                + (f"its modifiers are: {', '.join(names)}" if names else "it has none")
+            )
+        return mod
+
+    @staticmethod
+    def _require_object_mode(obj: Any, action: str) -> None:
+        """Refuse to change an object's mesh data while it is edited in another mode."""
+        mode = getattr(obj, "mode", "OBJECT")
+        if mode != "OBJECT":
+            raise ValueError(
+                f"Object '{obj.name}' is in {mode.replace('_', ' ').title()} Mode; "
+                f"switch it to Object Mode to {action}"
+            )
+
+    @staticmethod
+    def _refuse_invalid_geometry(obj: Any, purpose: str) -> None:
+        """Refuse a mesh that Blender's validation would change.
+
+        Faces that repeat a vertex, duplicate faces and duplicate edges are
+        invalid topology that Blender's tools assume away: on Blender 5.0.1,
+        Decimate's collapse looped forever on such a mesh, pinning the main
+        thread. The check validates a throwaway copy, as Blender's C validation
+        is both exact and fast (0.17 s for a million faces); leaving the mesh
+        itself unchanged keeps the repair an explicit clean_mesh call.
+
+        Args:
+            obj: The mesh object.
+            purpose: What the mesh is checked for, named in the error.
+        """
+        blender_module: Any = bpy
+        if getattr(obj, "mode", "OBJECT") == "EDIT":
+            obj.update_from_editmode()
+        probe = obj.data.copy()
+        try:
+            invalid = bool(probe.validate(verbose=False, clean_customdata=False))
+        finally:
+            blender_module.data.meshes.remove(probe)
+        if invalid:
+            raise ValueError(
+                f"Mesh of '{obj.name}' has invalid geometry (faces that repeat a vertex, "
+                f"duplicate faces or duplicate edges), on which {purpose} can freeze Blender; "
+                "run clean_blender_mesh on it first"
+            )
+
+    def _set_rna_settings(
+        self, struct: Any, settings: Dict[str, Any], what: str
+    ) -> Dict[str, Any]:
+        """Set settings on a Blender struct after checking each against its RNA.
+
+        Args:
+            struct: The struct, such as a modifier.
+            settings: Values by RNA property identifier.
+            what: The struct as an error names it, e.g. ``DECIMATE modifier``.
+
+        Returns:
+            Each setting as Blender stored it, in JSON-friendly form.
+
+        Raises:
+            ValueError: For an unknown, reserved or read-only setting, a value
+                outside its limits or items, or a datablock that is not found
+                or that Blender refuses for the setting.
+        """
+        properties = struct.bl_rna.properties
+        writable = sorted(
+            prop.identifier
+            for prop in properties
+            if not prop.is_readonly
+            and prop.identifier not in _RESERVED_MODIFIER_SETTINGS
+        )
+        applied: Dict[str, Any] = {}
+        for key, value in settings.items():
+            if key in ("name", "type"):
+                raise ValueError(
+                    f"Set the {what}'s {key} through modifier_{key}, not params"
+                )
+            prop = None if key in _RESERVED_MODIFIER_SETTINGS else properties.get(key)
+            if prop is None:
+                raise ValueError(
+                    f"{what} has no setting '{key}'{_did_you_mean(key, writable)}; "
+                    f"its settings are: {', '.join(writable)}"
+                )
+            if prop.is_readonly:
+                raise ValueError(f"{what} setting '{key}' is read-only")
+            converted = self._rna_value(prop, value, f"{what} setting '{key}'")
+            setattr(struct, key, converted)
+            stored = getattr(struct, key)
+            if prop.type == "POINTER":
+                if stored != converted:
+                    # Blender drops a datablock its poll function refuses,
+                    # such as a camera for a Boolean's object, without an error.
+                    raise ValueError(
+                        f"Blender refused '{value}' for {what} setting '{key}': it does not "
+                        f"take that {prop.fixed_type.identifier}"
+                    )
+                applied[key] = None if stored is None else stored.name
+            else:
+                applied[key] = self._rna_echo(stored)
+        return applied
+
+    def _rna_value(self, prop: Any, value: Any, what: str) -> Any:
+        """The value to assign to an RNA property, checked against its definition.
+
+        Enum items match case-insensitively and an enum flag takes a list;
+        a datablock is named; a number must lie within the hard limits that
+        Blender would otherwise clamp it to silently.
+        """
+        kind = prop.type
+        if kind == "ENUM":
+            items = [item.identifier for item in prop.enum_items]
+            if prop.is_enum_flag:
+                values = [value] if isinstance(value, str) else value
+                if not isinstance(values, (list, tuple, set, frozenset)):
+                    raise ValueError(f"{what} takes a list of {', '.join(items)}")
+                return {_enum_item(item, items, what) for item in values}
+            return _enum_item(value, items, what)
+        if kind == "POINTER":
+            return self._named_datablock(prop, value, what)
+        if kind in ("INT", "FLOAT"):
+            length = getattr(prop, "array_length", 0)
+            if not length:
+                _check_rna_number(prop, value, what)
+                return int(value) if kind == "INT" else value
+            if not isinstance(value, (list, tuple)) or len(value) != length:
+                raise ValueError(f"{what} takes {length} numbers")
+            for item in value:
+                _check_rna_number(prop, item, what)
+            return [int(item) for item in value] if kind == "INT" else list(value)
+        return value
+
+    def _named_datablock(self, prop: Any, value: Any, what: str) -> Any:
+        """Resolve the name given for a pointer setting to its datablock."""
+        if value is None:
+            return None
+        type_name = prop.fixed_type.identifier
+        if not isinstance(value, str):
+            raise ValueError(
+                f"{what} takes the name of a {type_name}, got {type(value).__name__}"
+            )
+        rna = prop.fixed_type
+        while rna is not None and rna.identifier not in _ID_COLLECTIONS:
+            rna = getattr(rna, "base", None)
+        if rna is None:
+            raise ValueError(f"{what} points to a {type_name}, which cannot be set by name")
+        if rna.identifier == "Object":
+            # Objects resolve like every other object argument: within the
+            # attached scene in attached mode.
+            try:
+                return self._get_object_or_raise(value)
+            except ValueError:
+                raise ValueError(f"{what}: object '{value}' not found") from None
+        blender_module: Any = bpy
+        datablock = getattr(blender_module.data, _ID_COLLECTIONS[rna.identifier]).get(value)
+        if datablock is None:
+            raise ValueError(f"{what}: {type_name} '{value}' not found")
+        return datablock
+
+    @staticmethod
+    def _rna_echo(value: Any) -> Any:
+        """A stored RNA value in JSON-friendly form: datablocks by name, sets sorted."""
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, (set, frozenset)):
+            return sorted(value)
+        if hasattr(value, "bl_rna") and hasattr(value, "name"):
+            return value.name
+        try:
+            return [BlenderRuntimeSession._rna_echo(item) for item in value]
+        except TypeError:
+            return str(value)
+
+    @staticmethod
+    def _enum_items(struct_type: Any, identifier: str) -> List[str]:
+        """The item identifiers of an enum property of a Blender type, or [] when unknown."""
+        try:
+            prop = struct_type.bl_rna.properties[identifier]
+        except (AttributeError, KeyError, TypeError):
+            return []
+        return [item.identifier for item in prop.enum_items]
 
     def set_light_params(
         self,
@@ -2711,12 +3544,16 @@ class BlenderRuntimeSession:
         """
         Set the animation start and end frames.
 
+        An unbaked rigid-body cache is fitted to the new range, since Blender
+        simulates nothing past the cache's end frame; a baked cache keeps its
+        range and the warning says what part of the scene range it leaves out.
+
         Args:
             frame_start: Start frame of the animation range.
             frame_end: End frame of the animation range.
 
         Returns:
-            Dict with the frame range that was set.
+            Dict with the frame range that was set, rigid_body_cache and warning.
         """
         if frame_start >= frame_end:
             raise ValueError(
@@ -2727,9 +3564,14 @@ class BlenderRuntimeSession:
         scene = blender_module.context.scene
         scene.frame_start = frame_start
         scene.frame_end = frame_end
+        # An unbaked rigid-body cache follows the scene range (bodies froze at
+        # its old end frame otherwise); a baked one is reported.
+        rigid_body_cache, warning = self._sync_rigid_body_cache(scene)
         return {
             "frame_start": scene.frame_start,
             "frame_end": scene.frame_end,
+            "rigid_body_cache": rigid_body_cache,
+            "warning": warning,
         }
 
     def play_animation(self, action: str = "play") -> Dict[str, Any]:
@@ -2933,8 +3775,7 @@ class BlenderRuntimeSession:
         obj = self._get_object_or_raise(object_name)
 
         scene = blender_module.context.scene
-        if scene.rigidbody_world is None:
-            blender_module.ops.rigidbody.world_add()
+        self._ensure_rigid_body_world(scene)
 
         blender_module.context.view_layer.objects.active = obj
         obj.select_set(True)
@@ -3045,8 +3886,7 @@ class BlenderRuntimeSession:
         obj2 = self._get_object_or_raise(object2_name)
 
         scene = blender_module.context.scene
-        if scene.rigidbody_world is None:
-            blender_module.ops.rigidbody.world_add()
+        self._ensure_rigid_body_world(scene)
 
         loc = tuple(location or [0.0, 0.0, 0.0])
         blender_module.ops.object.empty_add(location=loc)
@@ -3120,31 +3960,158 @@ class BlenderRuntimeSession:
             [float(v) for v in matrix.to_euler(order)],
         )
 
-    def get_physics_state(self, object_name: str) -> Dict[str, Any]:
+    def get_physics_state(
+        self, object_name: str, step_simulation: bool = True
+    ) -> Dict[str, Any]:
         """
-        Get current physics state of an object.
+        Get an object's world pose and rigid-body state at the current frame.
+
+        An unbaked rigid-body simulation advances one frame at a time from its
+        cache start, so after a jump to a frame Blender has not simulated, a
+        body still sits where the simulation last left it (its starting pose
+        on a fresh cache). With step_simulation the scene steps from the cache
+        start to the current frame first, as playback would; frames Blender
+        has cached are read, not simulated again. pose_source and
+        simulated_for_frame say whether the pose is the simulation's result
+        for this frame.
 
         Args:
             object_name: Name of the object.
+            step_simulation: Step an unbaked rigid-body simulation from its
+                cache start to the current frame before reading the pose, at
+                most frames x bodies = 400 000; false reads the pose as it is.
 
         Returns:
-            Dict with object_name, location, rotation_euler, is_active,
-            has_rigid_body, mass, collision_shape.
+            Dict with object_name, frame, location, rotation_euler, is_active,
+            has_rigid_body, mass, collision_shape, pose_source,
+            simulated_for_frame, stepped_frames, world_enabled,
+            rigid_body_cache and warning.
         """
+        blender_module: Any = bpy
         obj = self._get_object_or_raise(object_name)
+        scene = blender_module.context.scene
         rb = getattr(obj, "rigid_body", None)
-        has_rb = rb is not None
+        world = getattr(scene, "rigidbody_world", None)
+        frame = int(scene.frame_current)
+        source, simulated, warning, stepped = self._simulated_pose(
+            scene, world, obj, rb, frame, step_simulation
+        )
 
         location, rotation = self._world_pose(obj)
         return {
             "object_name": object_name,
+            "frame": frame,
             "location": location,
             "rotation_euler": rotation,
             "is_active": rb is not None and rb.type == "ACTIVE",
-            "has_rigid_body": has_rb,
+            "has_rigid_body": rb is not None,
             "mass": float(rb.mass) if rb is not None else None,
             "collision_shape": rb.collision_shape if rb is not None else None,
+            "pose_source": source,
+            "simulated_for_frame": simulated,
+            "stepped_frames": stepped,
+            "world_enabled": bool(world.enabled) if world is not None else None,
+            "rigid_body_cache": (
+                self._cache_state(world.point_cache, scene)
+                if world is not None
+                else None
+            ),
+            "warning": warning,
         }
+
+    def _simulated_pose(
+        self,
+        scene: Any,
+        world: Any,
+        obj: Any,
+        rb: Any,
+        frame: int,
+        step_simulation: bool,
+    ) -> Tuple[str, Optional[bool], Optional[str], int]:
+        """Where the object's pose at ``frame`` comes from, stepping the simulation when asked.
+
+        Returns:
+            ``(pose_source, simulated_for_frame, warning, stepped_frames)``.
+        """
+        if rb is None:
+            return "evaluated", None, None, 0
+        if world is None or not self._in_rigid_body_world(world, obj):
+            return (
+                "evaluated",
+                None,
+                (
+                    f"'{obj.name}' has rigid-body settings but is not in the scene's "
+                    "rigid body world, so nothing simulates it"
+                ),
+                0,
+            )
+        if rb.type != "ACTIVE" or rb.kinematic or not rb.enabled:
+            # Passive, animated (kinematic) and disabled bodies follow their own
+            # transform and animation; the simulation only collides with them.
+            return "evaluated", None, None, 0
+        cache = world.point_cache
+        start, end = int(cache.frame_start), int(cache.frame_end)
+        if not world.enabled:
+            return (
+                "world_disabled",
+                False,
+                (
+                    "The rigid body world is disabled, so the body is at its own "
+                    "transform, not simulated; set_blender_rigid_body_world "
+                    "enabled=true turns the simulation on"
+                ),
+                0,
+            )
+        if frame < start:
+            return (
+                "before_cache",
+                False,
+                (
+                    f"Frame {frame} is before the rigid-body cache start {start}: "
+                    "the body is at its starting pose until the simulation begins"
+                ),
+                0,
+            )
+        stepped = 0
+        if not cache.is_baked and frame > start and step_simulation:
+            stepped = self._step_rigid_bodies(scene, world, frame)
+        if frame > end:
+            return (
+                "past_cache_end",
+                False,
+                (
+                    f"Frame {frame} is past the rigid-body cache end {end}: Blender "
+                    f"simulates nothing later and holds the bodies at their frame-{end} "
+                    "pose. Extend the cache with set_blender_rigid_body_world "
+                    "cache_frame_end (after free_blender_bake when it is baked), or "
+                    "with set_blender_frame_range while it is unbaked"
+                ),
+                stepped,
+            )
+        if cache.is_baked:
+            return "baked", True, None, 0
+        if frame == start or stepped:
+            return "simulation", True, None, stepped
+        if not step_simulation:
+            reason = "step_simulation is false"
+        else:
+            reason = (
+                f"stepping {frame - start + 1} frames of "
+                f"{self._rigid_body_count(world)} bodies exceeds "
+                f"{self._STEP_WORK_BUDGET} body-frames"
+            )
+        return (
+            "unknown",
+            None,
+            (
+                f"The rigid-body cache is not baked and the simulation was not "
+                f"stepped to frame {frame} ({reason}): the pose is the simulation's "
+                "only if Blender already simulated this frame, and otherwise where "
+                "the body was last simulated. Bake with bake_blender_simulation, or "
+                "sample with get_blender_object_trajectory"
+            ),
+            0,
+        )
 
     def get_object_trajectory(
         self,
@@ -3228,54 +4195,622 @@ class BlenderRuntimeSession:
         self,
         frame_start: int,
         frame_end: int,
+        scope: str = "rigid_body",
     ) -> Dict[str, Any]:
         """
-        Bake all physics simulations in the scene.
+        Bake the physics simulation over a frame range, replacing any earlier bake.
+
+        Blender skips a cache that is already baked, so a second bake used to
+        change only the reported range. The earlier bake is freed first and the
+        simulation restarts from frame_start with the bodies' current
+        transforms. The scene returns to its current frame afterwards.
 
         Args:
             frame_start: First frame to bake.
-            frame_end: Last frame to bake.
+            frame_end: Last frame to bake; after frame_start.
+            scope: rigid_body bakes the rigid-body world's cache only (stepping
+                each frame, then marking the cache baked), leaving cloth and
+                other caches as they are; all frees and bakes every point cache
+                in the scene, as Blender's Bake All Dynamics does: rigid bodies,
+                cloth, soft bodies and dynamic paint over frame_start-frame_end,
+                particle systems over the range their emission settings give.
 
         Returns:
-            Dict with frame_start, frame_end.
+            Dict with scope, frame_start, frame_end and frame_count of the
+            rigid-body cache (null without one), rigid_body_cache, caches (each
+            cache's owner, kind, range and bake state) and warnings.
         """
         blender_module: Any = bpy
+        scope = self._bake_scope(scope)
+        self._check_cache_range(int(frame_start), int(frame_end))
         scene = blender_module.context.scene
+        warnings: List[str] = []
+        original_frame = int(scene.frame_current)
+        if scope == "rigid_body":
+            world = self._simulating_world(scene, "bake")
+            try:
+                self._bake_rigid_body_cache(scene, world, frame_start, frame_end)
+            finally:
+                scene.frame_set(original_frame)
+        else:
+            caches = self._point_caches(scene)
+            if not caches:
+                raise ValueError(
+                    "Nothing to bake: the scene has no rigid body world, cloth, soft "
+                    "body, dynamic paint or particle cache"
+                )
+            try:
+                warnings.extend(
+                    self._bake_all_caches(scene, caches, frame_start, frame_end)
+                )
+            finally:
+                scene.frame_set(original_frame)
+        return self._bake_report(scene, scope, warnings)
 
-        if scene.rigidbody_world is None:
-            raise ValueError("No rigid body world to bake")
+    def free_bake(self, scope: str = "rigid_body") -> Dict[str, Any]:
+        """
+        Free baked physics simulation data, over the same scope bake_simulation takes.
 
-        pc = scene.rigidbody_world.point_cache
-        pc.frame_start = frame_start
-        pc.frame_end = frame_end
+        A freed cache gets the scene's frame range back (particle systems keep
+        the range Blender derives for them), so the simulation is not cut off
+        at the last bake's end frame; rigid-body frames cached from the same
+        start frame stay valid. Freeing an unbaked cache changes nothing else,
+        except that an unbaked rigid-body cache is fitted to the scene range.
 
-        # Blender 4.0 removed the positional context-override dict.
-        with blender_module.context.temp_override(scene=scene, point_cache=pc):
-            blender_module.ops.ptcache.bake(bake=True)
+        Args:
+            scope: rigid_body frees the rigid-body world's cache only; all frees
+                every point cache in the scene (rigid bodies, cloth, soft bodies,
+                dynamic paint, particles).
 
+        Returns:
+            Dict with scope, freed (the caches that were baked), caches,
+            rigid_body_cache and warnings.
+        """
+        blender_module: Any = bpy
+        scope = self._bake_scope(scope)
+        scene = blender_module.context.scene
+        world: Any = getattr(scene, "rigidbody_world", None)
+        caches = self._point_caches(scene)
+        if scope == "rigid_body":
+            if world is None:
+                raise ValueError(
+                    "No rigid body world to free; use scope 'all' for cloth, soft-body, "
+                    "particle or dynamic paint caches"
+                )
+            caches = caches[:1]
+        baked = [(entry, cache) for entry, cache in caches if cache.is_baked]
+        freed = [self._cache_entry(entry, cache) for entry, cache in baked]
+        if scope == "rigid_body":
+            self._free_cache(scene, world.point_cache)
+        elif caches:
+            with blender_module.context.temp_override(scene=scene):
+                blender_module.ops.ptcache.free_bake_all()
+            # A bake over part of the scene range would otherwise cut the
+            # simulation off at its end frame; particle ranges are derived.
+            for entry, cache in baked:
+                if entry["kind"] not in ("RIGID_BODY", "PARTICLES"):
+                    cache.frame_start = int(scene.frame_start)
+                    cache.frame_end = max(int(scene.frame_end), int(scene.frame_start) + 1)
+        state, warning = self._sync_rigid_body_cache(scene)
         return {
-            "frame_start": frame_start,
-            "frame_end": frame_end,
+            "scope": scope,
+            "freed": freed,
+            "caches": [self._cache_entry(entry, cache) for entry, cache in caches],
+            "rigid_body_cache": state,
+            "warnings": [warning] if warning else [],
         }
 
-    def free_bake(self) -> Dict[str, Any]:
+    def _bake_rigid_body_cache(
+        self, scene: Any, world: Any, frame_start: int, frame_end: int
+    ) -> None:
+        """Bake the rigid-body cache alone.
+
+        ``ptcache.bake`` given the rigid-body cache bakes every cache in the
+        scene on Blender 5.0.1 (a cloth came out baked over its own 250 frames)
+        while ``ptcache.free_bake`` frees only that one. Stepping each frame
+        fills the rigid-body cache as playback does, and ``bake_from_cache``
+        marks only that cache baked. Other simulations step along, as during
+        playback, without being baked.
         """
-        Free all baked physics simulation data.
+        blender_module: Any = bpy
+        cache = world.point_cache
+        if cache.is_baked:
+            self._free_cache(scene, cache)
+        cache.frame_start = frame_start
+        cache.frame_end = frame_end
+        self._invalidate_rigid_body_cache(world)
+        for frame in range(frame_start, frame_end + 1):
+            scene.frame_set(frame)
+        with blender_module.context.temp_override(scene=scene, point_cache=cache):
+            blender_module.ops.ptcache.bake_from_cache()
+        if not cache.is_baked:
+            raise RuntimeError(
+                "Blender did not mark the rigid-body cache baked after stepping "
+                f"frames {frame_start}-{frame_end}"
+            )
+
+    def _bake_all_caches(
+        self,
+        scene: Any,
+        caches: List[Tuple[Dict[str, Any], Any]],
+        frame_start: int,
+        frame_end: int,
+    ) -> List[str]:
+        """Free and bake every point cache, as Blender's Bake All Dynamics.
+
+        Bake All skips caches that are already baked, so all are freed first.
+        Particle systems keep the range Blender derives from their emission
+        settings and the scene range. A disabled rigid body world stores no
+        simulation, so its cache is left unbaked.
 
         Returns:
-            Empty dict (success indicated by caller).
+            Warnings for the reply.
+        """
+        blender_module: Any = bpy
+        warnings: List[str] = []
+        world = getattr(scene, "rigidbody_world", None)
+        with blender_module.context.temp_override(scene=scene):
+            blender_module.ops.ptcache.free_bake_all()
+        for entry, cache in caches:
+            if entry["kind"] != "PARTICLES":
+                cache.frame_start = frame_start
+                cache.frame_end = frame_end
+        if world is not None and world.enabled:
+            self._invalidate_rigid_body_cache(world)
+        scene.frame_set(frame_start)
+        with blender_module.context.temp_override(scene=scene):
+            blender_module.ops.ptcache.bake_all(bake=True)
+        if world is not None and not world.enabled:
+            self._free_cache(scene, world.point_cache)
+            warnings.append(
+                "The rigid body world is disabled, so its cache was left unbaked; "
+                "enable it with set_blender_rigid_body_world enabled=true and bake again"
+            )
+        return warnings
+
+    def _bake_report(self, scene: Any, scope: str, warnings: List[str]) -> Dict[str, Any]:
+        """The reply of bake_simulation: the range the caches actually hold."""
+        world = getattr(scene, "rigidbody_world", None)
+        state = (
+            self._cache_state(world.point_cache, scene) if world is not None else None
+        )
+        if state is not None and not state["covers_scene_range"]:
+            warnings.append(
+                f"The rigid-body bake covers frames {state['frame_start']}-"
+                f"{state['frame_end']} of the scene range {scene.frame_start}-"
+                f"{scene.frame_end}: bodies hold their pose outside it"
+            )
+        if scope == "all":
+            caches = self._point_caches(scene)
+        else:
+            caches = self._point_caches(scene)[:1]
+        return {
+            "scope": scope,
+            "frame_start": state["frame_start"] if state else None,
+            "frame_end": state["frame_end"] if state else None,
+            "frame_count": (
+                state["frame_end"] - state["frame_start"] + 1 if state else None
+            ),
+            "rigid_body_cache": state,
+            "caches": [self._cache_entry(entry, cache) for entry, cache in caches],
+            "warnings": warnings,
+        }
+
+    # -- Rigid-body world and point caches -----------------------------------
+
+    #: What bake_simulation and free_bake act on: the rigid-body world's cache
+    #: only, or every point cache in the scene, as Blender's Bake All Dynamics.
+    _BAKE_SCOPES = ("rigid_body", "all")
+
+    #: Modifier types whose ``point_cache`` Blender's Bake All Dynamics bakes.
+    _CACHED_MODIFIER_TYPES = frozenset({"CLOTH", "SOFT_BODY"})
+
+    #: The frame range a point cache accepts (PointCache RNA, Blender 4.2-5.0).
+    _CACHE_FRAME_MIN = -1048574
+    _CACHE_FRAME_MAX = 1048574
+
+    #: Most work get_physics_state steps an unbaked simulation through, in
+    #: body-frames (frames x rigid bodies): on Blender 5.0.1 a frame cost about
+    #: 0.3 ms plus 20-30 microseconds per body in contact with a ground, so this
+    #: stays near 10 s, a third of the attached-mode timeout.
+    _STEP_WORK_BUDGET = 400_000
+
+    @staticmethod
+    def _in_rigid_body_world(world: Any, obj: Any) -> bool:
+        """Whether the world's collection, which is what Blender simulates, holds ``obj``."""
+        collection = world.collection
+        return collection is not None and any(
+            member == obj for member in collection.all_objects
+        )
+
+    @staticmethod
+    def _rigid_body_count(world: Any) -> int:
+        collection = world.collection
+        return len(collection.all_objects) if collection is not None else 0
+
+    def _step_rigid_bodies(self, scene: Any, world: Any, frame: int) -> int:
+        """Step an unbaked rigid-body simulation from its cache start up to ``frame``.
+
+        Blender advances an unbaked simulation only from one frame to the next,
+        so this visits every frame from the cache start, as playback would.
+        Frames already cached are read, not simulated again. Past the cache
+        end nothing more is simulated; the walk stops there and ends on
+        ``frame``. Nothing is stepped when the walk would exceed
+        ``_STEP_WORK_BUDGET``.
+
+        Returns:
+            The number of frames visited, 0 when the walk was over budget.
+        """
+        cache = world.point_cache
+        start = int(cache.frame_start)
+        last = min(frame, int(cache.frame_end))
+        frames = last - start + 1
+        if frames * max(self._rigid_body_count(world), 1) > self._STEP_WORK_BUDGET:
+            return 0
+        for step in range(start, last + 1):
+            scene.frame_set(step)
+        if last != frame:
+            scene.frame_set(frame)
+        return frames
+
+    @staticmethod
+    def _cache_state(cache: Any, scene: Any) -> Dict[str, Any]:
+        """The range and bake state of a rigid-body point cache."""
+        start, end = int(cache.frame_start), int(cache.frame_end)
+        return {
+            "frame_start": start,
+            "frame_end": end,
+            "is_baked": bool(cache.is_baked),
+            "is_outdated": bool(cache.is_outdated),
+            "info": str(cache.info),
+            "covers_scene_range": start <= int(scene.frame_start)
+            and end >= int(scene.frame_end),
+        }
+
+    @staticmethod
+    def _invalidate_rigid_body_cache(world: Any) -> None:
+        """Mark an unbaked rigid-body cache outdated, so the simulation restarts at its start.
+
+        Writing a world setting runs Blender's rigid-body reset even when the
+        value stays the same, and Python has no other handle on it. Blender then
+        drops the cached frames and rebuilds the physics world from the bodies'
+        own transforms when the scene next steps from the cache start to the
+        frame after. Without it the frames of an earlier simulation stay
+        readable: on Blender 5.0.1, after a freed bake of frames 1-200, a bake
+        of 10-50 read the old frames simulated from frame 1.
+        """
+        world.time_scale = world.time_scale
+
+    def _set_cache_range(self, world: Any, frame_start: int, frame_end: int) -> None:
+        """Set the rigid-body cache range; a new start frame invalidates the cache.
+
+        Frames cached from the same start stay valid when only the end moves.
+        """
+        cache = world.point_cache
+        moved_start = int(cache.frame_start) != frame_start
+        cache.frame_start = frame_start
+        cache.frame_end = frame_end
+        if moved_start:
+            self._invalidate_rigid_body_cache(world)
+
+    def _sync_rigid_body_cache(
+        self, scene: Any
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Fit an unbaked rigid-body cache to the scene's frame range.
+
+        Blender simulates rigid bodies only inside the cache's range and holds
+        them at its last frame after it. ``rigidbody.world_add`` makes the range
+        1-250 whatever the scene's, and changing the scene range leaves it
+        alone, so bodies froze at frame 250 of a 1000-frame scene. Call this
+        wherever the scene range changes or the cache is created or freed
+        (set_frame_range, free_bake, world creation). A baked cache keeps its
+        range, since a new range would not change the bake; the warning says
+        what it leaves out.
+
+        Args:
+            scene: The scene whose rigid-body world to sync.
+
+        Returns:
+            The cache state (None without a rigid body world) and a warning,
+            or None.
+        """
+        world = getattr(scene, "rigidbody_world", None)
+        if world is None:
+            return None, None
+        cache = world.point_cache
+        start, end = int(scene.frame_start), int(scene.frame_end)
+        warning = None
+        if not cache.is_baked:
+            self._set_cache_range(world, start, max(end, start + 1))
+        elif int(cache.frame_start) > start or int(cache.frame_end) < end:
+            warning = (
+                f"The rigid-body cache is baked for frames {cache.frame_start}-"
+                f"{cache.frame_end}, which leaves out part of the scene range "
+                f"{start}-{end}: bodies hold their pose outside it. Bake again over "
+                "the new range with bake_blender_simulation"
+            )
+        return self._cache_state(cache, scene), warning
+
+    def _ensure_rigid_body_world(self, scene: Any) -> Tuple[Any, bool]:
+        """Return the scene's rigid body world, adding one fitted to the scene range.
+
+        Returns:
+            The world and whether it was added.
+        """
+        world = scene.rigidbody_world
+        if world is not None:
+            return world, False
+        blender_module: Any = bpy
+        _bpy_op(
+            "Failed to add a rigid body world",
+            blender_module.ops.rigidbody.world_add,
+        )
+        world = scene.rigidbody_world
+        self._sync_rigid_body_cache(scene)
+        return world, True
+
+    def _point_caches(self, scene: Any) -> List[Tuple[Dict[str, Any], Any]]:
+        """Every point cache Blender's Bake All Dynamics covers, with a description.
+
+        The rigid-body world's, then per object those of cloth and soft-body
+        modifiers, dynamic paint canvas surfaces and particle systems. Fluid
+        domains bake through their own cache, not a point cache.
+
+        Returns:
+            ``(entry, cache)`` pairs; ``entry`` names the owner and kind.
+        """
+        found: List[Tuple[Dict[str, Any], Any]] = []
+        world = getattr(scene, "rigidbody_world", None)
+        if world is not None:
+            found.append(
+                (
+                    {"owner": scene.name, "kind": "RIGID_BODY", "name": "RigidBodyWorld"},
+                    world.point_cache,
+                )
+            )
+        for obj in scene.objects:
+            for modifier in getattr(obj, "modifiers", ()):
+                if modifier.type in self._CACHED_MODIFIER_TYPES:
+                    found.append(
+                        (
+                            {"owner": obj.name, "kind": modifier.type, "name": modifier.name},
+                            modifier.point_cache,
+                        )
+                    )
+                elif modifier.type == "DYNAMIC_PAINT":
+                    canvas = getattr(modifier, "canvas_settings", None)
+                    for surface in getattr(canvas, "canvas_surfaces", ()) or ():
+                        found.append(
+                            (
+                                {"owner": obj.name, "kind": "DYNAMIC_PAINT", "name": surface.name},
+                                surface.point_cache,
+                            )
+                        )
+            for system in getattr(obj, "particle_systems", ()):
+                found.append(
+                    (
+                        {"owner": obj.name, "kind": "PARTICLES", "name": system.name},
+                        system.point_cache,
+                    )
+                )
+        return found
+
+    @staticmethod
+    def _cache_entry(entry: Dict[str, Any], cache: Any) -> Dict[str, Any]:
+        return {
+            **entry,
+            "frame_start": int(cache.frame_start),
+            "frame_end": int(cache.frame_end),
+            "is_baked": bool(cache.is_baked),
+        }
+
+    @staticmethod
+    def _free_cache(scene: Any, cache: Any) -> None:
+        """Free one point cache's bake (a no-op on an unbaked cache)."""
+        blender_module: Any = bpy
+        # Blender 4.0 removed the positional context-override dict.
+        with blender_module.context.temp_override(scene=scene, point_cache=cache):
+            blender_module.ops.ptcache.free_bake()
+
+    @classmethod
+    def _bake_scope(cls, scope: str) -> str:
+        if scope not in cls._BAKE_SCOPES:
+            raise ValueError(
+                f"Invalid scope '{scope}'. Must be one of {cls._BAKE_SCOPES}"
+            )
+        return scope
+
+    def _simulating_world(self, scene: Any, action: str) -> Any:
+        """The scene's rigid body world, refusing ``action`` without one or while it is disabled."""
+        world = getattr(scene, "rigidbody_world", None)
+        if world is None:
+            raise ValueError(
+                f"No rigid body world to {action}: setup_blender_rigid_body adds one "
+                "with its first body, set_blender_rigid_body_world adds an empty one. "
+                "Use scope 'all' for cloth, soft-body, particle or dynamic paint caches"
+            )
+        if not world.enabled:
+            raise ValueError(
+                f"The rigid body world is disabled, so a {action} would store no "
+                "simulation; enable it with set_blender_rigid_body_world enabled=true"
+            )
+        return world
+
+    def get_rigid_body_world(self) -> Dict[str, Any]:
+        """
+        Get the scene's rigid body world: its settings, bodies and cache.
+
+        Gravity is the scene's, which cloth, soft bodies and particles share.
+        The cache's range bounds what Blender simulates: past its end, bodies
+        hold their pose. ``warnings`` names what makes the simulation differ
+        from what playback suggests (a disabled world, a cache that leaves out
+        part of the scene range, a baked cache that settings no longer change).
+
+        Returns:
+            Dict with exists, enabled, gravity, use_gravity, substeps_per_frame,
+            solver_iterations, time_scale, use_split_impulse, collection,
+            body_count, constraint_count, rigid_body_cache, scene_frame_start,
+            scene_frame_end and warnings.
+        """
+        blender_module: Any = bpy
+        return self._world_report(blender_module.context.scene)
+
+    def set_rigid_body_world(
+        self,
+        enabled: Optional[bool] = None,
+        gravity: Optional[List[float]] = None,
+        use_gravity: Optional[bool] = None,
+        substeps_per_frame: Optional[int] = None,
+        solver_iterations: Optional[int] = None,
+        time_scale: Optional[float] = None,
+        use_split_impulse: Optional[bool] = None,
+        cache_frame_start: Optional[int] = None,
+        cache_frame_end: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Change the scene's rigid body world, adding one when there is none.
+
+        Only the given settings change. A new world's cache covers the scene's
+        frame range. An unbaked cache restarts from its start frame after a
+        change; a baked one keeps playing its bake, so changed settings apply
+        only after free_blender_bake and a new bake, and its range cannot
+        change until it is freed.
+
+        Args:
+            enabled: Run the simulation; a disabled world leaves bodies at their
+                own transforms.
+            gravity: Scene gravity [x, y, z] in m/s^2, shared with cloth, soft
+                bodies and particles; Blender's default is [0, 0, -9.81].
+            use_gravity: Apply the scene gravity.
+            substeps_per_frame: Simulation steps per frame, 1-32767.
+            solver_iterations: Constraint solver iterations per step, 1-1000.
+            time_scale: Simulation speed relative to the scene's frame rate, 0-100.
+            use_split_impulse: Reduce extra velocity from penetration recovery.
+            cache_frame_start: First simulated frame.
+            cache_frame_end: Last simulated frame; after cache_frame_start.
+
+        Returns:
+            The world as get_rigid_body_world reports it, with created.
         """
         blender_module: Any = bpy
         scene = blender_module.context.scene
+        world = getattr(scene, "rigidbody_world", None)
+        range_requested = cache_frame_start is not None or cache_frame_end is not None
+        if world is None:
+            current = (int(scene.frame_start), max(int(scene.frame_end), int(scene.frame_start) + 1))
+            baked = False
+        else:
+            current = (int(world.point_cache.frame_start), int(world.point_cache.frame_end))
+            baked = bool(world.point_cache.is_baked)
+        new_range = (
+            current[0] if cache_frame_start is None else int(cache_frame_start),
+            current[1] if cache_frame_end is None else int(cache_frame_end),
+        )
+        if range_requested:
+            self._check_cache_range(*new_range, label="cache_frame")
+            if baked and new_range != current:
+                raise ValueError(
+                    f"The rigid-body cache is baked for frames {current[0]}-{current[1]}; "
+                    "free it with free_blender_bake before changing its range"
+                )
+        if gravity is not None:
+            gravity = [float(v) for v in gravity]
+            if len(gravity) != 3 or not all(math.isfinite(v) for v in gravity):
+                raise ValueError("gravity must be three finite numbers")
 
-        if scene.rigidbody_world is None:
-            raise ValueError("No rigid body world to free")
+        world, created = self._ensure_rigid_body_world(scene)
+        try:
+            settings = {
+                "enabled": enabled,
+                "substeps_per_frame": substeps_per_frame,
+                "solver_iterations": solver_iterations,
+                "time_scale": time_scale,
+                "use_split_impulse": use_split_impulse,
+            }
+            changed = False
+            for name, value in settings.items():
+                if value is not None:
+                    setattr(world, name, value)
+                    changed = True
+            if gravity is not None:
+                scene.gravity = gravity
+                changed = True
+            if use_gravity is not None:
+                scene.use_gravity = use_gravity
+                changed = True
+            if range_requested and not baked:
+                self._set_cache_range(world, *new_range)
+            if changed and not world.point_cache.is_baked:
+                self._invalidate_rigid_body_cache(world)
+        except Exception:
+            if created:
+                blender_module.ops.rigidbody.world_remove()
+            raise
+        report = self._world_report(scene)
+        report["created"] = created
+        if changed and world.point_cache.is_baked:
+            report["warnings"].append(
+                "The rigid-body cache is baked, so playback still reads the bake: the "
+                "changed settings apply after free_blender_bake and a new bake"
+            )
+        return report
 
-        pc = scene.rigidbody_world.point_cache
-        with blender_module.context.temp_override(scene=scene, point_cache=pc):
-            blender_module.ops.ptcache.free_bake()
+    def _check_cache_range(self, frame_start: int, frame_end: int, label: str = "frame") -> None:
+        """Refuse a range a point cache cannot hold, or one that is empty or inverted."""
+        if frame_start >= frame_end:
+            raise ValueError(
+                f"{label}_start ({frame_start}) must be less than {label}_end ({frame_end})"
+            )
+        if frame_start < self._CACHE_FRAME_MIN or frame_end > self._CACHE_FRAME_MAX:
+            raise ValueError(
+                f"A point cache covers frames {self._CACHE_FRAME_MIN} to "
+                f"{self._CACHE_FRAME_MAX}; got {frame_start}-{frame_end}"
+            )
 
-        return {}
+    def _world_report(self, scene: Any) -> Dict[str, Any]:
+        world = getattr(scene, "rigidbody_world", None)
+        report: Dict[str, Any] = {
+            "exists": world is not None,
+            "gravity": [float(v) for v in scene.gravity],
+            "use_gravity": bool(scene.use_gravity),
+            "scene_frame_start": int(scene.frame_start),
+            "scene_frame_end": int(scene.frame_end),
+            "warnings": [],
+        }
+        if world is None:
+            report["warnings"].append(
+                "The scene has no rigid body world: setup_blender_rigid_body adds one "
+                "with its first body, set_blender_rigid_body_world adds an empty one"
+            )
+            return report
+        cache = world.point_cache
+        state = self._cache_state(cache, scene)
+        constraints = world.constraints
+        report.update(
+            enabled=bool(world.enabled),
+            substeps_per_frame=int(world.substeps_per_frame),
+            solver_iterations=int(world.solver_iterations),
+            time_scale=float(world.time_scale),
+            use_split_impulse=bool(world.use_split_impulse),
+            collection=world.collection.name if world.collection is not None else None,
+            body_count=self._rigid_body_count(world),
+            constraint_count=(
+                len(constraints.all_objects) if constraints is not None else 0
+            ),
+            rigid_body_cache=state,
+        )
+        if not world.enabled:
+            report["warnings"].append(
+                "The rigid body world is disabled: nothing simulates and bakes are refused"
+            )
+        if not state["covers_scene_range"]:
+            report["warnings"].append(
+                f"The rigid-body cache covers frames {state['frame_start']}-"
+                f"{state['frame_end']}, not the whole scene range "
+                f"{report['scene_frame_start']}-{report['scene_frame_end']}: bodies hold "
+                "their pose outside it"
+            )
+        return report
 
     # -- End Phase 6 methods -------------------------------------------------
 
@@ -3432,79 +4967,266 @@ class BlenderRuntimeSession:
         """
         Create a mesh object from raw vertex, edge, and face data.
 
-        Uses ``bpy.data.meshes.new()`` + ``mesh.from_pydata()`` which is the
-        standard Blender Python API for procedural mesh creation.
+        Every argument is checked before anything is created: each vertex is
+        exactly three finite numbers, each index lies within the vertex list,
+        no face repeats a vertex or the vertex set of an earlier face, and no
+        edge joins a vertex to itself or repeats another edge. Such geometry
+        is invalid in Blender and froze its Decimate. The collection must be
+        in the current scene. The mesh is then built with
+        ``mesh.from_pydata()`` and checked with ``mesh.validate()``; when any
+        step fails, the mesh and object made so far are removed again.
 
         Args:
             name: Desired object name.
-            vertices: List of [x, y, z] vertex positions.
-            edges: List of [v0, v1] edge index pairs.
-            faces: List of vertex-index lists per face.
+            vertices: Vertex positions, each exactly [x, y, z] finite numbers.
+            edges: Loose edges as [v0, v1] pairs of two different vertices;
+                face edges are made from the faces.
+            faces: Faces as lists of three or more vertex indices, each vertex
+                once and each vertex set once.
             location: Optional world-space origin [x, y, z].
-            collection_name: Target collection (scene collection if None).
+            collection_name: Target collection in the current scene (the
+                scene collection if None).
 
         Returns:
-            Dict with object_name, mesh_name, vertex_count,
-            edge_count, face_count.
+            Dict with object_name, mesh_name, vertex_count, edge_count,
+            face_count and warnings.
 
         Raises:
-            ValueError: If vertices list is empty or indices are invalid.
+            ValueError: If the geometry, location or collection is invalid.
         """
-        if not vertices:
-            raise ValueError("vertices list must not be empty")
-
         blender_module: Any = bpy
-        safe_edges: List[List[int]] = edges or []
-        safe_faces: List[List[int]] = faces or []
+        coordinates = [
+            _finite_triple(vertex, f"Vertex {index}")
+            for index, vertex in enumerate(vertices)
+        ]
+        if not coordinates:
+            raise ValueError("vertices list must not be empty")
+        edge_list = self._mesh_edges(edges or [], len(coordinates))
+        face_list = self._mesh_faces(faces or [], len(coordinates))
+        origin = None if location is None else _finite_triple(location, "location")
+        collection = self._link_collection(collection_name)
+        warnings = self._collection_warnings(collection)
 
-        # Validate index bounds
-        num_verts = len(vertices)
-        for ei, edge in enumerate(safe_edges):
-            if len(edge) != 2:
-                raise ValueError(
-                    f"Edge {ei} must have exactly 2 indices, got {len(edge)}"
+        mesh: Any = None
+        obj: Any = None
+        try:
+            mesh = blender_module.data.meshes.new(name)
+            mesh.from_pydata(coordinates, edge_list, face_list)
+            if mesh.validate(verbose=False):
+                warnings.append(
+                    "Blender's mesh validation changed the geometry; the counts are "
+                    "what it kept"
                 )
-            for idx in edge:
-                if idx < 0 or idx >= num_verts:
-                    raise ValueError(
-                        f"Edge {ei} index {idx} out of range " f"[0, {num_verts})"
-                    )
-        for fi, face in enumerate(safe_faces):
-            if len(face) < 3:
-                raise ValueError(f"Face {fi} must have >= 3 indices, got {len(face)}")
-            for idx in face:
-                if idx < 0 or idx >= num_verts:
-                    raise ValueError(
-                        f"Face {fi} index {idx} out of range " f"[0, {num_verts})"
-                    )
+            mesh.update()
+            obj = blender_module.data.objects.new(name, mesh)
+            if origin is not None:
+                obj.location = origin
+            collection.objects.link(obj)
+        except Exception:
+            # Leave no orphan behind: an unlinked object or mesh is still
+            # written by whole-scene exports, which then fail on it.
+            if obj is not None:
+                blender_module.data.objects.remove(obj, do_unlink=True)
+            if mesh is not None:
+                blender_module.data.meshes.remove(mesh)
+            raise
 
-        # Create mesh data-block and populate
-        mesh = blender_module.data.meshes.new(name)
-        vert_tuples = [tuple(v) for v in vertices]
-        edge_tuples = [tuple(e) for e in safe_edges]
-        face_tuples = [tuple(f) for f in safe_faces]
-        mesh.from_pydata(vert_tuples, edge_tuples, face_tuples)
-        mesh.update()
-
-        # Create object and link to scene
-        obj = blender_module.data.objects.new(name, mesh)
-        if location is not None:
-            obj.location = tuple(location)
-
-        if collection_name is not None:
-            col = blender_module.data.collections.get(collection_name)
-            if col is None:
-                raise ValueError(f"Collection '{collection_name}' not found")
-            col.objects.link(obj)
-        else:
-            blender_module.context.scene.collection.objects.link(obj)
-
+        if obj.name != name:
+            warnings.append(
+                f"The name '{name}' was taken or too long; Blender named the object '{obj.name}'"
+            )
         return {
             "object_name": obj.name,
             "mesh_name": mesh.name,
             "vertex_count": len(mesh.vertices),
             "edge_count": len(mesh.edges),
             "face_count": len(mesh.polygons),
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def _mesh_edges(edges: Sequence[Sequence[int]], vertex_count: int) -> List[Tuple[int, int]]:
+        """Checked edge index pairs: in range, two distinct vertices, no edge twice."""
+        checked: List[Tuple[int, int]] = []
+        seen: Dict[Tuple[int, int], int] = {}
+        for ei, edge in enumerate(edges):
+            if len(edge) != 2:
+                raise ValueError(f"Edge {ei} must have exactly 2 indices, got {len(edge)}")
+            first, second = (_mesh_index(idx, f"Edge {ei}", vertex_count) for idx in edge)
+            if first == second:
+                raise ValueError(f"Edge {ei} joins vertex {first} to itself")
+            key = (min(first, second), max(first, second))
+            if key in seen:
+                raise ValueError(f"Edge {ei} repeats edge {seen[key]}")
+            seen[key] = ei
+            checked.append((first, second))
+        return checked
+
+    @staticmethod
+    def _mesh_faces(faces: Sequence[Sequence[int]], vertex_count: int) -> List[Tuple[int, ...]]:
+        """Checked faces: three or more indices in range, each vertex once, no face twice.
+
+        Two faces over the same vertex set count as duplicates whatever their
+        order: they overlap entirely.
+        """
+        checked: List[Tuple[int, ...]] = []
+        seen: Dict[Tuple[int, ...], int] = {}
+        for fi, face in enumerate(faces):
+            if len(face) < 3:
+                raise ValueError(f"Face {fi} must have >= 3 indices, got {len(face)}")
+            indices = tuple(_mesh_index(idx, f"Face {fi}", vertex_count) for idx in face)
+            if len(set(indices)) != len(indices):
+                repeated = next(idx for idx in indices if indices.count(idx) > 1)
+                raise ValueError(
+                    f"Face {fi} repeats vertex {repeated}; a face uses each vertex once"
+                )
+            key = tuple(sorted(indices))
+            if key in seen:
+                raise ValueError(
+                    f"Face {fi} uses the same vertices as face {seen[key]} (a duplicate face)"
+                )
+            seen[key] = fi
+            checked.append(indices)
+        return checked
+
+    def _link_collection(self, collection_name: Optional[str]) -> Any:
+        """The collection a new object goes into: one that belongs to the current scene.
+
+        An object linked only to a collection outside the scene is not part
+        of it: attached-mode lookups do not find it, and whole-scene exports
+        fail on it.
+        """
+        blender_module: Any = bpy
+        scene = blender_module.context.scene
+        if collection_name is None:
+            return scene.collection
+        collection = blender_module.data.collections.get(collection_name)
+        if collection is None:
+            raise ValueError(f"Collection '{collection_name}' not found")
+        if collection not in scene.collection.children_recursive:
+            raise ValueError(
+                f"Collection '{collection_name}' is not in scene '{scene.name}', so the "
+                "object would not be part of the scene; link the collection to the "
+                "scene, or omit collection_name"
+            )
+        if getattr(collection, "library", None) is not None:
+            raise ValueError(
+                f"Collection '{collection_name}' is linked from a library and cannot take new objects"
+            )
+        return collection
+
+    @staticmethod
+    def _collection_warnings(collection: Any) -> List[str]:
+        """A warning when the view layer excludes the collection an object goes into."""
+        blender_module: Any = bpy
+        view_layer: Any = getattr(blender_module.context, "view_layer", None)
+        pending = [getattr(view_layer, "layer_collection", None)]
+        while pending:
+            layer = pending.pop()
+            if layer is None:
+                continue
+            if layer.collection == collection:
+                if layer.exclude:
+                    return [
+                        f"Collection '{collection.name}' is excluded from view layer "
+                        f"'{view_layer.name}': Blender neither evaluates nor exports the object there"
+                    ]
+                return []
+            pending.extend(layer.children)
+        return []
+
+    def clean_mesh(
+        self,
+        object_name: str,
+        merge_distance: Optional[float] = None,
+        dissolve_degenerate_distance: Optional[float] = None,
+        recalculate_normals: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Repair a mesh object's data: validate it, then optionally merge, dissolve and recalculate.
+
+        ``mesh.validate()`` always runs first and removes invalid topology:
+        faces that repeat a vertex, duplicate faces and duplicate edges, which
+        can make Decimate loop forever. The optional steps then run in order
+        on the valid mesh: merge vertices closer than ``merge_distance``
+        (Merge by Distance), dissolve edges shorter and faces smaller than
+        ``dissolve_degenerate_distance`` (Degenerate Dissolve), and point the
+        face normals consistently outward. Mesh data shared by several objects
+        changes for all of them. The object must be in Object Mode.
+
+        Args:
+            object_name: Mesh object whose data to clean.
+            merge_distance: Merge vertices within this distance; None skips it.
+            dissolve_degenerate_distance: Dissolve edges and faces smaller than
+                this; None skips it.
+            recalculate_normals: Make face normals point consistently outside.
+
+        Returns:
+            Dictionary with the counts before and after, whether validation
+            changed anything, the merged vertex count, the operations run, the
+            mesh's user count and warnings.
+        """
+        obj = self._get_object_or_raise(object_name)
+        if obj.type != "MESH":
+            raise ValueError(f"Object '{object_name}' is not a MESH (type={obj.type})")
+        self._require_object_mode(obj, "clean its mesh")
+        distances: Dict[str, Any] = {
+            "merge_distance": merge_distance,
+            "dissolve_degenerate_distance": dissolve_degenerate_distance,
+        }
+        for label, distance in distances.items():
+            if distance is not None and (
+                isinstance(distance, bool)
+                or not isinstance(distance, numbers.Real)
+                or not math.isfinite(distance)
+                or distance <= 0
+            ):
+                raise ValueError(f"{label} must be a finite distance above 0, got {distance!r}")
+
+        mesh = obj.data
+        before = self._mesh_counts(mesh)
+        validation_fixed = bool(mesh.validate(verbose=False))
+        operations = ["validate"]
+        vertices_merged = 0
+        if merge_distance or dissolve_degenerate_distance or recalculate_normals:
+            import bmesh  # type: ignore[import-not-found]
+
+            bm = bmesh.new()
+            try:
+                bm.from_mesh(mesh)
+                if merge_distance:
+                    count = len(bm.verts)
+                    bmesh.ops.remove_doubles(bm, verts=list(bm.verts), dist=merge_distance)
+                    vertices_merged = count - len(bm.verts)
+                    operations.append("merge_by_distance")
+                if dissolve_degenerate_distance:
+                    bmesh.ops.dissolve_degenerate(
+                        bm, dist=dissolve_degenerate_distance, edges=list(bm.edges)
+                    )
+                    operations.append("dissolve_degenerate")
+                if recalculate_normals:
+                    bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
+                    operations.append("recalculate_normals")
+                bm.to_mesh(mesh)
+            finally:
+                bm.free()
+            mesh.update()
+
+        warnings: List[str] = []
+        if mesh.users > 1:
+            warnings.append(
+                f"Mesh '{mesh.name}' is shared by {mesh.users} users; all of them changed"
+            )
+        return {
+            "object_name": object_name,
+            "mesh_name": mesh.name,
+            "before": before,
+            "after": self._mesh_counts(mesh),
+            "validation_fixed": validation_fixed,
+            "vertices_merged": vertices_merged,
+            "operations": operations,
+            "mesh_users": int(mesh.users),
+            "warnings": warnings,
         }
 
     # -- End scripting & mesh-from-data methods ------------------------------
@@ -3604,46 +5326,10 @@ class BlenderRuntimeSession:
             Dict with object_name, metadata (or None), and has_simready_data.
         """
         obj = self._get_object_or_raise(object_name)
-
-        semantic: Dict[str, Any] = {}
-        physics: Dict[str, Any] = {}
-        material: Dict[str, Any] = {}
-        prefix = self._SIMREADY_PREFIX
-        additional_labels: Dict[str, str] = {}
-
-        for key in obj.keys():
-            if not key.startswith(prefix):
-                continue
-            stripped = key[len(prefix) :]
-            val = obj[key]
-            # Convert IDPropertyArray / other exotic types to Python
-            if hasattr(val, "to_list"):
-                val = val.to_list()
-
-            if stripped.startswith("label_"):
-                additional_labels[stripped[6:]] = str(val)
-            elif stripped in ("semantic_class", "semantic_hierarchy", "semantic_qcode"):
-                semantic[stripped] = val
-            elif stripped in (
-                "mass_kg",
-                "collider_type",
-                "static_friction",
-                "dynamic_friction",
-                "restitution",
-                "density",
-                "is_rigid_body",
-            ):
-                physics[stripped] = val
-            elif stripped in (
-                "substrate_type",
-                "material_naming",
-                "shader_type",
-                "texel_density",
-            ):
-                material[stripped] = val
-
-        if additional_labels:
-            semantic["additional_labels"] = additional_labels
+        stored = self._read_simready_properties(obj)
+        semantic = stored["semantic"]
+        physics = stored["physics"]
+        material = stored["material"]
 
         has_data = bool(semantic or physics or material)
         result_metadata: Optional[Dict[str, Any]] = None
@@ -3663,6 +5349,57 @@ class BlenderRuntimeSession:
             "metadata": result_metadata,
             "has_simready_data": has_data,
         }
+
+    _SIMREADY_SEMANTIC_KEYS = ("semantic_class", "semantic_hierarchy", "semantic_qcode")
+    _SIMREADY_PHYSICS_KEYS = (
+        "mass_kg",
+        "collider_type",
+        "static_friction",
+        "dynamic_friction",
+        "restitution",
+        "density",
+        "is_rigid_body",
+    )
+    _SIMREADY_MATERIAL_KEYS = (
+        "substrate_type",
+        "material_naming",
+        "shader_type",
+        "texel_density",
+    )
+
+    def _read_simready_properties(self, obj: Any) -> Dict[str, Dict[str, Any]]:
+        """The object's ``simready_*`` custom properties as stored, grouped like the metadata.
+
+        Additional labels (``simready_label_<key>``) are gathered under
+        ``semantic["additional_labels"]``; unknown ``simready_`` keys are left out.
+        """
+        semantic: Dict[str, Any] = {}
+        physics: Dict[str, Any] = {}
+        material: Dict[str, Any] = {}
+        additional_labels: Dict[str, str] = {}
+        prefix = self._SIMREADY_PREFIX
+        for key in obj.keys():
+            if not key.startswith(prefix):
+                continue
+            stripped = key[len(prefix) :]
+            val = obj[key]
+            # Convert IDPropertyArray / other exotic types to Python
+            if hasattr(val, "to_list"):
+                val = val.to_list()
+            elif hasattr(val, "to_dict"):
+                val = val.to_dict()
+
+            if stripped.startswith("label_"):
+                additional_labels[stripped[6:]] = str(val)
+            elif stripped in self._SIMREADY_SEMANTIC_KEYS:
+                semantic[stripped] = val
+            elif stripped in self._SIMREADY_PHYSICS_KEYS:
+                physics[stripped] = val
+            elif stripped in self._SIMREADY_MATERIAL_KEYS:
+                material[stripped] = val
+        if additional_labels:
+            semantic["additional_labels"] = additional_labels
+        return {"semantic": semantic, "physics": physics, "material": material}
 
     def validate_simready_compliance(
         self,
@@ -3692,6 +5429,7 @@ class BlenderRuntimeSession:
             Dict with compliant flag, object_count, issue_count, issues list.
         """
         issues: List[Dict[str, Any]] = []
+        unit_scale = self._scene_unit_scale()
 
         if object_names is None:
             targets = [o for o in self._resolve_object_source(None) if o.type == "MESH"]
@@ -3718,35 +5456,8 @@ class BlenderRuntimeSession:
                     }
                 )
 
-            if check_scale and hasattr(obj, "dimensions"):
-                dims = list(obj.dimensions)
-                max_dim = max(abs(d) for d in dims) if dims else 0.0
-                if max_dim > 1000.0:
-                    issues.append(
-                        {
-                            "object_name": name,
-                            "check": "scale",
-                            "severity": "warning",
-                            "message": (
-                                f"Largest dimension {max_dim:.2f}m exceeds "
-                                "1000m — verify scene is in meters"
-                            ),
-                            "suggestion": "Ensure scene unit scale is 1.0 (meters)",
-                        }
-                    )
-                if max_dim < 1e-4 and max_dim > 0:
-                    issues.append(
-                        {
-                            "object_name": name,
-                            "check": "scale",
-                            "severity": "warning",
-                            "message": (
-                                f"Largest dimension {max_dim:.6f}m is very small "
-                                "— may not be in meter scale"
-                            ),
-                            "suggestion": "Verify units; SimReady uses meters",
-                        }
-                    )
+            if check_scale:
+                issues.extend(self._simready_size_issues(obj, unit_scale))
 
             if check_transforms:
                 rot = tuple(obj.rotation_euler)
@@ -3820,7 +5531,107 @@ class BlenderRuntimeSession:
             "object_count": len(targets),
             "issue_count": len(issues),
             "issues": issues,
+            "meters_per_unit": unit_scale,
         }
+
+    # A part's largest real-world dimension (Blender units times the scene's
+    # Unit Scale) outside these bounds means the scene's units are not the ones
+    # it was modelled in: a 0.5 m part modelled in millimetres in a metre scene
+    # measures 500 m. Above the warning size an asset is plausible (a vehicle,
+    # a rack) but worth a second look.
+    _SIMREADY_MAX_SIZE_M = 100.0
+    _SIMREADY_WARN_SIZE_M = 20.0
+    _SIMREADY_MIN_SIZE_M = 0.001
+
+    def _scene_unit_scale(self) -> float:
+        """Meters per Blender unit: the scene's Unit Scale, 1.0 when unset or invalid."""
+        blender_module: Any = bpy
+        scene = getattr(blender_module.context, "scene", None)
+        settings = getattr(scene, "unit_settings", None)
+        try:
+            scale = float(getattr(settings, "scale_length", 1.0))
+        except (TypeError, ValueError):
+            return 1.0
+        if not math.isfinite(scale) or scale <= 0:
+            return 1.0
+        # Blender stores the scale in single precision (0.01 reads 0.00999999977).
+        return float(f"{scale:.7g}")
+
+    @staticmethod
+    def _world_dimensions(obj: Any) -> List[float]:
+        """The object's world-space bounding-box size in Blender units.
+
+        Read from the bounding box corners and the world matrix, so a parent's
+        scale counts; ``dimensions`` (object scale only) when either is missing.
+        """
+        corners = getattr(obj, "bound_box", None)
+        matrix = getattr(obj, "matrix_world", None)
+        if corners is not None and matrix is not None:
+            try:
+                rows = [[float(matrix[i][j]) for j in range(4)] for i in range(3)]
+                points = [
+                    [row[0] * c[0] + row[1] * c[1] + row[2] * c[2] + row[3] for row in rows]
+                    for c in (tuple(corner) for corner in corners)
+                ]
+                if points:
+                    return [
+                        max(p[axis] for p in points) - min(p[axis] for p in points)
+                        for axis in range(3)
+                    ]
+            except (TypeError, ValueError, IndexError):
+                pass
+        return [abs(float(d)) for d in getattr(obj, "dimensions", ())]
+
+    def _simready_size_issues(self, obj: Any, unit_scale: float) -> List[Dict[str, Any]]:
+        """A scale issue when a mesh's real-world size is implausible in the declared units."""
+        if getattr(obj, "type", "MESH") != "MESH":
+            return []
+        dimensions = self._world_dimensions(obj)
+        largest_units = max(dimensions) if dimensions else 0.0
+        largest = largest_units * unit_scale
+        if largest <= 0:
+            return []
+        declared = (
+            f"{largest:.4g} m ({largest_units:.4g} Blender units at a Unit Scale of "
+            f"{unit_scale:g} m)"
+        )
+        if largest > self._SIMREADY_MAX_SIZE_M:
+            severity = "error"
+            message = (
+                f"Largest dimension {declared} is implausibly large for a SimReady "
+                f"asset (over {self._SIMREADY_MAX_SIZE_M:g} m)"
+            )
+        elif largest < self._SIMREADY_MIN_SIZE_M:
+            severity = "error"
+            message = (
+                f"Largest dimension {declared} is implausibly small for a SimReady "
+                f"asset (under {self._SIMREADY_MIN_SIZE_M * 1000:g} mm)"
+            )
+        elif largest > self._SIMREADY_WARN_SIZE_M:
+            severity = "warning"
+            message = f"Largest dimension {declared} is large for a SimReady asset"
+        else:
+            return []
+        return [
+            {
+                "object_name": obj.name,
+                "check": "scale",
+                "severity": severity,
+                "message": message,
+                "suggestion": (
+                    "If it was modelled in other units, set Scene > Units > Unit Scale "
+                    "to the modelling unit (0.001 for millimetres, 0.01 for centimetres) "
+                    "or scale the mesh to its real size; pass check_scale=false for an "
+                    "asset this size"
+                ),
+            }
+        ]
+
+    _SIMREADY_USD_EXTENSIONS = EXPORT_EXTENSIONS["USD"]
+    # Object types left out unless include_lights_and_cameras is true.
+    _SIMREADY_SCENE_TYPES = frozenset({"LIGHT", "CAMERA"})
+    # Longest lists an export result carries; the counts give the totals.
+    _SIMREADY_RESULT_ITEMS = 50
 
     def export_simready_usd(
         self,
@@ -3828,65 +5639,357 @@ class BlenderRuntimeSession:
         object_names: Optional[List[str]] = None,
         embed_metadata: bool = True,
         validate_before_export: bool = True,
+        include_children: bool = True,
+        include_lights_and_cameras: bool = False,
+        force: bool = False,
     ) -> Dict[str, Any]:
         """
-        Export a SimReady-compliant USD file.
+        Export a SimReady asset as USD that a simulator reads as physics and semantics.
 
-        Validates objects before export (optionally), selects the requested
-        objects, and delegates to the version-aware USD exporter.  SimReady
-        custom properties on the Blender objects are carried into the USD
-        as custom attributes automatically by Blender's USD exporter.
+        Blender's USD exporter writes the geometry and render materials; the
+        export then authors, from each object's simready_ metadata, UsdPhysics
+        RigidBodyAPI, MassAPI (mass, and density in stage units), CollisionAPI
+        with a MeshCollisionAPI approximation on the meshes, a physics material
+        bound with the physics purpose, and UsdSemantics LabelsAPI labels (Isaac
+        Sim's SemanticsAPI convention where Blender's USD has no UsdSemantics).
+        The asset root is the default prim and holds the materials (Looks,
+        PhysicsMaterials); metersPerUnit is the scene's Unit Scale. The file is
+        written only when everything succeeded. As export_file does, the export
+        applies modifiers, leaves Edit, Pose and paint modes for the export (so
+        unsaved mesh edits are included) and enters them again, and restores the
+        selection; a SimReady asset is static, so animation is left out.
 
         Args:
-            file_path: Output .usd / .usda / .usdc path.
-            object_names: Objects to export (None = all).
-            embed_metadata: Include simready_ custom properties.
-            validate_before_export: Run validation first.
+            file_path: Output .usd, .usda, .usdc or .usdz path.
+            object_names: Objects to export, each with its descendants unless
+                include_children is false; listed objects are exported even when
+                hidden. Null exports the scene's objects that are visible in
+                renders. An empty list is refused.
+            embed_metadata: Also keep the simready_ custom properties (and
+                Blender's names) as userProperties attributes, which Blender's
+                USD import reads back as custom properties.
+            validate_before_export: Validate the meshes first.
+            include_children: Export the descendants of the listed objects.
+            include_lights_and_cameras: Also export lights, cameras and the
+                World's dome light, which are left out of an asset by default.
+            force: Export although validation found errors.
 
         Returns:
-            Dict with file_path, object_count, validation_passed, issues.
+            Dict with file_path (written exactly there; a missing folder is
+            created), files_written, object_count (objects written), prims (object
+            name and USD path), default_prim, meters_per_unit, up_axis, physics
+            and semantics summaries, skipped_objects, validation_passed, issues
+            and warnings. When validation found errors and force is false, an
+            error result with the issues instead, and no file is written.
 
         Raises:
             PermissionError: If the path is outside the sandbox policy.
+            ValueError: For an unsupported extension, an empty object_names, an
+                unknown object, or a listed object that cannot be exported.
         """
-        file_path = self._deny_outside_sandbox(file_path, write=True)
-        issues: Optional[List[Dict[str, Any]]] = None
-        validation_passed = True
-
-        if object_names:
-            targets = [self._get_object_or_raise(n) for n in object_names]
-        else:
-            targets = list(self._resolve_object_source(None))
-
-        if validate_before_export:
-            # SimReady rules apply to mesh prims; cameras and lights would
-            # only produce spurious "No material" errors.
-            names = [o.name for o in targets if o.type == "MESH"]
-            result = self.validate_simready_compliance(object_names=names)
-            issues = result.get("issues")
-            validation_passed = result.get("compliant", True)
-
-        op_func = self._operator(self._export_op_path("USD"))
-        kwargs: Dict[str, Any] = {"filepath": file_path}
-        if object_names:
-            kwargs["selected_objects_only"] = True
-        # An older exporter without the option writes no custom properties.
-        if self._operator_property(op_func, ("export_custom_properties",)):
-            kwargs["export_custom_properties"] = embed_metadata
-        # The requested objects are selected for the export only.
-        self._run_export(
-            f"Failed to export SimReady USD file '{file_path}'",
-            op_func,
-            kwargs,
-            to_select=targets if object_names else None,
+        # Written at file_path exactly, as export_file does.
+        file_path = self._export_target(self._deny_outside_sandbox(file_path, write=True))
+        extension = os.path.splitext(file_path)[1].lower()
+        if extension not in self._SIMREADY_USD_EXTENSIONS:
+            raise ValueError(
+                f"Unsupported SimReady export extension '{extension or file_path}'; "
+                f"use one of {', '.join(self._SIMREADY_USD_EXTENSIONS)}"
+            )
+        if object_names is not None and not object_names:
+            raise ValueError(
+                "object_names is empty; list the objects to export, or pass null "
+                "to export the whole scene"
+            )
+        targets, listed, skipped = self._simready_export_targets(
+            object_names, include_children, include_lights_and_cameras
         )
+        if not targets:
+            raise ValueError(
+                "Nothing to export: "
+                + "; ".join(f"{s['object_name']}: {s['reason']}" for s in skipped)
+            )
 
+        issues: Optional[List[Dict[str, Any]]] = None
+        validation_passed: Optional[bool] = None
+        if validate_before_export:
+            result = self.validate_simready_compliance(
+                object_names=[o.name for o in targets if o.type == "MESH"]
+            )
+            issues = list(result.get("issues") or [])
+            validation_passed = bool(result.get("compliant", True))
+            if not validation_passed and not force:
+                return self._simready_validation_refusal(issues)
+
+        plan = {
+            "objects": [
+                {
+                    "name": obj.name,
+                    "parent": obj.parent.name if obj.parent is not None else None,
+                    **self._read_simready_properties(obj),
+                }
+                for obj in targets
+            ],
+            "asset_name": usd_identifier(os.path.splitext(os.path.basename(file_path))[0]),
+            "meters_per_unit": self._scene_unit_scale(),
+            "embed_metadata": embed_metadata,
+        }
+        main_file = Path(file_path)
+        created = self._make_folders(main_file.parent)
+        before = self._folder_state(main_file.parent)
+        workdir = tempfile.mkdtemp(prefix="simul-simready-")
+        raw_path = self._simready_raw_path(file_path, workdir)
+        export_warning: Optional[str] = None
+        try:
+            op_func = self._operator(self._export_op_path("USD"))
+            # export_file's option translation: the selection keyword this
+            # Blender's exporter defines, modifiers applied, Z up. A SimReady
+            # asset is static, so animation is left out.
+            kwargs = self._export_options(
+                op_func,
+                "USD",
+                raw_path,
+                None,
+                subset=True,
+                apply_modifiers=True,
+                export_animation=False,
+                frame_range=False,
+                axes=(None, None),
+                global_scale=None,
+                usd_up_axis="Z",
+                meters_per_unit=None,
+                root_prim_path=None,
+            )
+            defined = op_func.get_rna_type().properties.keys()
+            optional = {
+                # The layer is read back through Blender's object names.
+                "export_custom_properties": True,
+                "author_blender_name": True,
+                "root_prim_path": "/root",
+                "export_lights": include_lights_and_cameras,
+                "export_cameras": include_lights_and_cameras,
+                "convert_world_material": include_lights_and_cameras,
+                # Blender units go out unscaled; metersPerUnit declares them.
+                "convert_scene_units": "METERS",
+            }
+            kwargs.update({k: v for k, v in optional.items() if k in defined})
+            with self._simready_shown(targets, listed):
+                # Object Mode, then exactly the targets selected; both restored.
+                export_warning = self._run_export(
+                    f"Failed to export SimReady USD file '{file_path}'",
+                    op_func,
+                    kwargs,
+                    to_select=targets,
+                )
+            layer, report = author_simready_layer(raw_path, plan)
+            missing = report["missing_objects"]
+            listed_missing = sorted(name for name in missing if name in listed)
+            if listed_missing:
+                raise RuntimeError(
+                    "Blender's USD exporter did not write "
+                    + ", ".join(listed_missing)
+                    + "; nothing was written to "
+                    + file_path
+                )
+            skipped.extend(
+                {"object_name": name, "reason": "not written by Blender's USD exporter"}
+                for name in missing
+            )
+            self._simready_write(layer, file_path, workdir)
+        except Exception:
+            self._remove_empty_folders(created)
+            raise
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+            if os.path.exists(raw_path) and not raw_path.startswith(workdir):
+                os.remove(raw_path)
+
+        prims = sorted(report["prims"].items(), key=lambda item: item[1])
+        limit = self._SIMREADY_RESULT_ITEMS
+        warnings = report["warnings"] + ([export_warning] if export_warning else [])
         return {
             "file_path": file_path,
-            "object_count": len(targets),
+            "files_written": self._written_files(main_file.parent, before, file_path),
+            "object_count": len(prims),
+            "default_prim": report["default_prim"],
+            "prims": [{"object_name": n, "prim_path": p} for n, p in prims[:limit]],
+            "meters_per_unit": report["meters_per_unit"],
+            "up_axis": report["up_axis"],
+            "kilograms_per_unit": report["kilograms_per_unit"],
+            "physics": {
+                "rigid_body_count": len(report["rigid_bodies"]),
+                "collider_count": len(report["colliders"]),
+                "mass_count": len(report["mass_prims"]),
+                "physics_material_count": len(report["physics_materials"]),
+                "rigid_bodies": report["rigid_bodies"][:limit],
+                "colliders": report["colliders"][:limit],
+                "physics_materials": report["physics_materials"][:limit],
+            },
+            "semantics": {
+                "labels_schema": report["semantics_schema"],
+                "labelled_prim_count": len(report["labelled_prims"]),
+                "labelled_prims": report["labelled_prims"][:limit],
+            },
+            "skipped_objects": skipped[:limit],
             "validation_passed": validation_passed,
-            "issues": issues,
+            "forced": bool(force and validation_passed is False),
+            "issue_count": len(issues) if issues is not None else 0,
+            "issues": issues[:limit] if issues is not None else None,
+            "warnings": warnings[:limit],
         }
+
+    def _simready_validation_refusal(self, issues: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """The error result of an export that validation stopped."""
+        errors = [i for i in issues if i.get("severity") == "error"]
+        checks = sorted({str(i.get("check")) for i in errors})
+        first = errors[0] if errors else {}
+        return {
+            "success": False,
+            "error_type": "SimReadyValidationFailed",
+            "error": (
+                f"Not exported: validation found {len(errors)} error(s) "
+                f"({', '.join(checks)}), first {first.get('object_name')}: "
+                f"{first.get('message')}. Fix them, or pass force=true to export anyway"
+            ),
+            "details": {
+                "file_written": False,
+                "issue_count": len(issues),
+                "issues": issues[: self._SIMREADY_RESULT_ITEMS],
+            },
+        }
+
+    @staticmethod
+    def _descendants(obj: Any) -> List[Any]:
+        """Every object parented below ``obj``, depth first."""
+        recursive = getattr(obj, "children_recursive", None)
+        if recursive is not None:
+            return list(recursive)
+        found: List[Any] = []
+        for child in getattr(obj, "children", ()) or ():
+            found.append(child)
+            found.extend(BlenderRuntimeSession._descendants(child))
+        return found
+
+    @staticmethod
+    def _render_hidden(obj: Any) -> bool:
+        """Hidden in renders by the object itself or one of its collections."""
+        if getattr(obj, "hide_render", False):
+            return True
+        return any(
+            getattr(c, "hide_render", False) for c in getattr(obj, "users_collection", ())
+        )
+
+    def _simready_export_targets(
+        self,
+        object_names: Optional[List[str]],
+        include_children: bool,
+        include_lights_and_cameras: bool,
+    ) -> Tuple[List[Any], set, List[Dict[str, str]]]:
+        """The objects to export, the listed ones' names, and the left-out ones with why."""
+        blender_module: Any = bpy
+        layer_objects = blender_module.context.view_layer.objects
+        listed: List[Any] = []
+        if object_names is None:
+            candidates = list(blender_module.context.scene.objects)
+        else:
+            listed = [self._get_object_or_raise(name) for name in object_names]
+            outside = sorted(o.name for o in listed if layer_objects.get(o.name) is None)
+            if outside:
+                raise ValueError(
+                    "Cannot export "
+                    + ", ".join(outside)
+                    + ": not in the active view layer (another scene, or an excluded "
+                    "collection)"
+                )
+            candidates = list(listed)
+            if include_children:
+                for obj in listed:
+                    candidates.extend(self._descendants(obj))
+        listed_names = {o.name for o in listed}
+        targets: List[Any] = []
+        skipped: List[Dict[str, str]] = []
+        seen: set = set()
+        for obj in candidates:
+            if obj.name in seen:
+                continue
+            seen.add(obj.name)
+            reason = None
+            if obj.type in self._SIMREADY_SCENE_TYPES and not include_lights_and_cameras:
+                reason = "lights and cameras are left out; pass include_lights_and_cameras"
+            elif obj.name not in listed_names:
+                if layer_objects.get(obj.name) is None:
+                    reason = "not in the active view layer"
+                elif self._render_hidden(obj):
+                    reason = "hidden in renders; list it in object_names to export it"
+            if reason is None:
+                targets.append(obj)
+            else:
+                skipped.append({"object_name": obj.name, "reason": reason})
+        return targets, listed_names, skipped
+
+    @staticmethod
+    def _simready_raw_path(file_path: str, workdir: str) -> str:
+        """Where Blender's exporter writes before the SimReady layer is authored.
+
+        Next to the destination, so texture paths stay relative to it; a .usdz
+        is packaged from a .usdc in ``workdir`` instead, as Blender does.
+        """
+        directory, base = os.path.split(file_path)
+        stem, extension = os.path.splitext(base)
+        if extension.lower() == ".usdz":
+            return os.path.join(workdir, f"blender_{usd_identifier(stem)}.usdc")
+        return os.path.join(directory, f".{stem}.simul-{uuid.uuid4().hex[:8]}{extension}")
+
+    @staticmethod
+    def _simready_write(layer: Any, file_path: str, workdir: str) -> None:
+        """Write the authored layer to ``file_path``; a .usdz is packaged with its textures."""
+        if not file_path.lower().endswith(".usdz"):
+            if not layer.Export(file_path):
+                raise RuntimeError(f"Could not write {file_path}")
+            return
+        from pxr import Sdf, UsdUtils
+
+        stem = usd_identifier(os.path.splitext(os.path.basename(file_path))[0])
+        root_layer = os.path.join(workdir, f"{stem}.usdc")
+        if not layer.Export(root_layer):
+            raise RuntimeError(f"Could not write {root_layer}")
+        directory = os.path.dirname(file_path) or "."
+        package = os.path.join(directory, f".{stem}.simul-{uuid.uuid4().hex[:8]}.usdz")
+        try:
+            if not UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(root_layer), package):
+                raise RuntimeError(f"Could not package {file_path}")
+            os.replace(package, file_path)
+        finally:
+            if os.path.exists(package):
+                os.remove(package)
+
+    @staticmethod
+    @contextmanager
+    def _simready_shown(targets: List[Any], listed: set) -> Iterator[None]:
+        """Show ``targets`` to Blender's exporter for the block, then hide them again.
+
+        An object hidden in the viewport cannot be selected, so _run_export
+        could not export it; a listed object is also shown in renders, which
+        the exporter otherwise skips. _run_export leaves Edit Mode for the
+        export and selects exactly the targets, and restores both.
+        """
+        shown: List[Tuple[Any, Tuple[bool, bool, bool, bool]]] = []
+        try:
+            for obj in targets:
+                shown.append(
+                    (obj, (obj.hide_get(), obj.hide_viewport, obj.hide_render, obj.hide_select))
+                )
+                obj.hide_viewport = False
+                obj.hide_select = False
+                obj.hide_set(False)
+                if obj.name in listed:
+                    obj.hide_render = False
+            yield
+        finally:
+            for obj, (hidden, viewport, render, unselectable) in reversed(shown):
+                obj.hide_viewport = viewport
+                obj.hide_render = render
+                obj.hide_select = unselectable
+                obj.hide_set(hidden)
 
     def setup_simready_hierarchy(
         self,
@@ -6470,6 +8573,8 @@ class BlenderRuntimeAdapter:
             "blender_clear_parent",
             "blender_assign_material",
             "blender_add_modifier",
+            "blender_apply_modifier",
+            "blender_remove_modifier",
             "blender_set_light_params",
             "blender_open_file",
             "blender_save_file",
@@ -6494,6 +8599,7 @@ class BlenderRuntimeAdapter:
             "blender_free_bake",
             "execute_blender_script",
             "create_blender_mesh_from_data",
+            "blender_clean_mesh",
             "apply_simready_metadata",
             "get_simready_metadata",
             "validate_simready_compliance",

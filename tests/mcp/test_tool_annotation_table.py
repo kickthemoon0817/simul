@@ -75,7 +75,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "set_unreal_actor_property": (DESTRUCTIVE, True, True),
     "assign_unreal_material": (DESTRUCTIVE, True, True),
     "export_unreal_usd": (DESTRUCTIVE, False, True),
-    "import_unreal_usd": (RW, False, True),
+    "import_unreal_usd": (DESTRUCTIVE, False, True),  # replace_existing replaces assets and actors
     "execute_unreal_script": (DESTRUCTIVE, False, True),
     "control_unreal_simulation": (RW, False, True),
     "set_unreal_camera_view": (RW, True, True),
