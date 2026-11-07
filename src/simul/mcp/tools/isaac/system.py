@@ -114,7 +114,7 @@ class SystemMixin:
             "Enable an extension immediately in the running Isaac Sim instance. With "
             "security.allow_script_execution off, the extensions that run Python attached to "
             "the stage (omni.graph.scriptnode, omni.kit.scripting, omni.warp, and any with "
-            "'script' or 'warp' in its name) are refused."
+            "a word starting with 'script' in its name) are refused."
         ),
         read_only=False,
         idempotent=True,
