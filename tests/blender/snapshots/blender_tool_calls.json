@@ -865,6 +865,52 @@
         }
       }
     },
+    "apply_blender_modifier": {
+      "minimal": {
+        "arguments": {"object_name": "Cube", "modifier_name": "Decimate"},
+        "session_calls": [
+          {
+            "method": "apply_modifier",
+            "arguments": {"object_name": "'Cube'", "modifier_name": "'Decimate'"}
+          }
+        ],
+        "response": {"checked_against": "BlenderApplyModifierResponse"},
+        "usage": [{"tool": "apply_blender_modifier", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}, "modifier_name": "Decimate"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderModifierTargetRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}, "modifier_name": "Decimate"}}
+        }
+      }
+    },
+    "remove_blender_modifier": {
+      "minimal": {
+        "arguments": {"object_name": "Cube", "modifier_name": "Decimate"},
+        "session_calls": [
+          {
+            "method": "remove_modifier",
+            "arguments": {"object_name": "'Cube'", "modifier_name": "'Decimate'"}
+          }
+        ],
+        "response": {"checked_against": "BlenderRemoveModifierResponse"},
+        "usage": [{"tool": "remove_blender_modifier", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}, "modifier_name": "Decimate"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderModifierTargetRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"object_name": {"bogus": 1}, "modifier_name": "Decimate"}}
+        }
+      }
+    },
     "set_blender_light_params": {
       "minimal": {
         "arguments": {"light_name": "Light"},
@@ -1576,6 +1622,62 @@
               "faces": [],
               "location": null,
               "collection_name": null
+            }
+          }
+        }
+      }
+    },
+    "clean_blender_mesh": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [
+          {
+            "method": "clean_mesh",
+            "arguments": {
+              "object_name": "'Cube'",
+              "merge_distance": "None",
+              "dissolve_degenerate_distance": "None",
+              "recalculate_normals": "False"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderCleanMeshResponse"},
+        "usage": [{"tool": "clean_blender_mesh", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_name": "Cube",
+          "merge_distance": 0.001,
+          "dissolve_degenerate_distance": 0.0001,
+          "recalculate_normals": true
+        },
+        "session_calls": [
+          {
+            "method": "clean_mesh",
+            "arguments": {
+              "object_name": "'Cube'",
+              "merge_distance": "0.001",
+              "dissolve_degenerate_distance": "0.0001",
+              "recalculate_normals": "True"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderCleanMeshResponse"},
+        "usage": [{"tool": "clean_blender_mesh", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderCleanMeshRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "object_name": {"bogus": 1},
+              "merge_distance": null,
+              "dissolve_degenerate_distance": null,
+              "recalculate_normals": false
             }
           }
         }

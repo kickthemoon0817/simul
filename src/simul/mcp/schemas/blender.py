@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import AfterValidator, BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field, FiniteFloat, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 # Printed-output cap of execute_blender_script. Mirrors DEFAULT_SCRIPT_OUTPUT_CHARS
@@ -40,6 +40,15 @@ AgentLabel = Annotated[
     Field(min_length=1, max_length=64, description="Agent label shown in capture feedback"),
     AfterValidator(_printable_agent_label),
 ]
+
+# Mesh data for create_blender_mesh_from_data. Blender's from_pydata flattens
+# the vertex list, so a vertex of 2 or 4 numbers shifted every later vertex
+# instead of failing; NaN and infinity are not positions. Indices are strict
+# integers so that true/false cannot pass for 1/0.
+MeshVertex = Annotated[List[FiniteFloat], Field(min_length=3, max_length=3)]
+MeshIndex = Annotated[int, Field(ge=0, strict=True)]
+MeshEdge = Annotated[List[MeshIndex], Field(min_length=2, max_length=2)]
+MeshFace = Annotated[List[MeshIndex], Field(min_length=3)]
 
 
 class BlenderInfoResponse(BaseModel):
@@ -185,20 +194,57 @@ class BlenderMeshInfoRequest(BaseModel):
 
 
 class BlenderMeshInfoResponse(BaseModel):
-    """Counts-only mesh geometry information (O(1) access)."""
+    """Mesh geometry counts, of the stored mesh and after its modifiers.
+
+    The evaluated fields are null from an add-on built before they existed.
+    """
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     object_name: str = Field(..., description="Mesh object name")
-    vertex_count: int = Field(..., description="Number of vertices")
-    edge_count: int = Field(..., description="Number of edges")
-    face_count: int = Field(..., description="Number of polygon faces")
+    vertex_count: int = Field(..., description="Vertices of the stored (base) mesh")
+    edge_count: int = Field(..., description="Edges of the base mesh")
+    face_count: int = Field(..., description="Polygon faces of the base mesh")
+    triangle_count: Optional[int] = Field(
+        None, description="Triangles the base mesh's faces split into"
+    )
+    evaluated_vertex_count: Optional[int] = Field(
+        None,
+        description=(
+            "Vertices after the modifiers enabled in the viewport (what an export writes); "
+            "null when Blender does not evaluate the object"
+        ),
+    )
+    evaluated_edge_count: Optional[int] = Field(None, description="Edges after the modifiers")
+    evaluated_face_count: Optional[int] = Field(None, description="Faces after the modifiers")
+    evaluated_triangle_count: Optional[int] = Field(
+        None, description="Triangles after the modifiers"
+    )
+    evaluated_modifiers: Optional[List[str]] = Field(
+        None, description="Modifiers enabled in the viewport, which the evaluated counts include"
+    )
+    edit_mode: Optional[bool] = Field(
+        None, description="Whether the object was in Edit Mode (its edits are counted)"
+    )
     uv_layer_names: List[str] = Field(
         default_factory=list, description="UV layer names"
     )
     has_shape_keys: bool = Field(..., description="Whether mesh has shape keys")
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Why evaluated counts are missing or may differ from a render-mode export",
+    )
+
+
+class BlenderMeshCounts(BaseModel):
+    """Vertex, edge, face and triangle counts of one mesh."""
+
+    vertex_count: int = Field(..., description="Number of vertices")
+    edge_count: int = Field(..., description="Number of edges")
+    face_count: int = Field(..., description="Number of polygon faces")
+    triangle_count: int = Field(..., description="Triangles the faces split into")
 
 
 class BlenderBoundingBoxRequest(BaseModel):
@@ -976,11 +1022,19 @@ class BlenderAddModifierRequest(BaseModel):
     object_name: str = Field(..., description="Object to add modifier to")
     modifier_type: str = Field(
         ...,
-        description="Modifier type: SUBSURF, MIRROR, ARRAY, BEVEL, SOLIDIFY, BOOLEAN",
+        description=(
+            "Blender modifier type, e.g. SUBSURF, MIRROR, ARRAY, BEVEL, SOLIDIFY, BOOLEAN, "
+            "DECIMATE, TRIANGULATE, WELD"
+        ),
     )
     modifier_name: Optional[str] = Field(None, description="Modifier name")
     params: Dict[str, Any] = Field(
-        default_factory=dict, description="Modifier-specific parameters"
+        default_factory=dict,
+        description=(
+            "Modifier settings by Blender RNA name, e.g. {'ratio': 0.5} for DECIMATE or "
+            "{'object': 'Cutter'} for BOOLEAN; unknown names, enum values outside the "
+            "items and numbers outside the limits are refused"
+        ),
     )
 
 
@@ -994,6 +1048,55 @@ class BlenderAddModifierResponse(BaseModel):
     object_name: str = Field(..., description="Object name")
     modifier_name: str = Field(..., description="Modifier name")
     modifier_type: str = Field(..., description="Modifier type")
+    params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The settings as Blender stored them (datablocks by name)",
+    )
+
+
+class BlenderModifierTargetRequest(BaseModel):
+    """Request naming one modifier of one object."""
+
+    object_name: str = Field(..., description="Object holding the modifier")
+    modifier_name: str = Field(..., description="Name of the modifier")
+
+
+class BlenderApplyModifierResponse(BaseModel):
+    """Response after applying a modifier to its object's mesh."""
+
+    success: bool = Field(..., description="Whether the modifier was applied")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: str = Field(..., description="Object name")
+    modifier_name: str = Field(..., description="Applied modifier")
+    modifier_type: str = Field(..., description="Applied modifier's type")
+    vertex_count: int = Field(..., description="Vertices of the mesh afterwards")
+    edge_count: int = Field(..., description="Edges of the mesh afterwards")
+    face_count: int = Field(..., description="Faces of the mesh afterwards")
+    triangle_count: int = Field(..., description="Triangles of the mesh afterwards")
+    remaining_modifiers: List[str] = Field(
+        default_factory=list, description="Modifiers left on the object, in stack order"
+    )
+    made_single_user: bool = Field(
+        ..., description="Whether shared mesh data was copied for this object first"
+    )
+    warnings: List[str] = Field(default_factory=list, description="Caveats of the result")
+
+
+class BlenderRemoveModifierResponse(BaseModel):
+    """Response after removing a modifier."""
+
+    success: bool = Field(..., description="Whether the modifier was removed")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: str = Field(..., description="Object name")
+    modifier_name: str = Field(..., description="Removed modifier")
+    modifier_type: str = Field(..., description="Removed modifier's type")
+    remaining_modifiers: List[str] = Field(
+        default_factory=list, description="Modifiers left on the object, in stack order"
+    )
 
 
 class BlenderSetLightParamsRequest(BaseModel):
@@ -1701,20 +1804,26 @@ class BlenderCreateMeshFromDataRequest(BaseModel):
         description="Name for the new mesh object",
         min_length=1,
     )
-    vertices: List[List[float]] = Field(
+    vertices: List[MeshVertex] = Field(
         ...,
-        description="List of vertex positions, each [x, y, z]",
+        description="List of vertex positions, each exactly [x, y, z] finite numbers",
         min_length=1,
     )
-    edges: List[List[int]] = Field(
+    edges: List[MeshEdge] = Field(
         default_factory=list,
-        description="List of edges, each [v_index_a, v_index_b]",
+        description=(
+            "List of loose edges, each [v_index_a, v_index_b] of two different vertices; "
+            "face edges are made from the faces"
+        ),
     )
-    faces: List[List[int]] = Field(
+    faces: List[MeshFace] = Field(
         default_factory=list,
-        description="List of faces, each a list of vertex indices",
+        description=(
+            "List of faces, each three or more vertex indices, no vertex twice; a face "
+            "over the vertex set of another is refused as a duplicate"
+        ),
     )
-    location: Optional[List[float]] = Field(
+    location: Optional[List[FiniteFloat]] = Field(
         None,
         description="World-space location [x, y, z] for the object origin",
         min_length=3,
@@ -1723,7 +1832,8 @@ class BlenderCreateMeshFromDataRequest(BaseModel):
     collection_name: Optional[str] = Field(
         None,
         description=(
-            "Target collection name. Links to the active scene " "collection when None."
+            "Target collection, which must be in the current scene. Links to the "
+            "scene collection when None."
         ),
     )
 
@@ -1740,6 +1850,56 @@ class BlenderCreateMeshFromDataResponse(BaseModel):
     vertex_count: int = Field(..., description="Number of vertices created")
     edge_count: int = Field(..., description="Number of edges created")
     face_count: int = Field(..., description="Number of faces created")
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="A renamed object, an excluded collection, or a validation change",
+    )
+
+
+class BlenderCleanMeshRequest(BaseModel):
+    """Request to repair a mesh object's data."""
+
+    object_name: str = Field(..., description="Mesh object whose data to clean")
+    merge_distance: Optional[FiniteFloat] = Field(
+        None,
+        gt=0,
+        description="Merge vertices closer than this (Merge by Distance); omit to skip",
+    )
+    dissolve_degenerate_distance: Optional[FiniteFloat] = Field(
+        None,
+        gt=0,
+        description=(
+            "Dissolve edges shorter and faces smaller than this (Degenerate Dissolve); "
+            "omit to skip"
+        ),
+    )
+    recalculate_normals: bool = Field(
+        False, description="Make face normals point consistently outside"
+    )
+
+
+class BlenderCleanMeshResponse(BaseModel):
+    """Response after cleaning a mesh."""
+
+    success: bool = Field(..., description="Whether the mesh was cleaned")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: str = Field(..., description="Object name")
+    mesh_name: str = Field(..., description="Mesh data-block cleaned")
+    before: BlenderMeshCounts = Field(..., description="Counts before cleaning")
+    after: BlenderMeshCounts = Field(..., description="Counts after cleaning")
+    validation_fixed: bool = Field(
+        ...,
+        description=(
+            "Whether validation removed invalid topology (faces repeating a vertex, "
+            "duplicate faces or edges)"
+        ),
+    )
+    vertices_merged: int = Field(..., description="Vertices removed by merging")
+    operations: List[str] = Field(..., description="Steps run, in order")
+    mesh_users: int = Field(..., description="Objects and other users sharing the mesh")
+    warnings: List[str] = Field(default_factory=list, description="Caveats of the result")
 
 
 __all__ = [
@@ -1758,6 +1918,7 @@ __all__ = [
     "BlenderObjectInfoResponse",
     "BlenderMeshInfoRequest",
     "BlenderMeshInfoResponse",
+    "BlenderMeshCounts",
     "BlenderBoundingBoxRequest",
     "BlenderBoundingBoxResponse",
     "BlenderSearchObjectsRequest",
@@ -1795,6 +1956,9 @@ __all__ = [
     "BlenderAssignMaterialResponse",
     "BlenderAddModifierRequest",
     "BlenderAddModifierResponse",
+    "BlenderModifierTargetRequest",
+    "BlenderApplyModifierResponse",
+    "BlenderRemoveModifierResponse",
     "BlenderSetLightParamsRequest",
     "BlenderSetLightParamsResponse",
     "BlenderOpenFileRequest",
@@ -1844,4 +2008,6 @@ __all__ = [
     "BlenderExecuteScriptResponse",
     "BlenderCreateMeshFromDataRequest",
     "BlenderCreateMeshFromDataResponse",
+    "BlenderCleanMeshRequest",
+    "BlenderCleanMeshResponse",
 ]
