@@ -42,6 +42,8 @@ from ..schemas.usd import (
     USDValidateRequest,
 )
 from ...logging import get_logger
+from ...usd.validation import WARNING, composition_issues
+from ...usd.validation import validate_usd_file as run_validation
 from ._helpers import with_param_descriptions
 
 if TYPE_CHECKING:
@@ -84,8 +86,12 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="load_usd_file",
         description=(
-            "Load a USD file and return stage information. "
-            "Paths: sandbox (security.allowed_paths)."
+            "Load a USD file and return stage information. A file pxr cannot open "
+            "fails with LoadError, whose details.reason names the cause (ParseError "
+            "with line and column, CorruptFile, EmptyFile, FileTooLarge, "
+            "PermissionDenied, UnsupportedExtension, FileNotFound, NotAFile). Missing "
+            "sublayers, references or payloads do not fail the load; they are listed "
+            "in warnings. Paths: sandbox (security.allowed_paths)."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -110,13 +116,16 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             if isinstance(input_data, dict):
                 return input_data
 
-            stage_id = session.load_stage(
+            # A USDLoadError carries pxr's reason; the envelope reports it as
+            # LoadError with details.reason.
+            stage_id = session.load_stage_or_raise(
                 server._path_policy.authorize(input_data.file_path)
             )
-            stage_info = session.get_stage_info(stage_id) if stage_id else None
-            if not stage_id or stage_info is None:
+            stage = session.get_stage(stage_id)
+            stage_info = session.get_stage_info(stage_id)
+            if stage is None or stage_info is None:
                 return ErrorResponse(
-                    error=f"Failed to load USD file: {input_data.file_path}",
+                    error=f"Loaded {input_data.file_path} but could not read its stage information",
                     error_type="LoadError",
                 ).model_dump()
             return StageInfo(
@@ -133,6 +142,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 has_animation=stage_info.start_time_code != stage_info.end_time_code,
                 layer_count=len(stage_info.layers),
                 default_prim=stage_info.default_prim_path,
+                warnings=[issue.to_dict() for issue in composition_issues(stage, WARNING)],
             ).model_dump()
 
         return await server._exec_backend(
@@ -147,7 +157,15 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="validate_usd_file",
         description=(
-            "Validate a USD file without loading it. "
+            "Open a USD file with pxr and report what is wrong with it; no stage is "
+            "kept. Checks: access (exists, permissions, usd.allowed_extensions, "
+            "usd.max_file_size_mb, empty), parse and crate errors with pxr's reason, "
+            "missing sublayers, references, payloads and other asset paths, "
+            "defaultPrim, upAxis and metersPerUnit, physics (joint body targets, "
+            "nested rigid bodies or articulation roots, mass, inverted joint limits) "
+            "and pxr's UsdValidation validators, with the usdz package rules for a "
+            ".usdz. Returns is_valid (no error-severity issue), can_read (pxr opened "
+            "it, so load_usd_file can) and issues with severity, code and location. "
             "Paths: sandbox (security.allowed_paths)."
         ),
         annotations=server._tool_annotations(
@@ -158,7 +176,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     @with_param_descriptions()
     async def validate_usd_file(file_path: str) -> ToolResult:
         """
-        Check that a path names a readable USD file within the size limit.
+        Open a USD file with pxr and report every problem found.
 
         Args:
             file_path: Path to USD file
@@ -173,19 +191,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 return input_data
 
             path = Path(server._path_policy.authorize(input_data.file_path))
-            file_exists = path.exists()
-            is_file = path.is_file() if file_exists else False
-            file_size = path.stat().st_size if is_file else 0
-            valid_extension = path.suffix.lower() in (".usd", ".usda", ".usdc", ".usdz")
-            max_size_mb = server.settings.usd.max_file_size_mb
-            size_ok = file_size <= (max_size_mb * 1024 * 1024)
-            return USDFileInfo(
-                file_path=str(path.resolve()),
-                file_size=file_size,
-                format=path.suffix.lower().lstrip("."),
-                is_valid=file_exists and is_file and valid_extension and size_ok,
-                can_read=file_exists and is_file and valid_extension,
-            ).model_dump()
+            report = run_validation(str(path.resolve()), server.settings.usd)
+            return USDFileInfo(**report.to_dict()).model_dump()
 
         return await server._exec_backend(
             "validate_usd_file",

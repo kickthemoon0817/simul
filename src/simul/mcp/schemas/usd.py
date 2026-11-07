@@ -26,14 +26,52 @@ DEFAULT_SUBTREE_LIMIT = 150
 MAX_SUBTREE_LIMIT = 1000
 
 
+class USDIssue(BaseModel):
+    """One problem found in a USD file."""
+
+    severity: str = Field(..., description="error, warning or info")
+    code: str = Field(
+        ..., description="Stable identifier, e.g. ParseError, MissingReference, NestedArticulation"
+    )
+    message: str = Field(..., description="What is wrong, in pxr's words where pxr reported it")
+    source: str = Field(
+        "simul", description="simul, or the pxr validator that reported the issue"
+    )
+    location: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Where it is, as known: layer, prim_path, property_path, asset_path, line, column",
+    )
+
+
 class USDFileInfo(BaseModel):
     """USD file information."""
 
     file_path: str = Field(..., description="Path to USD file")
     file_size: int = Field(..., description="File size in bytes")
-    format: str = Field(..., description="USD file format (usd, usda, usdc, usdz)")
-    is_valid: bool = Field(..., description="Whether file is valid USD")
-    can_read: bool = Field(..., description="Whether file is readable")
+    format: str = Field(..., description="File extension (usd, usda, usdc, usdz)")
+    is_valid: bool = Field(
+        ..., description="pxr opened the file and no issue has severity error"
+    )
+    can_read: bool = Field(
+        ..., description="pxr opened the file, so load_usd_file can load it"
+    )
+    layer_format: Optional[str] = Field(
+        None, description="Format pxr read the root layer as (usda, usdc, usdz)"
+    )
+    default_prim: Optional[str] = Field(None, description="Default prim path, when valid")
+    up_axis: Optional[str] = Field(None, description="Stage up axis (authored or fallback)")
+    meters_per_unit: Optional[float] = Field(
+        None, description="Stage meters per unit (authored or fallback)"
+    )
+    error_count: int = Field(0, description="Issues with severity error")
+    warning_count: int = Field(0, description="Issues with severity warning")
+    info_count: int = Field(0, description="Issues with severity info")
+    issues: List[USDIssue] = Field(
+        default_factory=list, description="Problems found, errors first"
+    )
+    validators: List[str] = Field(
+        default_factory=list, description="pxr UsdValidation validators that ran"
+    )
 
 
 class USDFileRequest(BaseModel):
@@ -64,6 +102,13 @@ class StageInfo(BaseModel):
     has_animation: bool = Field(..., description="Whether stage has animation")
     layer_count: int = Field(..., description="Number of layers")
     default_prim: Optional[str] = Field(None, description="Default prim path")
+    warnings: List[USDIssue] = Field(
+        default_factory=list,
+        description=(
+            "Problems the stage loaded despite: missing sublayers, references or "
+            "payloads, unresolved reference prim paths"
+        ),
+    )
 
 
 class PrimInfo(BaseModel):
@@ -427,6 +472,7 @@ class BBoxResponse(BaseModel):
 
 
 __all__ = [
+    "USDIssue",
     "USDFileInfo",
     "USDFileRequest",
     "USDValidateRequest",
