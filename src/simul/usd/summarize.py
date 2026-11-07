@@ -1,27 +1,58 @@
 """
-Scene summarization utilities for USD data in Isaac Sim MCP Server.
+Scene summaries of USD stages for LLM consumption.
 
-This module provides scene and prim summarization functionality to generate
-concise, LLM-friendly descriptions of USD scenes and their contents.
+One walk of the stage (``search.iter_prims``, instance proxies included) fills
+every count, and every mesh is measured by ``mesh_ops.geometry_statistics`` in
+batches, never face by face: a stage with one million-vertex mesh, or twenty
+thousand small ones, summarises in about a second. An instanced mesh is
+measured once per prototype and counted once per instance.
+
+The summary also says what its numbers mean: the scene size in metres as well
+as stage units, animation from time samples even when no time range is
+authored (with its duration in seconds), and a warning for each layer whose
+``upAxis`` or ``metersPerUnit`` disagrees with the stage's, since USD does not
+rescale or reorient referenced geometry.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, field
 import json
+import math
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 from ._pxr import Usd, UsdGeom
 
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import monitor_performance
 from ..utils.math import bbox_center, bbox_size, bbox_volume
+from .bbox import BBoxCache, bbox_to_dict
+from .mesh_ops import (
+    MeshArrays,
+    MeshOperations,
+    bound_material,
+    geometry_statistics,
+    mesh_attributes,
+    read_mesh_arrays,
+    unsampled_topology,
+)
 from .reader import USDReader, USDStageInfo
-from .bbox import BBoxCache
-from .mesh_ops import MeshOperations, MeshInfo
 from .search import iter_prims
 
 logger = get_logger(__name__)
+
+# Type-count key for prims with no type.
+TYPELESS = "(typeless)"
+
+# Meshes measured per geometry_statistics batch, bounded by face-vertex indices.
+_BATCH_INDICES = 4_000_000
+
+# How many root prim paths a summary lists (the count is exact).
+_LISTED_PATHS = 50
+
+# Unit warnings: example layers per group, and groups listed.
+_EXAMPLE_LAYERS = 5
+_MAX_WARNING_GROUPS = 10
 
 
 @dataclass
@@ -71,6 +102,95 @@ class SceneSummary:
     mesh_statistics: Dict[str, Any] = field(default_factory=dict)
     hierarchy_depth: int = 0
     animation_info: Dict[str, Any] = field(default_factory=dict)
+    root_prim_paths: List[str] = field(default_factory=list)
+    root_prim_count: int = 0
+    scene_size_meters: Optional[List[float]] = None
+    warnings: List[Dict[str, Any]] = field(default_factory=list)
+
+
+def _layer_list(names: List[str], total: int) -> str:
+    shown = ", ".join(names)
+    return shown if total <= len(names) else f"{shown} and {total - len(names)} more"
+
+
+def unit_warnings(stage: Usd.Stage) -> List[Dict[str, Any]]:
+    """Warn about layers whose authored ``upAxis`` or ``metersPerUnit`` differs from the stage's.
+
+    Only the root layer's metrics apply to a stage. A referenced asset or a
+    sublayer authored in other units keeps its numbers, so a robot modelled in
+    metres inside a centimetre stage is a hundred times too small, and a
+    Z-up asset in a Y-up stage lies on its side.
+
+    Layers are grouped by mismatch and value: a stage referencing two
+    thousand metre assets gets one warning with ``layer_count`` 2000 and a
+    few example ``layers``, not two thousand, so the summary stays small.
+    At most ``_MAX_WARNING_GROUPS`` groups are listed; a final
+    ``MoreUnitMismatches`` entry counts the rest.
+    """
+    stage_up = str(UsdGeom.GetStageUpAxis(stage))
+    stage_mpu = float(UsdGeom.GetStageMetersPerUnit(stage))
+    session = stage.GetSessionLayer()
+    skip = {stage.GetRootLayer().identifier, session.identifier if session else None}
+    groups: Dict[Tuple[str, Any], Dict[str, Any]] = {}
+
+    def note(code: str, value: Any, layer: Any) -> None:
+        group = groups.setdefault((code, value), {"count": 0, "layers": [], "names": []})
+        group["count"] += 1
+        if len(group["layers"]) < _EXAMPLE_LAYERS:
+            group["layers"].append(layer.identifier)
+            group["names"].append(layer.GetDisplayName())
+
+    for layer in sorted(stage.GetUsedLayers(), key=lambda used: used.identifier):
+        if layer.identifier in skip:
+            continue
+        info = layer.pseudoRoot
+        if info.HasInfo("metersPerUnit"):
+            layer_mpu = float(info.GetInfo("metersPerUnit"))
+            if not math.isclose(layer_mpu, stage_mpu, rel_tol=1e-9):
+                note("MetersPerUnitMismatch", layer_mpu, layer)
+        if info.HasInfo("upAxis"):
+            layer_up = str(info.GetInfo("upAxis"))
+            if layer_up != stage_up:
+                note("UpAxisMismatch", layer_up, layer)
+
+    warnings: List[Dict[str, Any]] = []
+    for (code, value), group in groups.items():
+        count = group["count"]
+        names = _layer_list(group["names"], count)
+        subject = names if count == 1 else f"{count} layers ({names})"
+        if code == "MetersPerUnitMismatch":
+            factor = value / stage_mpu
+            look = f"{factor:g}x smaller" if factor > 1 else f"{1 / factor:g}x larger"
+            message = (
+                f"{subject} {'authors' if count == 1 else 'author'} metersPerUnit {value:g} but the stage "
+                f"uses {stage_mpu:g}; USD does not rescale {'it' if count == 1 else 'them'}, so the "
+                f"geometry appears {look} than modelled."
+            )
+            stage_value: Any = stage_mpu
+        else:
+            message = (
+                f"{subject} {'is' if count == 1 else 'are'} {value}-up but the stage is {stage_up}-up; "
+                f"USD does not reorient {'it' if count == 1 else 'them'}."
+            )
+            stage_value = stage_up
+        warnings.append({
+            "code": code,
+            "layer_value": value,
+            "stage_value": stage_value,
+            "layer_count": count,
+            "layers": group["layers"],
+            "message": message,
+        })
+    if len(warnings) > _MAX_WARNING_GROUPS:
+        rest = warnings[_MAX_WARNING_GROUPS:]
+        warnings = warnings[:_MAX_WARNING_GROUPS]
+        warnings.append({
+            "code": "MoreUnitMismatches",
+            "group_count": len(rest),
+            "layer_count": sum(entry["layer_count"] for entry in rest),
+            "message": f"{len(rest)} more groups of layers disagree with the stage's units or up axis.",
+        })
+    return warnings
 
 
 class SceneSummarizer(LoggerMixin):
@@ -85,7 +205,7 @@ class SceneSummarizer(LoggerMixin):
         """Initialize scene summarizer."""
         self.usd_reader = USDReader()
         self.mesh_ops = MeshOperations()
-        self.logger.info("Scene summarizer initialized")
+        self.logger.debug("Scene summarizer initialized")
 
     @monitor_performance("summarizer.summarize_stage")
     def summarize_stage(
@@ -97,93 +217,61 @@ class SceneSummarizer(LoggerMixin):
         max_depth: int = 5
     ) -> SceneSummary:
         """
-        Generate a comprehensive summary of a USD stage.
+        Generate a summary of a USD stage.
 
         Args:
             stage: USD Stage to summarize
             file_path: Path to the USD file
-            include_meshes: Include detailed mesh information
-            include_materials: Include material information
-            max_depth: Maximum hierarchy depth to analyze
+            include_meshes: Include mesh statistics
+            include_materials: Include the material list
+            max_depth: Kept for callers that pass it; the summary no longer
+                builds per-root prim summaries, which it used to compute and
+                then discard
 
         Returns:
             SceneSummary object
         """
-        try:
-            # One traversal fills every per-prim accumulator (type counts,
-            # materials, mesh statistics, hierarchy depth); the prim count is
-            # handed to get_stage_info so it doesn't walk the stage again.
-            scan = self._scan_stage(
-                stage,
-                include_meshes=include_meshes,
-                include_materials=include_materials,
-            )
-            total_prims = scan["total_prims"]
-            prim_type_counts = scan["prim_type_counts"]
+        scan = self._scan_stage(stage, include_meshes=include_meshes, include_materials=include_materials)
+        total_prims = scan["total_prims"]
+        stage_info = self.usd_reader.get_stage_info(stage, prim_count=total_prims)
 
-            stage_info = self.usd_reader.get_stage_info(stage, prim_count=total_prims)
+        scene_bbox = BBoxCache(stage).get_stage_bbox()
+        scene_bbox_dict = scene_center = scene_size = scene_volume = scene_size_meters = None
+        if scene_bbox:
+            scene_bbox_dict = bbox_to_dict(scene_bbox)
+            scene_center = bbox_center(scene_bbox)
+            scene_size = bbox_size(scene_bbox)
+            scene_volume = bbox_volume(scene_bbox)
+            scene_size_meters = [extent * stage_info.meters_per_unit for extent in scene_size]
 
-            bbox_cache = BBoxCache(stage)
-
-            scene_bbox = bbox_cache.get_stage_bbox()
-            scene_bbox_dict = None
-            scene_center = None
-            scene_size = None
-            scene_volume = None
-
-            if scene_bbox:
-                from .bbox import bbox_to_dict
-                scene_bbox_dict = bbox_to_dict(scene_bbox)
-                scene_center = bbox_center(scene_bbox)
-                scene_size = bbox_size(scene_bbox)
-                scene_volume = bbox_volume(scene_bbox)
-
-            root_prims = []
-            for prim in stage.GetPseudoRoot().GetChildren():
-                prim_summary = self.summarize_prim(
-                    prim,
-                    bbox_cache=bbox_cache,
-                    include_mesh_info=include_meshes,
-                    max_depth=max_depth
-                )
-                root_prims.append(prim_summary)
-
-            materials = scan["materials"]
-            mesh_statistics = scan["mesh_statistics"]
-            hierarchy_depth = scan["hierarchy_depth"]
-
-            animation_info = self._get_animation_info(stage_info)
-
-            summary = SceneSummary(
-                file_path=file_path,
-                stage_info={
-                    'up_axis': stage_info.up_axis,
-                    'meters_per_unit': stage_info.meters_per_unit,
-                    'time_codes_per_second': stage_info.time_codes_per_second,
-                    'start_time': stage_info.start_time_code,
-                    'end_time': stage_info.end_time_code,
-                    'frame_rate': stage_info.frame_rate,
-                    'layer_count': len(stage_info.layers)
-                },
-                total_prims=total_prims,
-                prim_type_counts=prim_type_counts,
-                scene_bbox=scene_bbox_dict,
-                scene_center=scene_center,
-                scene_size=scene_size,
-                scene_volume=scene_volume,
-                materials=materials,
-                root_prims=root_prims,
-                mesh_statistics=mesh_statistics,
-                hierarchy_depth=hierarchy_depth,
-                animation_info=animation_info
-            )
-
-            self.logger.info(f"Generated scene summary: {total_prims} prims, {len(root_prims)} root prims")
-            return summary
-
-        except Exception as e:
-            self.logger.error(f"Error summarizing stage: {e}")
-            raise
+        summary = SceneSummary(
+            file_path=file_path,
+            stage_info={
+                'up_axis': stage_info.up_axis,
+                'meters_per_unit': stage_info.meters_per_unit,
+                'time_codes_per_second': stage_info.time_codes_per_second,
+                'start_time': stage_info.start_time_code,
+                'end_time': stage_info.end_time_code,
+                'frame_rate': stage_info.frame_rate,
+                'layer_count': len(stage_info.layers),
+            },
+            total_prims=total_prims,
+            prim_type_counts=scan["prim_type_counts"],
+            scene_bbox=scene_bbox_dict,
+            scene_center=scene_center,
+            scene_size=scene_size,
+            scene_volume=scene_volume,
+            materials=scan["materials"],
+            mesh_statistics=scan["mesh_statistics"],
+            hierarchy_depth=scan["hierarchy_depth"],
+            animation_info=self._get_animation_info(stage_info),
+            root_prim_paths=stage_info.root_prims[:_LISTED_PATHS],
+            root_prim_count=len(stage_info.root_prims),
+            scene_size_meters=scene_size_meters,
+            warnings=unit_warnings(stage),
+        )
+        self.logger.info(f"Generated scene summary: {total_prims} prims, {summary.root_prim_count} root prims")
+        return summary
 
     @monitor_performance("summarizer.summarize_prim")
     def summarize_prim(
@@ -200,88 +288,57 @@ class SceneSummarizer(LoggerMixin):
         Args:
             prim: USD Prim to summarize
             bbox_cache: Bounding box cache (created if None)
-            include_mesh_info: Include detailed mesh information
+            include_mesh_info: Include mesh statistics
             max_depth: Maximum recursion depth
             current_depth: Current recursion depth
 
         Returns:
             PrimSummary object
         """
-        try:
-            prim_info = self.usd_reader.get_prim_info(prim)
+        prim_info = self.usd_reader.get_prim_info(prim)
+        if bbox_cache is None:
+            bbox_cache = BBoxCache(prim.GetStage())
+        bbox = bbox_cache.compute_world_bbox(prim)
 
-            if bbox_cache is None:
-                bbox_cache = BBoxCache(prim.GetStage())
+        mesh_info_dict = None
+        if include_mesh_info and prim.IsA(UsdGeom.Mesh):
+            mesh_info = self.mesh_ops.get_mesh_statistics(prim)
+            mesh_info_dict = {
+                'vertex_count': mesh_info.vertex_count,
+                'face_count': mesh_info.face_count,
+                'has_normals': mesh_info.has_normals,
+                'has_uvs': mesh_info.has_uvs,
+                'has_colors': mesh_info.has_colors,
+                'surface_area': mesh_info.surface_area,
+                'volume': mesh_info.volume,
+                'is_closed': mesh_info.is_closed,
+                'topology_valid': mesh_info.topology_valid
+            }
 
-            bbox = bbox_cache.compute_world_bbox(prim)
-            bbox_dict = None
-            bbox_center_val = None
-            bbox_size_val = None
-            bbox_volume_val = None
+        children_types: Dict[str, int] = {}
+        if current_depth < max_depth:
+            for child in prim.GetChildren():
+                child_type = child.GetTypeName() or TYPELESS
+                children_types[child_type] = children_types.get(child_type, 0) + 1
 
-            if bbox:
-                from .bbox import bbox_to_dict
-                bbox_dict = bbox_to_dict(bbox)
-                bbox_center_val = bbox_center(bbox)
-                bbox_size_val = bbox_size(bbox)
-                bbox_volume_val = bbox_volume(bbox)
-
-            transform_info = None
-            if prim.IsA(UsdGeom.Xformable):
-                transform_info = self._get_transform_info(prim)
-
-            mesh_info_dict = None
-            if include_mesh_info and prim.IsA(UsdGeom.Mesh):
-                try:
-                    mesh_info = self.mesh_ops.get_mesh_statistics(prim)
-                    mesh_info_dict = {
-                        'vertex_count': mesh_info.vertex_count,
-                        'face_count': mesh_info.face_count,
-                        'has_normals': mesh_info.has_normals,
-                        'has_uvs': mesh_info.has_uvs,
-                        'has_colors': mesh_info.has_colors,
-                        'surface_area': mesh_info.surface_area,
-                        'volume': mesh_info.volume,
-                        'is_closed': mesh_info.is_closed,
-                        'topology_valid': mesh_info.topology_valid
-                    }
-                except Exception as e:
-                    self.logger.debug(f"Could not get mesh info for {prim.GetPath()}: {e}")
-
-            children_types = {}
-            children_count = len(prim_info.children)
-
-            if current_depth < max_depth:
-                for child in prim.GetChildren():
-                    child_type = child.GetTypeName()
-                    children_types[child_type] = children_types.get(child_type, 0) + 1
-
-            important_attributes = self._filter_important_attributes(prim_info.attributes)
-
-            summary = PrimSummary(
-                path=prim_info.path,
-                name=prim_info.name,
-                type=prim_info.type_name,
-                purpose=prim_info.purpose,
-                visibility=prim_info.visibility,
-                bbox=bbox_dict,
-                bbox_center=bbox_center_val,
-                bbox_size=bbox_size_val,
-                bbox_volume=bbox_volume_val,
-                transform=transform_info,
-                mesh_info=mesh_info_dict,
-                material_bindings=self._get_material_bindings(prim),
-                children_count=children_count,
-                children_types=children_types,
-                attributes=important_attributes,
-                metadata=prim_info.metadata
-            )
-
-            return summary
-
-        except Exception as e:
-            self.logger.error(f"Error summarizing prim {prim.GetPath()}: {e}")
-            raise
+        return PrimSummary(
+            path=prim_info.path,
+            name=prim_info.name,
+            type=prim_info.type_name,
+            purpose=prim_info.purpose,
+            visibility=prim_info.visibility,
+            bbox=bbox_to_dict(bbox) if bbox else None,
+            bbox_center=bbox_center(bbox) if bbox else None,
+            bbox_size=bbox_size(bbox) if bbox else None,
+            bbox_volume=bbox_volume(bbox) if bbox else None,
+            transform=self._get_transform_info(prim),
+            mesh_info=mesh_info_dict,
+            material_bindings=self._get_material_bindings(prim),
+            children_count=len(prim_info.children),
+            children_types=children_types,
+            attributes=self._filter_important_attributes(prim_info.attributes),
+            metadata=prim_info.metadata,
+        )
 
     @staticmethod
     def _empty_mesh_statistics() -> Dict[str, Any]:
@@ -293,6 +350,9 @@ class SceneSummarizer(LoggerMixin):
             'meshes_with_uvs': 0,
             'meshes_with_colors': 0,
             'closed_meshes': 0,
+            'invalid_topology_meshes': 0,
+            'meshes_measured_at_first_sample': 0,
+            'instanced_meshes': 0,
             'total_surface_area': 0.0,
             'total_volume': 0.0
         }
@@ -307,29 +367,25 @@ class SceneSummarizer(LoggerMixin):
 
         The walk is ``search.iter_prims``: the prims every listing counts,
         instance proxies included, so ``total_prims`` agrees with
-        ``load_usd_file`` and a match-everything search. An instanced mesh is
-        measured once per prototype and counted once per instance.
-
-        Returns ``total_prims``, ``prim_type_counts``, ``materials`` (empty
-        unless ``include_materials``), ``mesh_statistics`` (empty dict unless
-        ``include_meshes``) and ``hierarchy_depth``.
+        ``load_usd_file`` and a match-everything search. Meshes are collected
+        during the walk and measured afterwards in batches; an instanced mesh
+        is measured once per prototype and counted once per instance.
         """
         prim_type_counts: Dict[str, int] = {}
         total_prims = 0
         materials: List[MaterialSummary] = []
-        mesh_stats = self._empty_mesh_statistics() if include_meshes else {}
         hierarchy_depth = 0
+        # The prim whose data a mesh is -> (that prim, how often it appears).
+        meshes: Dict[str, Tuple[Usd.Prim, int]] = {}
+        instanced = 0
 
-        prototype_stats: Dict[str, Optional[MeshInfo]] = {}
         for prim in iter_prims(stage):
             total_prims += 1
-            prim_type = prim.GetTypeName()
+            prim_type = prim.GetTypeName() or TYPELESS
             prim_type_counts[prim_type] = prim_type_counts.get(prim_type, 0) + 1
 
-            path_str = str(prim.GetPath())
-            path_depth = path_str.count('/')
-            if path_depth > hierarchy_depth:
-                hierarchy_depth = path_depth
+            path_str = prim.GetPath().pathString
+            hierarchy_depth = max(hierarchy_depth, path_str.count('/'))
 
             if include_materials and prim_type == "Material":
                 materials.append(MaterialSummary(
@@ -341,7 +397,18 @@ class SceneSummarizer(LoggerMixin):
                 ))
 
             if include_meshes and prim.IsA(UsdGeom.Mesh):
-                self._accumulate_mesh_statistics(mesh_stats, prim, prototype_stats)
+                source = prim
+                if prim.IsInstanceProxy():
+                    source = prim.GetPrimInPrototype()
+                    instanced += 1
+                key = source.GetPath().pathString
+                seen = meshes.get(key)
+                meshes[key] = (source, seen[1] + 1 if seen else 1)
+
+        mesh_stats: Dict[str, Any] = {}
+        if include_meshes:
+            mesh_stats = self._measure_meshes(list(meshes.values()))
+            mesh_stats['instanced_meshes'] = instanced
 
         return {
             'total_prims': total_prims,
@@ -351,113 +418,109 @@ class SceneSummarizer(LoggerMixin):
             'hierarchy_depth': hierarchy_depth,
         }
 
-    def _accumulate_mesh_statistics(
-        self,
-        stats: Dict[str, Any],
-        prim: Usd.Prim,
-        prototype_stats: Optional[Dict[str, Optional[MeshInfo]]] = None,
-    ) -> None:
-        """Fold one mesh prim's statistics into ``stats``.
+    def _measure_meshes(self, meshes: List[Tuple[Usd.Prim, int]]) -> Dict[str, Any]:
+        """Fold every mesh's statistics, times how often it appears, into one total."""
+        stats = self._empty_mesh_statistics()
+        batch: List[Tuple[Usd.Prim, int, MeshArrays]] = []
+        batch_indices = 0
 
-        ``prototype_stats`` memoises instance proxies by the prototype prim
-        they stand for, so each instanced mesh is measured once.
-        """
-        try:
-            if prototype_stats is not None and prim.IsInstanceProxy():
-                key = prim.GetPrimInPrototype().GetPath().pathString
-                if key not in prototype_stats:
-                    prototype_stats[key] = self.mesh_ops.get_mesh_statistics(prim)
-                mesh_info = prototype_stats[key]
-            else:
-                mesh_info = self.mesh_ops.get_mesh_statistics(prim)
-            stats['total_meshes'] += 1
-            stats['total_vertices'] += mesh_info.vertex_count
-            stats['total_faces'] += mesh_info.face_count
-            if mesh_info.has_normals:
-                stats['meshes_with_normals'] += 1
-            if mesh_info.has_uvs:
-                stats['meshes_with_uvs'] += 1
-            if mesh_info.has_colors:
-                stats['meshes_with_colors'] += 1
-            if mesh_info.is_closed:
-                stats['closed_meshes'] += 1
-            stats['total_surface_area'] += mesh_info.surface_area
-            stats['total_volume'] += mesh_info.volume
-        except Exception as e:
-            self.logger.debug(f"Error getting mesh stats for {prim.GetPath()}: {e}")
+        def flush() -> None:
+            measured = geometry_statistics([arrays for _prim, _uses, arrays in batch])
+            for (prim, uses, arrays), geometry in zip(batch, measured):
+                attributes = mesh_attributes(UsdGeom.Mesh(prim))
+                stats['total_meshes'] += uses
+                stats['total_vertices'] += uses * len(arrays.points)
+                stats['total_faces'] += uses * len(arrays.counts)
+                stats['meshes_with_normals'] += uses * (attributes.normals_source is not None)
+                stats['meshes_with_uvs'] += uses * bool(attributes.uv_sets)
+                stats['meshes_with_colors'] += uses * attributes.has_colors
+                stats['closed_meshes'] += uses * geometry.is_closed
+                stats['invalid_topology_meshes'] += uses * (not geometry.topology_valid)
+                stats['total_surface_area'] += uses * (geometry.surface_area or 0.0)
+                stats['total_volume'] += uses * (geometry.volume or 0.0)
+            batch.clear()
+
+        for prim, uses in meshes:
+            mesh = UsdGeom.Mesh(prim)
+            arrays = read_mesh_arrays(mesh)
+            if not (len(arrays.points) and len(arrays.counts) and len(arrays.indices)):
+                # A deforming mesh may have points only as time samples; at the
+                # default time it has none, which is not invalid topology.
+                unsampled = unsampled_topology(mesh)
+                if unsampled:
+                    arrays = read_mesh_arrays(mesh, min(span[0] for span in unsampled.values()))
+                    stats['meshes_measured_at_first_sample'] += uses
+            batch.append((prim, uses, arrays))
+            batch_indices += len(arrays.indices)
+            if batch_indices >= _BATCH_INDICES:
+                flush()
+                batch_indices = 0
+        flush()
+        return stats
 
     def _get_animation_info(self, stage_info: USDStageInfo) -> Dict[str, Any]:
-        """Get animation information from stage info."""
+        """Describe the stage's animation: whether, over which time codes, for how long.
+
+        A stage animates when it authors a time range or when anything in it
+        is time-sampled. ``duration_seconds`` is the time-code span divided by
+        ``timeCodesPerSecond``: the authored range when there is one, else the
+        span of the samples.
+        """
+        tcps = stage_info.time_codes_per_second
+        first: Optional[float] = None
+        last: Optional[float] = None
+        source: Optional[str] = None
+        if stage_info.authored_time_range and stage_info.end_time_code > stage_info.start_time_code:
+            first, last, source = stage_info.start_time_code, stage_info.end_time_code, "authored_range"
+        elif stage_info.time_sample_range is not None and stage_info.has_animation:
+            first, last = stage_info.time_sample_range
+            source = "time_samples"
+        span = (last - first) if first is not None and last is not None else 0.0
         return {
-            'has_animation': stage_info.start_time_code != stage_info.end_time_code,
+            'has_animation': stage_info.has_animation,
+            'source': source,
             'start_time': stage_info.start_time_code,
             'end_time': stage_info.end_time_code,
-            'duration': stage_info.end_time_code - stage_info.start_time_code,
+            'authored_time_range': stage_info.authored_time_range,
+            'time_sample_range': stage_info.time_sample_range,
+            'duration_time_codes': span,
+            'duration_seconds': span / tcps if tcps else None,
             'frame_rate': stage_info.frame_rate,
-            'time_codes_per_second': stage_info.time_codes_per_second
+            'time_codes_per_second': tcps,
         }
 
-    def _get_transform_info(self, prim: Usd.Prim) -> Dict[str, Any]:
-        """Get transform information for a prim."""
-        try:
-            if prim.IsA(UsdGeom.Xformable):
-                xformable = UsdGeom.Xformable(prim)
-                transform = xformable.GetLocalTransformation()
-
-                # Extract translation, rotation, scale
-                translation = transform.ExtractTranslation()
-                rotation = transform.ExtractRotation()
-                scale = transform.ExtractScale()
-
-                return {
-                    'translation': [translation[0], translation[1], translation[2]],
-                    'rotation': [rotation.GetReal(), rotation.GetImaginary()[0],
-                                 rotation.GetImaginary()[1], rotation.GetImaginary()[2]],
-                    'scale': [scale[0], scale[1], scale[2]]
-                }
-        except Exception as e:
-            self.logger.debug(f"Could not get transform info for {prim.GetPath()}: {e}")
-
-        return None
+    def _get_transform_info(self, prim: Usd.Prim) -> Optional[Dict[str, Any]]:
+        """Get the local translation, rotation ([w, x, y, z]) and scale of a prim."""
+        if not prim.IsA(UsdGeom.Xformable):
+            return None
+        transform = UsdGeom.Xformable(prim).GetLocalTransformation()
+        translation = transform.ExtractTranslation()
+        rotation = transform.ExtractRotationQuat()
+        imaginary = rotation.GetImaginary()
+        return {
+            'translation': [translation[0], translation[1], translation[2]],
+            'rotation': [rotation.GetReal(), imaginary[0], imaginary[1], imaginary[2]],
+            'scale': [transform.GetRow3(axis).GetLength() for axis in range(3)],
+        }
 
     def _get_material_bindings(self, prim: Usd.Prim) -> List[str]:
-        """Get material bindings for a prim."""
-        bindings = []
-
-        try:
-            if hasattr(UsdGeom, 'MaterialBindingAPI'):
-                binding_api = UsdGeom.MaterialBindingAPI(prim)
-                if binding_api:
-                    material_rel = binding_api.GetDirectBindingRel()
-                    if material_rel:
-                        targets = material_rel.GetTargets()
-                        bindings = [str(target) for target in targets]
-        except Exception as e:
-            self.logger.debug(f"Could not get material bindings for {prim.GetPath()}: {e}")
-
-        return bindings
+        """The material bound to a prim, as ``UsdShade.MaterialBindingAPI`` resolves it."""
+        material = bound_material(prim)
+        return [material] if material else []
 
     def _filter_important_attributes(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
-        """Filter attributes to keep only important ones for summary."""
-        important_attrs = {}
-
-        # List of attribute names that are typically important
+        """Keep the attributes that matter in a summary; values are already bounded records."""
         important_names = [
             'points', 'normals', 'primvars:st', 'displayColor',
             'size', 'radius', 'height', 'width', 'depth',
             'focalLength', 'horizontalAperture', 'verticalAperture',
             'intensity', 'color', 'temperature', 'exposure'
         ]
-
-        for name, value in attributes.items():
-            if any(important in name for important in important_names):
-                # Truncate large arrays for summary
-                if isinstance(value, list) and len(value) > 10:
-                    important_attrs[name] = f"Array[{len(value)}]"
-                else:
-                    important_attrs[name] = value
-
-        return important_attrs
+        return {
+            name: value
+            for name, value in attributes.items()
+            if any(important in name for important in important_names)
+        }
 
 
 def generate_scene_digest(summary: SceneSummary) -> str:
@@ -470,38 +533,55 @@ def generate_scene_digest(summary: SceneSummary) -> str:
     Returns:
         Human-readable scene digest
     """
-    digest_parts = []
+    digest_parts = [
+        f"USD Scene: {summary.file_path}",
+        f"Total prims: {summary.total_prims}",
+    ]
+    info = summary.stage_info
+    if info:
+        digest_parts.append(f"Stage: {info.get('up_axis')}-up, {info.get('meters_per_unit'):g} m per unit")
 
-    # Basic scene info
-    digest_parts.append(f"USD Scene: {summary.file_path}")
-    digest_parts.append(f"Total prims: {summary.total_prims}")
-
-    # Scene dimensions
     if summary.scene_size:
         size = summary.scene_size
-        digest_parts.append(f"Scene size: {size[0]:.2f} x {size[1]:.2f} x {size[2]:.2f} units")
+        line = f"Scene size: {size[0]:.2f} x {size[1]:.2f} x {size[2]:.2f} units"
+        if summary.scene_size_meters:
+            meters = summary.scene_size_meters
+            line += f" ({meters[0]:.3g} x {meters[1]:.3g} x {meters[2]:.3g} m)"
+        digest_parts.append(line)
 
-    # Prim type breakdown
     if summary.prim_type_counts:
         top_types = sorted(summary.prim_type_counts.items(), key=lambda x: x[1], reverse=True)[:5]
         type_str = ", ".join([f"{count} {ptype}" for ptype, count in top_types])
         digest_parts.append(f"Main content: {type_str}")
 
-    # Mesh statistics
     if summary.mesh_statistics and summary.mesh_statistics.get('total_meshes', 0) > 0:
         mesh_stats = summary.mesh_statistics
-        digest_parts.append(f"Meshes: {mesh_stats['total_meshes']} total, "
-                            f"{mesh_stats['total_vertices']} vertices, "
-                            f"{mesh_stats['total_faces']} faces")
+        line = (f"Meshes: {mesh_stats['total_meshes']} total, "
+                f"{mesh_stats['total_vertices']} vertices, "
+                f"{mesh_stats['total_faces']} faces")
+        if mesh_stats.get('meshes_measured_at_first_sample'):
+            line += (f" ({mesh_stats['meshes_measured_at_first_sample']} deforming, "
+                     "measured at their first time sample)")
+        digest_parts.append(line)
 
-    # Materials
     if summary.materials:
         digest_parts.append(f"Materials: {len(summary.materials)}")
 
-    # Animation
-    if summary.animation_info.get('has_animation', False):
-        anim_info = summary.animation_info
-        digest_parts.append(f"Animation: {anim_info['duration']:.1f}s at {anim_info['frame_rate']:.1f} FPS")
+    anim_info = summary.animation_info
+    if anim_info.get('has_animation', False):
+        seconds = anim_info.get('duration_seconds')
+        span = anim_info.get('duration_time_codes', 0.0)
+        line = "Animation: " + (f"{seconds:.2f} s" if seconds is not None else f"{span:g} time codes")
+        line += (
+            f" ({span:g} time codes at {anim_info.get('time_codes_per_second'):g} per second, "
+            f"{anim_info.get('frame_rate'):g} FPS"
+        )
+        if anim_info.get('source') == "time_samples":
+            line += "; from time samples, no time range authored"
+        digest_parts.append(line + ")")
+
+    for warning in summary.warnings:
+        digest_parts.append(f"Warning: {warning['message']}")
 
     return "\n".join(digest_parts)
 
@@ -516,7 +596,6 @@ def format_summary_for_llm(summary: SceneSummary) -> str:
     Returns:
         JSON string formatted for LLM
     """
-    # Create a simplified version for LLM
     llm_summary = {
         'scene_overview': {
             'file_path': summary.file_path,
@@ -524,16 +603,18 @@ def format_summary_for_llm(summary: SceneSummary) -> str:
             'prim_types': summary.prim_type_counts,
             'scene_bounds': summary.scene_bbox,
             'scene_center': summary.scene_center,
-            'scene_size': summary.scene_size
+            'scene_size': summary.scene_size,
+            'scene_size_meters': summary.scene_size_meters,
         },
         'content_summary': {
-            'root_prims': len(summary.root_prims),
+            'root_prims': summary.root_prim_count,
             'materials': len(summary.materials),
             'hierarchy_depth': summary.hierarchy_depth,
             'has_animation': summary.animation_info.get('has_animation', False)
         },
         'mesh_statistics': summary.mesh_statistics,
-        'stage_settings': summary.stage_info
+        'stage_settings': summary.stage_info,
+        'warnings': summary.warnings,
     }
 
     return json.dumps(llm_summary, indent=2)

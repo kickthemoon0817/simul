@@ -177,11 +177,30 @@ context, not at the virtual pointer as if it were a physical mouse.
 
 `capture_blender_viewport` returns two content blocks: the JPEG as an MCP image
 content block (`mimeType: image/jpeg`), then a JSON text block with `success`,
-`width`, `height`, `engine`, `capture_method`, `format` and
+`width`, `height`, `engine`, `capture_method`, `camera_name`, `format` and
 `image_attached: true`. The JSON carries no `image_base64`; a client that only
 logs text or structured results has to read the image block to get the pixels.
-`capture_blender_viewport_sequence` is different: its frames stay inline in the
-JSON as `frames: [{frame, image_base64}, ...]`, with no image blocks.
+
+`capture_blender_viewport_sequence` writes its frames to JPEG files instead and
+returns their paths: `frames: [{frame, file_path}, ...]`, `output_dir`, `width`
+and `height`, with no image blocks. Inline frames did not fit: five 512 px frames
+exceeded the server's 40 KB result budget and came back as one. `output_dir`
+must be inside the sandbox; by default each call gets a new
+`sequence-<time>-<id>` folder in the capture directory (`captures/` under a
+writable allowed root). Frames are captured on Blender's main thread, so one call
+captures at most `max_frames` (default 50, at most 100) and starts no frame after
+10 seconds; `complete: false` and `next_start_frame` then say where to continue,
+and `stopped_by` says which limit applied. An `end_frame` before `start_frame` is
+refused. The current frame is restored afterwards.
+
+Both tools take `camera_name` to capture through that camera without changing
+the scene camera or the user's view. A render renders through it, and the
+scene camera is restored afterwards. A viewport capture draws the 3D View's
+shading and overlays from the camera's evaluated pose and lens
+(`capture_method: viewport_camera`), keeping the render's aspect ratio inside
+`width` x `height`. An external engine's Rendered view exists only on screen and
+cannot be drawn through another camera, so that case fails with an error that
+suggests `method: "render"`.
 
 What the image shows depends on the mode and on `method` (`auto` by default);
 `capture_method` in the result names the path taken:
@@ -324,6 +343,8 @@ script can make the GUI temporarily unresponsive. The client timeout limits
 waiting, not execution: an operation already started cannot safely be stopped.
 Its outcome is unknown after a timeout, and Simul never automatically retries it.
 Requests whose deadlines expired before execution are refused.
+`bake_blender_simulation` refuses a bake likely to outlast the timeout unless
+`allow_long_bake` is set; see [tools.md](tools.md).
 
 The transport uses a per-instance token in owner-only discovery/attachment
 files. It accepts loopback connections only. Normal filesystem sandbox settings
