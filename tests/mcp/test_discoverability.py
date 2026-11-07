@@ -199,6 +199,11 @@ HEADLESS_USD_TOOLS: frozenset[str] = frozenset({
     "get_bounding_box",
     "summarize_scene",
     "get_prim_subtree",
+    "list_usd_stages",
+    "save_usd_stage",
+    "export_usd_stage",
+    "reload_usd_stage",
+    "unload_usd_stage",
 })
 META_TOOLS: frozenset[str] = frozenset({"get_tool_usage_stats"})
 

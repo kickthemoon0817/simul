@@ -39,6 +39,8 @@ FILE_TAKING_TOOLS = (
     "capture_isaac_viewport",
     "load_usd_file",
     "validate_usd_file",
+    "save_usd_stage",
+    "export_usd_stage",
 )
 
 
