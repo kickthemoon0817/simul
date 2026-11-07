@@ -38,8 +38,10 @@ class _Driver:
         return asyncio.run(_run())
 
     def stage(self, stage_id: str) -> Usd.Stage:
+        # Read the server's stage directly: outside an MCP request the test is
+        # not the session that loaded it, so get_stage would hide it.
         with self.server.headless_adapter.create_session() as session:
-            return session.get_stage(stage_id)
+            return session._active_stages[stage_id]
 
 
 @pytest.fixture

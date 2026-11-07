@@ -18,6 +18,10 @@ that layer and:
   object's meshes, and a physics material (``UsdPhysics.MaterialAPI`` on a
   ``UsdShade.Material`` under ``<asset root>/PhysicsMaterials``) bound to those
   colliders with the ``physics`` purpose;
+- authors a UsdPhysics joint under ``<asset root>/Joints`` for each rigid body
+  constraint between exported objects (fixed, revolute, prismatic, spherical,
+  or a D6 ``PhysicsJoint`` with ``LimitAPI`` per locked or limited axis), with
+  ``body0``/``body1`` and the joint frame in each body's frame;
 - authors semantics with ``UsdSemantics.LabelsAPI`` (``SemanticsLabelsAPI:<taxonomy>``
   with a ``semantics:labels:<taxonomy>`` token array), or, where this pxr has no
   UsdSemantics, Isaac Sim's older ``SemanticsAPI`` convention
@@ -43,6 +47,8 @@ USER_PROPERTIES = "userProperties:"
 LOOKS_SCOPE = "Looks"
 #: Scope under the asset root that holds the physics materials.
 PHYSICS_MATERIALS_SCOPE = "PhysicsMaterials"
+#: Scope under the asset root that holds the joints.
+JOINTS_SCOPE = "Joints"
 #: Material binding purpose PhysX and UsdPhysics read physics materials from.
 PHYSICS_PURPOSE = "physics"
 
@@ -61,13 +67,20 @@ COLLIDER_APPROXIMATIONS: Dict[str, str] = {
     # UsdPhysics has no capsule approximation of a mesh.
     "capsule": "convexHull",
 }
+#: The collider_type values apply_simready_metadata accepts.
+COLLIDER_TYPES: Tuple[str, ...] = tuple(COLLIDER_APPROXIMATIONS)
 
-#: Semantic metadata key -> semantics taxonomy (the LabelsAPI instance name).
+#: Semantic metadata key -> semantics taxonomy (the LabelsAPI instance name),
+#: SimReady's: a Wikidata Q-code goes under wikidata_qcode.
 SEMANTIC_TAXONOMIES: Tuple[Tuple[str, str], ...] = (
     ("semantic_class", "class"),
     ("semantic_hierarchy", "hierarchy"),
-    ("semantic_qcode", "qcode"),
+    ("semantic_qcode", "wikidata_qcode"),
 )
+#: Taxonomies an additional label may not take: the fields' own, and qcode,
+#: under which an earlier export wrote the Q-code (readers of those files
+#: should accept both qcode and wikidata_qcode).
+RESERVED_TAXONOMIES = frozenset({"class", "hierarchy", "wikidata_qcode", "qcode"})
 
 LABELS_API_SCHEMA = "UsdSemantics.LabelsAPI"
 LEGACY_SEMANTICS_SCHEMA = "Isaac SemanticsAPI"
@@ -108,6 +121,14 @@ def author_simready_layer(
             object, ``{"name", "parent", "physics", "semantic"}``, where
             ``parent`` is the Blender parent's name (or None) and ``physics`` /
             ``semantic`` hold the object's ``simready_*`` metadata.
+            ``joints``: one entry per joint, ``{"name", "type" (fixed,
+            revolute, prismatic, spherical or d6), "body0", "body1" (exported
+            object names), "frame", "body0_world", "body1_world" (world
+            matrices as four rows, column vectors), "enabled",
+            "collision_enabled"}``, with ``"axis"`` (X, Y or Z) and ``"limit"``
+            ([lower, upper], degrees or stage units, or None) for revolute and
+            prismatic joints and ``"limits"`` (D6 degree of freedom such as
+            transX or rotZ -> [low, high], low above high locking it) for d6.
             ``asset_name``: the root prim's name when several objects share the
             top level. ``meters_per_unit``: the scene's unit scale.
             ``embed_metadata``: keep the ``userProperties:*`` attributes.
@@ -119,7 +140,7 @@ def author_simready_layer(
         The anonymous layer, unsaved (``layer.Export(path)`` writes it), and the
         report: ``default_prim``, ``prims`` (Blender object name -> prim path),
         ``missing_objects`` (planned objects the layer has no prim for), the
-        stage metrics, the physics and semantics prims authored, and
+        stage metrics, the physics, joint and semantics prims authored, and
         ``warnings``.
 
     Raises:
@@ -160,7 +181,14 @@ def author_simready_layer(
     report["default_prim"] = str(root_path)
     report["prims"] = {name: str(path) for name, path in present.items()}
 
-    _author_physics(stage, root_path, present, planned, report)
+    joints: List[Mapping[str, Any]] = list(plan.get("joints") or [])
+    jointed = {
+        frozenset((str(present[str(j["body0"])]), str(present[str(j["body1"])])))
+        for j in joints
+        if str(j.get("body0")) in present and str(j.get("body1")) in present
+    }
+    _author_physics(stage, root_path, present, planned, report, jointed)
+    _author_joints(stage, root_path, present, joints, report)
     _author_semantics(
         stage,
         present,
@@ -494,6 +522,7 @@ def _author_physics(
     prims: Mapping[str, Any],
     planned: Mapping[str, Mapping[str, Any]],
     report: Dict[str, Any],
+    jointed: Iterable[frozenset] = (),
 ) -> None:
     """Rigid bodies, mass, colliders and physics materials from the objects' metadata.
 
@@ -501,7 +530,10 @@ def _author_physics(
     prim. ``collider_type`` and the friction/restitution values also apply to
     the meshes of descendants that set none of their own, like an inherited
     material binding, so one call on an asset root makes all its meshes collide.
+    ``jointed`` holds the prim path pairs a joint joins: a rigid body nested in
+    another is expected with one.
     """
+    jointed = set(jointed)
     from pxr import Sdf, UsdGeom, UsdPhysics, UsdShade
 
     meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage)
@@ -621,8 +653,15 @@ def _author_physics(
                 f"{body}: rigid body without a collider; set collider_type on it or its meshes"
             )
         for other in rigid_bodies:
-            if other != body and path.HasPrefix(Sdf.Path(other)):
-                warnings.append(f"{body}: rigid body nested under the rigid body {other}")
+            if (
+                other != body
+                and path.HasPrefix(Sdf.Path(other))
+                and frozenset((body, other)) not in jointed
+            ):
+                warnings.append(
+                    f"{body}: rigid body nested under the rigid body {other} with no joint "
+                    "between them"
+                )
         for collider, approximation in approximations.items():
             if approximation == "none" and Sdf.Path(collider).HasPrefix(path):
                 warnings.append(
@@ -643,6 +682,191 @@ def _has_mesh_below(prim: Any) -> bool:
     from pxr import Usd, UsdGeom
 
     return any(p.IsA(UsdGeom.Mesh) for p in Usd.PrimRange(prim))
+
+
+# ---------------------------------------------------------------------------
+# Joints
+# ---------------------------------------------------------------------------
+
+_Vector = List[float]
+_Rotation = List[List[float]]
+
+
+def _rows(matrix: Any) -> List[List[float]]:
+    return [[float(matrix[i][j]) for j in range(4)] for i in range(4)]
+
+
+def _rigid_frame(matrix: Any) -> Optional[Tuple[_Vector, _Rotation]]:
+    """A transform's position and rotation (columns its unit axes), scale and skew removed.
+
+    The axes are made orthonormal in X, Y, Z order; a mirrored transform's
+    axes are negated, as Blender's rigid body world does. None for a
+    transform with a zero-length axis.
+    """
+    m = _rows(matrix)
+    axes = [[m[r][c] for r in range(3)] for c in range(3)]
+    units: List[_Vector] = []
+    for axis in axes:
+        v = list(axis)
+        for u in units:
+            dot = sum(a * b for a, b in zip(v, u))
+            v = [a - dot * b for a, b in zip(v, u)]
+        length = math.sqrt(sum(a * a for a in v))
+        if length < 1e-12:
+            return None
+        units.append([a / length for a in v])
+    x, y, z = units
+    determinant = (
+        x[0] * (y[1] * z[2] - y[2] * z[1])
+        - y[0] * (x[1] * z[2] - x[2] * z[1])
+        + z[0] * (x[1] * y[2] - x[2] * y[1])
+    )
+    if determinant < 0:
+        units = [[-a for a in u] for u in units]
+    rotation = [[units[c][r] for c in range(3)] for r in range(3)]
+    return [m[0][3], m[1][3], m[2][3]], rotation
+
+
+def _quaternion(r: _Rotation) -> Tuple[float, float, float, float]:
+    """(w, x, y, z) of a rotation matrix acting on column vectors, w >= 0."""
+    trace = r[0][0] + r[1][1] + r[2][2]
+    if trace > 0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        q = (0.25 * s, (r[2][1] - r[1][2]) / s, (r[0][2] - r[2][0]) / s, (r[1][0] - r[0][1]) / s)
+    elif r[0][0] > r[1][1] and r[0][0] > r[2][2]:
+        s = math.sqrt(1.0 + r[0][0] - r[1][1] - r[2][2]) * 2.0
+        q = ((r[2][1] - r[1][2]) / s, 0.25 * s, (r[0][1] + r[1][0]) / s, (r[0][2] + r[2][0]) / s)
+    elif r[1][1] > r[2][2]:
+        s = math.sqrt(1.0 + r[1][1] - r[0][0] - r[2][2]) * 2.0
+        q = ((r[0][2] - r[2][0]) / s, (r[0][1] + r[1][0]) / s, 0.25 * s, (r[1][2] + r[2][1]) / s)
+    else:
+        s = math.sqrt(1.0 + r[2][2] - r[0][0] - r[1][1]) * 2.0
+        q = ((r[1][0] - r[0][1]) / s, (r[0][2] + r[2][0]) / s, (r[1][2] + r[2][1]) / s, 0.25 * s)
+    norm = math.sqrt(sum(v * v for v in q))
+    sign = -1.0 if q[0] < 0 else 1.0
+    w, x, y, z = (sign * v / norm for v in q)
+    return w, x, y, z
+
+
+def _inverse3(m: List[List[float]]) -> Optional[List[List[float]]]:
+    """The inverse of a 3x3 matrix, or None when it has none."""
+    a, b, c = m[0]
+    d, e, f = m[1]
+    g, h, i = m[2]
+    det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+    if abs(det) < 1e-18:
+        return None
+    return [
+        [(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det],
+        [(f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det],
+        [(d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det],
+    ]
+
+
+def _local_pose(
+    body_world: Any, frame: Tuple[_Vector, _Rotation]
+) -> Optional[Tuple[_Vector, Tuple[float, float, float, float]]]:
+    """The joint frame in a body's frame, as UsdPhysics reads localPos and localRot.
+
+    The position is in the body's local coordinates, which the UsdPhysics
+    parser scales by the body's world scale again; the rotation is relative
+    to the body's rotation alone. None for a body with zero scale.
+    """
+    b = _rows(body_world)
+    inverse = _inverse3([row[:3] for row in b[:3]])
+    body = _rigid_frame(b)
+    if inverse is None or body is None:
+        return None
+    position, rotation = frame
+    offset = [position[i] - b[i][3] for i in range(3)]
+    local = [sum(inverse[i][k] * offset[k] for k in range(3)) for i in range(3)]
+    body_rotation = body[1]
+    relative = [
+        [sum(body_rotation[k][i] * rotation[k][j] for k in range(3)) for j in range(3)]
+        for i in range(3)
+    ]
+    return local, _quaternion(relative)
+
+
+def _author_joints(
+    stage: Any,
+    root_path: Any,
+    prims: Mapping[str, Any],
+    joints: Iterable[Mapping[str, Any]],
+    report: Dict[str, Any],
+) -> None:
+    """One UsdPhysics joint per planned joint, under ``<asset root>/Joints``."""
+    from pxr import Gf, UsdGeom, UsdPhysics
+
+    schemas = {
+        "fixed": UsdPhysics.FixedJoint,
+        "revolute": UsdPhysics.RevoluteJoint,
+        "prismatic": UsdPhysics.PrismaticJoint,
+        "spherical": UsdPhysics.SphericalJoint,
+        "d6": UsdPhysics.Joint,
+    }
+    authored: List[str] = []
+    report["joints"] = authored
+    warnings: List[str] = report["warnings"]
+    scope = None
+    taken: set = set()
+    for joint in joints:
+        name = str(joint["name"])
+        kind = str(joint.get("type"))
+        bodies = [str(joint[key]) for key in ("body0", "body1")]
+        missing = [body for body in bodies if body not in prims]
+        if missing:
+            warnings.append(
+                f"{name}: joint not exported; the layer has no prim for {', '.join(missing)}"
+            )
+            continue
+        if kind not in schemas:
+            warnings.append(f"{name}: joint type {kind!r} is not one of {sorted(schemas)}")
+            continue
+        frame = _rigid_frame(joint["frame"])
+        poses = [
+            pose
+            for pose in (
+                _local_pose(joint[f"body{index}_world"], frame) if frame is not None else None
+                for index in (0, 1)
+            )
+            if pose is not None
+        ]
+        if len(poses) != 2:
+            warnings.append(
+                f"{name}: joint not exported; its frame or a body's transform has zero scale"
+            )
+            continue
+        if scope is None:
+            scope_name = _free_name(
+                JOINTS_SCOPE,
+                (c.GetName() for c in stage.GetPrimAtPath(root_path).GetChildren()),
+            )
+            scope = UsdGeom.Scope.Define(stage, root_path.AppendChild(scope_name))
+        prim_name = _free_name(usd_identifier(name, "joint"), taken)
+        taken.add(prim_name)
+        usd_joint = schemas[kind].Define(stage, scope.GetPath().AppendChild(prim_name))
+        usd_joint.CreateBody0Rel().SetTargets([prims[bodies[0]]])
+        usd_joint.CreateBody1Rel().SetTargets([prims[bodies[1]]])
+        local_pos = (usd_joint.CreateLocalPos0Attr, usd_joint.CreateLocalPos1Attr)
+        local_rot = (usd_joint.CreateLocalRot0Attr, usd_joint.CreateLocalRot1Attr)
+        for index, (position, (w, x, y, z)) in enumerate(poses):
+            local_pos[index](Gf.Vec3f(*position))
+            local_rot[index](Gf.Quatf(w, Gf.Vec3f(x, y, z)))
+        usd_joint.CreateJointEnabledAttr(bool(joint.get("enabled", True)))
+        usd_joint.CreateCollisionEnabledAttr(bool(joint.get("collision_enabled", False)))
+        if kind in ("revolute", "prismatic"):
+            usd_joint.CreateAxisAttr(str(joint.get("axis") or "X"))
+            limit = joint.get("limit")
+            if limit is not None:
+                usd_joint.CreateLowerLimitAttr(float(limit[0]))
+                usd_joint.CreateUpperLimitAttr(float(limit[1]))
+        elif kind == "d6":
+            for dof, (low, high) in sorted((joint.get("limits") or {}).items()):
+                limit_api = UsdPhysics.LimitAPI.Apply(usd_joint.GetPrim(), dof)
+                limit_api.CreateLowAttr(float(low))
+                limit_api.CreateHighAttr(float(high))
+        authored.append(str(usd_joint.GetPath()))
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +891,13 @@ def _labels(entry: Mapping[str, Any], name: str, report: Dict[str, Any]) -> List
             if not _IDENTIFIER.match(str(key)):
                 report["warnings"].append(
                     f"{name}: label {key!r} is not a valid USD identifier; not exported"
+                )
+                continue
+            if key in RESERVED_TAXONOMIES:
+                # It would overwrite a field's labels, as `class` overwrote semantic_class.
+                report["warnings"].append(
+                    f"{name}: additional label {key!r} is a semantic field's taxonomy; "
+                    "not exported"
                 )
                 continue
             labels.append((str(key), str(value)))
