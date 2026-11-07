@@ -841,34 +841,6 @@ def _like(current: Any, value: float) -> Any:
     return float(value)
 
 
-def _finite3(values: Sequence[float], name: str) -> Tuple[float, float, float]:
-    """Three finite floats, or ValueError naming ``name``."""
-    numbers = tuple(float(v) for v in values)
-    if len(numbers) != 3 or not all(math.isfinite(v) for v in numbers):
-        raise ValueError(f"{name} must be 3 finite numbers")
-    return numbers[0], numbers[1], numbers[2]
-
-
-def _own_quaternion(struct: Any, mathutils: Any) -> Any:
-    """The rotation an object or pose bone stores, as a unit quaternion.
-
-    Blender reads only the property its ``rotation_mode`` names; it
-    normalizes a quaternion, and takes an axis-angle with a zero axis for no
-    rotation, when it builds the matrix.
-    """
-    mode = struct.rotation_mode
-    if mode == "QUATERNION":
-        quaternion = mathutils.Quaternion(tuple(struct.rotation_quaternion))
-        return quaternion.normalized() if quaternion.magnitude else mathutils.Quaternion()
-    if mode == "AXIS_ANGLE":
-        angle, *axis = tuple(struct.rotation_axis_angle)
-        direction = mathutils.Vector(axis)
-        if direction.length == 0.0:
-            return mathutils.Quaternion()
-        return mathutils.Quaternion(direction.normalized(), angle)
-    return mathutils.Euler(tuple(struct.rotation_euler), mode).to_quaternion()
-
-
 class _KeyedProperty:
     """The property (or element of it) a keyframe call keys, read and written through its owner.
 
@@ -4106,61 +4078,34 @@ class BlenderRuntimeSession:
             raise ValueError(f"Armature '{object_name}' has no bone '{bone_name}'")
         if rotation_euler is not None and rotation_quaternion is not None:
             raise ValueError("Give either rotation_euler or rotation_quaternion, not both")
-        new_location = None if location is None else _finite3(location, "location")
-        new_scale = None if scale is None else _finite3(scale, "scale")
-        mathutils = _mathutils()
-        rotation = None
+        new_location = None if location is None else _finite(location, 3, "location")
+        new_scale = None if scale is None else _finite(scale, 3, "scale")
         if rotation_euler is not None:
-            angles = _finite3(rotation_euler, "rotation_euler")
-            rotation = mathutils.Euler(angles, "XYZ").to_quaternion()
-        elif rotation_quaternion is not None:
-            values = [float(v) for v in rotation_quaternion]
-            if len(values) != 4 or not all(math.isfinite(v) for v in values):
-                raise ValueError("rotation_quaternion must be 4 finite numbers")
-            if not any(values):
+            _finite(rotation_euler, 3, "rotation_euler")
+        if rotation_quaternion is not None:
+            if not any(_finite(rotation_quaternion, 4, "rotation_quaternion")):
                 raise ValueError("rotation_quaternion must not have zero length")
-            rotation = mathutils.Quaternion(values).normalized()
 
         if new_location is not None:
             bone.location = new_location
-        if rotation is not None:
-            mode = bone.rotation_mode
-            if mode == "QUATERNION":
-                if rotation_euler is not None:
-                    # Converted angles: stay on the side of the current sign.
-                    rotation.make_compatible(_own_quaternion(bone, mathutils))
-                bone.rotation_quaternion = rotation
-            elif mode == "AXIS_ANGLE":
-                axis, angle = rotation.to_axis_angle()
-                bone.rotation_axis_angle = (float(angle), *(float(v) for v in axis))
-            elif mode == "XYZ" and rotation_euler is not None:
-                bone.rotation_euler = tuple(float(a) for a in rotation_euler)
-            else:
-                bone.rotation_euler = rotation.to_euler(mode, bone.rotation_euler)
+        if rotation_euler is not None or rotation_quaternion is not None:
+            # A pose bone keeps its rotation as an object does, so the object
+            # tools' conversion into its own mode applies unchanged.
+            write_rotation(bone, rotation_euler, rotation_quaternion)
         if new_scale is not None:
             bone.scale = new_scale
 
         blender_module: Any = bpy
         evaluated = obj.evaluated_get(blender_module.context.evaluated_depsgraph_get())
         posed = evaluated.pose.bones.get(bone_name)
-        own = _own_quaternion(bone, mathutils)
-        mode = bone.rotation_mode
-        if mode == "QUATERNION":
-            stored = bone.rotation_quaternion
-        elif mode == "AXIS_ANGLE":
-            stored = bone.rotation_axis_angle
-        else:
-            stored = bone.rotation_euler
         return {
             "object_name": object_name,
             "bone_name": bone_name,
-            "rotation_mode": mode,
+            "rotation_mode": bone.rotation_mode,
             "location": _f32s(bone.location),
-            "rotation_euler": _f32s(
-                bone.rotation_euler if mode == "XYZ" else own.to_euler("XYZ")
-            ),
-            "rotation_quaternion": _f32s(own),
-            "rotation_in_mode": _f32s(stored),
+            "rotation_euler": _f32s(local_rotation_euler(bone)),
+            "rotation_quaternion": _f32s(local_rotation_quaternion(bone)),
+            "rotation_in_mode": _f32s(stored_rotation(bone)),
             "scale": _f32s(bone.scale),
             "world_head": _f32s(evaluated.matrix_world @ posed.head),
             "world_tail": _f32s(evaluated.matrix_world @ posed.tail),
@@ -4874,12 +4819,17 @@ class BlenderRuntimeSession:
             compatible = _mathutils().Euler(tuple(local), order)
         else:
             compatible = None
+        # The rotation nearest the matrix, as get_object_info reads it: a
+        # turned child of a parent with non-uniform scale has a sheared matrix,
+        # from which to_euler and to_quaternion read different rotations.
+        nearest = _nearest_rotation([[float(v) for v in row][:3] for row in matrix][:3])
+        rotation = matrix if nearest is None else _mathutils().Matrix(nearest)
         euler = (
-            matrix.to_euler(order)
+            rotation.to_euler(order)
             if compatible is None
-            else matrix.to_euler(order, compatible)
+            else rotation.to_euler(order, compatible)
         )
-        quaternion = [float(v) for v in matrix.to_quaternion()]
+        quaternion = [float(v) for v in rotation.to_quaternion()]
         if previous is not None and (
             sum(a * b for a, b in zip(quaternion, previous["rotation_quaternion"])) < 0
         ):

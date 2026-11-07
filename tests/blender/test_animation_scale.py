@@ -196,6 +196,30 @@ class TestTrajectoryPages:
         with pytest.raises(ValueError, match="limit must be at least 1"):
             session.get_object_trajectory("Cart", 1, 10, limit=0)
 
+    def test_a_sheared_child_reports_the_rotation_get_object_info_reports(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """A turned child of a parent scaled (1, 1, 0.5) has a sheared world matrix."""
+        parent = FakeTransformObject("Parent", scale=(1.0, 1.0, 0.5))
+        child = FakeTransformObject(
+            "Link", parent=parent, rotation_euler=(0.6, 0.0, 0.0)
+        )
+        child.matrix_parent_inverse = FakeMatrix.Identity(4)
+        session, _, _ = _session(monkeypatch, parent, child)
+
+        (point,) = session.get_object_trajectory("Link", 1, 1)["points"]
+
+        reference = blender_runtime.world_transform(child)
+        assert point["rotation_quaternion"] == pytest.approx(
+            reference["world_rotation_quaternion"], abs=1e-6
+        )
+        assert point["rotation_euler"] == pytest.approx(
+            reference["world_rotation_euler"], abs=1e-6
+        )
+        # Read straight off the matrix, the rotation is another one.
+        naive = list(child.matrix_world.to_quaternion())
+        assert naive != pytest.approx(reference["world_rotation_quaternion"], abs=1e-3)
+
     def test_values_are_the_float32_blender_holds_in_their_shortest_form(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
@@ -410,7 +434,9 @@ class TestRigidBodyWalk:
     ) -> None:
         """A GUI Blender 5.0.1 took 24 s for 400 000 bodies x frames; a call waits 30 s."""
         world = _world(bodies=1000)
-        session, _, frames = _session(monkeypatch, FakeTransformObject("Body"), world=world)
+        session, _, frames = _session(
+            monkeypatch, FakeTransformObject("Body"), world=world
+        )
 
         session.get_object_trajectory("Body", 201, 201)
         assert frames[:-1] == list(range(1, 202))
