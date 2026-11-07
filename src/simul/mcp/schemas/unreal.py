@@ -699,28 +699,54 @@ class UnrealCallActorFunctionResponse(BaseModel):
 
 
 class UnrealSetActorParentResponse(BaseModel):
-    """Response after setting actor parent."""
+    """Response after attaching an actor to a parent or detaching it."""
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    actor_path: str = Field(..., description="Child actor path")
+    actor_path: str = Field(..., description="Path of the actor attached or detached")
     parent_path: Optional[str] = Field(
-        None, description="Parent actor path (None if detached)"
+        None,
+        description="The actor's parent read back after the call; null once detached",
+    )
+    previous_parent_path: Optional[str] = Field(
+        None, description="The actor's parent before the call; null when it had none"
+    )
+    changed: bool = Field(
+        ...,
+        description=(
+            "Whether the parent changed: false when the actor already had that parent, "
+            "or had none to detach from"
+        ),
     )
 
 
 class UnrealAddComponentResponse(BaseModel):
-    """Response after adding a component."""
+    """Response after adding a component, read back from the actor."""
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor that received the component")
-    component_path: str = Field(..., description="Full path of the new component")
-    component_class: str = Field(..., description="Class of the added component")
+    component_path: str = Field(
+        ..., min_length=1, description="Full path of the new component"
+    )
+    component_name: str = Field(..., description="Name of the new component")
+    component_class: str = Field(
+        ..., description="Class name of the new component, read back"
+    )
+    parent_component: Optional[str] = Field(
+        None,
+        description=(
+            "Name of the component it is attached under; null for a component that is "
+            "not a scene component, or one that became the actor's root"
+        ),
+    )
+    is_root: bool = Field(
+        False, description="Whether the new component is the actor's root component"
+    )
 
 
 class UnrealSetActorVisibilityResponse(BaseModel):
@@ -845,6 +871,9 @@ class UnrealCreateMaterialInstanceResponse(BaseModel):
     )
     instance_path: str = Field(..., description="New MIC asset path")
     parent_path: str = Field(..., description="Parent material path")
+    class_name: str = Field(
+        "MaterialInstanceConstant", description="Class of the new asset"
+    )
 
 
 class UnrealAssignMaterialResponse(BaseModel):
@@ -855,8 +884,14 @@ class UnrealAssignMaterialResponse(BaseModel):
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor path")
-    material_path: str = Field(..., description="Assigned material path")
+    component_path: Optional[str] = Field(
+        None, description="Mesh component whose slot was set"
+    )
+    material_path: str = Field(..., description="Assigned material's object path")
     slot_index: int = Field(0, description="Slot index")
+    previous_material_path: Optional[str] = Field(
+        None, description="Material the slot rendered with before the assignment"
+    )
 
 
 class UnrealSetLightParamsResponse(BaseModel):
@@ -929,30 +964,83 @@ class UnrealGetSimulationStatusResponse(BaseModel):
     sim_time: float = Field(0.0, description="Elapsed simulation time in seconds")
 
 
-class UnrealEnablePhysicsResponse(BaseModel):
-    """Response after toggling physics on an actor."""
+class UnrealPhysicsBody(BaseModel):
+    """A primitive component's physics setup, read back after a physics or collision edit."""
 
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor that was modified")
-    physics_enabled: bool = Field(..., description="Current physics state")
+    world: str = Field(
+        "editor",
+        description=(
+            "World edited: editor (one undoable transaction, marks the map dirty) or simulation "
+            "(a running simulation's play copy: not undoable, not saved)"
+        ),
+    )
+    component_path: Optional[str] = Field(None, description="Primitive component edited")
+    physics_mode: Optional[str] = Field(
+        None,
+        description=(
+            "simulated (Movable, physics collision, simulates), kinematic (Movable, physics "
+            "collision, moved only by its transform), static (not Movable: no mass, never moves) "
+            "or none (no physics collision)"
+        ),
+    )
+    simulate_physics: Optional[bool] = Field(None, description="The body's Simulate Physics flag")
+    mobility: Optional[str] = Field(None, description="Static, Stationary or Movable")
+    collision_mode: Optional[str] = Field(
+        None, description="Collision enabled mode, e.g. QUERY_AND_PHYSICS, QUERY_ONLY, NO_COLLISION"
+    )
+    collision_preset: Optional[str] = Field(
+        None, description="Collision preset read back after the write (Custom once overridden)"
+    )
+    mass_kg: Optional[float] = Field(
+        None, description="Mass Unreal computes for the body; 0 for a Static or Stationary body"
+    )
+    mass_override_kg: Optional[float] = Field(
+        None, description="Mass override in kg, null when the body uses its computed mass"
+    )
+    gravity_enabled: Optional[bool] = Field(None, description="Whether gravity affects the body")
+    linear_damping: Optional[float] = Field(None, description="Linear damping")
+    angular_damping: Optional[float] = Field(None, description="Angular damping")
+    attach_parent: Optional[str] = Field(
+        None, description="Component the body is attached to, null when it is not attached"
+    )
+    warning: Optional[str] = Field(
+        None, description="What to know about the result: a detach, a Static body, an edit during PIE"
+    )
 
 
-class UnrealSetCollisionResponse(BaseModel):
+class UnrealEnablePhysicsResponse(UnrealPhysicsBody):
+    """Response after making a body simulated or kinematic, or turning its physics off."""
+
+    physics_enabled: bool = Field(..., description="Whether the body now simulates physics")
+    mobility_changed_from: Optional[str] = Field(
+        None, description="The mobility this call changed to Movable, null when unchanged"
+    )
+    detached_from: Optional[str] = Field(
+        None,
+        description=(
+            "Parent component the body was detached from as it started simulating (allow_detach); "
+            "Undo reattaches it"
+        ),
+    )
+
+
+class UnrealSetCollisionResponse(UnrealPhysicsBody):
     """Response after setting collision configuration."""
 
-    success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
-    )
-    actor_path: str = Field(..., description="Actor that was modified")
-    collision_preset: str = Field(
-        ..., description="Collision preset read back after the write (Custom once overridden)"
-    )
     collision_enabled: bool = Field(
         ..., description="Whether the component has any collision, read back after the write"
+    )
+    use_default_collision: Optional[bool] = Field(
+        None,
+        description=(
+            "A static mesh's Use Default Collision flag, cleared whenever collision is set so the "
+            "mesh's own collision does not come back; null for other components"
+        ),
     )
 
 
@@ -969,15 +1057,14 @@ class UnrealApplyForceResponse(BaseModel):
     is_impulse: bool = Field(..., description="Whether an impulse was applied")
 
 
-class UnrealSetPhysicsParamsResponse(BaseModel):
+class UnrealSetPhysicsParamsResponse(UnrealPhysicsBody):
     """Response after setting physics parameters."""
 
-    success: bool = Field(True, description="Operation success")
-    error: Optional[str] = Field(
-        None, description="Error message when success is False"
+    params_set: int = Field(..., description="Number of parameters that read back as given")
+    applied: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Each parameter given, read back (mass as the override, as the 32-bit float stored)",
     )
-    actor_path: str = Field(..., description="Actor that was modified")
-    params_set: int = Field(..., description="Number of parameters set")
 
 
 # ----------------------------------------------------------------------
@@ -996,6 +1083,10 @@ class UnrealImportUsdResponse(BaseModel):
     actor_paths: List[str] = Field(
         default_factory=list, description="Spawned actor paths in the level"
     )
+    removed_actor_paths: List[str] = Field(
+        default_factory=list,
+        description="Level actors the import replaced (only with replace_existing)",
+    )
     warnings: List[str] = Field(default_factory=list, description="Import warnings")
 
 
@@ -1007,7 +1098,17 @@ class UnrealExportUsdResponse(BaseModel):
         None, description="Error message when success is False"
     )
     output_path: str = Field(..., description="Written USD file path")
-    actors_exported: int = Field(..., description="Number of actors exported")
+    actors_exported: int = Field(
+        ..., description="Number of actors the written stage has a prim for"
+    )
+    exported_prims: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="Each exported actor's actor_path and the prim_path it was written to",
+    )
+    skipped_actors: List[str] = Field(
+        default_factory=list,
+        description="Actors given that the exporter wrote no prim for (editor helpers it leaves out)",
+    )
     file_size_bytes: int = Field(0, description="Output file size in bytes")
 
 

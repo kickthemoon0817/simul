@@ -8,9 +8,10 @@ component keys so the server's own tool listing works against it.
 
 ``StrictBlenderSession`` stands in for a Blender session behind the registered
 tools; ``BlenderSessionAdapter`` hands it to the server.
-``FakeVector``, ``FakeMatrix``, ``FakeEuler`` and ``FakePropArray`` stand in
-for Blender's ``mathutils`` types and ``bpy_prop_array``; ``fake_mathutils``
-packages the first three as the module the Blender runtime imports.
+``FakeVector``, ``FakeMatrix``, ``FakeEuler``, ``FakeQuaternion`` and
+``FakePropArray`` stand in for Blender's ``mathutils`` types and
+``bpy_prop_array``; ``fake_mathutils`` packages the first four as the module
+the Blender runtime imports.
 ``FakeTransformObject`` is an object whose ``matrix_world`` follows its parent,
 rotation mode and ``FakeConstraint`` stack as a Blender object's does;
 ``FakeObjectModifier`` is an entry of its modifier stack.
@@ -232,6 +233,13 @@ class FakeVector:
     def __repr__(self) -> str:
         return f"Vector({self._values!r})"
 
+    @property
+    def length(self) -> float:
+        return float(np.linalg.norm(self._values))
+
+    def normalized(self) -> "FakeVector":
+        return FakeVector(np.asarray(self._values) / self.length)
+
 
 class FakePropArray(tuple):
     """``bpy_prop_array`` stand-in, such as an ``Object.bound_box`` corner: not a Vector."""
@@ -362,6 +370,70 @@ class FakeEuler:
     def to_matrix(self) -> "FakeMatrix":
         return FakeMatrix(euler_matrix(self._angles, self.order))
 
+    def to_quaternion(self) -> "FakeQuaternion":
+        return FakeQuaternion(matrix_quaternion(euler_matrix(self._angles, self.order)))
+
+
+class FakeQuaternion:
+    """``mathutils.Quaternion`` stand-in: (w, x, y, z), or built from an axis and an angle.
+
+    ``Quaternion()`` is no rotation, ``Quaternion(values)`` keeps the four
+    values as given (unnormalized too), and ``Quaternion(axis, angle)`` turns
+    by ``angle`` radians about ``axis``, as mathutils builds them.
+    """
+
+    def __init__(
+        self,
+        values: Iterable[float] = (1.0, 0.0, 0.0, 0.0),
+        angle: Optional[float] = None,
+    ) -> None:
+        if angle is not None:
+            axis = np.asarray(list(values), dtype=float)
+            values = (
+                math.cos(angle / 2),
+                *(axis / np.linalg.norm(axis) * math.sin(angle / 2)),
+            )
+        self._values = tuple(float(v) for v in values)
+
+    def __iter__(self) -> Iterator[float]:
+        return iter(self._values)
+
+    def __getitem__(self, index: int) -> float:
+        return self._values[index]
+
+    def __len__(self) -> int:
+        return 4
+
+    def __repr__(self) -> str:
+        return f"Quaternion({self._values!r})"
+
+    @property
+    def magnitude(self) -> float:
+        return float(np.linalg.norm(self._values))
+
+    def normalized(self) -> "FakeQuaternion":
+        return FakeQuaternion(np.asarray(self._values) / self.magnitude)
+
+    def to_matrix(self) -> "FakeMatrix":
+        return FakeMatrix(quaternion_matrix(self._values))
+
+    def to_euler(self, order: str = "XYZ", compatible: Any = None) -> "FakeEuler":
+        return self.to_matrix().to_euler(order, compatible)
+
+    def to_axis_angle(self) -> Tuple[FakeVector, float]:
+        """(axis, angle), the axis +Y for no rotation, as mathutils returns them."""
+        w, x, y, z = self.normalized()
+        angle = 2 * math.acos(max(-1.0, min(1.0, w)))
+        sine = math.sin(angle / 2)
+        if abs(sine) < 1e-12:
+            return FakeVector((0.0, 1.0, 0.0)), 0.0
+        return FakeVector((x / sine, y / sine, z / sine)), angle
+
+    def make_compatible(self, other: Iterable[float]) -> None:
+        """Negate in place when ``other`` is nearer the opposite quaternion (the same rotation)."""
+        if float(np.dot(self._values, list(other))) < 0:
+            self._values = tuple(-v for v in self._values)
+
 
 class FakeMatrix:
     """``mathutils.Matrix`` stand-in for a 3x3 or 4x4 transform.
@@ -427,6 +499,33 @@ class FakeMatrix:
 
     def inverted(self) -> "FakeMatrix":
         return FakeMatrix(np.linalg.inv(np.asarray(self.rows)))
+
+    def inverted_safe(self) -> "FakeMatrix":
+        """The inverse, or the nearest one of a singular matrix (mathutils nudges its diagonal)."""
+        try:
+            return self.inverted()
+        except np.linalg.LinAlgError:
+            return FakeMatrix(np.linalg.pinv(np.asarray(self.rows)))
+
+    def _rotation_and_scale(self) -> Tuple[np.ndarray, np.ndarray]:
+        """The rotation and scale ``decompose`` gives: a mirror's scale negative on every axis."""
+        linear = np.asarray(self.rows)[:3, :3]
+        scale = np.linalg.norm(linear, axis=0)
+        if np.linalg.det(linear) < 0:
+            scale = -scale
+        return linear / scale, scale
+
+    def decompose(self) -> Tuple[FakeVector, "FakeQuaternion", FakeVector]:
+        """(location, rotation, scale), as ``mathutils.Matrix.decompose`` returns them."""
+        rotation, scale = self._rotation_and_scale()
+        return (
+            self.translation,
+            FakeQuaternion(matrix_quaternion(rotation)),
+            FakeVector(scale),
+        )
+
+    def to_quaternion(self) -> "FakeQuaternion":
+        return FakeQuaternion(matrix_quaternion(self._rotation_and_scale()[0]))
 
     def copy(self) -> "FakeMatrix":
         """A matrix of these values that no later change to its source reaches."""
@@ -821,19 +920,69 @@ def fake_mathutils() -> ModuleType:
     module.Vector = FakeVector  # type: ignore[attr-defined]
     module.Matrix = FakeMatrix  # type: ignore[attr-defined]
     module.Euler = FakeEuler  # type: ignore[attr-defined]
+    module.Quaternion = FakeQuaternion  # type: ignore[attr-defined]
     return module
 
 
 class FakeCollection:
-    """``bpy.types.Collection`` stand-in: its name and Disable in Viewports (hide_viewport)."""
+    """``bpy.types.Collection`` stand-in: its name, Disable in Viewports (hide_viewport)
+    and child collections. A scene's own collection is one named "Scene Collection".
+    """
 
-    def __init__(self, name: str, hide_viewport: bool = False) -> None:
+    def __init__(
+        self,
+        name: str,
+        hide_viewport: bool = False,
+        children: Sequence["FakeCollection"] = (),
+    ) -> None:
         self.name = name
         self.hide_viewport = hide_viewport
+        self.children = list(children)
 
     def link(self, obj: Any) -> None:
         """Put an object in this collection, as ``collection.objects.link`` does."""
         obj.users_collection.append(self)
+
+    @property
+    def children_recursive(self) -> List["FakeCollection"]:
+        """Every collection below this one, as ``Collection.children_recursive`` lists them."""
+        below: List["FakeCollection"] = []
+        for child in self.children:
+            below += [child, *child.children_recursive]
+        return below
+
+    def as_pointer(self) -> int:
+        return id(self)
+
+
+# Object.type's identifiers on Blender 5.0.1, in Blender's order.
+BLENDER_5_OBJECT_TYPES = (
+    "MESH",
+    "CURVE",
+    "SURFACE",
+    "META",
+    "FONT",
+    "CURVES",
+    "POINTCLOUD",
+    "VOLUME",
+    "GREASEPENCIL",
+    "ARMATURE",
+    "LATTICE",
+    "EMPTY",
+    "LIGHT",
+    "LIGHT_PROBE",
+    "CAMERA",
+    "SPEAKER",
+)
+
+
+def fake_bpy_types() -> SimpleNamespace:
+    """``bpy.types`` stand-in whose ``Object.bl_rna`` lists Blender 5.0.1's object types."""
+    enum_items = [SimpleNamespace(identifier=name) for name in BLENDER_5_OBJECT_TYPES]
+    bl_rna = SimpleNamespace(
+        properties={"type": SimpleNamespace(enum_items=enum_items)}
+    )
+    return SimpleNamespace(Object=SimpleNamespace(bl_rna=bl_rna))
 
 
 class FakeLayerCollection:

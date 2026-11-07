@@ -25,9 +25,9 @@ from __future__ import annotations
 import inspect
 import json
 from dataclasses import KW_ONLY, dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple, Type
+from typing import Annotated, Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple, Type
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ...config import Settings
 from ...tool_surfaces import THIN_UNREAL_TOOLS
@@ -98,6 +98,17 @@ from ._helpers import utf8_byte_length
 
 #: Default of a parameter the caller must supply.
 REQUIRED: Any = inspect.Parameter.empty
+
+#: Most assets ``search_unreal_assets`` returns per call
+#: (``unreal_runtime.MAX_ASSET_SEARCH_RESULTS``; this module does not import
+#: the adapter, and ``test_unreal_tool_wrappers`` checks the two agree).
+MAX_ASSET_SEARCH_RESULTS = 1000
+
+#: The ``allow_engine_content`` parameter of the material tools that write assets.
+_ALLOW_ENGINE_CONTENT_DESCRIPTION = (
+    "Also write to content outside the project's /Game folder: /Engine or a plugin's content, "
+    "which every project using that engine or plugin shares. Default false refuses it (SandboxError)."
+)
 
 
 @dataclass(frozen=True)
@@ -258,6 +269,16 @@ def _focus_view(request: Any) -> Optional[str]:
     from ...adapters.unreal_runtime import focus_view_error
 
     return focus_view_error(request.fov, request.aspect_ratio)
+
+
+def _parent_or_detach(request: Any) -> Optional[str]:
+    """Attaching names the parent and detaching says so; one of the two, never both."""
+    if bool(request.parent_path) == bool(request.detach):
+        return (
+            "Pass parent_path to attach the actor, or detach=true to detach it from its parent"
+            + (", not both" if request.detach else "")
+        )
+    return None
 
 
 def _camera_arguments(request: Any) -> Dict[str, Any]:
@@ -529,7 +550,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="get_unreal_actor_info",
-        description="Get detailed information about a specific actor including transform, components, and tags.",
+        description=(
+            "Get detailed information about a specific actor including transform, components, and tags. The path "
+            "must name a live actor of the level open in the editor; a deleted actor, or one of a map that is not "
+            "open, is not found, and no map is loaded to look for it."
+        ),
         response=UnrealGetActorInfoResponse,
         read_only=True,
         idempotent=True,
@@ -559,7 +584,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 description="Comma-separated package paths to search.",
                 convert=_name_list,
             ),
-            ToolParam("max_results", int, 100, description="Maximum number of results."),
+            ToolParam(
+                "max_results",
+                Annotated[int, Field(ge=1, le=MAX_ASSET_SEARCH_RESULTS)],
+                100,
+                description=f"Maximum number of results, from 1 to {MAX_ASSET_SEARCH_RESULTS}.",
+            ),
         ),
     ),
     UnrealTool(
@@ -782,26 +812,76 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_actor_parent",
-        description="Attach an actor to a parent actor or detach it.",
+        description=(
+            "Attach an actor to a parent actor (parent_path), or detach it from its parent (detach=true with an "
+            "empty parent_path). The actor keeps its world transform, the change is one undoable editor transaction, "
+            "and the parent is read back: parent_path is the parent afterwards (null once detached), with "
+            "previous_parent_path and changed. Attaching an actor to itself or under one of its own children, or a "
+            "Static actor under a parent that is not Static, is refused with the reason, as is a path that names no "
+            "actor of the level open in the editor."
+        ),
         response=UnrealSetActorParentResponse,
         read_only=False,
         destructive=True,
         method="set_actor_parent",
         params=(
-            ToolParam("actor_path", str),
-            ToolParam("parent_path", str, "", convert=_optional_text),
+            ToolParam("actor_path", str, description="Full path of the actor to attach or detach."),
+            ToolParam(
+                "parent_path",
+                str,
+                description="Full path of the actor to attach it to; an empty string together with detach=true.",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "detach",
+                bool,
+                False,
+                description="Detach the actor from its parent instead, keeping its world transform.",
+            ),
         ),
+        check=_parent_or_detach,
     ),
     UnrealTool(
         name="add_unreal_component",
-        description="Add a component to an Unreal actor.",
+        description=(
+            "Add an instance component to an actor in the level, as the editor's Add Component button does, in one "
+            "undoable editor transaction. A scene component attaches under parent_component or the root component. "
+            "Returns the component read back: component_path, component_name, component_class, parent_component and "
+            "is_root. Abstract classes and names already used inside the actor are refused."
+        ),
         response=UnrealAddComponentResponse,
         read_only=False,
         method="add_component",
         params=(
-            ToolParam("actor_path", str),
-            ToolParam("component_class", str),
-            ToolParam("component_name", str, "", convert=_optional_text),
+            ToolParam("actor_path", str, description="Full path of the actor."),
+            ToolParam(
+                "component_class",
+                str,
+                description=(
+                    "Component class: a native class name such as PointLightComponent, or a class path such as "
+                    "/Script/Engine.PointLightComponent or a Blueprint component's /Game/BP_Lamp.BP_Lamp_C."
+                ),
+            ),
+            ToolParam(
+                "component_name",
+                str,
+                "",
+                description=(
+                    "Name of the new component, unique inside the actor, without spaces or punctuation such as "
+                    ". : / ( ); empty lets Unreal name it after its class."
+                ),
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "parent_component",
+                str,
+                "",
+                description=(
+                    "Name of the actor's scene component to attach the new one under (get_unreal_actor_info lists "
+                    "the components); empty attaches it under the root component. Scene components only."
+                ),
+                convert=_optional_text,
+            ),
         ),
     ),
     UnrealTool(
@@ -842,7 +922,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "the call fails, writing nothing, when the material has no global parameter by a given "
             "name (a name only its Material Layers have included) or a texture does not load, and "
             "fails when a value reads back different, keeping what applied; not_applied gives each "
-            "reason."
+            "reason. An instance outside /Game (engine or plugin content) is refused unless "
+            "allow_engine_content is true."
         ),
         response=UnrealSetMaterialParamsResponse,
         read_only=False,
@@ -883,23 +964,40 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 target="texture_params",
                 convert=_optional_json,
             ),
+            ToolParam("allow_engine_content", bool, False, description=_ALLOW_ENGINE_CONTENT_DESCRIPTION),
         ),
     ),
     UnrealTool(
         name="create_unreal_material_instance",
-        description="Create a Material Instance Constant from a parent material.",
+        description=(
+            "Create and save a Material Instance Constant from a parent material, in the project's /Game "
+            "folder: save_path, else the parent's folder when it is in /Game, else /Game/Materials. A folder "
+            "outside /Game is refused unless allow_engine_content is true."
+        ),
         response=UnrealCreateMaterialInstanceResponse,
         read_only=False,
         method="create_material_instance",
         params=(
             ToolParam("parent_path", str),
             ToolParam("instance_name", str),
-            ToolParam("save_path", str, ""),
+            ToolParam(
+                "save_path",
+                str,
+                "",
+                description=(
+                    "Content folder for the new instance, such as /Game/Materials. Empty picks the parent's "
+                    "folder when it is under /Game, else /Game/Materials."
+                ),
+            ),
+            ToolParam("allow_engine_content", bool, False, description=_ALLOW_ENGINE_CONTENT_DESCRIPTION),
         ),
     ),
     UnrealTool(
         name="assign_unreal_material",
-        description="Assign a material to a mesh component's material slot.",
+        description=(
+            "Assign a material to a mesh component's material slot of an actor in the level being edited, "
+            "as one undoable transaction that marks the level dirty, and read it back."
+        ),
         response=UnrealAssignMaterialResponse,
         read_only=False,
         idempotent=True,
@@ -976,7 +1074,15 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="enable_unreal_physics",
-        description="Enable or disable physics simulation on an actor.",
+        description=(
+            "Make an actor's body simulate physics (falls, takes forces), make it kinematic (physics "
+            "collision, moved only by its transform), or turn physics off, in one undoable editor "
+            "transaction that marks the map dirty. A Static body is made Movable unless make_movable "
+            "is false; a body without physics collision or simple collision geometry is refused "
+            "(IncompatibleBody, with the reasons). Unreal detaches a simulated body from its parent, "
+            "so an attached one needs allow_detach. Returns the body read back: physics_mode, "
+            "mobility, collision and mass."
+        ),
         response=UnrealEnablePhysicsResponse,
         read_only=False,
         idempotent=True,
@@ -984,15 +1090,52 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         method="enable_physics",
         params=(
             ToolParam("actor_path", str),
-            ToolParam("enable", bool, True),
-            ToolParam("simulate_physics", bool, True),
+            ToolParam(
+                "enable",
+                bool,
+                True,
+                description=(
+                    "True makes the body physical: simulated, or kinematic with kinematic true. False "
+                    "stops it simulating, keeping its collision and mobility."
+                ),
+            ),
+            ToolParam(
+                "kinematic",
+                bool,
+                False,
+                description=(
+                    "With enable true, make the body kinematic instead of simulated: it keeps physics "
+                    "collision, so simulated bodies hit it, but is not simulated and moves only when "
+                    "its transform is set."
+                ),
+            ),
+            ToolParam(
+                "make_movable",
+                bool,
+                True,
+                description=(
+                    "Make a Static or Stationary body Movable, which simulation and kinematic movement "
+                    "need (reported as mobility_changed_from); false refuses such a body instead."
+                ),
+            ),
+            ToolParam(
+                "allow_detach",
+                bool,
+                False,
+                description=(
+                    "Let a body attached to a parent be detached from it as it starts simulating, "
+                    "keeping its world transform, as Unreal does (reported as detached_from; Undo "
+                    "reattaches it, turning physics off does not). False refuses an attached body."
+                ),
+            ),
         ),
     ),
     UnrealTool(
         name="set_unreal_collision",
         description=(
-            "Set an actor's collision preset and/or enable or disable its collision; "
-            "what is left out is kept. Returns the state read back."
+            "Set an actor's collision preset and/or enable or disable its collision, in one undoable "
+            "editor transaction that marks the map dirty; what is left out is kept and an unknown "
+            "preset changes nothing. Returns the state read back."
         ),
         response=UnrealSetCollisionResponse,
         read_only=False,
@@ -1024,7 +1167,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_physics_params",
-        description="Set physics body parameters (mass, damping, gravity) on an actor.",
+        description=(
+            "Set physics body parameters (mass in kg, linear and angular damping, gravity) on an actor "
+            "in one undoable editor transaction that marks the map dirty, and read them back; a "
+            "parameter left out is kept. A Static body keeps the values but has no mass until it is "
+            "Movable (see warning)."
+        ),
         response=UnrealSetPhysicsParamsResponse,
         read_only=False,
         idempotent=True,
@@ -1041,9 +1189,16 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     # -- USD and SimReady ----------------------------------------------------------
     UnrealTool(
         name="import_unreal_usd",
-        description="Import USD with Unreal's optional USDImporter plugin, enabled at editor startup.",
+        description=(
+            "Import USD with Unreal's optional USDImporter plugin, enabled at editor startup: assets to "
+            "<destination_path>/<file name>, and actors into the level being edited. Without "
+            "replace_existing it is refused when that folder already holds assets, and existing actors are "
+            "kept; with it, those assets and the level's actors from an earlier import of the file are "
+            "replaced."
+        ),
         response=UnrealImportUsdResponse,
         read_only=False,
+        destructive=True,
         method="import_usd",
         params=(
             ToolParam("usd_path", str, description="Path to the USD file on disk; must be inside the sandbox."),
@@ -1057,11 +1212,24 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "import_lights, import_cameras."
                 ),
             ),
+            ToolParam(
+                "replace_existing",
+                bool,
+                False,
+                description=(
+                    "Replace the assets already in <destination_path>/<file name> and the level's actors from "
+                    "an earlier import of this file. Default false refuses an import into a folder that holds "
+                    "assets (InvalidState) and replaces no actor."
+                ),
+            ),
         ),
     ),
     UnrealTool(
         name="export_unreal_usd",
-        description="Export selected Unreal actors with the optional USDImporter plugin's LevelExporterUSD.",
+        description=(
+            "Export actors of the level being edited with the optional USDImporter plugin's "
+            "LevelExporterUSD; actors_exported counts the actors the written stage has a prim for."
+        ),
         response=UnrealExportUsdResponse,
         read_only=False,
         destructive=True,

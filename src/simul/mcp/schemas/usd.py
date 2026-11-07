@@ -6,15 +6,72 @@ from pydantic import BaseModel, Field, field_validator
 
 from .common import BoundingBox, Transform
 
+Purpose = Literal["default", "render", "proxy", "guide"]
+
+DEFAULT_BBOX_PURPOSES: List[Purpose] = ["default", "render"]
+
+SearchType = Literal["by_name", "by_path", "by_type", "by_api_schema"]
+
+MatchMode = Literal["auto", "exact", "substring", "glob", "regex"]
+
+SummaryFormat = Literal["json", "text"]
+
+# Mirror simul.usd.values and simul.usd.search; kept here so the schema
+# module imports no pxr.
+DEFAULT_ARRAY_PREVIEW = 16
+MAX_ARRAY_PREVIEW = 10_000
+DEFAULT_SEARCH_LIMIT = 200
+MAX_SEARCH_LIMIT = 5000
+DEFAULT_SUBTREE_LIMIT = 150
+MAX_SUBTREE_LIMIT = 1000
+
+
+class USDIssue(BaseModel):
+    """One problem found in a USD file."""
+
+    severity: str = Field(..., description="error, warning or info")
+    code: str = Field(
+        ..., description="Stable identifier, e.g. ParseError, MissingReference, NestedArticulation"
+    )
+    message: str = Field(..., description="What is wrong, in pxr's words where pxr reported it")
+    source: str = Field(
+        "simul", description="simul, or the pxr validator that reported the issue"
+    )
+    location: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Where it is, as known: layer, prim_path, property_path, asset_path, line, column",
+    )
+
 
 class USDFileInfo(BaseModel):
     """USD file information."""
 
     file_path: str = Field(..., description="Path to USD file")
     file_size: int = Field(..., description="File size in bytes")
-    format: str = Field(..., description="USD file format (usd, usda, usdc, usdz)")
-    is_valid: bool = Field(..., description="Whether file is valid USD")
-    can_read: bool = Field(..., description="Whether file is readable")
+    format: str = Field(..., description="File extension (usd, usda, usdc, usdz)")
+    is_valid: bool = Field(
+        ..., description="pxr opened the file and no issue has severity error"
+    )
+    can_read: bool = Field(
+        ..., description="pxr opened the file, so load_usd_file can load it"
+    )
+    layer_format: Optional[str] = Field(
+        None, description="Format pxr read the root layer as (usda, usdc, usdz)"
+    )
+    default_prim: Optional[str] = Field(None, description="Default prim path, when valid")
+    up_axis: Optional[str] = Field(None, description="Stage up axis (authored or fallback)")
+    meters_per_unit: Optional[float] = Field(
+        None, description="Stage meters per unit (authored or fallback)"
+    )
+    error_count: int = Field(0, description="Issues with severity error")
+    warning_count: int = Field(0, description="Issues with severity warning")
+    info_count: int = Field(0, description="Issues with severity info")
+    issues: List[USDIssue] = Field(
+        default_factory=list, description="Problems found, errors first"
+    )
+    validators: List[str] = Field(
+        default_factory=list, description="pxr UsdValidation validators that ran"
+    )
 
 
 class USDFileRequest(BaseModel):
@@ -45,10 +102,22 @@ class StageInfo(BaseModel):
     has_animation: bool = Field(..., description="Whether stage has animation")
     layer_count: int = Field(..., description="Number of layers")
     default_prim: Optional[str] = Field(None, description="Default prim path")
+    warnings: List[USDIssue] = Field(
+        default_factory=list,
+        description=(
+            "Problems the stage loaded despite: missing sublayers, references or "
+            "payloads, unresolved reference prim paths"
+        ),
+    )
 
 
 class PrimInfo(BaseModel):
-    """USD prim information."""
+    """USD prim information.
+
+    Values are plain JSON: vectors are lists, quaternions ``[w, x, y, z]``
+    lists, matrices lists of rows, and a non-finite float the string
+    ``"Infinity"``, ``"-Infinity"`` or ``"NaN"``.
+    """
 
     path: str = Field(..., description="Prim path")
     name: str = Field(..., description="Prim name")
@@ -57,16 +126,63 @@ class PrimInfo(BaseModel):
     is_loaded: bool = Field(..., description="Whether prim is loaded")
     is_defined: bool = Field(..., description="Whether prim is defined")
     is_instance: bool = Field(..., description="Whether prim is an instance")
-    purpose: Optional[str] = Field(None, description="Prim purpose")
+    is_instance_proxy: bool = Field(
+        False, description="Whether prim lies under an instance (read-only proxy)"
+    )
+    prototype: Optional[str] = Field(None, description="Prototype path of an instance")
+    prim_in_prototype: Optional[str] = Field(
+        None, description="Prototype prim an instance proxy stands for"
+    )
+    purpose: Optional[str] = Field(None, description="Authored or fallback purpose")
+    computed_purpose: Optional[str] = Field(
+        None, description="Purpose after inheritance from ancestors"
+    )
     visibility: Optional[str] = Field(None, description="Prim visibility")
+    computed_visibility: Optional[str] = Field(
+        None, description="Visibility after inheritance (invisible if an ancestor is)"
+    )
     kind: Optional[str] = Field(None, description="Prim kind")
-    bbox: Optional[BoundingBox] = Field(None, description="Bounding box")
+    api_schemas: List[str] = Field(
+        default_factory=list, description="Applied API schemas, e.g. PhysicsRigidBodyAPI"
+    )
+    bbox: Optional[BoundingBox] = Field(
+        None, description="World bounding box; None when nothing is boundable"
+    )
+    bbox_purposes: List[str] = Field(
+        default_factory=list, description="Purposes the bounding box counts"
+    )
     transform: Optional[Transform] = Field(None, description="Local transformation")
-    children_count: int = Field(..., description="Number of child prims")
-    children_types: Dict[str, int] = Field(..., description="Child prim type counts")
+    children_count: int = Field(
+        ..., description="Number of child prims, instance proxies included"
+    )
+    children_types: Dict[str, int] = Field(
+        ..., description="Child prim type counts; '(typeless)' for prims without a type"
+    )
     material_bindings: List[str] = Field(..., description="Bound material paths")
-    attributes: Dict[str, Any] = Field(..., description="Important attributes")
-    metadata: Dict[str, Any] = Field(..., description="Prim metadata")
+    attribute_count: int = Field(
+        0, description="Attributes on the prim, before attribute_filter"
+    )
+    attributes: Dict[str, Any] = Field(
+        ...,
+        description=(
+            "Attribute name to {type, value, authored}; arrays add length and "
+            "truncated, animated attributes time_samples, connected ones connections"
+        ),
+    )
+    relationships: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Relationship name to {targets, authored}",
+    )
+    metadata: Dict[str, Any] = Field(
+        ...,
+        description=(
+            "specifier, instanceable, composition arcs, variant_sets, "
+            "opinion_layers and other authored metadata"
+        ),
+    )
+    time_code: Optional[float] = Field(
+        None, description="Time code evaluated; None for the default time"
+    )
 
 
 class PrimInfoRequest(BaseModel):
@@ -74,6 +190,19 @@ class PrimInfoRequest(BaseModel):
 
     stage_id: str = Field(..., description="Stage identifier", min_length=1)
     prim_path: str = Field(..., description="Prim path", min_length=1)
+    time_code: Optional[float] = Field(None, description="Time code to evaluate at")
+    include_purposes: Optional[List[Purpose]] = Field(
+        None, description="Purposes the bounding box counts"
+    )
+    array_preview: int = Field(
+        DEFAULT_ARRAY_PREVIEW,
+        ge=0,
+        le=MAX_ARRAY_PREVIEW,
+        description="Leading elements of each array attribute to include",
+    )
+    attribute_filter: Optional[List[str]] = Field(
+        None, description="Glob patterns selecting the attributes to list"
+    )
 
 
 class MeshInfoRequest(BaseModel):
@@ -81,28 +210,47 @@ class MeshInfoRequest(BaseModel):
 
     stage_id: str = Field(..., description="Stage identifier", min_length=1)
     prim_path: str = Field(..., description="Mesh prim path", min_length=1)
+    time_code: Optional[float] = Field(None, description="Time code to read points at")
 
 
 class PrimCreateRequest(BaseModel):
     stage_id: str = Field(..., description="Stage identifier", min_length=1)
-    prim_path: str = Field(..., description="Prim path", min_length=1)
-    prim_type: str = Field(..., description="USD prim type", min_length=1)
+    prim_path: str = Field(..., description="Absolute prim path", min_length=1)
+    prim_type: str = Field(..., description="Concrete USD prim type", min_length=1)
     attributes: Dict[str, Any] = Field(
         default_factory=dict, description="Attribute values"
+    )
+    redefine_existing: bool = Field(
+        False, description="Allow re-typing a prim that already exists"
+    )
+    attribute_types: Dict[str, str] = Field(
+        default_factory=dict, description="USD value type per new attribute name"
+    )
+    time_code: Optional[float] = Field(
+        None, description="Write values as time samples at this time", allow_inf_nan=False
     )
 
 
 class PrimUpdateRequest(BaseModel):
     stage_id: str = Field(..., description="Stage identifier", min_length=1)
-    prim_path: str = Field(..., description="Prim path", min_length=1)
+    prim_path: str = Field(..., description="Absolute prim path", min_length=1)
     attributes: Dict[str, Any] = Field(
         default_factory=dict, description="Attribute values"
+    )
+    attribute_types: Dict[str, str] = Field(
+        default_factory=dict, description="USD value type per new attribute name"
+    )
+    time_code: Optional[float] = Field(
+        None, description="Write values as time samples at this time", allow_inf_nan=False
     )
 
 
 class PrimDeleteRequest(BaseModel):
     stage_id: str = Field(..., description="Stage identifier", min_length=1)
-    prim_path: str = Field(..., description="Prim path", min_length=1)
+    prim_path: str = Field(..., description="Absolute prim path", min_length=1)
+    allow_root_delete: bool = Field(
+        False, description="Permit deleting the stage's default prim"
+    )
 
 
 class MeshInfo(BaseModel):
@@ -112,18 +260,60 @@ class MeshInfo(BaseModel):
     vertex_count: int = Field(..., description="Number of vertices")
     face_count: int = Field(..., description="Number of faces")
     point_count: int = Field(..., description="Number of face vertex indices")
-    has_normals: bool = Field(..., description="Whether mesh has normals")
+    has_normals: bool = Field(
+        ..., description="Whether mesh has normals (primvars:normals or normals)"
+    )
+    normals_source: Optional[str] = Field(
+        None, description="primvars:normals or normals (the former wins), None without normals"
+    )
     has_uvs: bool = Field(..., description="Whether mesh has UV coordinates")
+    uv_sets: List[str] = Field(default_factory=list, description="Texture-coordinate primvar names")
     has_colors: bool = Field(..., description="Whether mesh has vertex colors")
     has_tangents: bool = Field(..., description="Whether mesh has tangents")
     subdivision_scheme: str = Field(..., description="Subdivision scheme")
-    topology_valid: bool = Field(..., description="Whether topology is valid")
-    is_closed: bool = Field(..., description="Whether mesh is watertight")
-    surface_area: float = Field(..., description="Surface area")
-    volume: float = Field(..., description="Volume (if closed)")
-    bbox: BoundingBox = Field(..., description="Mesh bounding box")
-    materials: List[str] = Field(..., description="Material paths")
-    subsets: List[Dict[str, Any]] = Field(..., description="Geometry subsets")
+    topology_valid: Optional[bool] = Field(
+        ..., description="Whether topology is valid; None when the mesh was not measured"
+    )
+    is_closed: Optional[bool] = Field(
+        ..., description="Whether mesh is watertight; None when the mesh was not measured"
+    )
+    surface_area: Optional[float] = Field(
+        ..., description="Surface area in the mesh's own space (before transforms); None for invalid topology"
+    )
+    volume: Optional[float] = Field(
+        ..., description="Enclosed volume in the mesh's own space; None unless the mesh is closed"
+    )
+    bbox: Optional[BoundingBox] = Field(
+        ..., description="Bounds of the points in the mesh's own space; None without points"
+    )
+    materials: List[str] = Field(
+        ..., description="Bound materials: the mesh's, then its material subsets'"
+    )
+    physics_material: Optional[str] = Field(
+        None, description="Material bound for physics, when it has PhysicsMaterialAPI"
+    )
+    subsets: List[Dict[str, Any]] = Field(
+        ...,
+        description=(
+            "Geometry subsets: name, path, element_type, family_name, index_count, "
+            "the first indices, and material for materialBind subsets"
+        ),
+    )
+    points_time_samples: int = Field(0, description="Time samples on points (deforming mesh)")
+    measured: bool = Field(
+        True,
+        description=(
+            "False when points or topology exist only as time samples and none "
+            "applies at time_code; pass a time_code in sampled_time_range"
+        ),
+    )
+    sampled_time_range: Optional[List[float]] = Field(
+        None, description="[first, last] sample time of an unmeasured mesh's topology"
+    )
+    note: Optional[str] = Field(None, description="Why the mesh was not measured")
+    time_code: Optional[float] = Field(
+        None, description="Time code read; None for the default time"
+    )
 
 
 class FocusPrimResponse(BaseModel):
@@ -152,6 +342,15 @@ class PrimActionResponse(BaseModel):
     stage_id: str = Field(..., description="Stage identifier")
     prim_path: str = Field(..., description="Prim path")
     message: str = Field(..., description="Status message")
+    changed: Optional[List[str]] = Field(
+        None, description="Attributes, relationships and metadata the edit wrote"
+    )
+    created_attributes: Optional[Dict[str, str]] = Field(
+        None, description="New attributes the edit created, with their USD value types"
+    )
+    time_code: Optional[float] = Field(
+        None, description="Time code the values were written at; null for defaults"
+    )
 
 
 class SceneSummaryRequest(BaseModel):
@@ -161,15 +360,7 @@ class SceneSummaryRequest(BaseModel):
     include_meshes: bool = Field(True, description="Include detailed mesh information")
     include_materials: bool = Field(True, description="Include material information")
     max_depth: int = Field(5, description="Maximum hierarchy depth", ge=1, le=10)
-    format: str = Field("json", description="Output format (json, text)")
-
-    @field_validator("format")
-    @classmethod
-    def validate_format(cls, v: str) -> str:
-        valid_formats = ["json", "text"]
-        if v not in valid_formats:
-            raise ValueError(f"Format must be one of {valid_formats}")
-        return v
+    format: SummaryFormat = Field("json", description="Output format (json, text)")
 
 
 class SceneSummaryResponse(BaseModel):
@@ -186,34 +377,96 @@ class PrimSearchRequest(BaseModel):
     """Request to search for prims."""
 
     stage_id: str = Field(..., description="Stage identifier")
-    search_type: str = Field(..., description="Search type (by_type, by_name)")
+    search_type: SearchType = Field(..., description="What the query is matched against")
     query: str = Field(..., description="Search query")
-    exact_match: bool = Field(False, description="Use exact matching (for name search)")
+    exact_match: bool = Field(
+        False, description="Shorthand for match='exact' (kept for older callers)"
+    )
+    match: MatchMode = Field("auto", description="How the query is matched")
+    case_sensitive: bool = Field(False, description="Compare case-sensitively")
+    root_path: Optional[str] = Field(None, description="Search only under this prim")
+    include_instance_proxies: bool = Field(True, description="Look inside instances")
+    offset: int = Field(0, ge=0, description="Matches to skip")
+    limit: int = Field(
+        DEFAULT_SEARCH_LIMIT, ge=1, le=MAX_SEARCH_LIMIT, description="Matches to return"
+    )
 
-    @field_validator("search_type")
+    @field_validator("query")
     @classmethod
-    def validate_search_type(cls, v: str) -> str:
-        valid_types = ["by_type", "by_name"]
-        if v not in valid_types:
-            raise ValueError(f"Search type must be one of {valid_types}")
+    def validate_query(cls, v: str, info: Any) -> str:
+        if not v and info.data.get("search_type") in ("by_type", "by_api_schema"):
+            raise ValueError("query must name a type or API schema")
         return v
 
 
 class PrimSearchResponse(BaseModel):
-    """Response from prim search."""
+    """Response from prim search: one page of the matches."""
 
     success: bool = Field(..., description="Whether search was successful")
     stage_id: str = Field(..., description="Stage identifier")
     search_type: str = Field(..., description="Search type used")
     query: str = Field(..., description="Search query")
-    results: List[str] = Field(..., description="List of matching prim paths")
-    count: int = Field(..., description="Number of results")
+    match: str = Field("auto", description="Match mode used")
+    case_sensitive: bool = Field(False, description="Whether case mattered")
+    root_path: Optional[str] = Field(None, description="Prim the search was limited to")
+    include_instance_proxies: bool = Field(True, description="Whether instances were searched")
+    results: List[str] = Field(..., description="Matching prim paths in this page, traversal order")
+    count: int = Field(..., description="Matches in this page")
+    total_matches: int = Field(0, description="Matches in the whole search")
+    searched: int = Field(0, description="Prims the search visited")
+    offset: int = Field(0, description="Matches skipped before this page")
+    limit: int = Field(DEFAULT_SEARCH_LIMIT, description="Page size applied")
+    truncated: bool = Field(False, description="More matches follow this page")
+    next_offset: Optional[int] = Field(
+        None, description="offset of the next page; None when this is the last"
+    )
+    notes: List[str] = Field(default_factory=list, description="How the query was interpreted")
     error: Optional[str] = Field(None, description="Error message if failed")
 
 
-Purpose = Literal["default", "render", "proxy", "guide"]
+class PrimSubtreeRequest(BaseModel):
+    """Request for a subtree listing."""
 
-DEFAULT_BBOX_PURPOSES: List[Purpose] = ["default", "render"]
+    stage_id: str = Field(..., description="Stage identifier", min_length=1)
+    root_path: str = Field("/", description="Subtree root", min_length=1)
+    max_depth: int = Field(5, ge=0, le=64, description="Deepest level listed below the root")
+    max_results: int = Field(
+        DEFAULT_SUBTREE_LIMIT, ge=1, le=MAX_SUBTREE_LIMIT, description="Prims per page"
+    )
+    offset: int = Field(0, ge=0, description="Prims to skip")
+    include_instance_proxies: bool = Field(True, description="Descend into instances")
+    include_properties: bool = Field(False, description="Add authored attributes and relationships")
+    attribute_filter: Optional[List[str]] = Field(
+        None, description="Glob patterns limiting the properties added"
+    )
+    array_preview: int = Field(
+        4, ge=0, le=MAX_ARRAY_PREVIEW, description="Leading array elements to include"
+    )
+
+
+class PrimSubtreeResponse(BaseModel):
+    """One page of a subtree listing."""
+
+    success: bool = Field(True, description="Whether the listing succeeded")
+    stage_id: str = Field(..., description="Stage identifier")
+    root_path: str = Field(..., description="Subtree root")
+    max_depth: int = Field(..., description="Deepest level listed")
+    prims: List[Dict[str, Any]] = Field(
+        ...,
+        description=(
+            "path, name, type, depth, child_count, api_schemas (kind, is_instance, "
+            "is_instance_proxy when set; attributes and relationships when asked)"
+        ),
+    )
+    count: int = Field(..., description="Prims in this page")
+    total: int = Field(..., description="Prims in the subtree up to max_depth")
+    offset: int = Field(0, description="Prims skipped before this page")
+    limit: int = Field(DEFAULT_SUBTREE_LIMIT, description="Page size applied")
+    truncated: bool = Field(False, description="More prims follow this page")
+    next_offset: Optional[int] = Field(
+        None, description="offset of the next page; None when this is the last"
+    )
+    error: Optional[str] = Field(None, description="Error message if failed")
 
 
 class BBoxRequest(BaseModel):
@@ -280,6 +533,7 @@ class BBoxResponse(BaseModel):
 
 
 __all__ = [
+    "USDIssue",
     "USDFileInfo",
     "USDFileRequest",
     "USDValidateRequest",
@@ -297,6 +551,8 @@ __all__ = [
     "SceneSummaryResponse",
     "PrimSearchRequest",
     "PrimSearchResponse",
+    "PrimSubtreeRequest",
+    "PrimSubtreeResponse",
     "BBoxRequest",
     "BBoxResponse",
 ]

@@ -1,8 +1,17 @@
 """Blender MCP schemas."""
 
-from typing import Annotated, Any, Dict, List, Literal, Optional
+import math
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 
-from pydantic import AfterValidator, BaseModel, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    FiniteFloat,
+    field_validator,
+    model_validator,
+)
 from pydantic.json_schema import SkipJsonSchema
 
 # Printed-output cap of execute_blender_script. Mirrors DEFAULT_SCRIPT_OUTPUT_CHARS
@@ -12,12 +21,18 @@ SCRIPT_OUTPUT_CHARS_DEFAULT = 32_000
 SCRIPT_OUTPUT_CHARS_MAX = 100_000
 # Mirrors MAX_SCRIPT_OUTPUT_JSON_BYTES: output that JSON escapes heavily is cut here.
 SCRIPT_OUTPUT_JSON_BYTES_MAX = 300_000
+# capture_blender_viewport_sequence: mirrors DEFAULT_SEQUENCE_FRAMES,
+# MAX_SEQUENCE_FRAMES and SEQUENCE_TIME_BUDGET_SECONDS in blender_runtime.
+SEQUENCE_FRAMES_DEFAULT = 50
+SEQUENCE_FRAMES_MAX = 100
+SEQUENCE_TIME_BUDGET_SECONDS = 10.0
 
 # How capture_blender_viewport produces its image; see BlenderRuntimeSession.capture_viewport.
 BlenderCaptureMethod = Literal["auto", "viewport", "render"]
 
 _CAPTURE_METHOD_RESULT = (
     "How the image was made: viewport (the 3D View redrawn offscreen as the user sees it), "
+    "viewport_camera (the 3D View's shading drawn offscreen from camera_name), "
     "viewport_screen (the 3D View's on-screen pixels, used for Rendered shading of an "
     "external engine such as Cycles), render (bpy.ops.render.render through the scene "
     "camera), render_temp_camera_view or render_temp_camera_framing (a render through a "
@@ -40,6 +55,15 @@ AgentLabel = Annotated[
     Field(min_length=1, max_length=64, description="Agent label shown in capture feedback"),
     AfterValidator(_printable_agent_label),
 ]
+
+# Mesh data for create_blender_mesh_from_data. Blender's from_pydata flattens
+# the vertex list, so a vertex of 2 or 4 numbers shifted every later vertex
+# instead of failing; NaN and infinity are not positions. Indices are strict
+# integers so that true/false cannot pass for 1/0.
+MeshVertex = Annotated[List[FiniteFloat], Field(min_length=3, max_length=3)]
+MeshIndex = Annotated[int, Field(ge=0, strict=True)]
+MeshEdge = Annotated[List[MeshIndex], Field(min_length=2, max_length=2)]
+MeshFace = Annotated[List[MeshIndex], Field(min_length=3)]
 
 
 class BlenderInfoResponse(BaseModel):
@@ -67,8 +91,27 @@ class BlenderObjectInfo(BaseModel):
 
     name: str = Field(..., description="Object name")
     object_type: str = Field(..., description="Blender object type")
-    collection: Optional[str] = Field(None, description="Collection name filter")
+    collection: Optional[str] = Field(
+        None,
+        description=(
+            "A collection holding the object: the filtered one, else its first in the current "
+            "scene ('Scene Collection' for the scene's own); null from an add-on that predates it"
+        ),
+    )
     visible: bool = Field(..., description="Whether object is visible")
+
+
+# Mirrors LISTING_JSON_BYTES_MAX in simul.adapters.blender_runtime, which ships in
+# the Blender add-on and cannot import this module; a test keeps the two in step.
+LISTING_JSON_BYTES_MAX = 30_000
+
+_PAGE_COUNT = (
+    "Number of objects in this page; fewer than requested when their JSON would pass "
+    f"{LISTING_JSON_BYTES_MAX} bytes, so the reply fits the result budget"
+)
+_PAGE_TOTAL = "Number of matching objects in all pages"
+_PAGE_NEXT = "offset of the next page; null after the last page"
+_PAGE_TRUNCATED = "Whether more matching objects follow this page (see next_offset)"
 
 
 class BlenderSceneObjectsRequest(BaseModel):
@@ -88,6 +131,9 @@ class BlenderSceneObjectsRequest(BaseModel):
         ge=1,
         le=5000,
     )
+    offset: int = Field(
+        0, description="Matching objects to skip; pass the previous page's next_offset", ge=0
+    )
 
 
 class BlenderSceneObjectsResponse(BaseModel):
@@ -102,12 +148,16 @@ class BlenderSceneObjectsResponse(BaseModel):
         ..., description="Whether hidden objects were included"
     )
     max_items: int = Field(..., description="Maximum number of requested objects")
-    count: int = Field(..., description="Number of objects in response")
+    count: int = Field(..., description=_PAGE_COUNT)
     objects: List[BlenderObjectInfo] = Field(
         ...,
         description="Listed Blender objects",
     )
-    truncated: bool = Field(..., description="Whether output reached max_items limit")
+    truncated: bool = Field(..., description=_PAGE_TRUNCATED)
+    # Optional: an add-on built before paging still answers.
+    offset: Optional[int] = Field(None, description="Matching objects skipped before this page")
+    total: Optional[int] = Field(None, description=_PAGE_TOTAL)
+    next_offset: Optional[int] = Field(None, description=_PAGE_NEXT)
 
 
 # ---------------------------------------------------------------------------
@@ -154,13 +204,88 @@ class BlenderObjectInfoResponse(BaseModel):
     name: str = Field(..., description="Object name")
     object_type: str = Field(..., description="Blender object type")
     location: List[float] = Field(
-        ..., description="World location [x, y, z]", min_length=3, max_length=3
+        ...,
+        description=(
+            "Location [x, y, z] of the object's own transform (Blender's Location field): "
+            "relative to its parent, before constraints; world_location is in world space"
+        ),
+        min_length=3,
+        max_length=3,
     )
     rotation_euler: List[float] = Field(
-        ..., description="Rotation in Euler radians [x, y, z]", min_length=3, max_length=3
+        ...,
+        description=(
+            "Rotation of the object's own transform as XYZ Euler radians [x, y, z], "
+            "converted from rotation_mode; world_rotation_euler is in world space"
+        ),
+        min_length=3,
+        max_length=3,
     )
     scale: List[float] = Field(
-        ..., description="Scale [x, y, z]", min_length=3, max_length=3
+        ...,
+        description="Scale [x, y, z] of the object's own transform; world_scale is in world space",
+        min_length=3,
+        max_length=3,
+    )
+    # Optional from here to visible: an add-on built before them still answers.
+    rotation_mode: Optional[str] = Field(
+        None,
+        description="How Blender stores the rotation: an Euler order (XYZ, ZXY, ...), QUATERNION or AXIS_ANGLE",
+    )
+    rotation_quaternion: Optional[List[float]] = Field(
+        None,
+        description="Rotation of the object's own transform as a unit quaternion [w, x, y, z]",
+        min_length=4,
+        max_length=4,
+    )
+    rotation_in_mode: Optional[List[float]] = Field(
+        None,
+        description=(
+            "The rotation as Blender stores it for rotation_mode: Euler angles [x, y, z] "
+            "applied in that order, a quaternion [w, x, y, z], or [angle, x, y, z] for AXIS_ANGLE"
+        ),
+        min_length=3,
+        max_length=4,
+    )
+    world_location: Optional[List[float]] = Field(
+        None,
+        description="World-space location [x, y, z], from matrix_world (parents and constraints included)",
+        min_length=3,
+        max_length=3,
+    )
+    world_rotation_euler: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World-space rotation as XYZ Euler radians [x, y, z]: the rotation nearest "
+            "matrix_world, also where a parent's non-uniform scale shears it"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    world_rotation_quaternion: Optional[List[float]] = Field(
+        None,
+        description="World-space rotation as a unit quaternion [w, x, y, z], the same rotation",
+        min_length=4,
+        max_length=4,
+    )
+    world_scale: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World-space scale [x, y, z], from matrix_world; negative on every axis for a "
+            "mirrored object, as Blender decomposes it"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    matrix_world: Optional[List[List[float]]] = Field(
+        None,
+        description=(
+            "Blender's matrix_world as four rows of four; exact where the decomposed world "
+            "values cannot be, such as the shear of a turned child under a parent with "
+            "non-uniform scale"
+        ),
+        min_length=4,
+        max_length=4,
     )
     parent_name: Optional[str] = Field(None, description="Parent object name")
     children_names: List[str] = Field(
@@ -185,20 +310,57 @@ class BlenderMeshInfoRequest(BaseModel):
 
 
 class BlenderMeshInfoResponse(BaseModel):
-    """Counts-only mesh geometry information (O(1) access)."""
+    """Mesh geometry counts, of the stored mesh and after its modifiers.
+
+    The evaluated fields are null from an add-on built before they existed.
+    """
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     object_name: str = Field(..., description="Mesh object name")
-    vertex_count: int = Field(..., description="Number of vertices")
-    edge_count: int = Field(..., description="Number of edges")
-    face_count: int = Field(..., description="Number of polygon faces")
+    vertex_count: int = Field(..., description="Vertices of the stored (base) mesh")
+    edge_count: int = Field(..., description="Edges of the base mesh")
+    face_count: int = Field(..., description="Polygon faces of the base mesh")
+    triangle_count: Optional[int] = Field(
+        None, description="Triangles the base mesh's faces split into"
+    )
+    evaluated_vertex_count: Optional[int] = Field(
+        None,
+        description=(
+            "Vertices after the modifiers enabled in the viewport (what an export writes); "
+            "null when Blender does not evaluate the object"
+        ),
+    )
+    evaluated_edge_count: Optional[int] = Field(None, description="Edges after the modifiers")
+    evaluated_face_count: Optional[int] = Field(None, description="Faces after the modifiers")
+    evaluated_triangle_count: Optional[int] = Field(
+        None, description="Triangles after the modifiers"
+    )
+    evaluated_modifiers: Optional[List[str]] = Field(
+        None, description="Modifiers enabled in the viewport, which the evaluated counts include"
+    )
+    edit_mode: Optional[bool] = Field(
+        None, description="Whether the object was in Edit Mode (its edits are counted)"
+    )
     uv_layer_names: List[str] = Field(
         default_factory=list, description="UV layer names"
     )
     has_shape_keys: bool = Field(..., description="Whether mesh has shape keys")
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Why evaluated counts are missing or may differ from a render-mode export",
+    )
+
+
+class BlenderMeshCounts(BaseModel):
+    """Vertex, edge, face and triangle counts of one mesh."""
+
+    vertex_count: int = Field(..., description="Number of vertices")
+    edge_count: int = Field(..., description="Number of edges")
+    face_count: int = Field(..., description="Number of polygon faces")
+    triangle_count: int = Field(..., description="Triangles the faces split into")
 
 
 class BlenderBoundingBoxRequest(BaseModel):
@@ -241,9 +403,22 @@ class BlenderSearchObjectsRequest(BaseModel):
         ),
     )
     object_type: Optional[str] = Field(
-        None, description="Filter by Blender object type (MESH, LIGHT, CAMERA, etc.)"
+        None,
+        description=(
+            "Filter by Blender object type (MESH, LIGHT, CAMERA, etc.), in any case; "
+            "a type the running Blender does not have is refused"
+        ),
     )
     max_results: int = Field(50, description="Maximum number of results", ge=1, le=5000)
+    offset: int = Field(
+        0, description="Matching objects to skip; pass the previous page's next_offset", ge=0
+    )
+
+    @field_validator("object_type")
+    @classmethod
+    def _upper_case_type(cls, value: Optional[str]) -> Optional[str]:
+        """Blender's type identifiers are upper case: 'mesh' used to match nothing."""
+        return None if value is None else value.strip().upper()
 
 
 class BlenderSearchObjectsResponse(BaseModel):
@@ -255,9 +430,13 @@ class BlenderSearchObjectsResponse(BaseModel):
     )
     pattern: Optional[str] = Field(None, description="Name pattern used")
     object_type: Optional[str] = Field(None, description="Type filter used")
-    count: int = Field(..., description="Number of matching objects")
+    count: int = Field(..., description=_PAGE_COUNT)
     objects: List[BlenderObjectInfo] = Field(..., description="Matching objects")
-    truncated: bool = Field(..., description="Whether results were capped")
+    truncated: bool = Field(..., description=_PAGE_TRUNCATED)
+    # Optional: an add-on built before paging still answers.
+    offset: Optional[int] = Field(None, description="Matching objects skipped before this page")
+    total: Optional[int] = Field(None, description=_PAGE_TOTAL)
+    next_offset: Optional[int] = Field(None, description=_PAGE_NEXT)
 
 
 class BlenderSceneSummaryResponse(BaseModel):
@@ -272,7 +451,11 @@ class BlenderSceneSummaryResponse(BaseModel):
         ..., description="Object counts keyed by Blender type"
     )
     collection_names: List[str] = Field(
-        default_factory=list, description="Top-level collection names"
+        default_factory=list,
+        description=(
+            "The scene's top-level collections, directly under its own; nested ones, other "
+            "scenes' and unlinked ones are left out"
+        ),
     )
     active_camera: Optional[str] = Field(
         None, description="Name of the active scene camera"
@@ -359,6 +542,21 @@ class BlenderBoundsCheckRequest(BaseModel):
         ..., description="Maximum bounds [x, y, z]", min_length=3, max_length=3
     )
 
+    @model_validator(mode="after")
+    def _ordered(self) -> "BlenderBoundsCheckRequest":
+        """Refuse a box whose minimum passes its maximum: it holds nothing."""
+        values = [*self.bounds_min, *self.bounds_max]
+        if not all(math.isfinite(v) for v in values):
+            raise ValueError("bounds_min and bounds_max must be finite")
+        inverted = [
+            axis
+            for axis, low, high in zip("xyz", self.bounds_min, self.bounds_max)
+            if low > high
+        ]
+        if inverted:
+            raise ValueError(f"bounds_min exceeds bounds_max on {', '.join(inverted)}")
+        return self
+
 
 class BlenderBoundsCheckResponse(BaseModel):
     """Result of a spatial bounds check."""
@@ -369,11 +567,41 @@ class BlenderBoundsCheckResponse(BaseModel):
     )
     object_name: str = Field(..., description="Object name checked")
     within_bounds: bool = Field(
-        ..., description="Whether object location is within the bounds"
+        ...,
+        description=(
+            "Whether the object's whole world-space bounding box is within the bounds "
+            "(an add-on that predates relation tests only its origin)"
+        ),
     )
     object_location: List[float] = Field(
         ...,
-        description="Object world location [x, y, z]",
+        description="Object origin's world location [x, y, z]",
+        min_length=3,
+        max_length=3,
+    )
+    # Optional: an add-on built before them still answers.
+    relation: Optional[Literal["inside", "intersecting", "outside"]] = Field(
+        None,
+        description=(
+            "Where the object's world-space bounding box lies: wholly inside the bounds, "
+            "partly (touching counts), or not at all"
+        ),
+    )
+    intersects: Optional[bool] = Field(
+        None, description="Whether any part of the bounding box is within the bounds"
+    )
+    origin_within_bounds: Optional[bool] = Field(
+        None, description="Whether the object's origin is within the bounds"
+    )
+    object_bbox_min: Optional[List[float]] = Field(
+        None,
+        description="Minimum of the object's world-space bounding box corners [x, y, z]",
+        min_length=3,
+        max_length=3,
+    )
+    object_bbox_max: Optional[List[float]] = Field(
+        None,
+        description="Maximum of the object's world-space bounding box corners [x, y, z]",
         min_length=3,
         max_length=3,
     )
@@ -419,6 +647,9 @@ class BlenderCaptureViewportRequest(BaseModel):
     use_render_fallback: bool = Field(
         False, description="Deprecated; same as method='render'"
     )
+    camera_name: Optional[str] = Field(
+        None, min_length=1, description="Capture through this camera"
+    )
 
     @model_validator(mode="after")
     def _apply_render_alias(self) -> "BlenderCaptureViewportRequest":
@@ -463,6 +694,13 @@ class BlenderCaptureViewportResponse(BaseModel):
     )
     capture_method: str = Field(..., description=_CAPTURE_METHOD_RESULT)
     format: str = Field("jpeg", description="Encoded format of the attached image")
+    camera_name: Optional[str] = Field(
+        None,
+        description=(
+            "Camera captured through: camera_name, or the scene camera of a render; null "
+            "for the 3D View's angle or a temporary camera"
+        ),
+    )
 
 
 class BlenderSetCameraViewRequest(BaseModel):
@@ -730,6 +968,29 @@ class BlenderFocusOnObjectResponse(BaseModel):
     warning: Optional[str] = Field(None, description=_PLACEMENT_WARNING)
 
 
+class BlenderView3DState(BaseModel):
+    """The view state of the 3D View captures use; see BlenderRuntimeSession.get_viewport_info."""
+
+    view_perspective: str = Field(..., description="PERSP, ORTHO or CAMERA")
+    is_perspective: bool = Field(..., description="Whether the view projects in perspective")
+    view_matrix: List[List[float]] = Field(
+        ..., description="World-to-view matrix, 4 rows of 4"
+    )
+    eye_location: List[float] = Field(..., description="World-space point the view looks from")
+    view_location: List[float] = Field(..., description="World-space point the view orbits")
+    view_rotation: List[float] = Field(..., description="View rotation as a quaternion [w, x, y, z]")
+    view_distance: float = Field(..., description="Distance from eye to view_location")
+    lens: float = Field(..., description="The 3D View's focal length in mm")
+    clip_start: float = Field(..., description="The 3D View's near clip distance")
+    clip_end: float = Field(..., description="The 3D View's far clip distance")
+    shading_type: str = Field(..., description="WIREFRAME, SOLID, MATERIAL or RENDERED")
+    view_camera: Optional[str] = Field(
+        None, description="The camera a CAMERA view looks through; null otherwise"
+    )
+    region_width: int = Field(..., description="Width of the view's region in pixels")
+    region_height: int = Field(..., description="Height of the view's region in pixels")
+
+
 class BlenderViewportInfoResponse(BaseModel):
     """Active viewport / render settings summary."""
 
@@ -745,6 +1006,16 @@ class BlenderViewportInfoResponse(BaseModel):
         ..., description="Whether film transparency is enabled"
     )
     active_camera: Optional[str] = Field(None, description="Active camera name or None")
+    view3d: Optional[BlenderView3DState] = Field(
+        None,
+        description=(
+            "The largest 3D View of the attached window, which captures use; null without "
+            "an editor window (embedded bpy, blender -b) or 3D View"
+        ),
+    )
+    view3d_unavailable_reason: Optional[str] = Field(
+        None, description="Why view3d is null; null when it is reported"
+    )
 
 
 class BlenderCaptureSequenceRequest(BaseModel):
@@ -761,20 +1032,67 @@ class BlenderCaptureSequenceRequest(BaseModel):
     method: BlenderCaptureMethod = Field(
         "auto", description="viewport, render or auto, as for capture_blender_viewport"
     )
+    camera_name: Optional[str] = Field(
+        None, min_length=1, description="Capture through this camera"
+    )
+    output_dir: Optional[str] = Field(
+        None, min_length=1, description="Folder for the frame files, inside the sandbox"
+    )
+    max_frames: int = Field(
+        SEQUENCE_FRAMES_DEFAULT,
+        ge=1,
+        le=SEQUENCE_FRAMES_MAX,
+        description="Most frames captured by this call",
+    )
+
+    @model_validator(mode="after")
+    def _check_range(self) -> "BlenderCaptureSequenceRequest":
+        """An end before the start used to succeed with no frames."""
+        if self.end_frame < self.start_frame:
+            raise ValueError(
+                f"end_frame ({self.end_frame}) is before start_frame ({self.start_frame})"
+            )
+        return self
 
 
 class BlenderCaptureSequenceResponse(BaseModel):
-    """Multi-frame capture result with per-frame base64 images."""
+    """Multi-frame capture result: JPEG files on disk and their paths."""
 
     success: bool = Field(..., description="Whether capture succeeded")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     frames: List[Dict[str, Any]] = Field(
-        ..., description="Per-frame data: [{frame: int, image_base64: str}, ...]"
+        ...,
+        description="The frames captured by this call: [{frame: int, file_path: str}, ...]",
     )
-    frame_count: int = Field(..., description="Number of frames captured")
+    frame_count: int = Field(..., description="Number of frames captured by this call")
     capture_method: str = Field(..., description=_CAPTURE_METHOD_RESULT)
+    # Optional: an add-on built before these were reported still answers.
+    requested_frame_count: Optional[int] = Field(
+        None, description="Frames in start_frame..end_frame at step"
+    )
+    complete: Optional[bool] = Field(
+        None, description="Whether every requested frame has been captured"
+    )
+    next_start_frame: Optional[int] = Field(
+        None,
+        description="First frame not captured yet: call again with it as start_frame; null when complete",
+    )
+    stopped_by: Optional[str] = Field(
+        None,
+        description=(
+            "Why the call stopped early: max_frames, or time_budget (no frame is started after "
+            f"{SEQUENCE_TIME_BUDGET_SECONDS:g} s); null when complete"
+        ),
+    )
+    output_dir: Optional[str] = Field(None, description="Folder holding the frame files")
+    width: Optional[int] = Field(None, description="Image width of the frames")
+    height: Optional[int] = Field(None, description="Image height of the frames")
+    format: Optional[str] = Field(None, description="Encoded format of the frame files")
+    camera_name: Optional[str] = Field(
+        None, description="Camera captured through; null for the 3D View's angle"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -835,12 +1153,31 @@ class BlenderCreateObjectResponse(BaseModel):
         min_length=3,
         max_length=3,
     )
+    # Optional: an add-on built before them still answers.
+    collection: Optional[str] = Field(None, description="Collection the object was created in")
+    mode: Optional[str] = Field(
+        None, description="Blender's mode after the creation (OBJECT unless it was not before)"
+    )
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Set when the active collection was excluded, hidden or disabled in viewports, "
+            "so the object went in the scene's own collection instead"
+        ),
+    )
 
 
 class BlenderDeleteObjectRequest(BaseModel):
     """Request to delete an object from the scene."""
 
     object_name: str = Field(..., description="Name of object to delete")
+    use_global: bool = Field(
+        False,
+        description=(
+            "Delete the object from every scene and the file (Blender's Delete Globally); by "
+            "default it leaves only the current scene, as Blender's Delete does"
+        ),
+    )
 
 
 class BlenderDeleteObjectResponse(BaseModel):
@@ -851,6 +1188,47 @@ class BlenderDeleteObjectResponse(BaseModel):
         None, description="Error message when success is False"
     )
     deleted_name: str = Field(..., description="Name of deleted object")
+    # Optional: an add-on built before them still answers.
+    use_global: Optional[bool] = Field(
+        None, description="Whether it was deleted from every scene"
+    )
+    removed_from_file: Optional[bool] = Field(
+        None, description="Whether the object is gone from the file (no scene links it any more)"
+    )
+    remaining_scenes: Optional[List[str]] = Field(
+        None, description="Scenes that still link the object"
+    )
+
+
+class BlenderSetObjectModeRequest(BaseModel):
+    """Request to switch an object into a mode."""
+
+    mode: str = Field(
+        "OBJECT",
+        description=(
+            "OBJECT (default), EDIT, POSE, SCULPT, VERTEX_PAINT, WEIGHT_PAINT, TEXTURE_PAINT or "
+            "another mode Blender's object.mode_set takes, in any case"
+        ),
+    )
+    object_name: Optional[str] = Field(
+        None, description="Object to switch, made active first; the active object by default"
+    )
+
+
+class BlenderSetObjectModeResponse(BaseModel):
+    """Response after switching an object's mode."""
+
+    success: bool = Field(..., description="Whether the switch succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: Optional[str] = Field(
+        None, description="Object switched; null when there was none and the mode was OBJECT"
+    )
+    mode: str = Field(..., description="The object's mode afterwards")
+    previous_mode: str = Field(..., description="The object's mode before")
+    context_mode: str = Field(..., description="Blender's context mode afterwards, such as EDIT_MESH")
+    changed: bool = Field(..., description="Whether the mode changed")
 
 
 class BlenderSetTransformRequest(BaseModel):
@@ -859,13 +1237,17 @@ class BlenderSetTransformRequest(BaseModel):
     object_name: str = Field(..., description="Object to transform")
     location: Optional[List[float]] = Field(
         None,
-        description="New location [x, y, z]",
+        description="New location [x, y, z] relative to the object's parent (Blender's Location field)",
         min_length=3,
         max_length=3,
     )
     rotation_euler: Optional[List[float]] = Field(
         None,
-        description="New rotation [rx, ry, rz] radians",
+        description=(
+            "New rotation as XYZ Euler radians [rx, ry, rz], relative to the parent; converted "
+            "to the object's rotation_mode (quaternion, axis-angle or another Euler order), "
+            "which is kept"
+        ),
         min_length=3,
         max_length=3,
     )
@@ -875,6 +1257,27 @@ class BlenderSetTransformRequest(BaseModel):
         min_length=3,
         max_length=3,
     )
+    rotation_quaternion: Optional[List[float]] = Field(
+        None,
+        description=(
+            "New rotation as a quaternion [w, x, y, z] instead of rotation_euler; normalized "
+            "and converted to the object's rotation_mode"
+        ),
+        min_length=4,
+        max_length=4,
+    )
+
+    @model_validator(mode="after")
+    def _one_rotation(self) -> "BlenderSetTransformRequest":
+        """Refuse two rotations, and a quaternion that is no rotation."""
+        if self.rotation_euler is not None and self.rotation_quaternion is not None:
+            raise ValueError("Give either rotation_euler or rotation_quaternion, not both")
+        if self.rotation_quaternion is not None:
+            if not all(math.isfinite(v) for v in self.rotation_quaternion):
+                raise ValueError("rotation_quaternion must be four finite numbers")
+            if not any(self.rotation_quaternion):
+                raise ValueError("rotation_quaternion must not have zero length")
+        return self
 
 
 class BlenderSetTransformResponse(BaseModel):
@@ -887,19 +1290,35 @@ class BlenderSetTransformResponse(BaseModel):
     object_name: str = Field(..., description="Object name")
     location: List[float] = Field(
         ...,
-        description="Final location [x, y, z]",
+        description="Final location [x, y, z] relative to the parent",
         min_length=3,
         max_length=3,
     )
     rotation_euler: List[float] = Field(
         ...,
-        description="Final rotation [rx, ry, rz]",
+        description="Final rotation as XYZ Euler radians [rx, ry, rz], relative to the parent",
         min_length=3,
         max_length=3,
     )
     scale: List[float] = Field(
         ...,
         description="Final scale [sx, sy, sz]",
+        min_length=3,
+        max_length=3,
+    )
+    # Optional: an add-on built before them still answers.
+    rotation_mode: Optional[str] = Field(
+        None, description="The object's rotation mode, which the write keeps"
+    )
+    rotation_quaternion: Optional[List[float]] = Field(
+        None,
+        description="Final rotation as a unit quaternion [w, x, y, z], relative to the parent",
+        min_length=4,
+        max_length=4,
+    )
+    world_location: Optional[List[float]] = Field(
+        None,
+        description="World-space location [x, y, z] after the change (parents and constraints included)",
         min_length=3,
         max_length=3,
     )
@@ -910,6 +1329,14 @@ class BlenderSetParentRequest(BaseModel):
 
     child_name: str = Field(..., description="Object to parent")
     parent_name: str = Field(..., description="Object to be the parent")
+    keep_transform: bool = Field(
+        True,
+        description=(
+            "Keep the child's world transform, as Blender's Parent > Object (Keep Transform); "
+            "false clears the parent inverse, so the child's own values become relative to "
+            "the parent and it moves"
+        ),
+    )
 
 
 class BlenderSetParentResponse(BaseModel):
@@ -921,6 +1348,19 @@ class BlenderSetParentResponse(BaseModel):
     )
     child_name: str = Field(..., description="Child object name")
     parent_name: str = Field(..., description="Parent object name")
+    # Optional: an add-on built before them still answers.
+    keep_transform: Optional[bool] = Field(
+        None, description="Whether the child's world transform was kept"
+    )
+    previous_parent: Optional[str] = Field(
+        None, description="The child's parent before the call, if it had one"
+    )
+    world_location: Optional[List[float]] = Field(
+        None,
+        description="The child's world-space location [x, y, z] afterwards",
+        min_length=3,
+        max_length=3,
+    )
 
 
 class BlenderClearParentRequest(BaseModel):
@@ -976,11 +1416,19 @@ class BlenderAddModifierRequest(BaseModel):
     object_name: str = Field(..., description="Object to add modifier to")
     modifier_type: str = Field(
         ...,
-        description="Modifier type: SUBSURF, MIRROR, ARRAY, BEVEL, SOLIDIFY, BOOLEAN",
+        description=(
+            "Blender modifier type, e.g. SUBSURF, MIRROR, ARRAY, BEVEL, SOLIDIFY, BOOLEAN, "
+            "DECIMATE, TRIANGULATE, WELD"
+        ),
     )
     modifier_name: Optional[str] = Field(None, description="Modifier name")
     params: Dict[str, Any] = Field(
-        default_factory=dict, description="Modifier-specific parameters"
+        default_factory=dict,
+        description=(
+            "Modifier settings by Blender RNA name, e.g. {'ratio': 0.5} for DECIMATE or "
+            "{'object': 'Cutter'} for BOOLEAN; unknown names, enum values outside the "
+            "items and numbers outside the limits are refused"
+        ),
     )
 
 
@@ -994,6 +1442,55 @@ class BlenderAddModifierResponse(BaseModel):
     object_name: str = Field(..., description="Object name")
     modifier_name: str = Field(..., description="Modifier name")
     modifier_type: str = Field(..., description="Modifier type")
+    params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The settings as Blender stored them (datablocks by name)",
+    )
+
+
+class BlenderModifierTargetRequest(BaseModel):
+    """Request naming one modifier of one object."""
+
+    object_name: str = Field(..., description="Object holding the modifier")
+    modifier_name: str = Field(..., description="Name of the modifier")
+
+
+class BlenderApplyModifierResponse(BaseModel):
+    """Response after applying a modifier to its object's mesh."""
+
+    success: bool = Field(..., description="Whether the modifier was applied")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: str = Field(..., description="Object name")
+    modifier_name: str = Field(..., description="Applied modifier")
+    modifier_type: str = Field(..., description="Applied modifier's type")
+    vertex_count: int = Field(..., description="Vertices of the mesh afterwards")
+    edge_count: int = Field(..., description="Edges of the mesh afterwards")
+    face_count: int = Field(..., description="Faces of the mesh afterwards")
+    triangle_count: int = Field(..., description="Triangles of the mesh afterwards")
+    remaining_modifiers: List[str] = Field(
+        default_factory=list, description="Modifiers left on the object, in stack order"
+    )
+    made_single_user: bool = Field(
+        ..., description="Whether shared mesh data was copied for this object first"
+    )
+    warnings: List[str] = Field(default_factory=list, description="Caveats of the result")
+
+
+class BlenderRemoveModifierResponse(BaseModel):
+    """Response after removing a modifier."""
+
+    success: bool = Field(..., description="Whether the modifier was removed")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: str = Field(..., description="Object name")
+    modifier_name: str = Field(..., description="Removed modifier")
+    modifier_type: str = Field(..., description="Removed modifier's type")
+    remaining_modifiers: List[str] = Field(
+        default_factory=list, description="Modifiers left on the object, in stack order"
+    )
 
 
 class BlenderSetLightParamsRequest(BaseModel):
@@ -1108,7 +1605,8 @@ class BlenderSaveFileRequest(BaseModel):
     """Request to save the current .blend file."""
 
     file_path: Optional[str] = Field(
-        None, description="Path to save to. None saves in place."
+        None,
+        description="Path of the .blend file to save to. None saves in place.",
     )
 
 
@@ -1129,6 +1627,15 @@ class BlenderImportFileRequest(BaseModel):
     file_format: str = Field(
         ..., description="File format: OBJ, FBX, GLTF, USD, STL, PLY"
     )
+    scale: float = Field(
+        1.0,
+        gt=0.0,
+        le=1_000_000.0,
+        description=(
+            "Uniform scale applied to the imported objects about the world origin; "
+            "1.0 keeps the file's size"
+        ),
+    )
 
 
 class BlenderImportFileResponse(BaseModel):
@@ -1143,16 +1650,90 @@ class BlenderImportFileResponse(BaseModel):
     imported_objects: List[str] = Field(
         default_factory=list, description="Names of newly imported objects"
     )
+    # Optional: an add-on built before these were reported still answers.
+    scale: Optional[float] = Field(None, description="Scale applied to the imported objects")
+    warning: Optional[str] = Field(
+        None, description="Something about the import that needs attention; null otherwise"
+    )
+
+
+ExportAxisName = Literal["X", "Y", "Z", "-X", "-Y", "-Z"]
 
 
 class BlenderExportFileRequest(BaseModel):
     """Request to export scene objects to a file."""
 
-    file_path: str = Field(..., description="Absolute path to export to")
+    file_path: str = Field(
+        ...,
+        description=(
+            "Absolute path to export to, ending in the format's extension: .obj, .fbx, "
+            ".glb or .gltf, .usd/.usda/.usdc/.usdz, .stl, .ply"
+        ),
+    )
     file_format: str = Field(
         ..., description="File format: OBJ, FBX, GLTF, USD, STL, PLY"
     )
     selected_only: bool = Field(False, description="Export only selected objects")
+    object_names: Optional[List[str]] = Field(
+        None, min_length=1, description="Export exactly these objects"
+    )
+    collection_name: Optional[str] = Field(
+        None, min_length=1, description="Export the objects of this collection"
+    )
+    apply_modifiers: bool = Field(True, description="Apply modifiers to exported meshes")
+    export_animation: bool = Field(True, description="Include animation (glTF, FBX, USD)")
+    frame_start: Optional[int] = Field(None, description="First frame of exported animation")
+    frame_end: Optional[int] = Field(None, description="Last frame of exported animation")
+    gltf_format: Optional[Literal["GLB", "GLTF_SEPARATE", "GLTF_EMBEDDED"]] = Field(
+        None, description="glTF layout; default from the extension"
+    )
+    axis_forward: Optional[ExportAxisName] = Field(None, description="Forward axis written")
+    axis_up: Optional[ExportAxisName] = Field(None, description="Up axis written")
+    global_scale: Optional[float] = Field(
+        None, gt=0.0, le=1_000_000.0, description="Scale applied to exported data"
+    )
+    usd_up_axis: Optional[Literal["Y", "Z"]] = Field(None, description="USD stage up axis")
+    meters_per_unit: Optional[float] = Field(
+        None, ge=0.0001, le=1000.0, description="USD stage metersPerUnit"
+    )
+    root_prim_path: Optional[str] = Field(
+        None,
+        pattern=r"^(/[A-Za-z_][A-Za-z0-9_]*)*$",
+        description="USD prim everything is exported under; empty for none",
+    )
+    overwrite_companion_files: bool = Field(
+        False, description="Replace an unrelated .bin/.mtl beside file_path"
+    )
+
+    @model_validator(mode="after")
+    def _check_choices(self) -> "BlenderExportFileRequest":
+        """Refuse combinations export_file would refuse, before reaching Blender."""
+        chosen = [
+            name
+            for name, value in (
+                ("selected_only", self.selected_only),
+                ("object_names", self.object_names is not None),
+                ("collection_name", self.collection_name is not None),
+            )
+            if value
+        ]
+        if len(chosen) > 1:
+            raise ValueError(f"Pass only one of {', '.join(chosen)}")
+        if (self.frame_start is None) != (self.frame_end is None):
+            raise ValueError("Pass frame_start and frame_end together")
+        if (
+            self.frame_start is not None
+            and self.frame_end is not None
+            and self.frame_start > self.frame_end
+        ):
+            raise ValueError("frame_start must not be after frame_end")
+        if self.frame_start is not None and not self.export_animation:
+            raise ValueError("frame_start and frame_end need export_animation")
+        if (self.axis_forward is None) != (self.axis_up is None):
+            raise ValueError("Pass axis_forward and axis_up together")
+        if self.axis_forward and self.axis_up and self.axis_forward[-1] == self.axis_up[-1]:
+            raise ValueError("axis_forward and axis_up must be different axes")
+        return self
 
 
 class BlenderExportFileResponse(BaseModel):
@@ -1164,6 +1745,28 @@ class BlenderExportFileResponse(BaseModel):
     )
     file_path: str = Field(..., description="Path the file was exported to")
     file_format: str = Field(..., description="Format that was exported")
+    # Optional: an add-on built before these were reported still answers.
+    gltf_format: Optional[str] = Field(
+        None, description="GLTF only: the layout written, GLB, GLTF_SEPARATE or GLTF_EMBEDDED"
+    )
+    files_written: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Every file the export created or changed, file_path first: a glTF's .bin and "
+            "textures, an OBJ's .mtl, USD textures"
+        ),
+    )
+    object_count: Optional[int] = Field(
+        None,
+        description="Objects chosen for export (selection, list or collection); null for the scene",
+    )
+    exporter_options: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The Blender exporter's operator properties that were set, besides filepath",
+    )
+    warning: Optional[str] = Field(
+        None, description="Something about the export that needs attention; null otherwise"
+    )
 
 
 class BlenderFileInfoResponse(BaseModel):
@@ -1176,8 +1779,19 @@ class BlenderFileInfoResponse(BaseModel):
     file_path: str = Field(..., description="Current .blend file path")
     is_saved: bool = Field(..., description="Whether the file has been saved to disk")
     is_dirty: bool = Field(..., description="Whether there are unsaved changes")
-    object_count: int = Field(..., description="Number of objects in the scene")
+    object_count: int = Field(
+        ...,
+        description=(
+            "Number of objects in the current scene (an add-on that predates "
+            "file_object_count counts every object in the file)"
+        ),
+    )
     scene_name: str = Field(..., description="Active scene name")
+    # Optional: an add-on built before it still answers.
+    file_object_count: Optional[int] = Field(
+        None,
+        description="Number of objects in the file: every scene's and those no scene links",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1235,6 +1849,18 @@ class BlenderSetFrameRangeResponse(BaseModel):
     )
     frame_start: int = Field(..., description="Start frame that was set")
     frame_end: int = Field(..., description="End frame that was set")
+    # Defined with the physics schemas; resolved by model_rebuild() there.
+    rigid_body_cache: Optional["BlenderRigidBodyCache"] = Field(
+        None,
+        description=(
+            "The rigid-body cache after the change: an unbaked cache follows the new "
+            "range, a baked one keeps its own. Null without a rigid body world"
+        ),
+    )
+    warning: Optional[str] = Field(
+        None,
+        description="Set when a baked rigid-body cache leaves out part of the new range",
+    )
 
 
 class BlenderPlayAnimationRequest(BaseModel):
@@ -1355,26 +1981,160 @@ class BlenderGetKeyframesResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _upper_name(value: Any) -> Any:
+    """Accept Blender enum names in any case, as the session always has."""
+    return value.upper() if isinstance(value, str) else value
+
+
+def _field_type_name(value: Any) -> Any:
+    # MAGNETIC is what simul used to document; FLUID_FLOW is what a FLUID
+    # field's FieldSettings.type reports. effector_add takes neither.
+    if not isinstance(value, str):
+        return value
+    value = value.upper()
+    return {"MAGNETIC": "MAGNET", "FLUID_FLOW": "FLUID"}.get(value, value)
+
+
+# Blender 4.2-5.0's enum items; BlenderRuntimeSession repeats them for the
+# add-on, which cannot import these schemas.
+BlenderBodyType = Annotated[Literal["ACTIVE", "PASSIVE"], BeforeValidator(_upper_name)]
+BlenderCollisionShape = Annotated[
+    Literal["BOX", "SPHERE", "CAPSULE", "CYLINDER", "CONE", "CONVEX_HULL", "MESH", "COMPOUND"],
+    BeforeValidator(_upper_name),
+]
+BlenderForceFieldType = Annotated[
+    Literal[
+        "FORCE",
+        "WIND",
+        "VORTEX",
+        "MAGNET",
+        "HARMONIC",
+        "CHARGE",
+        "LENNARDJ",
+        "TEXTURE",
+        "GUIDE",
+        "BOID",
+        "TURBULENCE",
+        "DRAG",
+        "FLUID",
+    ],
+    BeforeValidator(_field_type_name),
+]
+BlenderFieldShape = Annotated[
+    Literal["POINT", "LINE", "PLANE", "SURFACE", "POINTS"], BeforeValidator(_upper_name)
+]
+BlenderFalloffType = Annotated[
+    Literal["SPHERE", "TUBE", "CONE"], BeforeValidator(_upper_name)
+]
+BlenderConstraintType = Annotated[
+    Literal[
+        "FIXED", "POINT", "HINGE", "SLIDER", "PISTON", "GENERIC", "GENERIC_SPRING", "MOTOR"
+    ],
+    BeforeValidator(_upper_name),
+]
+#: A constraint limit's local axis: lin_* in meters, ang_* in radians.
+BlenderConstraintLimitAxis = Literal["lin_x", "lin_y", "lin_z", "ang_x", "ang_y", "ang_z"]
+#: A GENERIC_SPRING spring's local axis.
+BlenderSpringAxis = Literal["x", "y", "z", "ang_x", "ang_y", "ang_z"]
+#: A spring's settings: stiffness and damping, each 0 or more.
+BlenderSpringSettings = Dict[Literal["stiffness", "damping"], float]
+
+# The limits each constraint type applies; BlenderRuntimeSession repeats them.
+_CONSTRAINT_LIMITS: Dict[str, Tuple[str, ...]] = {
+    "HINGE": ("ang_z",),
+    "SLIDER": ("lin_x",),
+    "PISTON": ("lin_x", "ang_x"),
+    "GENERIC": ("lin_x", "lin_y", "lin_z", "ang_x", "ang_y", "ang_z"),
+    "GENERIC_SPRING": ("lin_x", "lin_y", "lin_z", "ang_x", "ang_y", "ang_z"),
+}
+
+# Blender's RNA ranges for rigid-body and field settings, which the tools also
+# advertise; Blender itself stored a mass of -5 unclamped.
+RigidBodyMass = Annotated[float, Field(ge=0.001, allow_inf_nan=False)]
+NonNegativeFloat = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
+UnitFloat = Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False)]
+FieldTenth = Annotated[float, Field(ge=0.0, le=10.0, allow_inf_nan=False)]
+# RigidBodyWorld's RNA ranges.
+WorldSubsteps = Annotated[int, Field(ge=1, le=32767)]
+WorldSolverIterations = Annotated[int, Field(ge=1, le=1000)]
+WorldTimeScale = Annotated[float, Field(ge=0.0, le=100.0, allow_inf_nan=False)]
+
+
+def _finite_vector(value: Optional[List[float]], label: str) -> None:
+    if value is not None and not all(math.isfinite(v) for v in value):
+        raise ValueError(f"{label} must be three finite numbers")
+
+
+def _nonzero_vector(value: Optional[List[float]], label: str) -> None:
+    _finite_vector(value, label)
+    if value is not None and not any(value):
+        raise ValueError(f"{label} must not be the zero vector")
+
+
 class BlenderSetupRigidBodyRequest(BaseModel):
     """Request to set up rigid body physics on an object."""
 
-    object_name: str = Field(..., description="Name of the target object")
-    body_type: str = Field(
+    object_name: str = Field(..., description="Name of the target mesh object")
+    body_type: BlenderBodyType = Field(
         "ACTIVE",
-        description="Rigid body type: ACTIVE (dynamic) or PASSIVE (static)",
+        description="ACTIVE (simulated) or PASSIVE (static or animated collider)",
     )
-    mass: float = Field(1.0, description="Mass in kilograms")
-    friction: float = Field(0.5, description="Surface friction coefficient")
-    restitution: float = Field(0.0, description="Bounciness (0-1)")
-    collision_shape: str = Field(
+    mass: float = Field(
+        1.0, description="Mass in kilograms", ge=0.001, allow_inf_nan=False
+    )
+    friction: float = Field(
+        0.5, description="Surface friction coefficient", ge=0.0, allow_inf_nan=False
+    )
+    restitution: float = Field(
+        0.0, description="Bounciness (0-1)", ge=0.0, le=1.0, allow_inf_nan=False
+    )
+    collision_shape: BlenderCollisionShape = Field(
         "CONVEX_HULL",
         description=(
-            "Collision shape: BOX, SPHERE, CAPSULE, CYLINDER, "
-            "CONE, CONVEX_HULL, MESH"
+            "Collision shape: BOX, SPHERE, CAPSULE, CYLINDER, CONE, CONVEX_HULL, MESH "
+            "or COMPOUND (the children's shapes combined)"
         ),
     )
-    linear_damping: float = Field(0.04, description="Linear damping factor")
-    angular_damping: float = Field(0.1, description="Angular damping factor")
+    linear_damping: float = Field(
+        0.04,
+        description="Fraction of linear velocity lost per second (0-1)",
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+    angular_damping: float = Field(
+        0.1,
+        description="Fraction of angular velocity lost per second (0-1)",
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+    kinematic: Optional[bool] = Field(
+        None,
+        description=(
+            "Animated: the body follows its own animation and pushes simulated bodies"
+        ),
+    )
+    collision_margin: Optional[float] = Field(
+        None,
+        description="Collision margin in meters (0-1); omitted keeps Blender's automatic margin",
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+    collision_collections: Optional[List[Annotated[int, Field(ge=0, le=19)]]] = Field(
+        None,
+        description=(
+            "Collision collections 0-19 the body is in; bodies collide only when they share one"
+        ),
+        max_length=20,
+    )
+    use_deactivation: Optional[bool] = Field(
+        None, description="Let the body sleep when it nearly stops"
+    )
+    start_deactivated: Optional[bool] = Field(
+        None, description="Start asleep until something hits it"
+    )
 
 
 class BlenderSetupRigidBodyResponse(BaseModel):
@@ -1388,19 +2148,39 @@ class BlenderSetupRigidBodyResponse(BaseModel):
     body_type: str = Field(..., description="Rigid body type set")
     mass: float = Field(..., description="Mass set")
     collision_shape: str = Field(..., description="Collision shape set")
+    # Null from an add-on built before these were reported.
+    friction: Optional[float] = Field(None, description="Friction set")
+    restitution: Optional[float] = Field(None, description="Restitution set")
+    linear_damping: Optional[float] = Field(None, description="Linear damping set")
+    angular_damping: Optional[float] = Field(None, description="Angular damping set")
+    kinematic: Optional[bool] = Field(None, description="Whether the body is animated")
+    collision_margin: Optional[float] = Field(
+        None, description="Collision margin, or null for Blender's automatic margin"
+    )
+    collision_collections: Optional[List[int]] = Field(
+        None, description="Collision collections the body is in"
+    )
+    use_deactivation: Optional[bool] = Field(None, description="Whether the body can sleep")
+    start_deactivated: Optional[bool] = Field(None, description="Whether it starts asleep")
+    world_created: Optional[bool] = Field(
+        None, description="Whether the call added the scene's rigid body world"
+    )
+    replaced: Optional[bool] = Field(
+        None, description="Whether the object already had a rigid body"
+    )
 
 
 class BlenderAddForceFieldRequest(BaseModel):
     """Request to add a force field to the scene."""
 
-    field_type: str = Field(
+    field_type: BlenderForceFieldType = Field(
         ...,
         description=(
-            "Force field type: FORCE, WIND, VORTEX, MAGNETIC, "
-            "HARMONIC, CHARGE, LENNARDJ, TURBULENCE, DRAG"
+            "Force field type: FORCE, WIND, VORTEX, MAGNET, HARMONIC, CHARGE, LENNARDJ, "
+            "TEXTURE, GUIDE, BOID, TURBULENCE, DRAG or FLUID"
         ),
     )
-    strength: float = Field(1.0, description="Field strength")
+    strength: float = Field(1.0, description="Field strength", allow_inf_nan=False)
     # Optional, not a default list: the tool passes None when the caller omits
     # the location, and a List[float] field rejects None.
     location: Optional[List[float]] = Field(
@@ -1410,6 +2190,38 @@ class BlenderAddForceFieldRequest(BaseModel):
         max_length=3,
     )
     name: Optional[str] = Field(None, description="Optional name for the field")
+    direction: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World-space direction of the field's local +Z (where WIND blows, the "
+            "axis VORTEX turns about); world +Z when omitted"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    shape: Optional[BlenderFieldShape] = Field(
+        None, description="POINT, LINE, PLANE, SURFACE or POINTS"
+    )
+    flow: Optional[float] = Field(None, description="Air flow", allow_inf_nan=False)
+    falloff_type: Optional[BlenderFalloffType] = Field(
+        None, description="SPHERE, TUBE or CONE"
+    )
+    falloff_power: Optional[float] = Field(
+        None, description="How fast the field weakens with distance", ge=0.0, le=10.0
+    )
+    distance_max: Optional[float] = Field(
+        None,
+        description="Distance past which the field has no effect; 0 for no limit",
+        ge=0.0,
+        allow_inf_nan=False,
+    )
+    noise: Optional[float] = Field(None, description="Random noise", ge=0.0, le=10.0)
+
+    @model_validator(mode="after")
+    def _finite_vectors(self) -> "BlenderAddForceFieldRequest":
+        _finite_vector(self.location, "location")
+        _nonzero_vector(self.direction, "direction")
+        return self
 
 
 class BlenderAddForceFieldResponse(BaseModel):
@@ -1420,13 +2232,37 @@ class BlenderAddForceFieldResponse(BaseModel):
         None, description="Error message when success is False"
     )
     name: str = Field(..., description="Name of the created force field object")
-    field_type: str = Field(..., description="Type of force field")
+    field_type: str = Field(
+        ..., description="Type of force field (a FLUID field reports FLUID_FLOW)"
+    )
     strength: float = Field(..., description="Strength of the field")
     location: List[float] = Field(
         ...,
         description="Location of the field [x, y, z]",
         min_length=3,
         max_length=3,
+    )
+    # Null from an add-on built before these were reported.
+    rotation_euler: Optional[List[float]] = Field(
+        None, description="World XYZ Euler rotation, radians"
+    )
+    direction: Optional[List[float]] = Field(
+        None, description="World direction of the field's local +Z"
+    )
+    shape: Optional[str] = Field(None, description="Field shape")
+    flow: Optional[float] = Field(None, description="Air flow")
+    falloff_type: Optional[str] = Field(None, description="Falloff type")
+    falloff_power: Optional[float] = Field(None, description="Falloff power")
+    distance_max: Optional[float] = Field(
+        None, description="Maximum distance, or null for no limit"
+    )
+    noise: Optional[float] = Field(None, description="Noise")
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Set when the field went into the scene collection because the active "
+            "collection is hidden, disabled in viewports or linked"
+        ),
     )
 
 
@@ -1454,29 +2290,125 @@ class BlenderGetForceFieldInfoResponse(BaseModel):
         min_length=3,
         max_length=3,
     )
+    # Null from an add-on built before these were reported.
+    rotation_euler: Optional[List[float]] = Field(
+        None, description="World XYZ Euler rotation, radians"
+    )
+    direction: Optional[List[float]] = Field(
+        None, description="World direction of the field's local +Z"
+    )
+    falloff_type: Optional[str] = Field(None, description="Falloff type")
+    falloff_power: Optional[float] = Field(None, description="Falloff power")
+    distance_max: Optional[float] = Field(
+        None, description="Maximum distance, or null for no limit"
+    )
+    noise: Optional[float] = Field(None, description="Noise")
 
 
 class BlenderAddConstraintRequest(BaseModel):
     """Request to add a rigid body constraint."""
 
-    constraint_type: str = Field(
+    constraint_type: BlenderConstraintType = Field(
         ...,
         description=(
             "Constraint type: FIXED, POINT, HINGE, SLIDER, "
             "PISTON, GENERIC, GENERIC_SPRING, MOTOR"
         ),
     )
-    object1_name: str = Field(..., description="First constrained object")
-    object2_name: str = Field(..., description="Second constrained object")
+    object1_name: str = Field(..., description="First constrained rigid body")
+    object2_name: str = Field(..., description="Second constrained rigid body")
     location: Optional[List[float]] = Field(
         None,
-        description="Optional location for the constraint empty",
+        description="World-space pivot; midway between the two objects when omitted",
         min_length=3,
         max_length=3,
     )
     disable_collisions: bool = Field(
         True, description="Disable collisions between constrained objects"
     )
+    axis: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World direction of the constraint axis: the hinge axis (local Z) for "
+            "HINGE, the slide or motor axis (local X) for SLIDER, PISTON and MOTOR, "
+            "local Z otherwise; unrotated (world axes) when omitted"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    limits: Optional[Dict[BlenderConstraintLimitAxis, List[FiniteFloat]]] = Field(
+        None,
+        description="Limits by local axis as [lower, upper]; meters for lin_*, radians for ang_*",
+    )
+    springs: Optional[Dict[BlenderSpringAxis, BlenderSpringSettings]] = Field(
+        None, description="GENERIC_SPRING only: stiffness and damping by local axis"
+    )
+    motor_angular_velocity: Optional[float] = Field(
+        None, description="MOTOR only: target rad/s about local X", allow_inf_nan=False
+    )
+    motor_angular_max_impulse: Optional[float] = Field(
+        None, description="MOTOR only: angular motor impulse cap", ge=0.0, allow_inf_nan=False
+    )
+    motor_linear_velocity: Optional[float] = Field(
+        None, description="MOTOR only: target m/s along local X", allow_inf_nan=False
+    )
+    motor_linear_max_impulse: Optional[float] = Field(
+        None, description="MOTOR only: linear motor impulse cap", ge=0.0, allow_inf_nan=False
+    )
+    breaking_threshold: Optional[float] = Field(
+        None,
+        description="Impulse that breaks the constraint; omitted, it never breaks",
+        ge=0.0,
+        allow_inf_nan=False,
+    )
+
+    @model_validator(mode="after")
+    def _fits_the_type(self) -> "BlenderAddConstraintRequest":
+        if self.object1_name == self.object2_name:
+            raise ValueError("object1_name and object2_name must name two different objects")
+        _finite_vector(self.location, "location")
+        _nonzero_vector(self.axis, "axis")
+        allowed = _CONSTRAINT_LIMITS.get(self.constraint_type, ())
+        for key, bounds in (self.limits or {}).items():
+            if key not in allowed:
+                raise ValueError(
+                    f"A {self.constraint_type} constraint has no {key} limit; it limits "
+                    f"{', '.join(allowed) or 'nothing'}"
+                )
+            if len(bounds) != 2 or bounds[0] > bounds[1]:
+                raise ValueError(f"limits.{key} must be [lower, upper] with lower <= upper")
+            if key.startswith("ang_") and max(abs(v) for v in bounds) > 2 * math.pi:
+                raise ValueError(f"limits.{key} must be within +-2 pi radians")
+        if self.springs:
+            if self.constraint_type != "GENERIC_SPRING":
+                raise ValueError("springs apply to GENERIC_SPRING constraints only")
+            for spring_axis, spring in self.springs.items():
+                if any(not math.isfinite(v) or v < 0 for v in spring.values()):
+                    raise ValueError(
+                        f"springs.{spring_axis} needs finite stiffness and damping >= 0"
+                    )
+        motor = (
+            self.motor_angular_velocity,
+            self.motor_angular_max_impulse,
+            self.motor_linear_velocity,
+            self.motor_linear_max_impulse,
+        )
+        if self.constraint_type != "MOTOR" and any(v is not None for v in motor):
+            raise ValueError("motor settings apply to MOTOR constraints only")
+        return self
+
+
+class BlenderConstraintMotor(BaseModel):
+    """A MOTOR constraint's drive along and about its local X."""
+
+    angular_velocity: Optional[float] = Field(
+        None, description="Target rad/s about local X; null when the angular motor is off"
+    )
+    angular_max_impulse: float = Field(..., description="Angular motor impulse cap")
+    linear_velocity: Optional[float] = Field(
+        None, description="Target m/s along local X; null when the linear motor is off"
+    )
+    linear_max_impulse: float = Field(..., description="Linear motor impulse cap")
 
 
 class BlenderAddConstraintResponse(BaseModel):
@@ -1490,6 +2422,39 @@ class BlenderAddConstraintResponse(BaseModel):
     constraint_type: str = Field(..., description="Type of constraint")
     object1_name: str = Field(..., description="First constrained object")
     object2_name: str = Field(..., description="Second constrained object")
+    # Null from an add-on built before these were reported.
+    pivot: Optional[List[float]] = Field(
+        None, description="World-space pivot (the constraint empty's location)"
+    )
+    axis: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World direction of the constraint axis: local Z for HINGE, local X for "
+            "SLIDER, PISTON and MOTOR, local Z otherwise"
+        ),
+    )
+    local_axes: Optional[Dict[str, List[float]]] = Field(
+        None,
+        description="World directions of the empty's local x, y and z, which limits refer to",
+    )
+    rotation_euler: Optional[List[float]] = Field(
+        None, description="The empty's world XYZ Euler rotation, radians"
+    )
+    limits: Optional[Dict[str, List[float]]] = Field(
+        None, description="Enabled limits by local axis, [lower, upper]"
+    )
+    springs: Optional[Dict[str, Dict[str, float]]] = Field(
+        None, description="Enabled springs by local axis"
+    )
+    motor: Optional[BlenderConstraintMotor] = Field(
+        None, description="The motor of a MOTOR constraint"
+    )
+    breaking_threshold: Optional[float] = Field(
+        None, description="Impulse that breaks it, or null when unbreakable"
+    )
+    warnings: List[str] = Field(
+        default_factory=list, description="Settings the constraint still needs"
+    )
 
 
 class BlenderGetConstraintInfoRequest(BaseModel):
@@ -1515,12 +2480,115 @@ class BlenderGetConstraintInfoResponse(BaseModel):
     )
     enabled: bool = Field(..., description="Whether constraint is enabled")
     disable_collisions: bool = Field(..., description="Whether collisions are disabled")
+    # Null from an add-on built before these were reported.
+    pivot: Optional[List[float]] = Field(
+        None, description="World-space pivot (the constraint empty's location)"
+    )
+    axis: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World direction of the constraint axis: local Z for HINGE, local X for "
+            "SLIDER, PISTON and MOTOR, local Z otherwise"
+        ),
+    )
+    local_axes: Optional[Dict[str, List[float]]] = Field(
+        None,
+        description="World directions of the empty's local x, y and z, which limits refer to",
+    )
+    rotation_euler: Optional[List[float]] = Field(
+        None, description="The empty's world XYZ Euler rotation, radians"
+    )
+    limits: Optional[Dict[str, List[float]]] = Field(
+        None, description="Enabled limits by local axis, [lower, upper]"
+    )
+    springs: Optional[Dict[str, Dict[str, float]]] = Field(
+        None, description="Enabled springs by local axis"
+    )
+    motor: Optional[BlenderConstraintMotor] = Field(
+        None, description="The motor of a MOTOR constraint"
+    )
+    breaking_threshold: Optional[float] = Field(
+        None, description="Impulse that breaks it, or null when unbreakable"
+    )
+
+
+# Bounds of a Blender point cache's frame range (PointCache RNA, Blender
+# 4.2-5.0); BlenderRuntimeSession._CACHE_FRAME_MIN/_MAX repeat them.
+CACHE_FRAME_MIN = -1048574
+CACHE_FRAME_MAX = 1048574
+
+#: What bake_blender_simulation and free_blender_bake act on.
+BlenderBakeScope = Literal["rigid_body", "all"]
+
+#: Where get_blender_physics_state's pose comes from.
+BlenderPoseSource = Literal[
+    "evaluated",
+    "simulation",
+    "baked",
+    "before_cache",
+    "past_cache_end",
+    "world_disabled",
+    "unknown",
+]
+
+
+class BlenderRigidBodyCache(BaseModel):
+    """Range and bake state of the rigid-body world's point cache."""
+
+    frame_start: int = Field(..., description="First simulated frame")
+    frame_end: int = Field(
+        ...,
+        description="Last simulated frame: Blender holds the bodies at this frame's pose after it",
+    )
+    is_baked: bool = Field(..., description="Whether playback reads a bake")
+    is_outdated: bool = Field(
+        False,
+        description=(
+            "Blender's outdated flag: something changed since the cached frames were "
+            "simulated; they are dropped when the scene next steps from frame_start"
+        ),
+    )
+    info: str = Field(
+        "",
+        description="Blender's cache summary, such as '100 frames in memory (14 KiB).'",
+    )
+    covers_scene_range: bool = Field(
+        ..., description="Whether the cache spans the scene's whole frame range"
+    )
+
+
+class BlenderPointCacheEntry(BaseModel):
+    """One point cache in the scene."""
+
+    owner: str = Field(
+        ..., description="Object holding the cache, or the scene for the rigid body world"
+    )
+    kind: str = Field(
+        ...,
+        description="RIGID_BODY, CLOTH, SOFT_BODY, DYNAMIC_PAINT or PARTICLES",
+    )
+    name: str = Field(
+        ..., description="Modifier, canvas surface or particle system holding it"
+    )
+    frame_start: int = Field(..., description="First frame of the cache")
+    frame_end: int = Field(..., description="Last frame of the cache")
+    is_baked: bool = Field(..., description="Whether the cache is baked")
+
+
+BlenderSetFrameRangeResponse.model_rebuild()
 
 
 class BlenderGetPhysicsStateRequest(BaseModel):
     """Request to get physics state of an object."""
 
     object_name: str = Field(..., description="Name of the object")
+    step_simulation: bool = Field(
+        True,
+        description=(
+            "Step an unbaked rigid-body simulation from its cache start to the current "
+            "frame before reading the pose, at most 400 000 body-frames"
+        ),
+    )
 
 
 class BlenderGetPhysicsStateResponse(BaseModel):
@@ -1550,6 +2618,39 @@ class BlenderGetPhysicsStateResponse(BaseModel):
     mass: Optional[float] = Field(None, description="Mass if rigid body exists")
     collision_shape: Optional[str] = Field(
         None, description="Collision shape if rigid body exists"
+    )
+    # Null from an add-on built before the cache report.
+    frame: Optional[int] = Field(None, description="Frame the pose was read at")
+    pose_source: Optional[BlenderPoseSource] = Field(
+        None,
+        description=(
+            "evaluated: not a simulated body (no rigid body, passive, animated or "
+            "disabled), its transform and animation; simulation: the unbaked "
+            "simulation's pose for this frame; baked: read from the bake; "
+            "before_cache: before the cache start, the starting pose; past_cache_end: "
+            "held at the cache's last frame; world_disabled: the world does not "
+            "simulate; unknown: not stepped, so the pose is the simulation's only if "
+            "Blender already simulated this frame"
+        ),
+    )
+    simulated_for_frame: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether the pose is the rigid-body simulation's result for this frame; "
+            "null when nothing simulates the object or it is unknown"
+        ),
+    )
+    stepped_frames: Optional[int] = Field(
+        None, description="Frames stepped to reach the current frame (0 when none)"
+    )
+    world_enabled: Optional[bool] = Field(
+        None, description="Whether the rigid body world simulates; null without one"
+    )
+    rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
+        None, description="The rigid-body cache; null without a rigid body world"
+    )
+    warning: Optional[str] = Field(
+        None, description="Why the pose may not be the simulation's for this frame"
     )
 
 
@@ -1604,8 +2705,43 @@ class BlenderGetTrajectoryResponse(BaseModel):
 class BlenderBakeSimulationRequest(BaseModel):
     """Request to bake physics simulation."""
 
-    frame_start: int = Field(..., description="First frame to bake")
-    frame_end: int = Field(..., description="Last frame to bake")
+    frame_start: int = Field(
+        ...,
+        description="First frame to bake",
+        ge=CACHE_FRAME_MIN,
+        le=CACHE_FRAME_MAX,
+    )
+    frame_end: int = Field(
+        ...,
+        description="Last frame to bake; after frame_start",
+        ge=1,
+        le=CACHE_FRAME_MAX,
+    )
+    scope: BlenderBakeScope = Field(
+        "rigid_body",
+        description=(
+            "rigid_body bakes only the rigid-body world's cache; all bakes every point "
+            "cache in the scene (rigid bodies, cloth, soft bodies, dynamic paint and "
+            "particles)"
+        ),
+    )
+    allow_long_bake: bool = Field(
+        False,
+        description=(
+            "Bake above 20 000 frames or 400 000 body-frames, which can outlast the "
+            "client timeout while Blender keeps baking"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "BlenderBakeSimulationRequest":
+        # An inverted range used to bake nothing and leave the cache unable to
+        # simulate any frame before its start, even after a free (Blender 5.0.1).
+        if self.frame_start >= self.frame_end:
+            raise ValueError(
+                f"frame_start ({self.frame_start}) must be less than frame_end ({self.frame_end})"
+            )
+        return self
 
 
 class BlenderBakeSimulationResponse(BaseModel):
@@ -1615,8 +2751,45 @@ class BlenderBakeSimulationResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    frame_start: int = Field(..., description="First baked frame")
-    frame_end: int = Field(..., description="Last baked frame")
+    scope: Optional[BlenderBakeScope] = Field(None, description="What was baked")
+    frame_start: Optional[int] = Field(
+        None,
+        description=(
+            "First frame of the rigid-body bake, as the cache holds it; null without "
+            "a rigid body world"
+        ),
+    )
+    frame_end: Optional[int] = Field(
+        None,
+        description=(
+            "Last frame of the rigid-body bake, as the cache holds it; null without "
+            "a rigid body world"
+        ),
+    )
+    frame_count: Optional[int] = Field(None, description="Frames in the rigid-body bake")
+    rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
+        None, description="The rigid-body cache after the bake"
+    )
+    caches: List[BlenderPointCacheEntry] = Field(
+        default_factory=list,
+        description="The caches in scope after the bake, with their ranges",
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="What the bake leaves out, such as frames of the scene range past its end",
+    )
+
+
+class BlenderFreeBakeRequest(BaseModel):
+    """Request to free baked simulation data."""
+
+    scope: BlenderBakeScope = Field(
+        "rigid_body",
+        description=(
+            "rigid_body frees only the rigid-body world's cache; all frees every point "
+            "cache in the scene"
+        ),
+    )
 
 
 class BlenderFreeBakeResponse(BaseModel):
@@ -1625,6 +2798,128 @@ class BlenderFreeBakeResponse(BaseModel):
     success: bool = Field(..., description="Whether free bake succeeded")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
+    )
+    scope: Optional[BlenderBakeScope] = Field(None, description="What was freed")
+    freed: List[BlenderPointCacheEntry] = Field(
+        default_factory=list, description="The caches that were baked and are now freed"
+    )
+    caches: List[BlenderPointCacheEntry] = Field(
+        default_factory=list, description="The caches in scope after freeing"
+    )
+    rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
+        None,
+        description="The rigid-body cache after freeing, fitted to the scene range",
+    )
+    warnings: List[str] = Field(default_factory=list, description="Anything left as it was")
+
+
+class BlenderSetRigidBodyWorldRequest(BaseModel):
+    """Request to change the scene's rigid body world."""
+
+    enabled: Optional[bool] = Field(None, description="Run the simulation")
+    gravity: Optional[List[float]] = Field(
+        None,
+        description=(
+            "Scene gravity [x, y, z] in m/s^2, shared with cloth, soft bodies and particles"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    use_gravity: Optional[bool] = Field(None, description="Apply the scene gravity")
+    substeps_per_frame: Optional[int] = Field(
+        None, description="Simulation steps per frame", ge=1, le=32767
+    )
+    solver_iterations: Optional[int] = Field(
+        None, description="Constraint solver iterations per step", ge=1, le=1000
+    )
+    time_scale: Optional[float] = Field(
+        None,
+        description="Simulation speed relative to the frame rate",
+        ge=0.0,
+        le=100.0,
+        allow_inf_nan=False,
+    )
+    use_split_impulse: Optional[bool] = Field(
+        None, description="Reduce extra velocity from penetration recovery"
+    )
+    cache_frame_start: Optional[int] = Field(
+        None,
+        description="First simulated frame",
+        ge=CACHE_FRAME_MIN,
+        le=CACHE_FRAME_MAX,
+    )
+    cache_frame_end: Optional[int] = Field(
+        None,
+        description="Last simulated frame; after cache_frame_start",
+        ge=1,
+        le=CACHE_FRAME_MAX,
+    )
+
+    @model_validator(mode="after")
+    def _finite_ordered(self) -> "BlenderSetRigidBodyWorldRequest":
+        if self.gravity is not None and not all(math.isfinite(v) for v in self.gravity):
+            raise ValueError("gravity must be three finite numbers")
+        if (
+            self.cache_frame_start is not None
+            and self.cache_frame_end is not None
+            and self.cache_frame_start >= self.cache_frame_end
+        ):
+            raise ValueError(
+                f"cache_frame_start ({self.cache_frame_start}) must be less than "
+                f"cache_frame_end ({self.cache_frame_end})"
+            )
+        return self
+
+
+class BlenderRigidBodyWorldResponse(BaseModel):
+    """The scene's rigid body world."""
+
+    success: bool = Field(..., description="Whether the query or change succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    exists: bool = Field(..., description="Whether the scene has a rigid body world")
+    created: Optional[bool] = Field(
+        None, description="set_blender_rigid_body_world only: whether it added the world"
+    )
+    enabled: Optional[bool] = Field(None, description="Whether the world simulates")
+    gravity: List[float] = Field(
+        ..., description="Scene gravity [x, y, z] in m/s^2", min_length=3, max_length=3
+    )
+    use_gravity: bool = Field(..., description="Whether the scene gravity applies")
+    substeps_per_frame: Optional[int] = Field(
+        None, description="Simulation steps per frame"
+    )
+    solver_iterations: Optional[int] = Field(
+        None, description="Constraint solver iterations per step"
+    )
+    time_scale: Optional[float] = Field(
+        None, description="Simulation speed relative to the frame rate"
+    )
+    use_split_impulse: Optional[bool] = Field(
+        None, description="Whether split impulse is on"
+    )
+    collection: Optional[str] = Field(
+        None, description="Collection of the simulated bodies"
+    )
+    body_count: Optional[int] = Field(
+        None, description="Rigid bodies in the world, active and passive"
+    )
+    constraint_count: Optional[int] = Field(
+        None, description="Rigid body constraints in the world"
+    )
+    rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
+        None, description="The world's cache: simulated range and bake state"
+    )
+    scene_frame_start: int = Field(..., description="Scene start frame")
+    scene_frame_end: int = Field(..., description="Scene end frame")
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "What makes the simulation differ from what playback suggests: a disabled "
+            "world, a cache that leaves out part of the scene range, a bake that "
+            "changed settings do not reach"
+        ),
     )
 
 
@@ -1708,20 +3003,26 @@ class BlenderCreateMeshFromDataRequest(BaseModel):
         description="Name for the new mesh object",
         min_length=1,
     )
-    vertices: List[List[float]] = Field(
+    vertices: List[MeshVertex] = Field(
         ...,
-        description="List of vertex positions, each [x, y, z]",
+        description="List of vertex positions, each exactly [x, y, z] finite numbers",
         min_length=1,
     )
-    edges: List[List[int]] = Field(
+    edges: List[MeshEdge] = Field(
         default_factory=list,
-        description="List of edges, each [v_index_a, v_index_b]",
+        description=(
+            "List of loose edges, each [v_index_a, v_index_b] of two different vertices; "
+            "face edges are made from the faces"
+        ),
     )
-    faces: List[List[int]] = Field(
+    faces: List[MeshFace] = Field(
         default_factory=list,
-        description="List of faces, each a list of vertex indices",
+        description=(
+            "List of faces, each three or more vertex indices, no vertex twice; a face "
+            "over the vertex set of another is refused as a duplicate"
+        ),
     )
-    location: Optional[List[float]] = Field(
+    location: Optional[List[FiniteFloat]] = Field(
         None,
         description="World-space location [x, y, z] for the object origin",
         min_length=3,
@@ -1730,7 +3031,8 @@ class BlenderCreateMeshFromDataRequest(BaseModel):
     collection_name: Optional[str] = Field(
         None,
         description=(
-            "Target collection name. Links to the active scene " "collection when None."
+            "Target collection, which must be in the current scene. Links to the "
+            "scene collection when None."
         ),
     )
 
@@ -1747,12 +3049,63 @@ class BlenderCreateMeshFromDataResponse(BaseModel):
     vertex_count: int = Field(..., description="Number of vertices created")
     edge_count: int = Field(..., description="Number of edges created")
     face_count: int = Field(..., description="Number of faces created")
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="A renamed object, an excluded collection, or a validation change",
+    )
+
+
+class BlenderCleanMeshRequest(BaseModel):
+    """Request to repair a mesh object's data."""
+
+    object_name: str = Field(..., description="Mesh object whose data to clean")
+    merge_distance: Optional[FiniteFloat] = Field(
+        None,
+        gt=0,
+        description="Merge vertices closer than this (Merge by Distance); omit to skip",
+    )
+    dissolve_degenerate_distance: Optional[FiniteFloat] = Field(
+        None,
+        gt=0,
+        description=(
+            "Dissolve edges shorter and faces smaller than this (Degenerate Dissolve); "
+            "omit to skip"
+        ),
+    )
+    recalculate_normals: bool = Field(
+        False, description="Make face normals point consistently outside"
+    )
+
+
+class BlenderCleanMeshResponse(BaseModel):
+    """Response after cleaning a mesh."""
+
+    success: bool = Field(..., description="Whether the mesh was cleaned")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: str = Field(..., description="Object name")
+    mesh_name: str = Field(..., description="Mesh data-block cleaned")
+    before: BlenderMeshCounts = Field(..., description="Counts before cleaning")
+    after: BlenderMeshCounts = Field(..., description="Counts after cleaning")
+    validation_fixed: bool = Field(
+        ...,
+        description=(
+            "Whether validation removed invalid topology (faces repeating a vertex, "
+            "duplicate faces or edges)"
+        ),
+    )
+    vertices_merged: int = Field(..., description="Vertices removed by merging")
+    operations: List[str] = Field(..., description="Steps run, in order")
+    mesh_users: int = Field(..., description="Objects and other users sharing the mesh")
+    warnings: List[str] = Field(default_factory=list, description="Caveats of the result")
 
 
 __all__ = [
     "SCRIPT_OUTPUT_CHARS_DEFAULT",
     "SCRIPT_OUTPUT_CHARS_MAX",
     "SCRIPT_OUTPUT_JSON_BYTES_MAX",
+    "LISTING_JSON_BYTES_MAX",
     "BlenderCaptureMethod",
     "BlenderInfoResponse",
     "BlenderObjectInfo",
@@ -1765,6 +3118,7 @@ __all__ = [
     "BlenderObjectInfoResponse",
     "BlenderMeshInfoRequest",
     "BlenderMeshInfoResponse",
+    "BlenderMeshCounts",
     "BlenderBoundingBoxRequest",
     "BlenderBoundingBoxResponse",
     "BlenderSearchObjectsRequest",
@@ -1792,6 +3146,8 @@ __all__ = [
     "BlenderCreateObjectResponse",
     "BlenderDeleteObjectRequest",
     "BlenderDeleteObjectResponse",
+    "BlenderSetObjectModeRequest",
+    "BlenderSetObjectModeResponse",
     "BlenderSetTransformRequest",
     "BlenderSetTransformResponse",
     "BlenderSetParentRequest",
@@ -1802,6 +3158,9 @@ __all__ = [
     "BlenderAssignMaterialResponse",
     "BlenderAddModifierRequest",
     "BlenderAddModifierResponse",
+    "BlenderModifierTargetRequest",
+    "BlenderApplyModifierResponse",
+    "BlenderRemoveModifierResponse",
     "BlenderSetLightParamsRequest",
     "BlenderSetLightParamsResponse",
     "BlenderOpenFileRequest",
@@ -1851,4 +3210,6 @@ __all__ = [
     "BlenderExecuteScriptResponse",
     "BlenderCreateMeshFromDataRequest",
     "BlenderCreateMeshFromDataResponse",
+    "BlenderCleanMeshRequest",
+    "BlenderCleanMeshResponse",
 ]

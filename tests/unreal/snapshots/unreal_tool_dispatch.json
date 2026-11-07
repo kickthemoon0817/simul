@@ -1433,7 +1433,8 @@
    "tool": "set_unreal_actor_parent",
    "case": "required",
    "arguments": {
-    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0"
    },
    "envelope": [
     {
@@ -1448,7 +1449,8 @@
      "method": "set_actor_parent",
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
-      "parent_path": null
+      "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0",
+      "detach": false
      }
     }
    ],
@@ -1470,7 +1472,8 @@
    "case": "every argument",
    "arguments": {
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
-    "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0"
+    "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0",
+    "detach": false
    },
    "envelope": [
     {
@@ -1485,7 +1488,8 @@
      "method": "set_actor_parent",
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
-      "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0"
+      "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0",
+      "detach": false
      }
     }
    ],
@@ -1523,7 +1527,8 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "component_class": "PointLightComponent",
-      "component_name": null
+      "component_name": null,
+      "parent_component": null
      }
     }
    ],
@@ -1546,7 +1551,8 @@
    "arguments": {
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "component_class": "PointLightComponent",
-    "component_name": "Lamp"
+    "component_name": "Lamp",
+    "parent_component": "Base"
    },
    "envelope": [
     {
@@ -1562,7 +1568,8 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "component_class": "PointLightComponent",
-      "component_name": "Lamp"
+      "component_name": "Lamp",
+      "parent_component": "Base"
      }
     }
    ],
@@ -1711,7 +1718,8 @@
       "material_path": "/Game/Materials/M_Wood",
       "scalar_params": null,
       "vector_params": null,
-      "texture_params": null
+      "texture_params": null,
+      "allow_engine_content": false
      }
     }
    ],
@@ -1735,7 +1743,8 @@
     "material_path": "/Game/Materials/M_Wood",
     "scalar_params_json": "{\"Roughness\": 0.4}",
     "vector_params_json": "{\"Tint\": [1, 0.5, 0, 1]}",
-    "texture_params_json": "{\"Albedo\": \"/Game/Textures/T_Wood\"}"
+    "texture_params_json": "{\"Albedo\": \"/Game/Textures/T_Wood\"}",
+    "allow_engine_content": true
    },
    "envelope": [
     {
@@ -1763,7 +1772,8 @@
       },
       "texture_params": {
        "Albedo": "/Game/Textures/T_Wood"
-      }
+      },
+      "allow_engine_content": true
      }
     }
    ],
@@ -1801,7 +1811,8 @@
      "arguments": {
       "parent_path": "/Game/Materials/M_Wood",
       "instance_name": "MI_Chair",
-      "save_path": ""
+      "save_path": "",
+      "allow_engine_content": false
      }
     }
    ],
@@ -1824,7 +1835,8 @@
    "arguments": {
     "parent_path": "/Game/Materials/M_Wood",
     "instance_name": "MI_Chair",
-    "save_path": "/Game/Materials"
+    "save_path": "/Game/Materials",
+    "allow_engine_content": true
    },
    "envelope": [
     {
@@ -1840,7 +1852,8 @@
      "arguments": {
       "parent_path": "/Game/Materials/M_Wood",
       "instance_name": "MI_Chair",
-      "save_path": "/Game/Materials"
+      "save_path": "/Game/Materials",
+      "allow_engine_content": true
      }
     }
    ],
@@ -2153,7 +2166,9 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "enable": true,
-      "simulate_physics": true
+      "kinematic": false,
+      "make_movable": true,
+      "allow_detach": false
      }
     }
    ],
@@ -2176,7 +2191,9 @@
    "arguments": {
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "enable": false,
-    "simulate_physics": false
+    "kinematic": true,
+    "make_movable": false,
+    "allow_detach": true
    },
    "envelope": [
     {
@@ -2192,7 +2209,9 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "enable": false,
-      "simulate_physics": false
+      "kinematic": true,
+      "make_movable": false,
+      "allow_detach": true
      }
     }
    ],
@@ -2478,7 +2497,8 @@
      "arguments": {
       "usd_path": "/tmp/in.usd",
       "destination_path": "/Game/Imports",
-      "import_options": null
+      "import_options": null,
+      "replace_existing": false
      }
     }
    ],
@@ -2503,7 +2523,8 @@
     "destination_path": "/Game/USD",
     "import_options": {
      "import_lights": false
-    }
+    },
+    "replace_existing": true
    },
    "envelope": [
     {
@@ -2521,7 +2542,8 @@
       "destination_path": "/Game/USD",
       "import_options": {
        "import_lights": false
-      }
+      },
+      "replace_existing": true
      }
     }
    ],
@@ -4300,6 +4322,83 @@
     {
      "success": false,
      "error": "fov must be at least 0.001 and less than 180 degrees, not 180.0"
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_parent",
+   "case": "invalid",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "parent_path": ""
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_parent",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorParentResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "Pass parent_path to attach the actor, or detach=true to detach it from its parent",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "parent_path": "",
+       "detach": false
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "Pass parent_path to attach the actor, or detach=true to detach it from its parent"
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_parent",
+   "case": "invalid",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0",
+    "detach": true
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_parent",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorParentResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "Pass parent_path to attach the actor, or detach=true to detach it from its parent, not both",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0",
+       "detach": true
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "Pass parent_path to attach the actor, or detach=true to detach it from its parent, not both"
     }
    ]
   },

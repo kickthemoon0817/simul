@@ -27,6 +27,30 @@ POLL_FAILED = (
 REPORTED = "Error: Cannot open file /x.blend@ for writing: Permission denied\n"
 
 
+class _Objects(dict):
+    """bpy.data.objects: looked up by name, iterated over its objects."""
+
+    def __iter__(self) -> Any:
+        return iter(list(self.values()))
+
+
+def _view_layer() -> SimpleNamespace:
+    """A view layer whose only collection is the scene's own, active and visible."""
+    root = SimpleNamespace(
+        collection=SimpleNamespace(
+            name="Scene Collection", library=None, is_editable=True, hide_viewport=False
+        ),
+        children=[],
+        exclude=False,
+        hide_viewport=False,
+    )
+    return SimpleNamespace(
+        objects=SimpleNamespace(active=None),
+        layer_collection=root,
+        active_layer_collection=root,
+    )
+
+
 def _raising(exc: BaseException) -> Any:
     def operator(*args: Any, **kwargs: Any) -> Any:
         raise exc
@@ -37,18 +61,35 @@ def _raising(exc: BaseException) -> Any:
 def _session(
     monkeypatch: pytest.MonkeyPatch, ops: Dict[str, Any], tmp_path: Path
 ) -> Any:
-    cube = SimpleNamespace(name="Cube", type="MESH", select_set=lambda value: None)
-    world = SimpleNamespace(point_cache=SimpleNamespace(frame_start=1, frame_end=250))
-    scene = SimpleNamespace(rigidbody_world=world, objects={"Cube": cube})
+    cube = SimpleNamespace(
+        name="Cube", type="MESH", select_set=lambda value: None, as_pointer=lambda: 1
+    )
+    world = SimpleNamespace(
+        enabled=True,
+        time_scale=1.0,
+        collection=None,
+        point_cache=SimpleNamespace(
+            frame_start=1, frame_end=250, is_baked=False, is_outdated=False, info=""
+        ),
+    )
+    scene = SimpleNamespace(
+        name="Scene",
+        rigidbody_world=world,
+        objects={"Cube": cube},
+        frame_current=1,
+        frame_start=1,
+        frame_end=250,
+        frame_set=lambda frame: None,
+    )
     fake = SimpleNamespace(
         app=SimpleNamespace(version=(5, 0, 1), version_string="5.0.1", background=True),
         data=SimpleNamespace(
-            objects={"Cube": cube}, filepath=str(tmp_path / "scene.blend")
+            objects=_Objects(Cube=cube), filepath=str(tmp_path / "scene.blend")
         ),
         context=SimpleNamespace(
             scene=scene,
             screen=SimpleNamespace(is_animation_playing=True),
-            view_layer=SimpleNamespace(objects=SimpleNamespace(active=None)),
+            view_layer=_view_layer(),
             temp_override=lambda **kwargs: _NullContext(),
         ),
         ops=SimpleNamespace(
@@ -149,8 +190,8 @@ def test_file_failures_name_the_resolved_path(
         ("wm", "save_mainfile", lambda s: s.save_blend_file()),
         ("screen", "animation_cancel", lambda s: s.play_animation("stop")),
         ("screen", "animation_play", lambda s: s.play_animation("play")),
-        ("object", "effector_add", lambda s: s.add_force_field("BOGUS")),
-        ("ptcache", "bake", lambda s: s.bake_simulation(1, 10)),
+        ("object", "effector_add", lambda s: s.add_force_field("WIND")),
+        ("ptcache", "bake_from_cache", lambda s: s.bake_simulation(1, 10)),
         ("ptcache", "free_bake", lambda s: s.free_bake()),
     ],
     ids=["save-in-place", "cancel", "play", "force-field", "bake", "free-bake"],

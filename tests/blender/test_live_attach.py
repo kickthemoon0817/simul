@@ -280,6 +280,97 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             assert box["bbox_min"] == pytest.approx([0.0, 1.0, 2.0])
             assert box["bbox_max"] == pytest.approx([2.0, 3.0, 4.0])
 
+            def pose(name: str) -> dict[str, Any]:
+                """The object's rotation mode and world matrix, as Blender holds them."""
+                seen = client.execute_script(
+                    "bpy.context.view_layer.update()\n"
+                    f"obj = bpy.data.objects[{name!r}]\n"
+                    "__result__ = {'mode': obj.rotation_mode, "
+                    "'parent': obj.parent.name if obj.parent else None, "
+                    "'world': [v for row in obj.matrix_world for v in row]}"
+                )
+                assert seen.get("error") is None, seen
+                return ast.literal_eval(seen["return_value"])
+
+            # glTF nodes store quaternions: a rotation_euler write was ignored
+            # with success, and object info gave the parent-relative location
+            # as world space.
+            made = client.execute_script(
+                "scene = bpy.context.scene\n"
+                "for name, parent, location in (('ProbeRoot', None, (1, 2, 0)),"
+                " ('ProbeArm', 'ProbeRoot', (0.3, 0, 1))):\n"
+                "    obj = bpy.data.objects.new(name, None)\n"
+                "    scene.collection.objects.link(obj)\n"
+                "    obj.rotation_mode = 'QUATERNION'\n"
+                "    obj.parent = bpy.data.objects.get(parent or '')\n"
+                "    obj.location = location\n"
+                "bpy.data.objects['ProbeRoot'].rotation_quaternion = (0.9659258, 0, 0, 0.2588190)\n"
+                "bpy.data.objects['ProbeArm'].rotation_quaternion = (0.9238795, 0, 0, 0.3826834)\n"
+            )
+            assert made.get("error") is None, made
+            turned = tool(
+                "set_blender_object_transform",
+                object_name="ProbeRoot",
+                rotation_euler=[0.0, 0.0, 1.0],
+            )
+            assert turned["success"] is True, turned
+            assert turned["rotation_mode"] == "QUATERNION"
+            assert turned["rotation_euler"] == pytest.approx([0.0, 0.0, 1.0], abs=1e-6)
+            root = pose("ProbeRoot")
+            assert root["mode"] == "QUATERNION"
+            assert root["world"][:2] == pytest.approx(
+                [0.5403023, -0.8414710], abs=1e-6
+            )
+            arm_info = tool("get_blender_object_info", object_name="ProbeArm")
+            arm = pose("ProbeArm")
+            assert arm_info["location"] == pytest.approx([0.3, 0.0, 1.0])
+            assert arm_info["world_location"] == pytest.approx(
+                [arm["world"][3], arm["world"][7], arm["world"][11]], abs=1e-6
+            )
+            assert arm_info["world_location"] != pytest.approx(arm_info["location"])
+            assert arm_info["rotation_euler"] == pytest.approx([0, 0, 0.7853982], abs=1e-6)
+            assert arm_info["world_rotation_euler"] == pytest.approx(
+                [0, 0, 1.7853982], abs=1e-6
+            )
+            assert [v for row in arm_info["matrix_world"] for v in row] == pytest.approx(
+                arm["world"], abs=1e-6
+            )
+            # Parenting moved the child by the parent's transform, and accepted
+            # a loop that Blender then ignored.
+            child_before = pose("AttachmentProbe")["world"]
+            parented = tool(
+                "set_blender_object_parent",
+                child_name="AttachmentProbe",
+                parent_name="ProbeArm",
+            )
+            assert parented["success"] is True, parented
+            assert pose("AttachmentProbe")["world"] == pytest.approx(
+                child_before, abs=1e-5
+            )
+            looped = tool(
+                "set_blender_object_parent",
+                child_name="ProbeRoot",
+                parent_name="AttachmentProbe",
+            )
+            assert looped["success"] is False and "loop" in looped["error"], looped
+            cleared = tool("clear_blender_object_parent", object_name="AttachmentProbe")
+            assert cleared["success"] is True, cleared
+            assert pose("AttachmentProbe") == {
+                "mode": "XYZ",
+                "parent": None,
+                "world": pytest.approx(child_before, abs=1e-5),
+            }
+            client.delete_object("ProbeArm")
+            client.delete_object("ProbeRoot")
+            # Snap the probe back to its exact transform for the checks below.
+            tool(
+                "set_blender_object_transform",
+                object_name="AttachmentProbe",
+                location=[1, 2, 3],
+                rotation_euler=[0, 0, 0],
+                scale=[1, 1, 1],
+            )
+
             def framing(camera: str, target: str) -> dict[str, Any]:
                 """Where the target's world bounding box lands in the camera's view."""
                 seen = client.execute_script(
@@ -623,7 +714,90 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             )
             with pytest.raises(RuntimeError, match="Object Mode"):
                 client.create_object("CUBE", name="MustNotModifyActiveMesh")
-            client.execute_script("bpy.ops.object.mode_set(mode='OBJECT')")
+            # The way back without a script.
+            left = tool("set_blender_object_mode")
+            assert left["success"] is True, left
+            assert (left["previous_mode"], left["context_mode"]) == ("EDIT", "OBJECT")
+            # Under the Enter Edit Mode preference creation left the window in Edit Mode.
+            client.execute_script("bpy.context.preferences.edit.use_enter_edit_mode = True")
+            try:
+                pref = tool("create_blender_object", object_type="CUBE", name="PrefProbe")
+            finally:
+                client.execute_script(
+                    "bpy.context.preferences.edit.use_enter_edit_mode = False"
+                )
+            assert pref["success"] is True and pref["mode"] == "OBJECT", pref
+            client.delete_object("PrefProbe")
+            # With the active collection disabled in viewports, creation failed
+            # on the 3D View's missing active object and left an unnamed cube.
+            hidden = client.execute_script(
+                "col = bpy.data.collections.new('HiddenWork')\n"
+                "bpy.context.scene.collection.children.link(col)\n"
+                "col.hide_viewport = True\n"
+                "layer = bpy.context.view_layer.layer_collection.children[col.name]\n"
+                "bpy.context.view_layer.active_layer_collection = layer\n"
+                "__result__ = bpy.context.view_layer.active_layer_collection.name"
+            )
+            assert "HiddenWork" in hidden["return_value"], hidden
+            boxed = tool(
+                "create_blender_object",
+                object_type="CUBE",
+                name="HiddenProbe",
+                scale=[3, 3, 3],
+            )
+            assert boxed["success"] is True, boxed
+            assert boxed["collection"] == "Scene Collection"
+            assert "HiddenWork" in boxed["warning"]
+            made = client.execute_script(
+                "__result__ = (sorted(o.name for o in bpy.data.objects"
+                " if o.name.startswith(('Cube.', 'HiddenProbe'))),"
+                " bpy.context.view_layer.active_layer_collection.name,"
+                " bpy.data.objects['HiddenProbe'].visible_get())"
+            )
+            assert ast.literal_eval(made["return_value"]) == (
+                ["HiddenProbe"],
+                "HiddenWork",
+                True,
+            )
+            # The 6 m probe's bounding box is not within a 2 m box around its
+            # origin, which was all the check tested.
+            bounds = tool(
+                "check_blender_object_bounds",
+                object_name="HiddenProbe",
+                bounds_min=[-1, -1, -1],
+                bounds_max=[1, 1, 1],
+            )
+            assert (
+                bounds["within_bounds"],
+                bounds["relation"],
+                bounds["origin_within_bounds"],
+            ) == (False, "intersecting", True), bounds
+            # A page is accurate about what it holds and what follows.
+            visible = client.execute_script(
+                "__result__ = sum(o.visible_get() for o in bpy.context.scene.objects)"
+            )
+            total = int(visible["return_value"])
+            page = tool("list_blender_scene_objects", max_items=1, offset=1)
+            assert (page["count"], page["total"], page["offset"]) == (1, total, 1)
+            assert page["next_offset"] == (2 if total > 2 else None)
+            assert page["objects"][0]["collection"] is not None
+            # Delete leaves the object in another scene that links it.
+            client.execute_script(
+                "bpy.data.scenes.new('VariantProbe').collection.objects.link("
+                "bpy.data.objects['HiddenProbe'])"
+            )
+            deleted = tool("delete_blender_object", object_name="HiddenProbe")
+            assert deleted["success"] is True, deleted
+            assert deleted["remaining_scenes"] == ["VariantProbe"]
+            assert deleted["removed_from_file"] is False
+            cleaned = client.execute_script(
+                "bpy.data.objects.remove(bpy.data.objects['HiddenProbe'])\n"
+                "bpy.data.scenes.remove(bpy.data.scenes['VariantProbe'])\n"
+                "bpy.context.view_layer.active_layer_collection = "
+                "bpy.context.view_layer.layer_collection\n"
+                "bpy.data.collections.remove(bpy.data.collections['HiddenWork'])"
+            )
+            assert cleaned.get("error") is None, cleaned
             capture = client.capture_viewport(
                 width=64, height=64, use_render_fallback=True, agent_id="viewer"
             )
@@ -907,17 +1081,21 @@ def test_recover_from_file_loads_context_loss_and_exit(
             assert printed["output"] == "x" * 4096
             assert printed["output_truncated"] is True
             assert printed["output_total_chars"] == 6001
-            # A bpy operator failure keeps its class across the bridge, and the
-            # object the session was acting on rides along as context.
+            # A refusal keeps its class across the bridge. A camera is refused
+            # before Blender's operator runs, which only said "poll() failed",
+            # and it leaves no rigid body world behind.
             no_mesh = call("setup_blender_rigid_body", object_name="Camera")
-            assert no_mesh["error_type"] == "RuntimeError", no_mesh
-            assert "Failed to add rigid body to 'Camera'" in no_mesh["error"]
-            assert "rigidbody.object_add.poll() failed" in no_mesh["error"]
+            assert no_mesh["error_type"] == "ValueError", no_mesh
+            assert "need a mesh object, and 'Camera' is a CAMERA" in no_mesh["error"]
+            world = call("get_blender_rigid_body_world")
+            assert world["success"] is True and world["exists"] is False, world
+            # An unknown field type never reaches Blender: the request model
+            # lists the types its effector_add takes.
             bad_enum = call(
                 "add_blender_force_field", field_type="BOGUS", location=[0.0, 0.0, 0.0]
             )
-            assert bad_enum["error_type"] == "TypeError", bad_enum
-            assert 'enum "BOGUS" not found' in bad_enum["error"]
+            assert bad_enum["error_type"] == "ValidationError", bad_enum
+            assert "'FORCE', 'WIND'" in bad_enum["error"]
 
             # Keyframes round trip. Blender 4.4+ keeps an action's F-curves per
             # action slot; get_blender_keyframes failed on 5.0, which removed

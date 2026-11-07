@@ -102,23 +102,21 @@ class TestUSDReader:
 
         assert stage is None
 
-    @patch("simul.usd.reader.UsdGeom")
-    def test_get_stage_info(self, mock_usd_geom, usd_reader, mock_usd_stage):
-        """Test stage information extraction."""
-        # Mock prim traversal
-        mock_prim1 = Mock()
-        mock_prim1.GetPath.return_value.pathString = "/World"
-        mock_prim2 = Mock()
-        mock_prim2.GetPath.return_value.pathString = "/World/Cube"
+    def test_get_stage_info(self, usd_reader):
+        """Stage information comes from a real stage, metadata included."""
+        from pxr import Usd, UsdGeom
 
-        mock_usd_stage.Traverse.return_value = [mock_prim1, mock_prim2]
-        mock_usd_stage.GetPseudoRoot.return_value.GetChildren.return_value = [
-            mock_prim1
-        ]
-        mock_usd_geom.GetStageUpAxis.return_value = "Y"
-        mock_usd_geom.GetStageMetersPerUnit.return_value = 1.0
+        stage = Usd.Stage.CreateInMemory()
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
+        UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+        stage.SetTimeCodesPerSecond(24.0)
+        stage.SetFramesPerSecond(24.0)
+        stage.SetStartTimeCode(1.0)
+        stage.SetEndTimeCode(100.0)
+        UsdGeom.Xform.Define(stage, "/World")
+        UsdGeom.Cube.Define(stage, "/World/Cube")
 
-        stage_info = usd_reader.get_stage_info(mock_usd_stage)
+        stage_info = usd_reader.get_stage_info(stage)
 
         assert isinstance(stage_info, USDStageInfo)
         assert stage_info.up_axis == "Y"
@@ -128,22 +126,33 @@ class TestUSDReader:
         assert stage_info.end_time_code == 100.0
         assert stage_info.frame_rate == 24.0
         assert stage_info.prim_count == 2
-        assert len(stage_info.root_prims) == 1
-        assert len(stage_info.layers) == 1
+        assert stage_info.root_prims == ["/World"]
+        assert stage_info.stage_variables["upAxis"] == "Y"
 
-    def test_get_prim_info(self, usd_reader, mock_usd_prim):
-        """Test prim information extraction."""
-        prim_info = usd_reader.get_prim_info(mock_usd_prim)
+    def test_get_prim_info(self, usd_reader):
+        """Prim information comes from a real prim, as JSON-ready records."""
+        from pxr import Usd, UsdGeom
+
+        stage = Usd.Stage.CreateInMemory()
+        mesh = UsdGeom.Mesh.Define(stage, "/World/Cube")
+        mesh.GetPointsAttr().Set([(0, 0, 0), (1, 0, 0), (0, 1, 0)])
+
+        prim_info = usd_reader.get_prim_info(mesh.GetPrim())
 
         assert isinstance(prim_info, USDPrimInfo)
         assert prim_info.path == "/World/Cube"
         assert prim_info.name == "Cube"
         assert prim_info.type_name == "Mesh"
+        assert prim_info.prim_type == PrimType.MESH
         assert prim_info.is_active is True
         assert prim_info.is_loaded is True
         assert prim_info.is_defined is True
         assert prim_info.is_instance is False
-        assert len(prim_info.children) == 0
+        assert prim_info.children == []
+        assert prim_info.parent == "/World"
+        assert prim_info.attributes["points"]["length"] == 3
+        assert prim_info.attributes["points"]["authored"] is True
+        assert prim_info.metadata["specifier"] == "def"
 
     def test_find_prims_by_type(self, usd_reader, mock_usd_stage):
         """Test finding prims by type."""
@@ -335,7 +344,8 @@ class TestUSDReaderIntegration:
         """Create a temporary USD file for testing."""
         with tempfile.NamedTemporaryFile(suffix=".usda", delete=False) as handle:
             handle.write(
-                b'#usda 1.0\n(\n    defaultPrim = "World"\n)\n\ndef Xform "World"\n{\n    def Cube "Cube"\n    {\n    }\n}\n'
+                b'#usda 1.0\n(\n    defaultPrim = "World"\n)\n\n'
+                b'def Xform "World"\n{\n    def Cube "Cube"\n    {\n    }\n}\n'
             )
             path = Path(handle.name)
         try:

@@ -15,6 +15,7 @@ import json
 import re
 import sys
 import textwrap
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Coroutine, Dict, List, Optional
 
@@ -330,7 +331,8 @@ def launch(
         None,
         "--auth-token",
         help=(
-            "Require this exact token on the python_server socket (Isaac Sim 6.0+ only). "
+            "Require this exact token on the python_server socket and the bridge "
+            "(Isaac Sim 6.0+ only). "
             "Set the same value as ISAAC_SIM__SOCKET_AUTH_TOKEN for the MCP server. "
             "Kit takes settings on argv, so the token is visible to other local "
             "users via the process list for the editor's lifetime; prefer "
@@ -341,8 +343,8 @@ def launch(
         False,
         "--generate-auth-token",
         help=(
-            "Require auth on the python_server socket and let Kit generate the token "
-            "(Isaac Sim 6.0+ only). The token is read back from the launch log and stored "
+            "Require auth on the python_server socket and the bridge, and let Kit generate "
+            "the token (Isaac Sim 6.0+ only). The token is read back from the launch log and stored "
             "0600 at <discovery_dir>/auth-token-<pid>, where the MCP server picks it up "
             "when ISAAC_SIM__SOCKET_AUTH_TOKEN is unset. Nothing secret reaches argv."
         ),
@@ -470,8 +472,14 @@ def launch(
         # An empty auth_token with require_auth makes python_server generate
         # one and print it, so the secret never appears on the command line.
         command.append(f"--/exts/{transport_ext}/require_auth=true")
+    bridge_auth_required = bridge_present and bool(auth_token or generate_auth_token)
     if bridge_present:
         command += ["--enable", BRIDGE_EXTENSION, f"--/exts/{BRIDGE_EXTENSION}/port={resolved_bridge_port}"]
+        if bridge_auth_required:
+            # The bridge runs the same Python as the socket; a token on 8226
+            # alone would leave 8229 open. It accepts python_server's token
+            # (generated or given above), so nothing secret is added here.
+            command.append(f"--/exts/{BRIDGE_EXTENSION}/require_auth=true")
     if headless:
         command.append("--no-window")
     command += list(kit_args)
@@ -493,6 +501,7 @@ def launch(
         "bridge_address": f"{settings.isaac_sim.bridge_host}:{resolved_bridge_port}",
         "command": redacted_command,
         "auth_required": bool(auth_token or generate_auth_token),
+        "bridge_auth_required": bridge_auth_required,
         "auth_token_source": (
             "argv" if auth_token else "generated" if generate_auth_token else None
         ),
@@ -1001,6 +1010,109 @@ def bridge_set_unsafe(
 
 
 # ---------------------------------------------------------------------------
+# claims
+# ---------------------------------------------------------------------------
+@app.command("claims")
+def claims(
+    port: Optional[int] = typer.Option(
+        None, "--port", "-p", click_type=PORT_NUMBER, help="Only the instance on this socket port"
+    ),
+    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Only this agent_id's claims"),
+    clear: bool = typer.Option(
+        False, "--clear", help="Remove the selected claims (every live claim without --port/--agent)"
+    ),
+) -> None:
+    """List the live Isaac instance claims MCP servers on this machine hold, or clear them.
+
+    Claims live in the session records every server process shares
+    (~/.simul/sessions). Clearing one is the operator's way out when an agent
+    is locked out by a claim nothing will release, for instance one whose
+    server crashed; agents that reconnect can also re-claim their own
+    orphaned claim with the same agent_id.
+    """
+    from simul.mcp.session_manager import (
+        CLAIM_TTL_SECONDS,
+        ClaimStoreError,
+        SessionManager,
+        claim_is_orphaned,
+    )
+
+    manager = SessionManager()
+    if clear:
+        try:
+            removed = manager.clear(port=port, agent_id=agent)
+        except ClaimStoreError as exc:
+            fail(str(exc), ClaimStoreError.error_type, exc.details)
+        if is_json_mode():
+            emit({"success": True, "cleared": removed, "session_dir": str(manager.session_dir)})
+            return
+        console.print(f"[green]Cleared {len(removed)} claim(s)[/green] in {manager.session_dir}")
+        for record in removed:
+            console.print(f"  port {record['port']}: {rich_escape(str(record.get('agent_id')))}")
+        return
+
+    now = time.time()
+    rows: List[Dict[str, Any]] = []
+    unreadable: List[Dict[str, Any]] = []
+    for instance in manager.get_all_sessions():
+        if port is not None and instance["port"] != port:
+            continue
+        if "error" in instance:
+            unreadable.append({"port": instance["port"], "error": instance["error"]})
+            continue
+        for record in instance["sessions"]:
+            if agent is not None and record.get("agent_id") != agent:
+                continue
+            last_active = float(record.get("last_active", 0.0))
+            rows.append(
+                {
+                    "port": instance["port"],
+                    "agent_id": record.get("agent_id"),
+                    "purpose": record.get("purpose", ""),
+                    "last_active": last_active,
+                    "expires_in_seconds": round(max(0.0, CLAIM_TTL_SECONDS - (now - last_active)), 1),
+                    "orphaned": claim_is_orphaned(record),
+                    "pid": record.get("pid"),
+                }
+            )
+        if "repaired_at" in instance:
+            unreadable.append(
+                {"port": instance["port"], "repaired_at": instance["repaired_at"]}
+            )
+    if is_json_mode():
+        emit({"success": not any("error" in u for u in unreadable), "claims": rows,
+              "problems": unreadable, "session_dir": str(manager.session_dir)})
+        if any("error" in u for u in unreadable):
+            raise typer.Exit(1)
+        return
+    if not rows:
+        console.print(f"[dim]No live claims in {manager.session_dir}.[/dim]")
+    else:
+        table = Table(title=f"Isaac instance claims ({manager.session_dir})")
+        for column in ("Port", "Agent", "Purpose", "Expires in", "Orphaned"):
+            table.add_column(column)
+        for row in rows:
+            table.add_row(
+                str(row["port"]),
+                rich_escape(str(row["agent_id"])),
+                rich_escape(str(row["purpose"])),
+                f"{row['expires_in_seconds']:.0f} s",
+                "yes" if row["orphaned"] else "",
+            )
+        console.print(table)
+    for problem in unreadable:
+        if "error" in problem:
+            console.print(f"[red]port {problem['port']}: {rich_escape(problem['error'])}[/red]")
+        else:
+            console.print(
+                f"[yellow]port {problem['port']}: records were repaired; enforcement stays "
+                "closed for one claim TTL[/yellow]"
+            )
+    if any("error" in u for u in unreadable):
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
 @app.command()
@@ -1486,16 +1598,27 @@ def new_stage(
 @app.command("create-physics-scene")
 def create_physics_scene(
     prim_path: str = typer.Option("/World/PhysicsScene", "--path", help="USD path for the physics scene"),
-    gravity: float = typer.Option(9.81, "--gravity", "-g", help="Gravity magnitude in m/s^2"),
-    gravity_dir: str = typer.Option("0,0,-1", "--gravity-dir", help="Gravity direction as x,y,z"),
+    gravity: Optional[float] = typer.Option(
+        None,
+        "--gravity",
+        "-g",
+        help="Gravity magnitude in m/s^2 (default 9.81, converted to stage units)",
+    ),
+    gravity_dir: Optional[str] = typer.Option(
+        None,
+        "--gravity-dir",
+        help="Gravity direction as x,y,z (default: the stage's negative up axis)",
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
     """Create a UsdPhysics.Scene with gravity settings."""
-    try:
-        grav_dir_list = [float(v) for v in gravity_dir.split(",")]
-    except ValueError as e:
-        fail(f"Invalid numeric value in --gravity-dir: {e}", "ValueError")
+    grav_dir_list: Optional[List[float]] = None
+    if gravity_dir is not None:
+        try:
+            grav_dir_list = [float(v) for v in gravity_dir.split(",")]
+        except ValueError as e:
+            fail(f"Invalid numeric value in --gravity-dir: {e}", "ValueError")
     result = _run(_tools(host, port).create_isaac_physics_scene(
         prim_path=prim_path,
         gravity_direction=grav_dir_list,
@@ -1504,13 +1627,19 @@ def create_physics_scene(
     if is_json_mode():
         emit(result)
         return
+    m_per_s2 = result.get("gravity_magnitude_m_per_s2")
+    direction = result.get("gravity_direction")
     if result.get("already_existed"):
+        state = "gravity updated" if result.get("updated") else "gravity unchanged"
         console.print(
             f"[yellow]Physics scene already exists[/yellow] at {prim_path} "
-            f"(gravity updated to {result.get('gravity_magnitude')} m/s^2)"
+            f"({state}: {m_per_s2} m/s^2 along {direction})"
         )
     else:
-        console.print(f"[green]Physics scene created[/green] at {prim_path} (gravity={gravity} m/s^2)")
+        console.print(
+            f"[green]Physics scene created[/green] at {prim_path} "
+            f"(gravity {m_per_s2} m/s^2 along {direction})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1701,6 +1830,11 @@ def set_carb_settings(
     assignments: List[str] = typer.Argument(
         ..., help="Key=value pairs (e.g. /rtx/fog/enabled=true /rtx/fog/fogEndDist=200.0)"
     ),
+    allow_persistent: bool = typer.Option(
+        False,
+        "--allow-persistent",
+        help="Also write /persistent/ keys, which Kit saves to the user's configuration for later sessions.",
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
@@ -1724,10 +1858,14 @@ def set_carb_settings(
                 except ValueError:
                     pass
         parsed[key] = val
-    result = _run(_tools(host, port).set_carb_settings(settings=parsed))
+    result = _run(
+        _tools(host, port).set_carb_settings(settings=parsed, allow_persistent=allow_persistent)
+    )
     if is_json_mode():
         emit(result)
         return
+    if result.get("warning"):
+        console.print(f"[yellow]{result['warning']}[/yellow]")
     applied = result.get("applied", {})
     table = Table(title=f"Applied ({result.get('count', len(applied))} settings)")
     table.add_column("Key", style="cyan", no_wrap=True)
@@ -1930,7 +2068,12 @@ def runtime_info(
     sections = [
         ("App", "app", ["version", "python_version", "update_number"]),
         ("Timeline", "timeline", ["is_playing", "is_stopped", "current_time", "fps"]),
-        ("Physics Config", "physics_config", ["gpu_dynamics_enabled", "physics_dt", "solver_type"]),
+        ("Physics", "physics", ["cuda_device", "update_to_usd", "physx_fabric_enabled", "reset_on_stop"]),
+        (
+            "Physics Config",
+            "physics_config",
+            ["scene_path", "time_steps_per_second", "gpu_dynamics_enabled", "physics_dt", "solver_type"],
+        ),
         ("Renderer", "renderer", ["gpu_name", "raytracing_mode", "hgi_driver"]),
         ("Stage", "stage", ["url", "prim_count"]),
         ("Extensions", "extensions", ["total", "enabled"]),

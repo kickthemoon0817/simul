@@ -280,6 +280,10 @@ class Editor:
                 return SimpleNamespace(get_class=lambda: _Class("StaticMesh"))
             return next((a for a in editor.level if a.get_path_name() == path), None)
 
+        def find_object(outer: Any, path: str) -> Any:
+            editor.calls.append("find_object " + path)
+            return next((a for a in editor.level if a.get_path_name() == path), None)
+
         return SimpleNamespace(
             Actor=Actor,
             ActorComponent=object,
@@ -308,7 +312,9 @@ class Editor:
                 get_time_seconds=lambda world: 12.5,
             ),
             SystemLibrary=SimpleNamespace(
-                get_engine_version=lambda: "5.7.4", get_game_name=lambda: "Lab"
+                get_engine_version=lambda: "5.7.4",
+                get_game_name=lambda: "Lab",
+                is_valid=lambda obj: obj is not None,
             ),
             Paths=SimpleNamespace(
                 project_dir=lambda: "../../Lab/",
@@ -321,6 +327,7 @@ class Editor:
             ScopedEditorTransaction=editor.transaction,
             MathLibrary=SimpleNamespace(class_is_child_of=lambda cls, parent: True),
             load_object=load_object,
+            find_object=find_object,
             load_asset=lambda path: None,
             UsdStageImportFactory=object,
             LevelExporterUSD=object,
@@ -333,7 +340,8 @@ class Editor:
             with redirect_stdout(out):
                 exec(code, {})
         except Exception as exc:
-            return {"ReturnValue": False, "CommandResult": repr(exc)}
+            # UE reports the traceback, whose last line is "<Type>: <message>".
+            return {"ReturnValue": False, "CommandResult": f"{type(exc).__name__}: {exc}"}
         return {
             "ReturnValue": True,
             "LogOutput": [
@@ -360,7 +368,9 @@ def _session(
     session.scripts = []  # type: ignore[attr-defined]
     session.calls = []  # type: ignore[attr-defined]
 
-    async def execute(code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
+    async def execute(
+        code: str, mode: str = "ExecuteFile", timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
         session.scripts.append(code)  # type: ignore[attr-defined]
         return editor.run(code)
 
@@ -951,8 +961,8 @@ def test_focus_on_a_missing_actor_fails_before_the_camera_moves(
 
     result = asyncio.run(session.focus_on_actor(LEVEL + "Missing"))
 
-    assert result["success"] is False and result["error_type"] == "ScriptError"
-    assert "Actor not found: " + LEVEL + "Missing" in result["error"]
+    assert result["success"] is False and result["error_type"] == "NotFoundError"
+    assert result["error"].startswith("Actor not found: " + LEVEL + "Missing (")
     assert session.calls == [] and editor.selection_calls == []
 
 

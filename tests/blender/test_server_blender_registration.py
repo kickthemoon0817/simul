@@ -242,12 +242,18 @@ def test_check_blender_object_bounds_calls_is_object_within_bounds(
             },
         )
     ]
+    # The relation report is optional: an add-on that predates it still answers.
     assert payload == {
         "success": True,
         "error": None,
         "object_name": "Cube",
         "within_bounds": True,
         "object_location": [0.5, 0.5, 0.5],
+        "relation": None,
+        "intersects": None,
+        "origin_within_bounds": None,
+        "object_bbox_min": None,
+        "object_bbox_max": None,
     }
 
 
@@ -454,3 +460,125 @@ def test_get_blender_camera_info_relays_the_active_constraints_and_pose_source(
         else dict.fromkeys(_COMPOSED_POSE_REPORT)
     )
     assert {key: payload[key] for key in _COMPOSED_POSE_REPORT} == expected
+
+
+class _AddonBeforeTheTransformFixes:
+    """The session of an add-on built before set_object_parent's keep_transform
+    and set_object_transform's rotation_quaternion: it refuses either keyword,
+    as the add-on's dispatcher binds each call to its own signature."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def set_object_parent(self, child_name: str, parent_name: str) -> dict:
+        self.calls.append(("set_object_parent", child_name, parent_name))
+        return {"child_name": child_name, "parent_name": parent_name}
+
+    def set_object_transform(
+        self, object_name: str, location=None, rotation_euler=None, scale=None
+    ) -> dict:
+        self.calls.append(("set_object_transform", object_name, rotation_euler))
+        return {
+            "object_name": object_name,
+            "location": [0.0, 0.0, 0.0],
+            "rotation_euler": rotation_euler or [0.0, 0.0, 0.0],
+            "scale": [1.0, 1.0, 1.0],
+        }
+
+
+def _call(instance: server_module.SimulMCPServer, tool: str, arguments: dict) -> dict:
+    async def _run() -> dict:
+        async with Client(instance.mcp) as client:
+            result = await client.call_tool(tool, arguments, raise_on_error=False)
+            return json.loads(result.content[-1].text)
+
+    return asyncio.run(_run())
+
+
+def test_an_older_addon_still_answers_calls_that_leave_the_new_parameters_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parameter at its default is not sent, so the add-on's own default applies.
+
+    The add-on is installed separately and can be older than the server; sent
+    always, the new keywords made it refuse every parenting and transform call.
+    A call that does need the new parameter still fails, naming it.
+    """
+    session = _AddonBeforeTheTransformFixes()
+    instance = _strict_server(monkeypatch, session, "attached")  # type: ignore[arg-type]
+
+    parented = _call(
+        instance, "set_blender_object_parent", {"child_name": "C", "parent_name": "P"}
+    )
+    turned = _call(
+        instance,
+        "set_blender_object_transform",
+        {"object_name": "Cube", "rotation_euler": [0, 0, 1]},
+    )
+    unsupported = _call(
+        instance,
+        "set_blender_object_parent",
+        {"child_name": "C", "parent_name": "P", "keep_transform": False},
+    )
+
+    assert parented["success"] is True
+    assert parented["keep_transform"] is None and parented["world_location"] is None
+    assert turned["success"] is True and turned["rotation_mode"] is None
+    assert session.calls == [
+        ("set_object_parent", "C", "P"),
+        ("set_object_transform", "Cube", [0.0, 0.0, 1.0]),
+    ]
+    assert unsupported["success"] is False
+    assert "keep_transform" in unsupported["error"]
+
+
+class _AddonBeforePaging:
+    """The session of an add-on built before listing pages and scene-only delete."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def list_scene_objects(
+        self, collection_name=None, include_hidden=False, max_items=200
+    ) -> dict:
+        self.calls.append(("list_scene_objects", max_items))
+        return {
+            "collection": collection_name,
+            "include_hidden": include_hidden,
+            "max_items": max_items,
+            "count": 0,
+            "objects": [],
+            "truncated": False,
+        }
+
+    def search_objects(self, name_pattern=None, object_type=None, max_results=50) -> dict:
+        self.calls.append(("search_objects", object_type))
+        return {"pattern": name_pattern, "object_type": object_type, "count": 0, "objects": [], "truncated": False}
+
+    def delete_object(self, object_name: str) -> dict:
+        self.calls.append(("delete_object", object_name))
+        return {"deleted_name": object_name}
+
+
+def test_an_older_addon_still_lists_searches_and_deletes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """offset and use_global at their defaults are not sent; the reply's new fields are null."""
+    session = _AddonBeforePaging()
+    instance = _strict_server(monkeypatch, session, "attached")  # type: ignore[arg-type]
+
+    listed = _call(instance, "list_blender_scene_objects", {})
+    found = _call(instance, "search_blender_objects", {"object_type": "mesh"})
+    deleted = _call(instance, "delete_blender_object", {"object_name": "Cube"})
+    paged = _call(instance, "list_blender_scene_objects", {"offset": 200})
+
+    assert listed["success"] is True and listed["total"] is None
+    assert found["success"] is True and found["next_offset"] is None
+    assert deleted["success"] is True and deleted["remaining_scenes"] is None
+    # The server upper-cases the type for an add-on that compared it as given.
+    assert session.calls == [
+        ("list_scene_objects", 200),
+        ("search_objects", "MESH"),
+        ("delete_object", "Cube"),
+    ]
+    assert paged["success"] is False and "offset" in paged["error"]

@@ -94,7 +94,12 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
     "list_blender_scene_objects": {
         "minimal": {},
-        "full": {"collection_name": "Props", "include_hidden": True, "max_items": 7},
+        "full": {
+            "collection_name": "Props",
+            "include_hidden": True,
+            "max_items": 7,
+            "offset": 14,
+        },
     },
     "get_blender_object_info": {"minimal": {"object_name": "Cube"}},
     "get_blender_mesh_info": {"minimal": {"object_name": "Cube"}},
@@ -104,7 +109,12 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
     "search_blender_objects": {
         "minimal": {},
-        "full": {"name_pattern": "Cu*", "object_type": "MESH", "max_results": 3},
+        "full": {
+            "name_pattern": "Cu*",
+            "object_type": "mesh",
+            "max_results": 3,
+            "offset": 6,
+        },
     },
     "summarize_blender_scene": {"minimal": {}},
     "get_blender_material_info": {"minimal": {"material_name": "Metal"}},
@@ -127,6 +137,7 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "method": "auto",
             "use_render_fallback": True,
             "agent_id": SNAPSHOT_AGENT,
+            "camera_name": "Cam2",
         },
     },
     "set_blender_camera_view": {
@@ -154,7 +165,11 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "jpeg_quality": 60,
             "agent_id": SNAPSHOT_AGENT,
             "method": "render",
+            "camera_name": "Cam2",
+            "output_dir": "/tmp/frames",
+            "max_frames": 4,
         },
+        "reversed": {"start_frame": 9, "end_frame": 1, "agent_id": SNAPSHOT_AGENT},
     },
     "create_blender_object": {
         "minimal": {"object_type": "CUBE"},
@@ -166,7 +181,14 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "scale": [2, 2, 2],
         },
     },
-    "delete_blender_object": {"minimal": {"object_name": "Cube"}},
+    "delete_blender_object": {
+        "minimal": {"object_name": "Cube"},
+        "full": {"object_name": "Cube", "use_global": True},
+    },
+    "set_blender_object_mode": {
+        "minimal": {},
+        "full": {"mode": "edit", "object_name": "Cube"},
+    },
     "set_blender_object_transform": {
         "minimal": {"object_name": "Cube"},
         "full": {
@@ -175,9 +197,14 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "rotation_euler": [0.1, 0.2, 0.3],
             "scale": [2, 2, 2],
         },
+        "quaternion": {
+            "object_name": "Cube",
+            "rotation_quaternion": [0.5, 0.5, 0.5, 0.5],
+        },
     },
     "set_blender_object_parent": {
-        "minimal": {"child_name": "Wheel", "parent_name": "Car"}
+        "minimal": {"child_name": "Wheel", "parent_name": "Car"},
+        "full": {"child_name": "Wheel", "parent_name": "Car", "keep_transform": False},
     },
     "clear_blender_object_parent": {
         "minimal": {"object_name": "Wheel"},
@@ -202,6 +229,12 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "params": {"levels": 2},
         },
     },
+    "apply_blender_modifier": {
+        "minimal": {"object_name": "Cube", "modifier_name": "Decimate"}
+    },
+    "remove_blender_modifier": {
+        "minimal": {"object_name": "Cube", "modifier_name": "Decimate"}
+    },
     "set_blender_light_params": {
         "minimal": {"light_name": "Light"},
         "full": {
@@ -217,14 +250,37 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
     "open_blender_file": {"minimal": {"file_path": "/tmp/scene.blend"}},
     "save_blender_file": {"minimal": {}, "full": {"file_path": "/tmp/out.blend"}},
     "import_blender_file": {
-        "minimal": {"file_path": "/tmp/model.obj", "file_format": "OBJ"}
+        "minimal": {"file_path": "/tmp/model.obj", "file_format": "OBJ"},
+        "full": {"file_path": "/tmp/model.obj", "file_format": "OBJ", "scale": 0.01},
     },
     "export_blender_file": {
         "minimal": {"file_path": "/tmp/out.glb", "file_format": "GLTF"},
         "full": {
-            "file_path": "/tmp/out.glb",
+            "file_path": "/tmp/out.fbx",
+            "file_format": "FBX",
+            "object_names": ["Cube", "Sphere"],
+            "apply_modifiers": False,
+            "export_animation": False,
+            "axis_forward": "-Y",
+            "axis_up": "Z",
+            "global_scale": 0.01,
+            "overwrite_companion_files": True,
+        },
+        "selected": {
+            "file_path": "/tmp/out.gltf",
             "file_format": "GLTF",
             "selected_only": True,
+            "gltf_format": "GLTF_EMBEDDED",
+            "frame_start": 10,
+            "frame_end": 20,
+        },
+        "usd": {
+            "file_path": "/tmp/out.usda",
+            "file_format": "USD",
+            "collection_name": "Props",
+            "usd_up_axis": "Y",
+            "meters_per_unit": 0.01,
+            "root_prim_path": "/World",
         },
     },
     "get_blender_file_info": {"minimal": {}},
@@ -262,6 +318,11 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "collision_shape": "BOX",
             "linear_damping": 0.1,
             "angular_damping": 0.2,
+            "kinematic": True,
+            "collision_margin": 0.01,
+            "collision_collections": [0, 3],
+            "use_deactivation": True,
+            "start_deactivated": True,
         },
     },
     "add_blender_force_field": {
@@ -271,6 +332,13 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "strength": 3,
             "location": [1, 2, 3],
             "name": "Swirl",
+            "direction": [0, 1, 0],
+            "shape": "PLANE",
+            "flow": 0.5,
+            "falloff_type": "TUBE",
+            "falloff_power": 2,
+            "distance_max": 10,
+            "noise": 0.25,
         },
     },
     "get_blender_force_field_info": {"minimal": {"object_name": "Swirl"}},
@@ -286,16 +354,61 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "object2_name": "B",
             "location": [0, 0, 1],
             "disable_collisions": False,
+            "axis": [0, 1, 0],
+            "limits": {"ang_z": [-0.5, 0.5]},
+            "breaking_threshold": 20,
+        },
+        "motor": {
+            "constraint_type": "MOTOR",
+            "object1_name": "A",
+            "object2_name": "B",
+            "motor_angular_velocity": 2,
+            "motor_angular_max_impulse": 5,
+            "motor_linear_velocity": 0.5,
+            "motor_linear_max_impulse": 3,
+        },
+        "spring": {
+            "constraint_type": "GENERIC_SPRING",
+            "object1_name": "A",
+            "object2_name": "B",
+            "limits": {"lin_z": [-1, 1]},
+            "springs": {"z": {"stiffness": 50, "damping": 0.5}},
         },
     },
     "get_blender_constraint_info": {"minimal": {"object_name": "Hinge"}},
-    "get_blender_physics_state": {"minimal": {"object_name": "Cube"}},
+    "get_blender_physics_state": {
+        "minimal": {"object_name": "Cube"},
+        "full": {"object_name": "Cube", "step_simulation": False},
+    },
     "get_blender_object_trajectory": {
         "minimal": {"object_name": "Cube", "start_frame": 1, "end_frame": 10},
         "full": {"object_name": "Cube", "start_frame": 1, "end_frame": 10, "step": 3},
     },
-    "bake_blender_simulation": {"minimal": {"frame_start": 1, "frame_end": 50}},
-    "free_blender_bake": {"minimal": {}},
+    "bake_blender_simulation": {
+        "minimal": {"frame_start": 1, "frame_end": 50},
+        "full": {
+            "frame_start": 1,
+            "frame_end": 50,
+            "scope": "all",
+            "allow_long_bake": True,
+        },
+    },
+    "free_blender_bake": {"minimal": {}, "full": {"scope": "all"}},
+    "get_blender_rigid_body_world": {"minimal": {}},
+    "set_blender_rigid_body_world": {
+        "minimal": {},
+        "full": {
+            "enabled": False,
+            "gravity": [0, 0, -1.62],
+            "use_gravity": False,
+            "substeps_per_frame": 20,
+            "solver_iterations": 30,
+            "time_scale": 0.5,
+            "use_split_impulse": True,
+            "cache_frame_start": 10,
+            "cache_frame_end": 400,
+        },
+    },
     "execute_blender_script": {
         "minimal": {"script": "print(1)"},
         "full": {"script": "print(1)", "timeout": 5, "max_output_chars": 100},
@@ -309,6 +422,15 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "faces": [[0, 1, 2]],
             "location": [1, 2, 3],
             "collection_name": "Props",
+        },
+    },
+    "clean_blender_mesh": {
+        "minimal": {"object_name": "Cube"},
+        "full": {
+            "object_name": "Cube",
+            "merge_distance": 0.001,
+            "dissolve_degenerate_distance": 0.0001,
+            "recalculate_normals": True,
         },
     },
     "apply_simready_metadata": {
@@ -340,6 +462,9 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "object_names": ["Cube"],
             "embed_metadata": False,
             "validate_before_export": False,
+            "include_children": False,
+            "include_lights_and_cameras": True,
+            "force": True,
         },
     },
     "setup_simready_hierarchy": {

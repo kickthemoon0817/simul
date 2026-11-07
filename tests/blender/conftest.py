@@ -41,3 +41,47 @@ def mathutils(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     module = fake_mathutils()
     monkeypatch.setitem(sys.modules, "mathutils", module)
     return module
+
+
+@pytest.fixture
+def fbx_parser(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    """Install a stand-in for Blender's ``io_scene_fbx.parse_fbx``.
+
+    import_file reads an FBX's texture paths through it before importing.
+    Append ``{b"FileName": ..., b"RelativeFilename": ...}`` dicts to the
+    returned module's ``textures`` for the Texture objects the file holds; a
+    ``b"name"`` entry is the object's name, which the importer falls back to.
+
+    Returns:
+        The installed ``parse_fbx`` module.
+    """
+    from types import SimpleNamespace
+
+    module = ModuleType("io_scene_fbx.parse_fbx")
+    textures: list = []
+
+    def parse(path: str) -> tuple:
+        def element(id_: bytes, props: list, elems: list) -> SimpleNamespace:
+            return SimpleNamespace(id=id_, props=props, elems=elems)
+
+        objects = [
+            element(
+                b"Texture",
+                [0, texture.get(b"name", "").encode() + b"\x00\x01Texture", b""],
+                [
+                    element(key, [value.encode()], [])
+                    for key, value in texture.items()
+                    if key != b"name"
+                ],
+            )
+            for texture in textures
+        ]
+        return element(b"", [], [element(b"Objects", [], objects)]), 7400
+
+    setattr(module, "parse", parse)
+    setattr(module, "textures", textures)
+    package = ModuleType("io_scene_fbx")
+    setattr(package, "parse_fbx", module)
+    monkeypatch.setitem(sys.modules, "io_scene_fbx", package)
+    monkeypatch.setitem(sys.modules, "io_scene_fbx.parse_fbx", module)
+    return module

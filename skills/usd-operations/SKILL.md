@@ -12,7 +12,7 @@ This skill teaches you how to load, inspect, analyze, and modify USD files using
 
 | Tool set | When to use | Identifier |
 |---|---|---|
-| `load_usd_file`, `get_prim_info`, `search_prims`, `get_mesh_info`, `get_bounding_box`, `summarize_scene`, `create_prim`, `update_prim_attributes`, `delete_prim` | Offline/headless USD file analysis and editing | `stage_id` |
+| `load_usd_file`, `get_prim_info`, `get_prim_subtree`, `search_prims`, `get_mesh_info`, `get_bounding_box`, `summarize_scene`, `create_prim`, `update_prim_attributes`, `delete_prim` | Offline/headless USD file analysis and editing | `stage_id` |
 | `get_isaac_prim_detail` (aspects: info, mesh, ...), `search_isaac_prims`, etc. | Live Isaac Sim scene (running instance) | prim path only |
 
 **Never mix these two sets.** If Isaac Sim is not running, use the headless tools with `stage_id`. If Isaac Sim is running with a stage open, use the Isaac tools (names containing `isaac`, such as `get_isaac_prim_detail`).
@@ -68,7 +68,14 @@ mcp__simul__get_prim_info
   prim_path: "/World/Robot/base_link"
 ```
 
-Returns type, attributes (with values), children, and applied schemas.
+Returns type, applied API schemas, bounding box, transform, children, attributes, relationships and metadata.
+
+- Each attribute is `{ "type": "point3f", "value": [0, 0, 0.2], "authored": true }`. `authored: false` means the value is the schema fallback, not something the file sets.
+- Values are plain JSON: vectors are lists, quaternions `[w, x, y, z]`, matrices lists of rows, and an infinite or NaN float the string `"Infinity"`, `"-Infinity"` or `"NaN"`.
+- Arrays carry `length` and only their first `array_preview` elements (default 16), with `truncated: true` when cut.
+- Narrow a large prim with `attribute_filter: ["physics:*"]`, and read animated values with `time_code`.
+- `relationships` holds `{targets, authored}` per relationship: joint `physics:body0`/`body1`, `material:binding`, `physics:filteredPairs`.
+- `metadata` holds `specifier`, `instanceable`, `composition` (references, payloads, inherits and specializes, each with `resolved`), `variant_sets`, `opinion_layers` and other authored metadata.
 
 ### 4. Search for Prims
 
@@ -90,10 +97,27 @@ mcp__simul__search_prims
 
 **`search_type` options:**
 
-| Value | Behavior |
+| Value | Behavior (`match: "auto"`) |
 |---|---|
-| `by_type` | Match USD schema type: `Mesh`, `Xform`, `Scope`, `Material`, `Camera`, `DistantLight`, `SphereLight`, `RectLight` |
-| `by_name` | Substring match on prim name (case-insensitive) |
+| `by_type` | A registered type matches its whole schema family: `PhysicsJoint` finds every joint, `Gprim` every geometric primitive, `Boundable` everything with extent. `match: "exact"` for the exact type only |
+| `by_api_schema` | Applied API schemas: `PhysicsRigidBodyAPI`, `PhysicsCollisionAPI`; `PhysicsDriveAPI` also finds `PhysicsDriveAPI:angular` |
+| `by_name` | Substring of the prim name, case-insensitive; an empty query lists every prim |
+| `by_path` | Substring of the full path; use `match: "glob"` for `/World/*/joints/*` |
+
+`match` can also be `exact`, `substring`, `glob` or `regex`; pass `case_sensitive: true` to respect case. Instances are searched; `root_path` limits the search to a subtree. Results are paged: `limit` (default 200), `total_matches`, and `next_offset` to pass as the next `offset`.
+
+### 4b. List a Subtree
+
+Read a robot or asset in one call instead of one `get_prim_info` per prim:
+
+```
+mcp__simul__get_prim_subtree
+  stage_id: "abc123"
+  root_path: "/World/Robot"
+  include_properties: true
+```
+
+Each prim has `path`, `type`, `depth`, `child_count` and `api_schemas`. With `include_properties`, each prim also carries its authored attributes and relationship targets, such as joint `physics:body0`/`body1`. Paged with `max_results`/`offset`.
 
 ### 5. Analyze Mesh Geometry
 
@@ -105,7 +129,11 @@ mcp__simul__get_mesh_info
   prim_path: "/World/Robot/base_link/visuals/mesh"
 ```
 
-Returns: `{ "vertex_count": 2048, "face_count": 1024, "has_normals": true, "uv_sets": ["st"], "extent": [...] }`
+Returns: `{ "vertex_count": 2048, "face_count": 1024, "has_normals": true, "normals_source": "primvars:normals", "uv_sets": ["st"], "is_closed": true, "surface_area": ..., "volume": ..., "bbox": {...}, "materials": [...], "physics_material": ..., "subsets": [...] }`
+
+- `materials` lists the material bound to the mesh, then those bound to its `materialBind` geometry subsets; each such subset also carries its `material`.
+- `volume` is null unless the mesh is closed. Area, volume and bounds are in the mesh's own space, before transforms.
+- Pass `time_code` for a deforming mesh: `points_time_samples > 0` means its points are animated, and at the default time it may have none.
 
 Use this to assess mesh complexity before simulation (high-poly meshes should use convex decomposition for collision).
 
@@ -137,7 +165,11 @@ mcp__simul__summarize_scene
 
 Use `format: "json"` for structured output when parsing programmatically. Use `format: "text"` for human-readable summaries.
 
-`include_meshes: true` adds per-mesh vertex/face counts to the summary. Set to `false` for faster results on large scenes.
+`include_meshes: true` adds mesh totals (vertices, faces, normals, UVs, closed meshes, area, volume) to the summary; it is fast even on large scenes.
+
+- `scene_size_meters` converts the bounds with the stage's `metersPerUnit`.
+- `animation_info.duration_seconds` is the animated span in seconds. Animation is detected from time samples too, when no time range is authored.
+- `warnings` flags referenced or sublayered files whose `upAxis` or `metersPerUnit` differs from the stage's: such an asset shows up scaled or rotated, because USD does not convert it.
 
 ### 8. Modify the USD File
 
@@ -165,6 +197,24 @@ mcp__simul__delete_prim
   stage_id: "abc123"
   prim_path: "/World/UnwantedPrim"
 ```
+
+Every edit is all or nothing: a call that fails changes nothing, and its
+error names the prim, each rejected attribute and the reason.
+
+- Paths are absolute (`/World/Box`, never `World/Box`).
+- `create_prim` takes a concrete registered type (`Xform`, `Cube`, ...) and
+  refuses an existing path unless `redefine_existing: true`.
+- `active`, `instanceable` and `kind` in `attributes` set prim metadata.
+- Values take the attribute's type: quaternions are `[w, x, y, z]`,
+  matrices are lists of rows, and a new `xformOp:translate` is a `double3`
+  op added to `xformOpOrder`. Name a new custom attribute's type with
+  `attribute_types: {"custom:offset": "double3"}`.
+- An animated attribute needs `time_code: <frame>`; without it the call is
+  refused, because a default value would be hidden by the time samples.
+- `delete_prim` refuses `/`, and the default prim unless
+  `allow_root_delete: true`. A prim that also comes from a sublayer or a
+  reference cannot be deleted from the root layer; deactivate it with
+  `attributes: {"active": false}` instead.
 
 **Note:** Modifications via these tools write back to the loaded stage. To persist changes to disk, the stage must be saved — use `execute_isaac_script` with `stage.Export(path)` if Isaac Sim is running, or be aware that headless modifications may require a separate save step depending on server configuration.
 
@@ -207,4 +257,4 @@ mcp__simul__delete_prim
 - **Forgetting `stage_id`**: Every headless call requires the `stage_id` from `load_usd_file`. Calling `get_prim_info` without it will fail.
 - **Stage ID is session-scoped**: The `stage_id` is not persistent across tool sessions. If the session resets, call `load_usd_file` again.
 - **Large scenes**: `summarize_scene` with `include_meshes: true` on a scene with thousands of meshes can be slow. Use `include_meshes: false` for a quick overview first.
-- **`by_name` is substring match**: `search_prims` with `by_name: "link"` will match `base_link`, `arm_link_1`, etc. Use more specific queries to narrow results.
+- **`by_name` is a case-insensitive substring match** by default: `"link"` matches `base_link`, `ARM_LINK_1`, etc. Use `match: "exact"`, `"glob"` or `"regex"` (and `case_sensitive`) to narrow it.

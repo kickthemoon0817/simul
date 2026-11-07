@@ -17,7 +17,14 @@ commands and their parameters, run `simul commands` (always JSON).
   1 to 65535, and every timeout option (`-t/--timeout`, `--wait-timeout`) a
   finite number of seconds greater than 0. Any other value exits 2 with
   `error_type: InvalidArgument`: the JSON envelope under `--json`, a message
-  on stderr otherwise.
+  on stderr otherwise. So does an unknown `--transport`, `--backends`,
+  `--log-level`, `--unreal-tools`, `--blender-tools`, `--unreal-mode` or
+  `--blender-mode` value.
+- Settings that cannot be used (a config file that is missing or not valid
+  YAML, an invalid value such as `UNREAL__PORT=70000`, an unknown security
+  key) exit 2 with `error_type: ConfigError` from every command, naming the
+  setting, its source and the reason in `details.errors`. See
+  [configuration.md](configuration.md#when-the-configuration-is-wrong).
 
 ```bash
 simul --json info
@@ -31,7 +38,7 @@ simul isaac scene | jq .
 | `simul server` | Start the MCP server |
 | `simul info [--config FILE]` | Backends reachable from this machine and the tools registered for them |
 | `simul commands` | Every CLI command with its parameters, as JSON |
-| `simul validate-config FILE` | Validate a YAML configuration file |
+| `simul validate-config FILE` | Validate a YAML configuration file strictly: YAML errors, unknown keys (with suggestions) and invalid values are errors (exit 1); retired keys and unknown non-security `SECTION__` variables are warnings |
 | `simul version` | Version information |
 | `simul stats [--tool NAME] [--recent N] [--reset]` | Tool usage statistics from the persistent log; `--reset` clears it |
 | `simul logs paths` | Resolved log file paths for the current settings |
@@ -53,20 +60,29 @@ simul server --config /abs/path/config.yaml --log-level DEBUG
 
 | Option | Meaning |
 |---|---|
-| `-c, --config FILE` | YAML configuration file (default: the packaged `default.yaml`) |
+| `-c, --config FILE` | YAML configuration file (default: `$CONFIG_FILE`, else the packaged `default.yaml`); missing or invalid exits 2 with `ConfigError` |
 | `-t, --transport` | `stdio` (default; the client spawns the server), `http` (streamable HTTP) or `sse` (legacy) |
 | `-b, --backends` | Comma-separated subset of `isaac,unreal,usd,blender`. Default: every available backend, Isaac Sim only on Linux and Windows; naming `isaac` registers it on any OS ([isaac-sim.md](isaac-sim.md#platforms)) |
 | `--unreal-tools` | `thin` (default, six tools) or `full` (every granular Unreal tool). Overrides `unreal.tool_surface` |
 | `--blender-tools` | `full` (default) or `thin` (the essentials in `THIN_BLENDER_TOOLS`). Overrides `blender.tool_surface` |
 | `--unreal-mode` | `endpoint` (default) or `attached` (the editor chosen with `simul unreal attach`) |
 | `--blender-mode` | `embedded` (default, local `bpy`) or `attached` (the window chosen with `simul blender attach`) |
-| `-l, --log-level` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
+| `-l, --log-level` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (any case); anything else exits 2 |
 | `-v, --verbose` | Verbose logging |
 | `--allow-public` | Let `http`/`sse` bind a non-loopback `server.host` (`SERVER__ALLOW_PUBLIC=true`) |
 
 `--backends` also limits the startup probes: backends you did not select are
 neither probed nor built. Isaac Sim is not probed either when its tools are
 skipped (on macOS, or with `ISAAC_SIM__ENABLED=false`); the banner says so.
+
+The server prints simul's banner on stderr; FastMCP's own banner, and the
+PyPI update check that came with it, are off. MCP clients see simul's version
+in `serverInfo.version`, the same one `simul version` prints. SIGTERM stops
+the server the way Ctrl-C does, over stdio and HTTP alike: the adapters are
+closed (`Simul 3D MCP Server shut down` in the log) and the process exits 0.
+State (logs, usage log, sessions) goes under `$SIMUL_HOME` (default
+`~/.simul`), created on first write; see
+[configuration.md](configuration.md#state-directory-simul_home).
 
 With `--transport http` or `sse` the server checks every request's `Host`
 and `Origin` headers against loopback, the bound address and
@@ -112,6 +128,7 @@ lifecycle.
 | `ping` | Check connectivity |
 | `runtime-info` | Transport, bridge state (`busy`, `current_action`) and runtime diagnostics |
 | `interrupt` | Stop the script the bridge is running |
+| `claims [--port N] [--agent ID] [--clear]` | List the instance claims the MCP servers on this machine hold, or clear them ([configuration.md](configuration.md#multi-agent-claims)) |
 | `bridge-capabilities` / `bridge-config` | Read the bridge's capability envelope or settings |
 | `bridge-set-unsafe --enable/--disable [--restart]` | Toggle the bridge's raw `execute_script` action (not a security boundary; see [configuration.md](configuration.md#security)) |
 
@@ -202,7 +219,7 @@ locally.
 
 | Command | Purpose |
 |---|---|
-| `install-bridge [--output PATH]` | Build the add-on ZIP (default `~/.simul/blender/simul_blender_bridge.zip`) |
+| `install-bridge [--output PATH]` | Build the add-on ZIP (default `$SIMUL_HOME/blender/simul_blender_bridge.zip`, `SIMUL_HOME` defaulting to `~/.simul`) |
 | `instances` | Bridge-enabled Blender processes, window IDs, files, scenes and unsaved state |
 | `attach [--instance ID] [--window ID]` | Select a window; IDs are required only when the choice is ambiguous |
 | `status` | Verify the saved attachment against the running process |
@@ -217,7 +234,7 @@ Headless commands; no application needs to be running.
 | Command | Purpose |
 |---|---|
 | `info FILE` | Stage metadata, prim counts and mesh statistics |
-| `validate FILE` | Validate a USD file without fully loading it |
+| `validate FILE` | Open the file with pxr and list its issues; exits 1 when it is invalid (see [tools.md](tools.md#headless-usd)) |
 | `summary FILE [--format text\|json]` | Scene summary |
 
 The CLI reads any path you give it. The equivalent MCP tools only accept
