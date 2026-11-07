@@ -296,23 +296,29 @@ REFERENCE_ASSET_CORE = """\
             _roll_back()
             return _code_nodes_refusal(found)
         units = _metrics(stage, layer)
+        declined = None
         if _needs_correction(units) and correct_units:
             own_ops = [
                 op.GetOpName() for op in UsdGeom.Xformable(prim).GetOrderedXformOps()
                 if not op.GetOpName().endswith(":unitsResolve")
             ] if prim.IsA(UsdGeom.Xformable) else None
             if own_ops is None:
-                units["notes"].append("the prim is a " + prim.GetTypeName() + ", not Xformable; nothing applied")
+                declined = (
+                    "correct_units was not applied: the prim is a " + prim.GetTypeName()
+                    + ", not Xformable."
+                )
             elif own_ops:
                 # Ops from the asset root are in asset units; corrected in
                 # place they would apply unconverted.
-                units["notes"].append(
-                    "the prim already has transform ops (" + ", ".join(own_ops) + "); a correction "
-                    "here would leave them unconverted, so none was applied. import_isaac_asset "
-                    "wraps the reference in a corrected Xform instead."
+                declined = (
+                    "correct_units was not applied: the prim already has transform ops ("
+                    + ", ".join(own_ops) + "), which a correction here would leave unconverted. "
+                    "import_isaac_asset wraps the reference in a corrected Xform instead."
                 )
             else:
                 _add_correction_ops(prim, units)
+            if declined is not None:
+                units["notes"].append(declined)
         elif _needs_correction(units):
             units["notes"].append("mismatch reported, not corrected (correct_units=false)")
         result = {
@@ -323,8 +329,11 @@ REFERENCE_ASSET_CORE = """\
             "child_count": len(prim.GetChildren()),
             "units": units,
         }
-        if warning is not None:
-            result["warning"] = warning
+        # The caller asked for the correction, so a refusal to apply it is
+        # surfaced at the top level, not only inside units.notes.
+        warnings = [text for text in (warning, declined) if text is not None]
+        if warnings:
+            result["warning"] = " ".join(warnings)
         return result
 """
 

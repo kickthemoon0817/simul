@@ -7,7 +7,9 @@ from typing import Any, Dict, Optional
 from ...schemas.common import ErrorResponse
 from ._shared import (
     DEFAULT_MAX_RESULTS,
+    TRAVERSAL_PREDICATE_CORE,
     FloatList,
+    _compose_script,
     _pyval,
 )
 from .._meta import DeprecatedAlias, SandboxedPath, tool_meta
@@ -430,7 +432,10 @@ class ExplorationMixin:
         description=(
             "Get the structure under one prim (a robot, an imported asset) as a flat, "
             "traversal-ordered list with depth, type, and child count for each prim. "
-            "Paged (max_results/offset)."
+            "max_depth=-1 is unlimited. Descends into instanceable prims (entries there "
+            "carry instance_proxy=true) unless include_instance_proxies=false; "
+            "include_inactive=true also lists deactivated prims (active=false). Paged "
+            "(max_results/offset)."
         ),
         read_only=True,
         idempotent=True,
@@ -442,30 +447,43 @@ class ExplorationMixin:
         max_depth: int = 5,
         max_results: int = 150,
         offset: int = 0,
+        include_instance_proxies: bool = True,
+        include_inactive: bool = False,
     ) -> Dict[str, Any]:
         """
         Get a full subtree as a flat list with depth info.
 
         Args:
             root_path: USD prim path of the subtree root.
-            max_depth: Maximum depth to traverse below root_path.
+            max_depth: Maximum depth to traverse below root_path; -1 for
+                unlimited, as in list_isaac_prims.
             max_results: Maximum number of prims to return per page. Clamped
                 to [1, 1000]; the effective cap is reported as applied_limit.
             offset: Number of prims (in traversal order) to skip before the
                 page starts; pass the previous page's next_offset to continue.
+            include_instance_proxies: Descend into instanceable prims, where
+                Isaac robot assets keep their meshes and colliders; entries
+                there carry ``instance_proxy: true``.
+            include_inactive: Also list deactivated prims (``active: false``).
 
         Returns:
             Dict with a page of prims showing path, type, name, depth, and
-            child count.
+            child count (counted with the same traversal rules).
         """
         _root_path = _pyval(root_path)
         max_results = max(1, min(max_results, 1000))
         offset = max(0, offset)
-        script = textwrap.dedent(f"""\
+        _max_depth = _pyval(int(max_depth))
+        _proxies = _pyval(bool(include_instance_proxies))
+        _inactive = _pyval(bool(include_inactive))
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import Usd
-
+            """,
+            TRAVERSAL_PREDICATE_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
@@ -480,13 +498,17 @@ class ExplorationMixin:
                     matched = 0
                     offset = {offset}
                     limit = {max_results}
-                    prim_iter = iter(Usd.PrimRange(root))
+                    max_d = {_max_depth}
+                    predicate = _traversal_predicate({_proxies}, {_inactive})
+                    prim_iter = iter(Usd.PrimRange(root, predicate))
                     for p in prim_iter:
                         path_str = str(p.GetPath())
                         depth = len(path_str.rstrip("/").split("/")) - 1 - root_depth
-                        if depth >= {max_depth}:
+                        # -1 is unlimited, as in list_isaac_prims; it used to
+                        # prune at the root and return nothing below it.
+                        if max_d >= 0 and depth >= max_d:
                             prim_iter.PruneChildren()
-                        if depth > {max_depth}:
+                        if max_d >= 0 and depth > max_d:
                             continue
                         matched += 1
                         if matched <= offset:
@@ -494,13 +516,20 @@ class ExplorationMixin:
                         if len(prims) >= limit:
                             truncated = True
                             break
-                        prims.append({{
+                        entry = {{
                             "path": path_str,
                             "name": p.GetName(),
                             "type": p.GetTypeName(),
                             "depth": depth,
-                            "child_count": len(p.GetChildren()),
-                        }})
+                            # Counted with the traversal's own rules: an
+                            # instance's children are proxies GetChildren skips.
+                            "child_count": len(p.GetFilteredChildren(predicate)),
+                        }}
+                        if p.IsInstanceProxy():
+                            entry["instance_proxy"] = True
+                        if not p.IsActive():
+                            entry["active"] = False
+                        prims.append(entry)
                     print(json.dumps({{
                         "root_path": {_root_path},
                         "count": len(prims),
@@ -508,10 +537,13 @@ class ExplorationMixin:
                         "applied_limit": limit,
                         "truncated": truncated,
                         "next_offset": offset + len(prims) if truncated else None,
-                        "max_depth": {max_depth},
+                        "max_depth": max_d,
+                        "include_instance_proxies": {_proxies},
+                        "include_inactive": {_inactive},
                         "prims": prims,
                     }}))
-        """)
+            """,
+        )
         return await self._execute_json_script(script)
 
     async def get_isaac_prim_relationships(self, prim_path: str) -> Dict[str, Any]:
