@@ -1159,8 +1159,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "level runs and its physics steps, no player) or, with mode play, a Play session that spawns "
             "the player's pawn. Exact frame stepping is unsupported (step is refused). While either "
             "runs, Unreal's editor spawns and deletes no actors, so those tools return PIEActive until "
-            "it stops; level reads keep working and report pie_active, and the physics tools act on and "
-            "read the simulation's copies of the actors."
+            "it stops; level reads keep working and report pie_active. apply_unreal_force, "
+            "get_unreal_physics_state and list_unreal_simulation_actors act on and read the simulation's "
+            "copies of the actors; physics and collision edits given an editor path change the editor "
+            "world, which the running simulation does not see."
         ),
         response=UnrealControlSimulationResponse,
         read_only=False,
@@ -1275,10 +1277,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "control_unreal_simulation; the editor world's bodies never move, so the call is refused "
             "without one). Editor and simulation paths are both accepted. Units are Unreal's: force in "
             "kg cm/s^2 and impulse in kg cm/s (1 N or 1 N s is 100), or N and N s with units si; the "
-            "application point is a world location in cm. An impulse changes the velocity at once by "
-            "impulse / mass; a force acts for one frame unless duration keeps it on for that many "
-            "seconds of simulation time. Returns the copy acted on, its mass and the expected change "
-            "of velocity."
+            "application point is a world location in cm, fixed in the world while the body moves. An "
+            "impulse changes the velocity at once by impulse / mass; a force acts for one physics step "
+            "unless duration keeps it on for that many seconds of physics time, in step with gravity. "
+            "Returns the copy acted on, its mass and the expected change of velocity."
         ),
         response=UnrealApplyForceResponse,
         read_only=False,
@@ -1297,9 +1299,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 float,
                 0.0,
                 description=(
-                    "Seconds of simulation time a force keeps acting, 0 to 600: every frame the body "
-                    "gets the force's momentum over the elapsed time, force x duration in all (paused "
-                    "time adds nothing). 0 acts for one frame only. Not for an impulse."
+                    "Seconds of physics time a force keeps acting, 0 to 600: every frame the body gets, as "
+                    "an impulse, the force's momentum over the physics time that frame simulated (the frame "
+                    "time, at most Unreal's physics step limit, 1/30 s by default), so it keeps pace with "
+                    "gravity; paused time adds nothing. 0 acts for one physics step. Not for an impulse."
                 ),
             ),
             ToolParam(
@@ -1338,7 +1341,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "or asleep, mass and center of mass. While a simulation runs each actor is read through "
             "its copy there (the editor world's actors stay where they were placed), otherwise in the "
             "editor world; world picks one. Editor and simulation paths are both accepted, and each "
-            "body lists both."
+            "body lists both. Paged: total counts every body, next_offset starts the next page."
         ),
         response=UnrealPhysicsStateResponse,
         read_only=True,
@@ -1368,7 +1371,13 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "(refused when none runs); editor."
                 ),
             ),
-            ToolParam("max_results", int, 100, description="Most bodies returned, 1 to 1000."),
+            ToolParam(
+                "max_results",
+                int,
+                100,
+                description="Most bodies on this page, 1 to 1000; a page also stops before 30,000 characters.",
+            ),
+            ToolParam("offset", int, 0, description="Bodies to skip: the previous page's next_offset."),
         ),
     ),
     UnrealTool(
@@ -1376,7 +1385,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         description=(
             "List the running simulation's actors with their simulation and editor paths (null editor "
             "path for an actor the simulation spawned, such as the player's pawn) and whether they "
-            "simulate physics. Refused when no simulation runs."
+            "simulate physics, a page at a time (total, next_offset). Refused when no simulation runs."
         ),
         response=UnrealListSimulationActorsResponse,
         read_only=True,
@@ -1398,7 +1407,13 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 convert=_optional_text,
             ),
             ToolParam("simulating_only", bool, False, description="Only actors with a body that simulates physics."),
-            ToolParam("max_results", int, 200, description="Most actors returned, 1 to 5000."),
+            ToolParam(
+                "max_results",
+                int,
+                200,
+                description="Most actors on this page, 1 to 5000; a page also stops before 30,000 characters.",
+            ),
+            ToolParam("offset", int, 0, description="Actors to skip: the previous page's next_offset."),
         ),
     ),
     # -- USD and SimReady ----------------------------------------------------------

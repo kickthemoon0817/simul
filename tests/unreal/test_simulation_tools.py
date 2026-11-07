@@ -211,10 +211,87 @@ def test_a_force_without_duration_acts_for_one_frame_and_says_so(
     editor.frame(120)
 
     assert result["application"] == "one_frame" and result["expected_delta_v"] is None
-    assert "one frame" in result["warning"] and "duration" in result["warning"]
+    assert "one physics step" in result["warning"] and "duration" in result["warning"]
+    assert "0.0083 s" in result["warning"]  # the 1/120 s step, under the 1/30 s limit
+    assert result["physics_step_limit_s"] == pytest.approx(1 / 30)
     # Twice the weight for one 1/120 s frame: 2 g / 120, about 16 cm/s, then nothing.
     assert copy.root_component.velocity.x == pytest.approx(2 * GRAVITY / 120)
     assert editor.tickers == {}
+
+
+def test_the_one_step_warning_quotes_the_capped_physics_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    editor = Editor()
+    cube = simulated_cube(editor)
+    editor.start()
+    editor.frame(1, frame_seconds=0.1)  # 10 fps: physics steps 1/30 s a frame
+    session = physics_session(monkeypatch, editor)
+
+    result = run(session.apply_force(cube.get_path_name(), force_x=1000.0))
+
+    assert "0.0333 s" in result["warning"], result["warning"]
+
+
+@pytest.mark.parametrize("frame_seconds", [1 / 120, 0.1, 0.25])
+def test_a_force_equal_to_the_weight_holds_the_body_at_any_frame_rate(
+    monkeypatch: pytest.MonkeyPatch, frame_seconds: float
+) -> None:
+    """Review of #320: the force was counted in game time, but Unreal's physics,
+    gravity included, steps at most MaxPhysicsDeltaTime (1/30 s) a frame. Holding a
+    10 kg cube up with exactly m g for 2 s at 10 fps gained +1216 cm/s on UE 5.7.4."""
+    editor = Editor()
+    cube = simulated_cube(editor, gravity=True)
+    cube.root_component.body.update(override_mass=True, mass_in_kg_override=10.0)
+    editor.start()
+    copy = editor.actors[PIE_LEVEL + cube.name]
+    editor.frame(3, frame_seconds=frame_seconds)
+    session = physics_session(monkeypatch, editor)
+
+    falling = copy.root_component.velocity.z
+    result = run(
+        session.apply_force(cube.get_path_name(), force_z=10.0 * GRAVITY, duration=2.0)
+    )
+    step = min(frame_seconds, 1 / 30)
+    for _ in range(round(2.0 / step)):
+        # Every frame of the force the body keeps the speed it fell at, within the
+        # one step's share the call delivers ahead of that frame's gravity.
+        assert abs(copy.root_component.velocity.z - falling) <= GRAVITY * step + 1e-6
+        editor.frame(1)
+
+    # Over the 2 s of physics time the force served, it carried as much momentum
+    # as gravity took: the body kept the speed it fell at.
+    assert copy.root_component.velocity.z == pytest.approx(
+        falling, abs=1e-6
+    ), frame_seconds
+    assert result["expected_delta_v"] == pytest.approx([0, 0, 2.0 * GRAVITY])
+    assert editor.tickers == {}  # served 2 s of physics time, then removed
+
+
+def test_a_continuous_force_lasts_its_duration_in_physics_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At 10 fps a frame steps 1/30 s of physics, so 1 s of force takes 30 frames, 3 s of game time."""
+    editor = Editor()
+    cube = simulated_cube(editor)
+    editor.start()
+    editor.frame(1, frame_seconds=0.1)
+    copy = editor.actors[PIE_LEVEL + cube.name]
+    session = physics_session(monkeypatch, editor)
+
+    run(
+        session.apply_force(
+            cube.get_path_name(), force_x=CUBE_MASS * 300.0, duration=1.0
+        )
+    )
+    editor.frame(28)
+    assert (
+        len(editor.tickers) == 1
+    )  # 29/30 s served: 1/30 s by the call, then a step a frame
+    editor.frame(3)
+    assert editor.tickers == {}
+    # 300 cm/s^2 for 1 s of physics time, not for the 3 s of game time it took.
+    assert copy.root_component.velocity.x == pytest.approx(300.0, rel=1e-6)
 
 
 def test_a_force_with_a_duration_acts_every_frame_for_that_long(
@@ -259,8 +336,9 @@ def test_a_continuous_force_waits_while_paused_and_ends_with_the_simulation(
     editor.frame(12)
     editor.paused = True
     editor.frame(120)
-    # 100 cm/s^2 for the 12 frames of game time that passed, then nothing while paused.
-    assert copy.root_component.velocity.x == pytest.approx(100 * 12 / 120)
+    # 100 cm/s^2 for the step the call delivered and the 12 frames that passed,
+    # then nothing while paused.
+    assert copy.root_component.velocity.x == pytest.approx(100 * 13 / 120)
     assert len(editor.tickers) == 1
     editor.paused = False
     editor.stop()
@@ -286,9 +364,48 @@ def test_bad_force_arguments_are_refused_before_the_editor_is_asked(
     cube = simulated_cube(editor)
     session = physics_session(monkeypatch, editor)
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(unreal_runtime.ArgumentError, match=message) as raised:
         run(session.apply_force(cube.get_path_name(), **{"force_x": 1.0, **kwargs}))
     assert editor.scripts == []
+    # A ValidationError naming the problem, still a ValueError to except clauses.
+    assert isinstance(raised.value, ValueError)
+    assert raised.value.error_type == "ValidationError"
+    assert raised.value.details["code"] in (
+        "DURATION_WITH_IMPULSE",
+        "OUT_OF_RANGE",
+        "NOT_FINITE",
+        "UNKNOWN_UNITS",
+        "PARTIAL_LOCATION",
+    )
+
+
+def test_pause_without_a_simulation_is_simulation_not_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #320: pause and resume said InvalidState while every other
+    simulation tool says SimulationNotRunning."""
+    session = physics_session(monkeypatch, Editor())
+
+    for action in ("pause", "resume"):
+        result = run(session.control_simulation(action))
+        assert result["error_type"] == scripts.SIMULATION_NOT_RUNNING, result
+        assert result["details"]["code"] == "SIMULATION_NOT_RUNNING"
+        assert "control_unreal_simulation" in result["details"]["hint"]
+
+
+def test_a_read_refusal_does_not_talk_about_forces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    editor = Editor()
+    cube = simulated_cube(editor)
+    session = physics_session(monkeypatch, editor)
+
+    read = run(session.get_physics_state([cube.get_path_name()], world="simulation"))
+    force = run(session.apply_force(cube.get_path_name(), force_z=5, is_impulse=True))
+
+    assert read["error_type"] == force["error_type"] == scripts.SIMULATION_NOT_RUNNING
+    assert "force" not in (read["error"] + read["details"]["hint"]).lower()
+    assert "lost" in force["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -364,11 +481,117 @@ def test_physics_state_by_tag_is_bounded(monkeypatch: pytest.MonkeyPatch) -> Non
     session = physics_session(monkeypatch, editor)
 
     result = run(session.get_physics_state(tag_filter="props", max_results=3))
+    rest = run(
+        session.get_physics_state(
+            tag_filter="props", max_results=3, offset=result["next_offset"]
+        )
+    )
 
     assert (result["count"], result["total"], result["truncated"]) == (3, 5, True)
+    assert (result["offset"], result["next_offset"]) == (0, 3)
+    assert "offset=3" in result["hint"]
     assert all(
         body["simulation_path"].startswith(PIE_LEVEL) for body in result["bodies"]
     )
+    assert (
+        rest["count"],
+        rest["next_offset"],
+        rest["truncated"],
+        rest.get("hint"),
+    ) == (2, None, False, None)
+    names = [body["name"] for body in result["bodies"] + rest["bodies"]]
+    assert sorted(names) == [f"Box{n}" for n in range(5)]
+
+
+def _many_bodies(editor: Editor, count: int, tag: str = "props") -> None:
+    for n in range(count):
+        simulated_cube(editor, f"Pallet_Box_With_A_Long_Label_{n:04d}").tags.append(tag)
+
+
+def test_a_large_physics_state_read_pages_within_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #320: 1020 tagged bodies with max_results 1000 came back as 51,
+    cut by the server's budget with a hint naming parameters the tool lacked."""
+    editor = Editor()
+    _many_bodies(editor, 1020)
+    editor.start()
+    session = physics_session(monkeypatch, editor)
+
+    seen, offset, pages = [], 0, 0
+    while offset is not None:
+        page = run(
+            session.get_physics_state(
+                tag_filter="props", max_results=1000, offset=offset
+            )
+        )
+        assert len(json.dumps(page["bodies"])) < unreal_runtime.PAGE_BUDGET_BYTES
+        assert page["total"] == 1020
+        if page["next_offset"] is not None:
+            assert (
+                "response budget" in page["hint"]
+                and f"offset={page['next_offset']}" in page["hint"]
+            )
+        seen += [body["simulation_path"] for body in page["bodies"]]
+        offset, pages = page["next_offset"], pages + 1
+    assert len(seen) == len(set(seen)) == 1020
+    assert pages > 1
+
+
+def test_a_large_simulation_listing_pages_within_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    editor = Editor()
+    _many_bodies(editor, 1051)
+    editor.start()
+    session = physics_session(monkeypatch, editor)
+
+    seen, offset = [], 0
+    while offset is not None:
+        page = run(session.list_simulation_actors(max_results=5000, offset=offset))
+        assert len(json.dumps(page["actors"])) < unreal_runtime.PAGE_BUDGET_BYTES
+        assert page["total"] == 1051
+        seen += [entry["simulation_path"] for entry in page["actors"]]
+        offset = page["next_offset"]
+    assert len(seen) == len(set(seen)) == 1051
+
+
+def test_a_body_given_by_both_its_paths_is_read_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    editor = Editor()
+    cube = simulated_cube(editor)
+    cube.tags.append("props")
+    editor.start()
+    session = physics_session(monkeypatch, editor)
+
+    result = run(
+        session.get_physics_state(
+            [cube.get_path_name(), PIE_LEVEL + cube.name], tag_filter="props"
+        )
+    )
+
+    assert (result["count"], result["total"]) == (1, 1)
+
+
+def test_a_destroyed_copy_is_no_counterpart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #320: a copy destroyed during the simulation stays findable until
+    garbage collection; the force came back as a ScriptError traceback and the
+    read as a body at the origin with no physics."""
+    editor = Editor()
+    cube = simulated_cube(editor)
+    editor.start()
+    editor.actors[PIE_LEVEL + cube.name].destroyed = True
+    session = physics_session(monkeypatch, editor)
+
+    force = run(session.apply_force(cube.get_path_name(), force_z=5, is_impulse=True))
+    state = run(session.get_physics_state([cube.get_path_name()]))
+    by_simulation_path = run(session.get_physics_state([PIE_LEVEL + cube.name]))
+
+    assert force["error_type"] == scripts.NOT_IN_SIMULATION
+    assert force["details"]["code"] == "NOT_IN_SIMULATION"
+    assert (state["count"], state["not_found"]) == (0, [cube.get_path_name()])
+    assert by_simulation_path["not_found"] == [PIE_LEVEL + cube.name]
 
 
 def test_physics_state_needs_paths_or_a_tag(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -509,6 +732,54 @@ def test_the_force_reply_keeps_its_fields_through_the_tool(
         [0, 0, 300],
     )
     assert payload["expected_delta_v"] == pytest.approx([0, 0, 300 / CUBE_MASS])
+    assert payload["physics_step_limit_s"] == pytest.approx(1 / 30)
+
+
+def _call_tool(instance: Any, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def call() -> Dict[str, Any]:
+        async with Client(instance.mcp) as client:
+            result = await client.call_tool(tool, arguments, raise_on_error=False)
+        texts = [
+            block.text
+            for block in result.content
+            if getattr(block, "type", None) == "text"
+        ]
+        return json.loads(texts[-1])
+
+    return run(call())
+
+
+def test_a_bad_argument_is_a_validation_error_with_a_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Review of #320: argument errors were ValueError with no details."""
+    editor = Editor()
+    cube = simulated_cube(editor)
+    editor.start()
+    instance = _server(monkeypatch, tmp_path, editor)
+
+    payload = _call_tool(
+        instance,
+        "apply_unreal_force",
+        {"actor_path": cube.get_path_name(), "duration": 601},
+    )
+    paged = _call_tool(
+        instance, "get_unreal_physics_state", {"tag_filter": "props", "offset": -1}
+    )
+
+    assert (payload["success"], payload["error_type"]) == (False, "ValidationError")
+    assert payload["details"] == {
+        "code": "OUT_OF_RANGE",
+        "parameter": "duration",
+        "value": 601.0,
+        "minimum": 0.0,
+        "maximum": 600.0,
+    }
+    assert (
+        paged["error_type"],
+        paged["details"]["code"],
+        paged["details"]["parameter"],
+    ) == ("ValidationError", "OUT_OF_RANGE", "offset")
 
 
 def test_the_simulation_tool_lists_its_actions_and_modes(

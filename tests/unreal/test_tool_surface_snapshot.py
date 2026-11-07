@@ -223,12 +223,14 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "tag_filter": "props",
         "world": "simulation",
         "max_results": 7,
+        "offset": 14,
     },
     "list_unreal_simulation_actors": {
         "class_filter": "StaticMeshActor",
         "tag_filter": "props",
         "simulating_only": True,
         "max_results": 9,
+        "offset": 18,
     },
     "import_unreal_usd": {
         "usd_path": "/tmp/in.usd",

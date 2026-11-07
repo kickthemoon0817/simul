@@ -1149,11 +1149,12 @@ class UnrealApplyForceResponse(BaseModel):
     application: Optional[str] = Field(
         None,
         description=(
-            "impulse (instant), one_frame (a force with duration 0, acting for one frame) or "
-            "continuous (a force re-applied every frame for duration_s)"
+            "impulse (instant), one_frame (a force with duration 0, acting for one physics step) or "
+            "continuous (each frame an impulse carrying the force over the physics time that frame "
+            "simulated, for duration_s of physics time)"
         ),
     )
-    duration_s: float = Field(0.0, description="Seconds of simulation time a continuous force acts")
+    duration_s: float = Field(0.0, description="Seconds of physics time a continuous force acts")
     mass_kg: Optional[float] = Field(None, description="Mass of the body in the simulation")
     expected_delta_v: Optional[List[float]] = Field(
         None,
@@ -1162,9 +1163,20 @@ class UnrealApplyForceResponse(BaseModel):
             "the body alone (gravity, contacts and damping add to it); null for one frame"
         ),
     )
+    physics_step_limit_s: Optional[float] = Field(
+        None,
+        description=(
+            "Longest physics step Unreal takes in one frame (MaxPhysicsDeltaTime, 1/30 s by default); a "
+            "slower frame advances physics by this much only. Null when Unreal sets no limit"
+        ),
+    )
     sim_time: Optional[float] = Field(None, description="Simulation game time when applied, s")
     ends_at_sim_time: Optional[float] = Field(
-        None, description="Simulation game time a continuous force stops at, s"
+        None,
+        description=(
+            "Simulation game time a continuous force stops at when no frame is slower than "
+            "physics_step_limit_s; slower frames stretch it"
+        ),
     )
     paused: bool = Field(False, description="Whether the simulation was paused (the force acts on resume)")
     warning: Optional[str] = Field(None, description="What to know about the result")
@@ -1218,10 +1230,13 @@ class UnrealPhysicsStateResponse(BaseModel):
     pie_active: bool = Field(False, description="Whether a simulation (Play or Simulate In Editor) runs")
     sim_time: Optional[float] = Field(None, description="Simulation game time, s; null for the editor world")
     paused: Optional[bool] = Field(None, description="Whether the simulation is paused; null for the editor")
-    bodies: List[UnrealBodyState] = Field(default_factory=list, description="Each actor read")
-    count: int = Field(0, description="Bodies returned")
-    total: int = Field(0, description="Actors matched")
-    truncated: bool = Field(False, description="Whether max_results left some out")
+    bodies: List[UnrealBodyState] = Field(default_factory=list, description="The bodies on this page")
+    count: int = Field(0, description="Bodies on this page")
+    total: int = Field(0, description="Bodies matched, on every page")
+    offset: int = Field(0, description="Bodies skipped before this page")
+    next_offset: Optional[int] = _next_offset_field()
+    truncated: bool = Field(False, description="Whether more bodies are left after this page")
+    hint: Optional[str] = _page_hint_field()
     not_found: List[str] = Field(
         default_factory=list, description="Paths with no actor, or no copy in the world read"
     )
@@ -1245,10 +1260,13 @@ class UnrealListSimulationActorsResponse(BaseModel):
     success: bool = Field(True, description="Operation success")
     error: Optional[str] = Field(None, description="Error message when success is False")
     world: str = Field(..., description="The simulation's world")
-    actors: List[UnrealSimulationActor] = Field(default_factory=list, description="Actors listed")
-    count: int = Field(0, description="Actors returned")
-    total: int = Field(0, description="Actors matched")
-    truncated: bool = Field(False, description="Whether max_results left some out")
+    actors: List[UnrealSimulationActor] = Field(default_factory=list, description="The actors on this page")
+    count: int = Field(0, description="Actors on this page")
+    total: int = Field(0, description="Actors matched, on every page")
+    offset: int = Field(0, description="Actors skipped before this page")
+    next_offset: Optional[int] = _next_offset_field()
+    truncated: bool = Field(False, description="Whether more actors are left after this page")
+    hint: Optional[str] = _page_hint_field()
     sim_time: Optional[float] = Field(None, description="Simulation game time, s")
 
 

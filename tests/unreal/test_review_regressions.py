@@ -428,7 +428,7 @@ async def test_simulation_lifecycle_and_query_errors(script_session, monkeypatch
         ("stop", "stopped"),
     ]:
         assert (await session.control_simulation(action))["state"] == state
-    assert (await session.control_simulation("pause"))["error_type"] == "InvalidState"
+    assert (await session.control_simulation("pause"))["error_type"] == "SimulationNotRunning"
     assert (await session.control_simulation("step"))[
         "error_type"
     ] == "UnsupportedOperation"

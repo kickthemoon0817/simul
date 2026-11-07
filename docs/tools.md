@@ -613,42 +613,64 @@ Behaviour worth knowing:
   mode spawns and possesses the player's pawn. Both are Play In Editor
   sessions, and everything below about PIE holds for either. Starting while a
   session runs resumes it if paused and otherwise leaves it as it is, whichever
-  mode it runs in (the reply's `mode` is then `null`). Single-frame stepping is
-  not supported by the editor and returns `UnsupportedOperation`; simulation
-  `frame_count` is `null` when the engine cannot report a simulation-specific
-  count.
+  mode it runs in (the reply's `mode` is then `null`); `pause` and `resume`
+  with no session running return `SimulationNotRunning`. Single-frame stepping
+  is not supported by the editor and returns `UnsupportedOperation`;
+  simulation `frame_count` is `null` when the engine cannot report a
+  simulation-specific count.
+- The physics, simulation and light tools refuse an argument out of range
+  before anything is sent, as a `ValidationError` whose `details.code` names
+  the problem (`OUT_OF_RANGE`, `NOT_FINITE`, `UNKNOWN_UNITS`,
+  `UNKNOWN_ACTION`, `PARTIAL_LOCATION` and the like) with the `parameter`,
+  `value` and range in `details`.
 - The running simulation is a copy of the editor world, `UEDPIE_<n>_<map>`, in
   which Unreal duplicates each actor at the same path, label and ActorGuid.
   Only that copy steps: the editor world's bodies read as simulating but never
-  move.
+  move. A copy destroyed during the simulation counts as none, though Unreal
+  keeps it findable until garbage collection.
   - `apply_unreal_force` acts on the actor's copy in the running simulation,
     given its editor path or its simulation path, and replies with
     `simulation_actor_path`, `world: "simulation"`, the body's `mass_kg` and
     `expected_delta_v`. With no simulation running it returns
-    `error_type: "SimulationNotRunning"`; an actor without a copy (spawned
-    after the simulation started, or not loaded in it) returns
-    `NotInSimulation`, and a copy that does not simulate physics returns
-    `IncompatibleBody`.
+    `error_type: "SimulationNotRunning"`; an actor without a live copy
+    (spawned after the simulation started, not loaded in it, or destroyed in
+    it) returns `NotInSimulation`, and a copy that does not simulate physics
+    returns `IncompatibleBody`.
   - Its units are Unreal's: a force in kg·cm/s² and an impulse in kg·cm/s
-    (1 N or 1 N·s is 100), or newtons and newton-seconds with `units: "si"`;
-    the application point is a world location in cm. An impulse changes the
-    velocity at once by impulse / mass. A force with `duration` 0 acts for one
-    frame only, since Unreal clears a force after each physics step (the reply
-    says so). A positive `duration`, up to 600 s of simulation time, keeps the
-    force on: every frame the body gets the force's momentum over the elapsed
-    game time, so it gets force × duration in all even when slow frames
-    shorten Unreal's physics steps. Paused time adds nothing, the force stops
-    with the simulation, and forces add up.
+    (1 N or 1 N·s is 100), or newtons and newton-seconds with `units: "si"`.
+    The application point is a world location in cm, fixed in the world for
+    the whole duration as the body moves; without one the force pushes the
+    center of mass. An impulse changes the velocity at once by impulse / mass.
+    A force with `duration` 0 acts for one physics step only, since Unreal
+    clears a force after each step (the reply says so).
+  - A positive `duration`, up to 600 s, keeps a force on for that much
+    physics time. Unreal's physics, gravity included, steps at most
+    `physics_step_limit_s` a frame (MaxPhysicsDeltaTime, 1/30 s by default;
+    with substepping, MaxSubsteps × MaxSubstepDeltaTime) however long the
+    frame, so every frame the body gets, as an impulse, the force's momentum
+    over the physics time that frame simulated. The force then keeps pace
+    with gravity at any frame rate: a body held up by exactly its weight keeps
+    its speed, give or take the one step the impulse lands behind. Frames
+    slower than the limit stretch the force in game time, as they slow the
+    physics, so `ends_at_sim_time` holds only while no frame is slower. Paused
+    time adds nothing, the force stops with the simulation, and forces add
+    up.
   - `get_unreal_physics_state` reads bodies (by path, or every actor with a
     tag) in the running simulation while one runs and in the editor world
     otherwise (`world` picks one): location, rotation, linear velocity (cm/s),
     angular velocity (degrees/s), whether the body is awake, mass, center of
     mass, gravity and the physics mode. Each body lists both its
-    `editor_path` and `simulation_path`. Unreal reports contacts only to
-    hit-event handlers, so none are listed.
+    `editor_path` and `simulation_path`, and a body given by both is read
+    once; a path with no live actor, or no live copy in the world read, is in
+    `not_found`. Unreal reports contacts only to hit-event handlers, so none
+    are listed.
   - `list_unreal_simulation_actors` lists the running simulation's actors
     with their simulation and editor paths; an actor the simulation spawned,
     such as the player's pawn, has a `null` editor path.
+  - Both reads are paged like the scene reads: `max_results` at most from
+    `offset`, a page stops before 30,000 characters of entries, `total`
+    counts every match and `next_offset` (null on the last page) starts the
+    next, which `hint` names.
 - `set_unreal_material_params` writes a Material Instance Constant through
   Unreal's MaterialEditingLibrary in one undoable transaction, in or out of
   Play In Editor, and reads every value back, so `success` alone tells

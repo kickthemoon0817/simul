@@ -2634,7 +2634,8 @@
       "actor_paths": null,
       "tag_filter": null,
       "world": "auto",
-      "max_results": 100
+      "max_results": 100,
+      "offset": 0
      }
     }
    ],
@@ -2658,7 +2659,8 @@
     "actor_paths": "/Game/Maps/Test.Test:PersistentLevel.Chair_0, /Game/Maps/Test.Test:PersistentLevel.Table_0",
     "tag_filter": "props",
     "world": "simulation",
-    "max_results": 7
+    "max_results": 7,
+    "offset": 14
    },
    "envelope": [
     {
@@ -2678,7 +2680,8 @@
       ],
       "tag_filter": "props",
       "world": "simulation",
-      "max_results": 7
+      "max_results": 7,
+      "offset": 14
      }
     }
    ],
@@ -2714,7 +2717,8 @@
       "class_filter": null,
       "tag_filter": null,
       "simulating_only": false,
-      "max_results": 200
+      "max_results": 200,
+      "offset": 0
      }
     }
    ],
@@ -2738,7 +2742,8 @@
     "class_filter": "StaticMeshActor",
     "tag_filter": "props",
     "simulating_only": true,
-    "max_results": 9
+    "max_results": 9,
+    "offset": 18
    },
    "envelope": [
     {
@@ -2755,7 +2760,8 @@
       "class_filter": "StaticMeshActor",
       "tag_filter": "props",
       "simulating_only": true,
-      "max_results": 9
+      "max_results": 9,
+      "offset": 18
      }
     }
    ],

@@ -1538,7 +1538,7 @@
   {
    "name": "control_unreal_simulation",
    "title": "Control Unreal Simulation",
-   "description": "Start, stop, pause or resume the editor's simulation. start begins Simulate In Editor (the level runs and its physics steps, no player) or, with mode play, a Play session that spawns the player's pawn. Exact frame stepping is unsupported (step is refused). While either runs, Unreal's editor spawns and deletes no actors, so those tools return PIEActive until it stops; level reads keep working and report pie_active, and the physics tools act on and read the simulation's copies of the actors.",
+   "description": "Start, stop, pause or resume the editor's simulation. start begins Simulate In Editor (the level runs and its physics steps, no player) or, with mode play, a Play session that spawns the player's pawn. Exact frame stepping is unsupported (step is refused). While either runs, Unreal's editor spawns and deletes no actors, so those tools return PIEActive until it stops; level reads keep working and report pie_active. apply_unreal_force, get_unreal_physics_state and list_unreal_simulation_actors act on and read the simulation's copies of the actors; physics and collision edits given an editor path change the editor world, which the running simulation does not see.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1715,7 +1715,7 @@
   {
    "name": "apply_unreal_force",
    "title": "Apply Unreal Force",
-   "description": "Apply a force or impulse to an actor's body in the running simulation (start it with control_unreal_simulation; the editor world's bodies never move, so the call is refused without one). Editor and simulation paths are both accepted. Units are Unreal's: force in kg cm/s^2 and impulse in kg cm/s (1 N or 1 N s is 100), or N and N s with units si; the application point is a world location in cm. An impulse changes the velocity at once by impulse / mass; a force acts for one frame unless duration keeps it on for that many seconds of simulation time. Returns the copy acted on, its mass and the expected change of velocity.",
+   "description": "Apply a force or impulse to an actor's body in the running simulation (start it with control_unreal_simulation; the editor world's bodies never move, so the call is refused without one). Editor and simulation paths are both accepted. Units are Unreal's: force in kg cm/s^2 and impulse in kg cm/s (1 N or 1 N s is 100), or N and N s with units si; the application point is a world location in cm, fixed in the world while the body moves. An impulse changes the velocity at once by impulse / mass; a force acts for one physics step unless duration keeps it on for that many seconds of physics time, in step with gravity. Returns the copy acted on, its mass and the expected change of velocity.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1754,7 +1754,7 @@
        }
       ],
       "default": null,
-      "description": "Application point X in world cm (None = center of mass)."
+      "description": "Application point X in world cm (None = center of mass), fixed in the world for the whole duration."
      },
      "location_y": {
       "anyOf": [
@@ -1782,7 +1782,7 @@
      },
      "duration": {
       "default": 0.0,
-      "description": "Seconds of simulation time a force keeps acting, 0 to 600: every frame the body gets the force's momentum over the elapsed time, force x duration in all (paused time adds nothing). 0 acts for one frame only. Not for an impulse.",
+      "description": "Seconds of physics time a force keeps acting, 0 to 600: every frame the body gets, as an impulse, the force's momentum over the physics time that frame simulated (the frame time, at most Unreal's physics step limit, 1/30 s by default), so it keeps pace with gravity; paused time adds nothing. 0 acts for one physics step. Not for an impulse.",
       "type": "number"
      },
      "units": {
@@ -1899,7 +1899,7 @@
   {
    "name": "get_unreal_physics_state",
    "title": "Get Unreal Physics State",
-   "description": "Read bodies' live physics state: location, rotation, linear and angular velocity, awake or asleep, mass and center of mass. While a simulation runs each actor is read through its copy there (the editor world's actors stay where they were placed), otherwise in the editor world; world picks one. Editor and simulation paths are both accepted, and each body lists both.",
+   "description": "Read bodies' live physics state: location, rotation, linear and angular velocity, awake or asleep, mass and center of mass. While a simulation runs each actor is read through its copy there (the editor world's actors stay where they were placed), otherwise in the editor world; world picks one. Editor and simulation paths are both accepted, and each body lists both. Paged: total counts every body, next_offset starts the next page.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1926,7 +1926,12 @@
      },
      "max_results": {
       "default": 100,
-      "description": "Most bodies returned, 1 to 1000.",
+      "description": "Most bodies on this page, 1 to 1000; a page also stops before 30,000 characters.",
+      "type": "integer"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Bodies to skip: the previous page's next_offset.",
       "type": "integer"
      }
     }
@@ -1950,7 +1955,7 @@
   {
    "name": "list_unreal_simulation_actors",
    "title": "List Unreal Simulation Actors",
-   "description": "List the running simulation's actors with their simulation and editor paths (null editor path for an actor the simulation spawned, such as the player's pawn) and whether they simulate physics. Refused when no simulation runs.",
+   "description": "List the running simulation's actors with their simulation and editor paths (null editor path for an actor the simulation spawned, such as the player's pawn) and whether they simulate physics, a page at a time (total, next_offset). Refused when no simulation runs.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1972,7 +1977,12 @@
      },
      "max_results": {
       "default": 200,
-      "description": "Most actors returned, 1 to 5000.",
+      "description": "Most actors on this page, 1 to 5000; a page also stops before 30,000 characters.",
+      "type": "integer"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Actors to skip: the previous page's next_offset.",
       "type": "integer"
      }
     }
