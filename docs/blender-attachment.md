@@ -293,8 +293,11 @@ same envelope. The stale attachment file is left in place; attach again or run
 `simul blender detach`.
 
 Object-creation and other mode-sensitive granular operations refuse to run
-in Edit/Pose Mode rather than unexpectedly editing the active mesh. Scripts
-remain responsible for their own operator context and mode changes.
+in Edit/Pose Mode rather than unexpectedly editing the active mesh.
+`set_blender_object_mode` (default `OBJECT`) returns the window to Object Mode
+without a script; `create_blender_object` itself never leaves it in Edit Mode,
+whatever Blender's "Enter Edit Mode" preference says. Scripts remain
+responsible for their own operator context and mode changes.
 
 Operations and scripts run inside a `temp_override` of the attached window and
 its 3D View, so exporters (`bpy.ops.export_scene.gltf`) and
@@ -358,7 +361,10 @@ user's undo and redo take back one at a time and that make quitting ask to
 save, a world-space
 bounding box, rotating a quaternion object (as glTF imports store them), local and
 world transforms in object info, parenting that keeps the child in place and refuses
-a parent loop, camera focus that keeps the whole object in the frame and clip range
+a parent loop, leaving Edit Mode with `set_blender_object_mode`, creation under the
+Enter Edit Mode preference and into a collection disabled in viewports, a bounds check
+of the whole bounding box, an accurate listing page, a delete that leaves another
+scene's link, camera focus that keeps the whole object in the frame and clip range
 (a 60 m cube included, and a camera parented to a moved rig with a quaternion
 rotation), world-space camera placement, a camera whose Track To constraint
 overrides focus and placement (reported with the evaluated pose and the
