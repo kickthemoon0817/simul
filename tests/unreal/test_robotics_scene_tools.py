@@ -63,11 +63,28 @@ class _Named:
 
 
 class _Mesh:
+    """A static mesh: Engine basic shapes are 100 cm cubes about their pivot."""
+
     def __init__(self, path: str) -> None:
         self.path = path
 
     def get_path_name(self) -> str:
         return self.path
+
+    def get_bounding_box(self) -> SimpleNamespace:
+        return SimpleNamespace(min=_vector(-50.0, -50.0, -50.0), max=_vector(50.0, 50.0, 50.0))
+
+
+def _axes(pitch: float, yaw: float, roll: float) -> Tuple[Tuple[float, ...], ...]:
+    """Forward, right and up of a rotation, as FRotationMatrix computes them."""
+    sp, cp = math.sin(math.radians(pitch)), math.cos(math.radians(pitch))
+    sy, cy = math.sin(math.radians(yaw)), math.cos(math.radians(yaw))
+    sr, cr = math.sin(math.radians(roll)), math.cos(math.radians(roll))
+    return (
+        (cp * cy, cp * sy, sp),
+        (sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp),
+        (-(cr * sp * cy + sr * sy), cy * sr - cr * sp * sy, cr * cp),
+    )
 
 
 class PrimitiveComponent:
@@ -86,6 +103,10 @@ class PrimitiveComponent:
         self.mesh = mesh
         self.mass = mass
         self.simulate = simulate
+        # Placed by its actor: world center, size along its own axes, rotation.
+        self.center: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self.size: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self.rotation: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def get_collision_enabled(self) -> _Named:
         return _Named(self.collision)
@@ -106,6 +127,28 @@ class PrimitiveComponent:
             return SimpleNamespace(get_editor_property={"simulate_physics": self.simulate}.__getitem__)
         raise AttributeError(name)
 
+    # A component's transform, as SceneComponent reports it.
+    def get_world_location(self) -> SimpleNamespace:
+        return _vector(*self.center)
+
+    def get_world_scale(self) -> SimpleNamespace:
+        return _vector(*(side / 100.0 for side in self.size))
+
+    def get_forward_vector(self) -> SimpleNamespace:
+        return _vector(*_axes(*self.rotation)[0])
+
+    def get_right_vector(self) -> SimpleNamespace:
+        return _vector(*_axes(*self.rotation)[1])
+
+    def get_up_vector(self) -> SimpleNamespace:
+        return _vector(*_axes(*self.rotation)[2])
+
+    def world_bounds(self) -> Tuple[SimpleNamespace, SimpleNamespace, float]:
+        """SystemLibrary.get_component_bounds: the world-axis box around the rotated one."""
+        axes = _axes(*self.rotation)
+        extent = [sum(abs(axes[i][k]) * self.size[i] / 2 for i in range(3)) for k in range(3)]
+        return _vector(*self.center), _vector(*extent), math.hypot(*extent)
+
 
 class StaticMeshComponent(PrimitiveComponent):
     def __init__(self, mesh: _Mesh, **kwargs: Any) -> None:
@@ -122,14 +165,18 @@ class FakeActor:
         mobility: Optional[str] = "STATIC",
         tilt_degrees: float = 0.0,
         class_name: str = "StaticMeshActor",
+        rotation: Optional[Tuple[float, float, float]] = None,
     ) -> None:
         self.label = label
         self.components = components
         self.size = size
         self.center = center
         self.root_component = SimpleNamespace(mobility=_Named(mobility)) if mobility else None
-        self.up_z = math.cos(math.radians(tilt_degrees))
+        # (pitch, yaw, roll); tilt_degrees rolls the actor about X.
+        self.rotation = rotation if rotation is not None else (0.0, 0.0, tilt_degrees)
         self.class_name = class_name
+        for component in components:
+            component.center, component.size, component.rotation = center, size, self.rotation
 
     def get_actor_label(self) -> str:
         return self.label
@@ -143,12 +190,17 @@ class FakeActor:
     def get_components_by_class(self, cls: type) -> List[PrimitiveComponent]:
         return [component for component in self.components if isinstance(component, cls)]
 
-    def get_actor_bounds(self, only_colliding: bool) -> Tuple[SimpleNamespace, SimpleNamespace]:
-        assert only_colliding is True, "the analysis sizes actors by their colliding components"
-        return _vector(*self.center), _vector(*(side / 2 for side in self.size))
+    def get_actor_location(self) -> SimpleNamespace:
+        return _vector(*self.center)
+
+    def get_actor_forward_vector(self) -> SimpleNamespace:
+        return _vector(*_axes(*self.rotation)[0])
+
+    def get_actor_right_vector(self) -> SimpleNamespace:
+        return _vector(*_axes(*self.rotation)[1])
 
     def get_actor_up_vector(self) -> SimpleNamespace:
-        return _vector(0.0, math.sqrt(1 - self.up_z**2), self.up_z)
+        return _vector(*_axes(*self.rotation)[2])
 
     def is_editable(self) -> bool:
         return True
@@ -270,8 +322,17 @@ class FakeEditor:
                 def set_static_mesh(mesh: _Mesh) -> None:
                     record["mesh"] = mesh.get_path_name()
 
+                def set_collision_profile_name(name: str) -> None:
+                    record["collision_profile"] = name
+
+                def set_simulate_physics(simulate: bool) -> None:
+                    record["simulate_physics"] = simulate
+
                 self.static_mesh_component = SimpleNamespace(
-                    set_mobility=set_mobility, set_static_mesh=set_static_mesh
+                    set_mobility=set_mobility,
+                    set_static_mesh=set_static_mesh,
+                    set_collision_profile_name=set_collision_profile_name,
+                    set_simulate_physics=set_simulate_physics,
                 )
 
             def get_path_name(self) -> str:
@@ -361,6 +422,10 @@ class FakeEditor:
             get_editor_subsystem=subsystems.__getitem__,
             PrimitiveComponent=PrimitiveComponent,
             StaticMeshComponent=StaticMeshComponent,
+            BoxComponent=type("BoxComponent", (PrimitiveComponent,), {}),
+            SphereComponent=type("SphereComponent", (PrimitiveComponent,), {}),
+            CapsuleComponent=type("CapsuleComponent", (PrimitiveComponent,), {}),
+            SystemLibrary=SimpleNamespace(get_component_bounds=lambda component: component.world_bounds()),
             StaticMesh=StaticMesh,
             StaticMeshActor="StaticMeshActor",
             ScopedEditorTransaction=Transaction,
@@ -415,16 +480,8 @@ def test_analysis_classifies_surfaces_graspable_objects_and_collision(monkeypatc
     assert result["analysis_types"] == ["traversability", "graspability", "collision_complexity"]
     assert result["criteria"] == unreal_runtime.ROBOTICS_CRITERIA
     assert result["total_actors_analyzed"] == 12
+    # Largest first.
     assert result["traversable_surfaces"] == [
-        {
-            "name": "Floor",
-            "path": LEVEL + "Floor",
-            "class_name": "StaticMeshActor",
-            "size": [1000, 1000, 10],
-            "top_z": 10,
-            "area_m2": 100.0,
-            "tilt_degrees": 0.0,
-        },
         {
             "name": "LandscapeStreamingProxy_0",
             "path": LEVEL + "LandscapeStreamingProxy_0",
@@ -433,8 +490,21 @@ def test_analysis_classifies_surfaces_graspable_objects_and_collision(monkeypatc
             "top_z": 100,
             "area_m2": 63504.0,
             "tilt_degrees": 0.0,
+            "normal": [0.0, 0.0, 1.0],
+        },
+        {
+            "name": "Floor",
+            "path": LEVEL + "Floor",
+            "class_name": "StaticMeshActor",
+            "size": [1000, 1000, 10],
+            "top_z": 10,
+            "area_m2": 100.0,
+            "tilt_degrees": 0.0,
+            "normal": [0.0, 0.0, 1.0],
         },
     ]
+    assert result["totals"] == {"traversable_surfaces": 2, "graspable_objects": 1}
+    assert (result["next_offset"], result["hint"]) == (None, None)
     assert result["graspable_objects"] == [
         {
             "name": "Box",
@@ -539,6 +609,105 @@ def test_a_failed_analysis_script_is_a_script_error(monkeypatch: pytest.MonkeyPa
     assert "/Game/Unknown.Unknown" in result["error"]
 
 
+def _surface(editor_result: Dict[str, Any], name: str) -> Optional[Dict[str, Any]]:
+    return next((entry for entry in editor_result["traversable_surfaces"] if entry["name"] == name), None)
+
+
+def test_rotated_surfaces_are_measured_by_their_oriented_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    """U2-06: the world-axis box read a 20 m x 0.5 m plank yawed 45 degrees as
+    1449 x 1449 cm (210 m2 for its 10 m2), rejected a slab pitched 14 degrees
+    (the limit is 15) and one rolled 180 degrees as tilted 180."""
+    actors = [
+        FakeActor("Plank", [StaticMeshComponent(CUBE_MESH)], (2000, 50, 10), (0, 0, 5), rotation=(0, 45, 0)),
+        FakeActor("Slope", [StaticMeshComponent(CUBE_MESH)], (1000, 1000, 10), (0, 0, 5), rotation=(14, 0, 0)),
+        FakeActor("Steep", [StaticMeshComponent(CUBE_MESH)], (1000, 1000, 10), (0, 0, 5), rotation=(16, 0, 0)),
+        FakeActor("Flipped", [StaticMeshComponent(CUBE_MESH)], (1000, 1000, 10), (0, 0, 5), rotation=(0, 0, 180)),
+    ]
+
+    result = _analyze(monkeypatch, FakeEditor(actors))
+
+    plank = _surface(result, "Plank")
+    assert plank is not None
+    assert plank["size"] == pytest.approx([2000, 50, 10])
+    assert (plank["area_m2"], plank["tilt_degrees"]) == (pytest.approx(10.0), 0.0)
+    slope = _surface(result, "Slope")
+    assert slope is not None and slope["tilt_degrees"] == pytest.approx(14.0)
+    assert slope["normal"] == pytest.approx([-math.sin(math.radians(14)), 0, math.cos(math.radians(14))], abs=1e-4)
+    assert _surface(result, "Steep") is None
+    flipped = _surface(result, "Flipped")
+    assert flipped is not None
+    assert (flipped["tilt_degrees"], flipped["normal"]) == (0.0, pytest.approx([0, 0, 1]))
+    assert flipped["top_z"] == pytest.approx(10)
+
+
+def test_a_rotated_object_is_graspable_by_its_own_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 50 cm cube yawed 45 degrees is 70.7 cm across in world axes, over the 60 cm limit."""
+    turned = FakeActor("Turned", [StaticMeshComponent(CUBE_MESH, mass=2.0)], (50, 50, 50), mobility="MOVABLE",
+                       rotation=(0, 45, 0))
+
+    result = _analyze(monkeypatch, FakeEditor([turned]), analysis_types=["graspability"])
+
+    assert [entry["name"] for entry in result["graspable_objects"]] == ["Turned"]
+    assert result["graspable_objects"][0]["size"] == pytest.approx([50, 50, 50])
+
+
+def _many(count: int, label: str = "Big_") -> List[FakeActor]:
+    """``count`` actors, every second a graspable box and the others floor tiles."""
+    actors = []
+    for n in range(count):
+        if n % 2:
+            actors.append(FakeActor(f"{label}{n}", [StaticMeshComponent(CUBE_MESH)], (120, 120, 10), (n, 0, 5)))
+        else:
+            actors.append(FakeActor(f"{label}{n}", [StaticMeshComponent(CUBE_MESH, mass=1.0)], (50, 50, 50),
+                                    (n, 0, 25), mobility="MOVABLE"))
+    return actors
+
+
+def test_a_large_level_is_paged_in_both_categories_within_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """U2-05: 5,000 actors gave 494,853 bytes; the server cut traversable_surfaces to
+    0 of 2,500, kept all 2,500 graspable_objects, and its hint named parameters the
+    tool does not have."""
+    editor = FakeEditor(_many(5000))
+
+    first = _analyze(monkeypatch, editor)
+
+    assert first["totals"] == {"traversable_surfaces": 2500, "graspable_objects": 2500}
+    assert first["returned"] == {"traversable_surfaces": 50, "graspable_objects": 50}
+    assert (first["offset"], first["max_results"], first["next_offset"]) == (0, 50, 50)
+    assert len(json.dumps(first)) <= unreal_runtime.ROBOTICS_PAGE_BYTES
+    assert "offset 50" in first["hint"] and "actor_filter" in first["hint"]
+    assert "max_results" not in first["hint"] or "fit the response budget" in first["hint"]
+
+    second = _analyze(monkeypatch, FakeEditor(_many(5000)), offset=50)
+    assert second["offset"] == 50 and second["next_offset"] == 100
+    seen = {entry["path"] for entry in first["graspable_objects"]}
+    assert not seen & {entry["path"] for entry in second["graspable_objects"]}
+
+    last = _analyze(monkeypatch, FakeEditor(_many(5000)), offset=2450)
+    assert (last["returned"]["graspable_objects"], last["next_offset"], last["hint"]) == (50, None, None)
+
+
+def test_a_page_that_would_exceed_the_budget_holds_fewer_of_each(monkeypatch: pytest.MonkeyPatch) -> None:
+    editor = FakeEditor(_many(400, label="A_very_long_actor_label_that_takes_room_in_every_entry_" * 3))
+
+    result = _analyze(monkeypatch, editor, max_results=200)
+
+    kept = result["returned"]
+    assert kept["traversable_surfaces"] == kept["graspable_objects"] < 200
+    assert len(json.dumps(result)) <= unreal_runtime.ROBOTICS_PAGE_BYTES
+    assert result["next_offset"] == kept["graspable_objects"]
+    assert "fit the response budget" in result["hint"]
+
+
+@pytest.mark.parametrize("kwargs, message", [({"max_results": 0}, "max_results"), ({"offset": -1}, "offset")])
+def test_paging_arguments_are_checked(monkeypatch: pytest.MonkeyPatch, kwargs: Dict[str, int], message: str) -> None:
+    session = _session(monkeypatch, FakeEditor(_scene()))
+
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(session.analyze_scene_for_robotics(**kwargs))
+    assert session.scripts == []  # type: ignore[attr-defined]
+
+
 # ---------------------------------------------------------------------------
 # generate_procedural_scene: the editor script
 # ---------------------------------------------------------------------------
@@ -552,6 +721,27 @@ def _generate(monkeypatch: pytest.MonkeyPatch, editor: FakeEditor, *args: Any, *
     monkeypatch.setattr(unreal_runtime, "new_generation", lambda: GENERATION)
     session = _session(monkeypatch, editor)
     return session, asyncio.run(session.generate_procedural_scene(*args, **kwargs))
+
+
+def test_physics_props_are_spawned_ready_to_simulate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """U2-16: the props came out BlockAll and not simulating, so every one needed
+    enable_unreal_physics and set_unreal_collision before a robot could push it."""
+    editor = FakeEditor([])
+    plan = plan_scene("room", {"seed": 7, "props": 3}, [0, 0, 0], [800, 600, 300])
+
+    _, result = _generate(
+        monkeypatch, editor, "room", {"seed": 7, "props": 3}, [0, 0, 0], [800, 600, 300], physics_props=True
+    )
+
+    props = [record for record, piece in zip(editor.spawned, plan.pieces) if piece.movable]
+    others = [record for record, piece in zip(editor.spawned, plan.pieces) if not piece.movable]
+    assert result["physics_props"] == len(props) == 3
+    assert all(
+        (record["collision_profile"], record["simulate_physics"], record["mobility"])
+        == ("PhysicsActor", True, "MOVABLE")
+        for record in props
+    )
+    assert not any("simulate_physics" in record or "collision_profile" in record for record in others)
 
 
 def test_generation_spawns_the_planned_pieces_in_one_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -568,6 +758,7 @@ def test_generation_spawns_the_planned_pieces_in_one_transaction(monkeypatch: py
         "seed": 7,
         "tag": f"simul_room_7_{GENERATION}",
         "folder": f"Simul/Room_7_{GENERATION}",
+        "physics_props": 0,
     }
     assert editor.transactions == [{"description": "simul: generate room scene", "cancelled": False, "open": False}]
     assert editor.destroyed == []
@@ -703,7 +894,7 @@ def test_the_script_receives_the_plan_as_a_literal(monkeypatch: pytest.MonkeyPat
     args = _script_args(session.scripts[0])
     plan = plan_scene("warehouse", {"rows": 1, "props": 2, "seed": 3})
     assert args == {
-        "pieces": [piece.spawn_args() for piece in plan.pieces],
+        "pieces": [dict(piece.spawn_args(), physics=False) for piece in plan.pieces],
         "folder": f"Simul/Warehouse_3_{GENERATION}",
         "tags": ["simul_procedural", f"simul_warehouse_3_{GENERATION}"],
         "transaction": "simul: generate warehouse scene",
@@ -1045,7 +1236,7 @@ def test_the_analysis_tool_returns_criteria_and_analyses(monkeypatch: pytest.Mon
     assert payload["success"] is True
     assert payload["analysis_types"] == ["traversability", "graspability"]
     assert payload["criteria"] == unreal_runtime.ROBOTICS_CRITERIA
-    assert [entry["name"] for entry in payload["traversable_surfaces"]] == ["Floor", "LandscapeStreamingProxy_0"]
+    assert [entry["name"] for entry in payload["traversable_surfaces"]] == ["LandscapeStreamingProxy_0", "Floor"]
     assert payload["collision_summary"] == {}
 
 
@@ -1070,6 +1261,7 @@ def test_the_generator_tool_returns_its_tag_and_folder(monkeypatch: pytest.Monke
         "seed": 9,
         "tag": f"simul_corridor_9_{GENERATION}",
         "folder": f"Simul/Corridor_9_{GENERATION}",
+        "physics_props": 0,
     }
 
 
@@ -1077,7 +1269,9 @@ def test_the_generator_tool_returns_its_tag_and_folder(monkeypatch: pytest.Monke
     "arguments, error_type, message",
     [
         ({"scene_type": "garage"}, "ValueError", "scene_type must be one of"),
-        ({"scene_type": "room", "parameters": "{bad"}, "JSONDecodeError", "Expecting property name"),
+        # U2-16: json's own error ("Expecting property name") did not name the parameter.
+        ({"scene_type": "room", "parameters": "{bad"}, "ValueError", "parameters must be a JSON object"),
+        ({"scene_type": "room", "parameters": "[1, 2]"}, "ValueError", "parameters must be a JSON object, got list"),
         ({"scene_type": "room", "bounds_min": "0,0"}, "ValueError", "bounds_min must be three finite numbers"),
         ({"scene_type": "room", "bounds_min": "0,0,nan"}, "ValueError", "bounds_min must be three finite numbers"),
     ],

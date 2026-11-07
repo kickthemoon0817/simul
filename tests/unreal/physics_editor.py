@@ -489,6 +489,7 @@ class Actor:
         self.class_name = class_name
         self.guid = Guid(next(_guids) if guid is None else guid)
         self.tags: List[str] = []
+        self.folder = ""
         self.location = Vector(0.0, 0.0, 300.0)
         # The path's level, for an actor World Partition streamed into a cell.
         self.level: Optional[str] = None
@@ -525,6 +526,9 @@ class Actor:
 
     def actor_has_tag(self, tag: str) -> bool:
         return tag in self.tags
+
+    def get_folder_path(self) -> str:
+        return self.folder
 
     def is_editable(self) -> bool:
         return True

@@ -175,6 +175,8 @@ def test_physics_edits_are_undoable_saved_and_simulate():
         client = session()
         level = "/Game/SimulReview_Physics_" + uuid.uuid4().hex[:8]
         try:
+            # A session another test (or run) left going would make start a resume and refuse new_level.
+            assert (await client.control_simulation("stop"))["state"] == "stopped"
             made = await client._execute_json_script(f"""
 import unreal, json
 les = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
@@ -268,6 +270,7 @@ def test_forces_act_on_the_running_simulation_and_the_reads_follow_it():
         client = session()
         level = "/Game/SimulReview_Forces_" + uuid.uuid4().hex[:8]
         try:
+            assert (await client.control_simulation("stop"))["state"] == "stopped"
             made = await client._execute_json_script(f"""
 import unreal, json
 print(json.dumps({{'new': bool(unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).new_level({level!r}))}}))
@@ -988,6 +991,179 @@ def test_generate_and_analyze_a_procedural_scene():
             level = await client.analyze_scene_for_robotics()
             assert not level.get("error"), level
             assert level["total_actors_analyzed"] >= len(paths)
+        finally:
+            await client._execute_python(_remove_tagged(prefix))
+            await client.close()
+
+    asyncio.run(run())
+
+
+_ROTATED_PIECES = """
+import unreal, json
+sub = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+cube = unreal.load_asset('/Engine/BasicShapes/Cube.Cube')
+paths = {}
+for label, loc, (pitch, yaw, roll), scale, movable in args['pieces']:
+    actor = sub.spawn_actor_from_object(cube, unreal.Vector(*loc), unreal.Rotator(roll=roll, pitch=pitch, yaw=yaw))
+    actor.set_actor_scale3d(unreal.Vector(*scale))
+    actor.set_actor_label(label)
+    actor.set_editor_property('tags', [unreal.Name(args['tag'])])
+    if movable:
+        actor.root_component.set_mobility(unreal.ComponentMobility.MOVABLE)
+    paths[label] = actor.get_path_name()
+print(json.dumps(paths))
+"""
+
+
+def test_robotics_analysis_measures_rotated_pieces_by_their_own_box_and_pages():
+    """The world-axis box read a 20 m x 0.5 m plank yawed 45 degrees as 1449 x
+    1449 cm (210 m2), rejected a slab pitched 14 degrees and one rolled 180
+    (U2-06), and a large level's result was cut by the server with every surface
+    lost (U2-05)."""
+
+    async def run():
+        client = session()
+        tag = "simul_review_obb_" + uuid.uuid4().hex[:8]
+        pieces = [
+            ("ObbPlank", (0, 0, 30005), (0, 45, 0), (20, 0.5, 0.1), False),
+            ("ObbSlope", (0, 3000, 30005), (14, 0, 0), (10, 10, 0.1), False),
+            ("ObbSteep", (0, 6000, 30005), (16, 0, 0), (10, 10, 0.1), False),
+            ("ObbFlipped", (0, 9000, 30005), (0, 0, 180), (10, 10, 0.1), False),
+            ("ObbTurnedBox", (0, 12000, 30025), (0, 45, 0), (0.5, 0.5, 0.5), True),
+        ]
+        try:
+            made = await client._execute_json_script(
+                f"args = {{'tag': {tag!r}, 'pieces': {pieces!r}}}\n" + _ROTATED_PIECES
+            )
+            assert not made.get("error"), made
+            analysis = await client.analyze_scene_for_robotics(actor_filter="Obb", max_results=10)
+            ours = set(made.values())
+            surfaces = {entry["name"]: entry for entry in analysis["traversable_surfaces"] if entry["path"] in ours}
+            assert set(surfaces) == {"ObbPlank", "ObbSlope", "ObbFlipped"}, analysis
+            assert surfaces["ObbPlank"]["size"] == pytest.approx([2000, 50, 10], abs=0.01)
+            assert surfaces["ObbPlank"]["area_m2"] == pytest.approx(10.0)
+            assert surfaces["ObbSlope"]["tilt_degrees"] == pytest.approx(14.0, abs=0.01)
+            assert surfaces["ObbFlipped"]["tilt_degrees"] == pytest.approx(0.0, abs=0.01)
+            assert surfaces["ObbFlipped"]["top_z"] == pytest.approx(30010, abs=0.01)
+            grasped = [entry for entry in analysis["graspable_objects"] if entry["path"] in made.values()]
+            assert [entry["name"] for entry in grasped] == ["ObbTurnedBox"], analysis
+            assert grasped[0]["size"] == pytest.approx([50, 50, 50], abs=0.01)
+
+            paged = await client.analyze_scene_for_robotics(actor_filter="Obb", max_results=1)
+            assert paged["returned"] == {"traversable_surfaces": 1, "graspable_objects": 1}, paged
+            assert paged["totals"]["traversable_surfaces"] >= 3 and paged["next_offset"] == 1, paged
+            assert "offset 1" in paged["hint"], paged
+            following = await client.analyze_scene_for_robotics(actor_filter="Obb", max_results=1, offset=1)
+            assert following["traversable_surfaces"][0]["path"] != paged["traversable_surfaces"][0]["path"]
+        finally:
+            await client._execute_python(_remove_tagged(tag))
+            await client.close()
+
+    asyncio.run(run())
+
+
+_LIGHT_STATE = """
+import unreal, json
+light = unreal.load_object(None, args['path']).get_components_by_class(unreal.LightComponentBase)[0]
+print(json.dumps({'intensity': light.get_editor_property('intensity'),
+                  'color': [light.get_editor_property('light_color').r, light.get_editor_property('light_color').g]}))
+"""
+
+
+def test_lights_are_checked_before_writing_and_sky_lights_are_set():
+    """intensity -5 turned the light to 0 while the reply said it was not
+    applied (U2-09); a SkyLight was refused, and a missing actor with nothing to
+    set returned success (U2-13)."""
+
+    async def run():
+        client = session()
+        made = []
+        try:
+            for cls in ("PointLight", "DirectionalLight", "SkyLight"):
+                spawned = await client.spawn_actor(f"/Script/Engine.{cls}", (0, 0, 31000))
+                assert not spawned.get("error"), spawned
+                made.append(spawned["actor_path"])
+            point, sun, sky = made
+
+            async def state(path):
+                return await client._execute_json_script(f"args = {{'path': {path!r}}}\n" + _LIGHT_STATE)
+
+            before = await state(point)
+            with pytest.raises(ValueError, match="intensity"):
+                await client.set_light_params(point, intensity=-5.0)
+            with pytest.raises(ValueError, match="temperature"):
+                await client.set_light_params(point, temperature=100.0)
+            assert await state(point) == before
+
+            set_point = await client.set_light_params(point, intensity=5000.0)
+            assert (set_point["intensity_unit"], set_point["params_set"]) == ("candelas", 1), set_point
+            assert (await state(point))["intensity"] == pytest.approx(5000.0)
+            refused = await client.set_light_params(sun, intensity=9.0, attenuation_radius=500.0)
+            assert refused["error_type"] == "ValidationError", refused
+            assert (await state(sun))["intensity"] != pytest.approx(9.0)
+            assert (await client.set_light_params(sun))["intensity_unit"] == "lux"
+
+            set_sky = await client.set_light_params(sky, intensity=2.0, color=[1.0, 0.5, 0.25])
+            assert (set_sky["light_class"], set_sky["intensity_unit"]) == ("SkyLightComponent", "scale"), set_sky
+            assert await state(sky) == {"intensity": pytest.approx(2.0), "color": [255, 128]}
+
+            missing = await client.set_light_params(point + "_Gone")
+            assert missing["success"] is False and "Actor not found" in missing["error"], missing
+        finally:
+            for path in made:
+                await destroy_actor(client, path)
+            await client.close()
+
+    asyncio.run(run())
+
+
+_TAG_BODIES = """
+import unreal, json
+out = {'n': 0, 'simulating': 0, 'physics_actor': 0}
+for actor in unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors():
+    if unreal.Name(args['tag']) in actor.tags and '_Box_' in actor.get_actor_label():
+        c = actor.root_component
+        out['n'] += 1
+        out['simulating'] += bool(c.get_editor_property('body_instance').get_editor_property('simulate_physics'))
+        out['physics_actor'] += str(c.get_collision_profile_name()) == 'PhysicsActor'
+print(json.dumps(out))
+"""
+
+
+def test_bulk_physics_sets_up_a_scene_s_props_in_one_undoable_call():
+    """One call per prop ran into the rate limit: 126 bodies took 116 s (U2-10);
+    and the generator's props came out not simulating (U2-16)."""
+
+    async def run():
+        client = session()
+        seed = uuid.uuid4().int % 100000
+        prefix = f"simul_room_{seed}_"
+        try:
+            scene = await client.generate_procedural_scene(
+                "room", {"seed": seed, "props": 30, "door_width": 0}, [0, 0, 32000], [1500, 1200, 32400]
+            )
+            assert not scene.get("error"), scene
+            tag = scene["tag"]
+
+            async def bodies():
+                return await client._execute_json_script(f"args = {{'tag': {tag!r}}}\n" + _TAG_BODIES)
+
+            assert await bodies() == {"n": 30, "simulating": 0, "physics_actor": 0}
+            bulk = await client.setup_physics_bulk(tag=tag, actor_filter="_Box_", collision_preset="PhysicsActor")
+            assert (bulk["matched"], bulk["configured_count"], bulk["failed_count"]) == (30, 30, 0), bulk
+            assert await bodies() == {"n": 30, "simulating": 30, "physics_actor": 30}
+            await transaction(client, "UNDO")  # one Undo reverts the whole call
+            assert await bodies() == {"n": 30, "simulating": 0, "physics_actor": 0}
+            await transaction(client, "REDO")
+            assert (await bodies())["simulating"] == 30
+
+            ready = await client.generate_procedural_scene(
+                "room", {"seed": seed, "props": 5, "door_width": 0}, [3000, 0, 32000], [4500, 1200, 32400],
+                physics_props=True,
+            )
+            assert ready["physics_props"] == 5, ready
+            ready_bodies = await client._execute_json_script(f"args = {{'tag': {ready['tag']!r}}}\n" + _TAG_BODIES)
+            assert ready_bodies == {"n": 5, "simulating": 5, "physics_actor": 5}, ready_bodies
         finally:
             await client._execute_python(_remove_tagged(prefix))
             await client.close()

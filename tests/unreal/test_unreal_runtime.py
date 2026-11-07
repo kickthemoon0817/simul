@@ -1279,7 +1279,8 @@ class TestUnrealRuntimeSessionPhase4:
         assert result["actor_path"].endswith("PointLight_0")
         assert result["params_set"] == 3  # Intensity + LightColor + CastShadows
         assert result["component_path"] == component
-        assert 'actor_component(actor_at(args["actor_path"]), unreal.LightComponent)' in scripts[0]
+        # LightComponentBase, so a SkyLight (not a LightComponent) is found too.
+        assert 'actor_component(actor_at(args["actor_path"]), unreal.LightComponentBase)' in scripts[0]
         # LightColor is an FColor: 0-255 channels.
         assert (
             "'values': {'intensity': 5000.0, 'light_color': [255, 230, 204, 255], 'cast_shadows': True}"
@@ -1330,9 +1331,41 @@ class TestUnrealRuntimeSessionPhase4:
         assert result["success"] is False
         assert "attenuation_radius" in result["error"]
 
-    def test_set_light_params_with_nothing_to_set_makes_no_call(
+    def test_set_light_params_with_nothing_to_set_still_finds_the_light(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """U2-13: with nothing to set no request was made, so a missing actor
+        came back as success with params_set 0."""
+        session = self._make_session(monkeypatch)
+
+        def put_fn(path: str, json: Any = None) -> FakeResponse:
+            return FakeResponse({
+                "ReturnValue": False,
+                "CommandResult": "ValueError: Actor not found: /Game/Maps/T.T:PersistentLevel.L",
+            })
+
+        session._session = SmartFakeClientSession(put_fn=put_fn)
+
+        result = asyncio.run(session.set_light_params(actor_path="/Game/Maps/T.T:PersistentLevel.L"))
+
+        assert result["success"] is False
+        assert "Actor not found" in result["error"]
+
+    @pytest.mark.parametrize(
+        "kwargs, message",
+        [
+            ({"intensity": -5.0}, "intensity"),
+            ({"intensity": float("inf")}, "intensity"),
+            ({"temperature": 100.0}, "temperature must be from 1000"),
+            ({"temperature": 1e9}, "temperature must be from 1000"),
+            ({"attenuation_radius": 0.0}, "attenuation_radius"),
+        ],
+    )
+    def test_set_light_params_checks_values_before_writing(
+        self, monkeypatch: pytest.MonkeyPatch, kwargs: Dict[str, float], message: str
+    ) -> None:
+        """U2-09/U2-13: intensity -5 turned the light to 0 while the reply said it
+        was not applied; temperatures of 100 K and 1e9 K were stored."""
         session = self._make_session(monkeypatch)
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
@@ -1340,9 +1373,10 @@ class TestUnrealRuntimeSessionPhase4:
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
-        result = asyncio.run(session.set_light_params(actor_path="/Game/Maps/T.T:PersistentLevel.L"))
-
-        assert result["params_set"] == 0
+        with pytest.raises(ValueError, match=message):
+            asyncio.run(session.set_light_params(
+                actor_path="/Game/Maps/T.T:PersistentLevel.L", **kwargs
+            ))
 
     def test_set_light_params_without_light_component_is_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1622,6 +1656,7 @@ class TestUnrealRuntimeSessionPhase7:
             "seed": 42,
             "tag": "simul_corridor_42_0badc0de",
             "folder": "Simul/Corridor_42_0badc0de",
+            "physics_props": 0,
         }
 
 

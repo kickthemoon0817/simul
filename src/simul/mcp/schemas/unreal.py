@@ -816,6 +816,23 @@ class UnrealSetLightParamsResponse(BaseModel):
     applied: Optional[Dict[str, Any]] = Field(
         None, description="Values read back from the light component after the write"
     )
+    light_class: Optional[str] = Field(
+        None, description="Light component class, e.g. PointLightComponent or SkyLightComponent"
+    )
+    intensity_unit: Optional[str] = Field(
+        None,
+        description=(
+            "Unit of intensity: lux (directional), the light's Intensity Units for a point, spot or "
+            "rect light (candelas, lumens, ev or unitless), scale for a SkyLight"
+        ),
+    )
+    current: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Every light value read back after the call; light_color as sRGB [r, g, b, a] bytes"
+        ),
+    )
+    warning: Optional[str] = Field(None, description="What to know about the result, e.g. an edit during PIE")
 
 
 class UnrealSetRenderSettingsResponse(BaseModel):
@@ -1002,6 +1019,30 @@ class UnrealSetPhysicsParamsResponse(UnrealPhysicsBody):
         default_factory=dict,
         description="Each parameter given, read back (mass as the override, as the 32-bit float stored)",
     )
+
+
+class UnrealSetupPhysicsBulkResponse(BaseModel):
+    """Response after setting up physics on many actors in one transaction."""
+
+    success: bool = Field(True, description="Operation success")
+    error: Optional[str] = Field(None, description="Error message when success is False")
+    world: str = Field("editor", description="World edited: the editor world, as one undoable transaction")
+    mode: str = Field(..., description="simulate, kinematic or off")
+    matched: int = Field(0, description="Actors the paths, tag and folder selected")
+    configured_count: int = Field(0, description="Actors set up")
+    failed_count: int = Field(0, description="Actors not set up")
+    configured: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "The first 50 actors set up: actor_path, physics_mode, mobility_changed_from, detached_from, "
+            "mass_kg"
+        ),
+    )
+    failed: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="The first 50 actors not set up: actor_path, error and, for a body, its problem codes",
+    )
+    warning: Optional[str] = Field(None, description="What to know about the result: detaches, an edit during PIE")
 
 
 class UnrealBodyState(BaseModel):
@@ -1203,16 +1244,31 @@ class UnrealAnalyzeSceneForRoboticsResponse(BaseModel):
     traversable_surfaces: List[Dict[str, Any]] = Field(
         default_factory=list,
         description=(
-            "Floor-like surfaces a robot can stand on: name, path, class_name, "
-            "size [x, y, z] cm, top_z cm, area_m2, tilt_degrees"
+            "Floor-like surfaces a robot can stand on, largest first: name, path, class_name, "
+            "size [x, y, z] cm along the box's own axes, top_z cm, area_m2 (of the top face), "
+            "tilt_degrees, normal (the top face's upward unit normal)"
         ),
     )
     graspable_objects: List[Dict[str, Any]] = Field(
         default_factory=list,
         description=(
-            "Movable actors with physics collision small enough to grasp: name, "
-            "path, class_name, size [x, y, z] cm, simulate_physics, mass_kg"
+            "Movable actors with physics collision small enough to grasp, by path: name, "
+            "path, class_name, size [x, y, z] cm along the box's own axes, simulate_physics, mass_kg"
         ),
+    )
+    totals: Dict[str, int] = Field(
+        default_factory=dict, description="Matches per category, every page included"
+    )
+    returned: Dict[str, int] = Field(
+        default_factory=dict, description="Entries per category on this page"
+    )
+    offset: int = Field(0, description="Entries of each category this page skipped")
+    max_results: int = Field(50, description="Most entries per category asked for")
+    next_offset: Optional[int] = Field(
+        None, description="Offset of the next page, null on the last page"
+    )
+    hint: Optional[str] = Field(
+        None, description="How to get the rest when more entries are left"
     )
     collision_summary: Dict[str, Any] = Field(
         default_factory=dict,
@@ -1252,6 +1308,9 @@ class UnrealGenerateProceduralSceneResponse(BaseModel):
         ...,
         description="Outliner folder this call filed its actors under, Simul/<Scene>_<seed>_<generation>; "
         "unique to the call",
+    )
+    physics_props: int = Field(
+        0, description="Props made physics-ready (PhysicsActor collision, simulating); 0 unless asked"
     )
 
 

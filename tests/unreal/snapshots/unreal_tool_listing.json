@@ -1293,7 +1293,7 @@
   {
    "name": "set_unreal_light_params",
    "title": "Set Unreal Light Params",
-   "description": "Set light component parameters (intensity, color, temperature, shadows); a parameter left out keeps its current value.",
+   "description": "Set a light's parameters (intensity, sRGB color, temperature, attenuation, shadows) in one undoable editor transaction and read them back; a parameter left out keeps its current value, and with none the light is only read. Works on point, spot, rect and directional lights and a SkyLight's intensity, color and shadows. Intensity is in the light's unit, returned as intensity_unit: lux for a directional light, candelas (or the light's Intensity Units) for a point, spot or rect light, a multiplier for a SkyLight. Values are range-checked before anything is written.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1312,7 +1312,7 @@
        }
       ],
       "default": null,
-      "description": "Light intensity."
+      "description": "Light intensity, 0 or more, in the light's unit."
      },
      "color": {
       "anyOf": [
@@ -1331,7 +1331,7 @@
        }
       ],
       "default": null,
-      "description": "Light color as [r, g, b], each channel 0-1; None keeps the current color."
+      "description": "Light color as sRGB [r, g, b], each channel 0-1; None keeps the current color."
      },
      "temperature": {
       "anyOf": [
@@ -1343,7 +1343,7 @@
        }
       ],
       "default": null,
-      "description": "Color temperature in Kelvin."
+      "description": "Color temperature in Kelvin, LIGHT_MIN_TEMPERATURE_K to LIGHT_MAX_TEMPERATURE_K, the range Unreal's blackbody color covers (it clamps others); applies with use_temperature."
      },
      "use_temperature": {
       "anyOf": [
@@ -1367,7 +1367,7 @@
        }
       ],
       "default": null,
-      "description": "Light attenuation radius in cm (point and spot lights only)."
+      "description": "Light attenuation radius in cm, more than 0 (point, spot and rect lights only)."
      },
      "cast_shadows": {
       "anyOf": [
@@ -1784,6 +1784,130 @@
     "required": [
      "actor_path"
     ]
+   },
+   "execution": null,
+   "outputSchema": null,
+   "icons": null,
+   "annotations": {
+    "title": null,
+    "readOnlyHint": false,
+    "destructiveHint": true,
+    "idempotentHint": true,
+    "openWorldHint": null
+   },
+   "_meta": {
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "setup_unreal_physics_bulk",
+   "title": "Setup Unreal Physics Bulk",
+   "description": "Set up physics on many editor actors in one call and one undoable transaction: the actor_paths plus every actor with tag, in the outliner folder and matching actor_filter (each that is given), at most 1000. Each is made simulated, kinematic or not physical as enable_unreal_physics does, after an optional collision preset (PhysicsActor makes props physics-ready) and with optional mass, damping and gravity. Every actor is checked first; one that cannot be set up refuses the call with nothing changed, unless skip_failures sets up the rest. Use it instead of one call per actor, which runs into the rate limit.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "actor_paths": {
+      "default": "",
+      "description": "Comma-separated editor actor paths (empty: none, select by tag or folder).",
+      "type": "string"
+     },
+     "tag": {
+      "default": "",
+      "description": "Also every editor actor with this actor tag, such as a procedural scene's tag.",
+      "type": "string"
+     },
+     "folder": {
+      "default": "",
+      "description": "Also every editor actor in this outliner folder or one under it, such as Simul/Room_5_7ee55bcd; with tag, only actors with both.",
+      "type": "string"
+     },
+     "actor_filter": {
+      "default": "",
+      "description": "Also every editor actor whose label or path contains this text, ignoring case; with tag or folder, only actors matching those too (a procedural scene's tag with _Box_ picks its props, not its floor and walls).",
+      "type": "string"
+     },
+     "enable": {
+      "default": true,
+      "description": "As enable_unreal_physics: false turns physics off.",
+      "type": "boolean"
+     },
+     "kinematic": {
+      "default": false,
+      "description": "As enable_unreal_physics: kinematic, not simulated.",
+      "type": "boolean"
+     },
+     "make_movable": {
+      "default": true,
+      "description": "As enable_unreal_physics.",
+      "type": "boolean"
+     },
+     "allow_detach": {
+      "default": false,
+      "description": "As enable_unreal_physics.",
+      "type": "boolean"
+     },
+     "collision_preset": {
+      "default": "",
+      "description": "Collision preset set first, such as PhysicsActor; empty keeps each actor's collision.",
+      "type": "string"
+     },
+     "mass": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Mass override in kg, 0.001 to 1e9."
+     },
+     "linear_damping": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Linear damping, 0 to 1e6."
+     },
+     "angular_damping": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Angular damping, 0 to 1e6."
+     },
+     "enable_gravity": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "description": "Whether gravity affects the bodies."
+     },
+     "skip_failures": {
+      "default": false,
+      "description": "Set up the actors that can be and list the rest, instead of refusing the call.",
+      "type": "boolean"
+     }
+    }
    },
    "execution": null,
    "outputSchema": null,
@@ -2222,7 +2346,7 @@
   {
    "name": "analyze_unreal_scene_for_robotics",
    "title": "Analyze Unreal Scene For Robotics",
-   "description": "Classify level actors for robotics from their collision setup: floor-like surfaces a robot can stand on, small Movable objects it can grasp, and collision counts and problems (static meshes with physics collision but no simple shapes). Uses the bounding box of each actor's collision-enabled components; the thresholds come back as criteria.",
+   "description": "Classify level actors for robotics from their collision setup: floor-like surfaces a robot can stand on, small Movable objects it can grasp, and collision counts and problems (static meshes with physics collision but no simple shapes). Measures each actor by the oriented box of its physics-collision components, so rotated pieces keep their size and tilt; the thresholds come back as criteria. Both lists are paged together (max_results each from offset; totals counts every match, next_offset starts the next page).",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2243,6 +2367,16 @@
       ],
       "default": null,
       "description": "Only analyze actors whose label or object path contains this text, ignoring case; empty or null analyzes every actor."
+     },
+     "max_results": {
+      "default": 50,
+      "description": "Most entries per category on this page, 1 to 500; a page is cut further, the same for both lists, to fit the response budget.",
+      "type": "integer"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Entries of each category to skip: the previous page's next_offset.",
+      "type": "integer"
      }
     }
    },
@@ -2265,7 +2399,7 @@
   {
    "name": "generate_unreal_procedural_scene",
    "title": "Generate Unreal Procedural Scene",
-   "description": "Build a room, corridor, warehouse or outdoor test scene from Engine basic shapes inside the bounds, in one undoable transaction; the same arguments give the same layout. Returns the spawned actor paths and the tag and outliner folder that group them, both unique to the call.",
+   "description": "Build a room, corridor, warehouse or outdoor test scene from Engine basic shapes inside the bounds, in one undoable transaction; the same arguments give the same layout. Returns the spawned actor paths and the tag and outliner folder that group them, both unique to the call. physics_props makes the props physics-ready: Movable, PhysicsActor collision, simulating, so they fall and can be pushed once the simulation starts.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2288,6 +2422,11 @@
       "default": "",
       "description": "Maximum corner as comma-separated x,y,z in cm; empty is 1000,1000,500.",
       "type": "string"
+     },
+     "physics_props": {
+      "default": false,
+      "description": "Make the props physics-ready: Movable, PhysicsActor collision and simulating physics. False leaves them Movable with BlockAll collision, not simulating.",
+      "type": "boolean"
      }
     },
     "required": [
@@ -3046,6 +3185,7 @@
    "set_unreal_collision",
    "apply_unreal_force",
    "set_unreal_physics_params",
+   "setup_unreal_physics_bulk",
    "get_unreal_physics_state",
    "list_unreal_simulation_actors",
    "import_unreal_usd",
@@ -3109,6 +3249,7 @@
    "set_unreal_collision",
    "apply_unreal_force",
    "set_unreal_physics_params",
+   "setup_unreal_physics_bulk",
    "get_unreal_physics_state",
    "list_unreal_simulation_actors",
    "import_unreal_usd",
@@ -3170,6 +3311,7 @@
    "set_unreal_collision",
    "apply_unreal_force",
    "set_unreal_physics_params",
+   "setup_unreal_physics_bulk",
    "get_unreal_physics_state",
    "list_unreal_simulation_actors",
    "import_unreal_usd",
@@ -3230,6 +3372,7 @@
    "set_unreal_collision",
    "apply_unreal_force",
    "set_unreal_physics_params",
+   "setup_unreal_physics_bulk",
    "get_unreal_physics_state",
    "list_unreal_simulation_actors",
    "import_unreal_usd",

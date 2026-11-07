@@ -136,7 +136,7 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 | Assets | `search_unreal_assets` |
 | Camera, lights, rendering | `set_unreal_camera_view`, `set_unreal_light_params`, `set_unreal_render_settings` |
 | Materials | `get_unreal_material_info`, `assign_unreal_material`, `create_unreal_material_instance`, `set_unreal_material_params` |
-| Physics and simulation | `enable_unreal_physics`, `set_unreal_physics_params`, `set_unreal_collision`, `apply_unreal_force`, `get_unreal_physics_state`, `list_unreal_simulation_actors`, `control_unreal_simulation`, `get_unreal_simulation_status` |
+| Physics and simulation | `enable_unreal_physics`, `set_unreal_physics_params`, `set_unreal_collision`, `setup_unreal_physics_bulk`, `apply_unreal_force`, `get_unreal_physics_state`, `list_unreal_simulation_actors`, `control_unreal_simulation`, `get_unreal_simulation_status` |
 | Mesh operations | `generate_unreal_mesh_primitive`, `generate_unreal_procedural_scene`, `validate_unreal_mesh`, `simplify_unreal_mesh`, `remesh_unreal_mesh`, `subdivide_unreal_mesh`, `edit_unreal_mesh_topology`, `apply_unreal_mesh_boolean`, `cut_unreal_mesh_plane`, `compute_unreal_convex_hull`, `decompose_unreal_convex_hull`, `compute_unreal_mesh_uv`, `convert_unreal_mesh_format` |
 | USD interchange | `get_unreal_interchange_info`, `import_unreal_usd`, `export_unreal_usd` |
 | SimReady | `validate_simready_asset`, `convert_to_simready` |
@@ -247,6 +247,21 @@ Behaviour worth knowing:
     simulation and after the map reloaded.
   - A path in a running simulation's world (`UEDPIE_<n>_<map>`) edits that
     play copy, which is neither undoable nor saved (`world: "simulation"`).
+  - `setup_unreal_physics_bulk` does the same for many editor actors in one
+    call and one undoable transaction: the `actor_paths`, plus every actor
+    with `tag`, in the outliner `folder` (or one under it) and whose label or
+    path contains `actor_filter`, each that is given, at most 1000. Each actor
+    is made simulated, kinematic or not physical as `enable_unreal_physics`
+    makes it, after an optional `collision_preset` (PhysicsActor makes props
+    physics-ready) and with optional mass, damping and gravity. Every actor
+    is checked first, the preset's collision standing in for its own: one
+    that cannot be set up refuses the call with nothing changed
+    (`IncompatibleBody`, the actors and reasons in `details.failed`), unless
+    `skip_failures` sets up the rest. The reply counts the actors matched,
+    set up and failed and lists the first 50 of each. A procedural scene's
+    tag also selects its floor and walls; add `actor_filter: "_Box_"` for its
+    props. Setting up props one call at a time ran into the rate limit (126
+    bodies took 116 s); one call set up 200 in under 2 s.
 - USD import and export need the optional **USDImporter** plugin enabled when
   the editor starts. They use `AssetImportTask` and `LevelExporterUSD`;
   `get_unreal_interchange_info` reports whether the plugin is available.
@@ -256,14 +271,30 @@ Behaviour worth knowing:
 - SimReady conversion and validation are not implemented for Unreal. Those
   tools return `UnsupportedOperation` without changing files.
 - `analyze_unreal_scene_for_robotics` classifies the actors loaded in the
-  editor world by the bounding box of their collision-enabled components:
-  traversable floor-like surfaces (physics collision, at least 1 m² in plan, no
-  thicker than a quarter of the shorter side, tilted at most 15°), graspable
-  objects (Movable, physics collision, fitting in a 60 cm cube) and the
+  editor world by the oriented box of their physics-collision components: a
+  single component's box rotated and scaled with it (a static mesh's bounds,
+  a box, sphere or capsule's extent), several components' boxes in the
+  actor's frame, and a component of another kind, such as a landscape
+  heightfield, by its world-axis bounds. It finds traversable floor-like
+  surfaces (physics collision, a top face of at least 1 m², no thicker than a
+  quarter of its shorter side, tilted at most 15°), graspable objects
+  (Movable, physics collision, a box fitting in a 60 cm cube) and the
   collision setup of their static meshes (simple shapes, convex hulls, render
   triangles used as simple collision, physics collision without any simple
-  shape). A landscape section counts whole, hills included. The thresholds
-  come back as `criteria`.
+  shape). A surface's top face is the box face across its thinnest side,
+  facing up, so `tilt_degrees` is that face's tilt, `area_m2` its area and
+  `normal` its upward normal: a plank yawed 45° keeps its own 2000 × 50 cm, a
+  slab pitched 14° is a floor, and one turned upside down is still one. A
+  landscape section counts whole, hills included. Sizes are along each box's
+  own axes. The thresholds come back as `criteria`.
+  - The two lists are paged together: surfaces largest first, graspable
+    objects by path, each cut to `max_results` (default 50, at most 500) from
+    `offset`. `totals` counts every match, `returned` this page's, and
+    `next_offset` (null on the last page) starts the next page, which `hint`
+    names. A page that would exceed 32 KB holds fewer per category, the same
+    number for both, so it stays within the response budget. A 5,000-actor
+    level used to return 494,853 bytes, which the server cut to no surfaces
+    and every graspable object; its first page is now 22 KB.
 - `generate_unreal_procedural_scene` builds a room, corridor, warehouse or
   outdoor scene from Engine basic shapes inside the bounds. The layout is
   planned before anything is spawned, so one that does not fit fails without
@@ -280,7 +311,28 @@ Behaviour worth knowing:
   transaction is cancelled. The actors are filed in their folder only once all
   have spawned, because Unreal keeps an outliner folder, empty, after its
   actors go and its Python API cannot delete one; a failed call therefore
-  leaves no folder behind. Props are Movable boxes; everything else is Static.
+  leaves no folder behind. Props are Movable boxes with the mesh's BlockAll
+  collision, not simulating; with `physics_props` they are made physics-ready
+  (PhysicsActor collision, simulating), so they fall and take forces once the
+  simulation starts, and the reply counts them in `physics_props`.
+  Everything else is Static. `parameters` must be a JSON object; anything
+  else fails with a `ValueError` that names it.
+- `set_unreal_light_params` writes a point, spot, rect or directional light,
+  or a SkyLight's intensity, color and shadows, in one undoable transaction,
+  and reads every value back into `applied` and `current`; with no parameter
+  it only reads the light, and an actor that is not there is an error. Values
+  are checked before anything is written: intensity 0 or more, temperature
+  1000 to 15000 K (the range Unreal's blackbody color covers; it clamps
+  others), attenuation radius above 0, and a value the light's class lacks
+  (a directional light's attenuation radius, a SkyLight's temperature) fails
+  with `ValidationError`, nothing written. A value Unreal still stores
+  differently is put back and fails the call (`LightParamsNotApplied`).
+  Intensity is in the light's unit, returned as `intensity_unit`: `lux` for a
+  directional light, the light's Intensity Units for a point, spot or rect
+  light (`candelas` by default, or `lumens`, `ev`, `unitless`), and `scale`
+  (a multiplier) for a SkyLight. `color` is sRGB, each channel 0 to 1 as the
+  color picker shows it, stored as the 8-bit color Unreal keeps
+  (channel × 255, rounded).
 - `get_unreal_material_info` reads a Material or Material Instance through
   editor scripting, in or out of Play In Editor: each scalar, vector and
   texture parameter with its value (a Material's default; for an instance,

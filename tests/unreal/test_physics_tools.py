@@ -554,3 +554,196 @@ def test_turning_off_a_simulated_body_s_collision_warns(
     # without collision gets no physics body and stays where it is.
     assert "falls through everything" in query_only["warning"]
     assert "does not move at all" in none["warning"]
+
+
+# ---------------------------------------------------------------------------
+# setup_physics_bulk
+# ---------------------------------------------------------------------------
+
+
+def _props(editor: Editor, count: int, tag: str = "simul_room_5") -> list:
+    actors = []
+    for n in range(count):
+        actor = editor.cube(f"Room_Box_{n}", mobility="MOVABLE")
+        actor.tags.append(tag)
+        actor.folder = "Simul/Room_5"
+        actors.append(actor)
+    return actors
+
+
+def test_bulk_setup_sets_up_a_tag_in_one_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U2-10: one call per prop ran into the rate limit (126 bodies took 116 s)."""
+    editor = Editor()
+    props = _props(editor, 6)
+    floor = editor.cube("Room_Floor_0")
+    session = physics_session(monkeypatch, editor)
+
+    result = run(
+        session.setup_physics_bulk(
+            tag="simul_room_5", collision_preset="PhysicsActor", mass=2.0
+        )
+    )
+
+    assert "error" not in result, result
+    assert (result["matched"], result["configured_count"], result["failed_count"]) == (
+        6,
+        6,
+        0,
+    )
+    assert {entry["actor_path"] for entry in result["configured"]} == {
+        p.get_path_name() for p in props
+    }
+    assert all(entry["physics_mode"] == "simulated" for entry in result["configured"])
+    assert all(p.root_component.preset == "PhysicsActor" for p in props)
+    assert all(p.root_component.get_mass() == 2.0 for p in props)
+    assert floor.root_component.body["simulate_physics"] is False
+    assert [t["description"] for t in editor.transactions] == ["simul: set up physics"]
+    assert editor.unrecorded_writes() == [] and editor.dirty is True
+
+
+def test_bulk_setup_refuses_everything_when_one_actor_cannot_take_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    editor = Editor()
+    props = _props(editor, 3)
+    props[1].root_component.collision = "QUERY_ONLY"
+    props[1].root_component.preset = "OverlapAll"
+    session = physics_session(monkeypatch, editor)
+
+    refused = run(session.setup_physics_bulk(tag="simul_room_5"))
+    with_preset = run(
+        session.setup_physics_bulk(tag="simul_room_5", collision_preset="PhysicsActor")
+    )
+
+    assert refused["error_type"] == INCOMPATIBLE_BODY
+    assert (
+        "none was changed" in refused["error"] and "skip_failures" in refused["error"]
+    )
+    assert refused["details"]["failed"][0]["problems"] == ["NO_PHYSICS_COLLISION"]
+    assert refused["details"]["failed_count"] == 1
+    # The refusal wrote nothing; the preset makes the query-only box physical, so the second call sets up all.
+    assert [t["description"] for t in editor.transactions] == ["simul: set up physics"]
+    assert with_preset["configured_count"] == 3
+
+
+def test_bulk_setup_with_skip_failures_sets_up_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    editor = Editor()
+    props = _props(editor, 3)
+    empty = editor.cube("Room_Box_Empty", mobility="MOVABLE", no_mesh=True)
+    empty.tags.append("simul_room_5")
+    session = physics_session(monkeypatch, editor)
+
+    result = run(
+        session.setup_physics_bulk(
+            tag="simul_room_5",
+            actor_paths=["/Game/Maps/Lab.Lab:PersistentLevel.Gone"],
+            skip_failures=True,
+        )
+    )
+
+    assert (result["configured_count"], result["failed_count"]) == (3, 2)
+    failures = {entry["actor_path"]: entry for entry in result["failed"]}
+    assert (
+        failures["/Game/Maps/Lab.Lab:PersistentLevel.Gone"]["error"]
+        == "Actor not found"
+    )
+    assert failures[empty.get_path_name()]["problems"] == ["NO_GEOMETRY"]
+    assert all(p.root_component.body["simulate_physics"] for p in props)
+
+
+def test_bulk_setup_selects_by_folder_and_tag_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    editor = Editor()
+    props = _props(editor, 2)
+    props[1].folder = "Simul/Room_5/Shelves"  # a subfolder counts
+    stray = editor.cube("Stray", mobility="MOVABLE")
+    stray.folder = "Simul/Room_5"  # in the folder, without the tag
+    other = editor.cube("Other", mobility="MOVABLE")
+    other.tags.append("simul_room_5")  # with the tag, in no folder
+    session = physics_session(monkeypatch, editor)
+
+    by_folder = run(session.setup_physics_bulk(folder="Simul/Room_5", kinematic=True))
+    both = run(
+        session.setup_physics_bulk(
+            folder="/Simul/Room_5/", tag="simul_room_5", enable=False
+        )
+    )
+
+    assert {entry["actor_path"] for entry in by_folder["configured"]} == {
+        props[0].get_path_name(),
+        props[1].get_path_name(),
+        stray.get_path_name(),
+    }
+    assert by_folder["mode"] == "kinematic"
+    assert {entry["actor_path"] for entry in both["configured"]} == {
+        p.get_path_name() for p in props
+    }
+
+
+def test_bulk_setup_actor_filter_picks_a_scene_s_props(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A procedural scene tags its floor and walls with its props: selecting by the tag
+    alone made the floor Movable and simulated, and everything fell through (live, UE 5.7.4).
+    """
+    editor = Editor()
+    props = _props(editor, 3)
+    floor = editor.cube("Room_Floor_0")
+    floor.tags.append("simul_room_5")
+    session = physics_session(monkeypatch, editor)
+
+    result = run(session.setup_physics_bulk(tag="simul_room_5", actor_filter="_box_"))
+
+    assert {entry["actor_path"] for entry in result["configured"]} == {
+        p.get_path_name() for p in props
+    }
+    assert floor.root_component.mobility.name == "STATIC"
+
+
+def test_bulk_setup_refuses_simulation_paths_and_too_many_actors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    editor = Editor()
+    props = _props(editor, 4)
+    editor.pie = True
+    copy = editor.simulation_copy(props[0])
+    session = physics_session(monkeypatch, editor)
+    monkeypatch.setattr("simul.adapters.unreal_runtime.PHYSICS_BULK_MAX_ACTORS", 3)
+
+    simulation = run(session.setup_physics_bulk(actor_paths=[copy.get_path_name()]))
+    too_many = run(session.setup_physics_bulk(tag="simul_room_5"))
+
+    assert simulation["error_type"] == INCOMPATIBLE_BODY
+    assert "pass the editor path" in simulation["details"]["failed"][0]["error"]
+    assert (
+        too_many["error_type"] == "ValidationError"
+        and "4 actors matched" in too_many["error"]
+    )
+    assert editor.transactions == []
+
+
+def test_bulk_setup_checks_its_arguments_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    editor = Editor()
+    _props(editor, 2)
+    session = physics_session(monkeypatch, editor)
+
+    with pytest.raises(ValueError, match="actor_paths, tag, folder or actor_filter"):
+        run(session.setup_physics_bulk())
+    with pytest.raises(ValueError, match="mass must be from"):
+        run(session.setup_physics_bulk(tag="simul_room_5", mass=1e40))
+    unknown = run(
+        session.setup_physics_bulk(tag="simul_room_5", collision_preset="Bogus")
+    )
+    nothing = run(session.setup_physics_bulk(tag="no_such_tag"))
+
+    assert unknown["error_type"] == "ValidationError" and "Bogus" in unknown["error"]
+    assert (
+        nothing["error_type"] == "ValidationError"
+        and "No actor matched" in nothing["error"]
+    )
+    assert editor.transactions == []
