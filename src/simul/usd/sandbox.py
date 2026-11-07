@@ -26,7 +26,8 @@ attributes from a file the policy would have refused by name.
   then (``GetUsedLayers``) and walks any the first pass did not see. It is the
   backstop for whatever the first pass could not predict (a resolver that
   finds a layer somewhere its anchored path did not say, a file swapped on
-  disk between the passes). A file read this way is never reported: the
+  disk between the passes), and judges every location afresh rather than
+  from the first pass's cache. A file read this way is never reported: the
   stage is discarded with the refusal. Value clips are the exception: when a
   clip set authors a ``manifestAssetPath``, pxr opens its clip layers only on
   the first read of a time-varying value, after this check. Clips are
@@ -148,8 +149,10 @@ class CompositionSandbox:
     def __init__(self, policy: "PathPolicy") -> None:
         self._policy = policy
         self._visited: Set[str] = set()
-        # One memoised read check for the whole load: each distinct location
-        # is judged once, each shared root's trust walked once.
+        # One memoised read check per pass: within a pass each distinct
+        # location is judged once and each shared root's trust walked once.
+        # check_stage starts a fresh one, so the filesystem is judged anew
+        # after composition rather than remembered from the first pass.
         self._allowed_check = policy.read_check()
         self._resolved: Dict[str, str] = {}
 
@@ -186,9 +189,11 @@ class CompositionSandbox:
     def check_stage(self, stage: "Usd.Stage") -> None:
         """Check the layers a composed stage uses by now.
 
-        Value clip layers that pxr opens lazily (a clip set with a manifest)
-        are not open yet; ``check_layers`` already held their paths to the
-        sandbox.
+        Every location is judged afresh, not from ``check_layers``'s cache,
+        so a file or directory swapped on disk between the two passes is
+        caught. Value clip layers that pxr opens lazily (a clip set with a
+        manifest) are not open yet; ``check_layers`` already held their paths
+        to the sandbox.
 
         Raises:
             SandboxDenied: A used layer, or an asset path one of them authors,
@@ -196,6 +201,10 @@ class CompositionSandbox:
         """
         if not self.enabled:
             return
+        # Nothing from the first pass is reused: a directory swapped for a
+        # symlink out of the sandbox since then must be judged as it is now.
+        self._allowed_check = self._policy.read_check()
+        self._resolved = {}
         outside: List[OutsidePath] = []
         unseen: List["Sdf.Layer"] = []
         root_id = stage.GetRootLayer().identifier

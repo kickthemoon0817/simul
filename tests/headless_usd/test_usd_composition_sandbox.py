@@ -350,6 +350,39 @@ def test_post_composition_check_catches_what_the_walk_did_not_see(dirs, policy) 
     assert str(secret) in [entry["location"] for entry in caught.value.details["outside_sandbox"]]
 
 
+def test_post_composition_check_judges_the_disk_afresh(dirs, policy) -> None:
+    """Both passes on one sandbox, with a directory swapped for an outside symlink between them.
+
+    check_stage used to reuse check_layers's verdicts, so a missing (and so
+    allowed) ./d/late.usda that became a link out of the sandbox before the
+    stage was composed passed the backstop.
+    """
+    import shutil
+
+    inside, outside = dirs
+    (inside / "d").mkdir()
+    (outside / "d2").mkdir()
+    _secret(outside / "d2", "late.usda")
+    path = inside / "late_ref.usda"
+    stage = _stage(path)
+    stage.DefinePrim("/World/Late").GetReferences().AddReference("./d/late.usda")
+    stage.GetRootLayer().Save()
+    root = Sdf.Layer.FindOrOpen(str(path))
+    sandbox = CompositionSandbox(policy)
+
+    sandbox.check_layers(root)  # ./d/late.usda is missing and inside: passes
+    shutil.rmtree(inside / "d")
+    (inside / "d").symlink_to(outside / "d2", target_is_directory=True)
+    composed = Usd.Stage.Open(root)
+    assert composed.GetPrimAtPath("/World/Late").GetAttribute("custom:api_key").Get() == SECRET
+
+    with pytest.raises(SandboxDenied) as caught:
+        sandbox.check_stage(composed)
+
+    locations = [entry["location"] for entry in caught.value.details["outside_sandbox"]]
+    assert str(inside / "d" / "late.usda") in locations
+
+
 def test_validation_applies_the_same_sandbox(dirs, policy) -> None:
     inside, outside = dirs
     _secret(outside)
@@ -443,8 +476,12 @@ def test_walk_judges_each_location_once_and_a_shared_root_once(
     finally:
         session.cleanup()
 
-    # 20 sublayers, 5 distinct textures named 200 times, and the root layer the
-    # post-composition check sees: each judged once.
-    assert len(judged) == len(set(judged)) == 26
-    # One trust walk per check of the root (as configured and as resolved).
-    assert len(trust_walks) == 2
+    # First pass: 20 sublayers and 5 distinct textures named 200 times, each
+    # judged once. The post-composition pass judges afresh the 21 layers the
+    # stage uses (root included), once each.
+    first, second = judged[:25], judged[25:]
+    assert len(first) == len(set(first)) == 25
+    assert len(second) == len(set(second)) == 21
+    assert set(second) <= set(first) | {str(root / "stack.usda")}
+    # The root's trust is walked once per pass (as configured and as resolved).
+    assert len(trust_walks) == 4
