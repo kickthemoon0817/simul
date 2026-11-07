@@ -276,6 +276,12 @@ class Actor:
     def actor_has_tag(self, tag):
         return tag in self.get_editor_property("tags")
 
+    def get_attach_parent_actor(self):
+        return None
+
+    def get_attached_actors(self):
+        return []
+
 
 @pytest.fixture
 def script_session(monkeypatch, tmp_path):
@@ -340,7 +346,7 @@ def script_session(monkeypatch, tmp_path):
     )
     session = UnrealRuntimeSession(settings)
 
-    async def execute(code, mode="ExecuteFile"):
+    async def execute(code, mode="ExecuteFile", timeout=None):
         output = io.StringIO()
         try:
             with redirect_stdout(output):
@@ -401,11 +407,7 @@ async def test_component_operations_and_missing_component(script_session):
     fuller fake editor in tests/unreal/test_physics_tools.py and
     tests/unreal/test_simulation_tools.py."""
     session, actor, _ = script_session
-    component = actor.root_component
-    assert not (await session.assign_material(actor.path, "/Game/Material")).get(
-        "error"
-    )
-    assert any(event[0] == "material" for event in component.events)
+    # assign_material has its own fake editor: tests/unreal/test_asset_tools.py.
     actor.root_component = None
     for result in (
         await session.enable_physics(actor.path),
