@@ -51,7 +51,9 @@ def _session(
             handlers=fake_app_handlers(),
         ),
         data=SimpleNamespace(
-            objects={"Cube": cube}, filepath=str(tmp_path / "scene.blend")
+            objects={"Cube": cube},
+            filepath=str(tmp_path / "scene.blend"),
+            is_dirty=False,
         ),
         context=SimpleNamespace(
             scene=scene,
