@@ -67,6 +67,7 @@ from ..schemas.unreal import (
     UnrealGetThumbnailResponse,
     UnrealHealthCheckResponse,
     UnrealImportUsdResponse,
+    UnrealListActorComponentsResponse,
     UnrealListActorsResponse,
     UnrealListInstancesResponse,
     UnrealLoadedMapResponse,
@@ -269,6 +270,13 @@ def _focus_view(request: Any) -> Optional[str]:
     from ...adapters.unreal_runtime import focus_view_error
 
     return focus_view_error(request.fov, request.aspect_ratio)
+
+
+def _visibility_request(request: Any) -> Optional[str]:
+    """A scope the visibility tool knows, and persistence only for the editor's hiding."""
+    from ...adapters.unreal_runtime import visibility_request_error
+
+    return visibility_request_error(request.scope, request.persistent)
 
 
 def _parent_or_detach(request: Any) -> Optional[str]:
@@ -517,7 +525,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     # -- Scene read operations ----------------------------------------------
     UnrealTool(
         name="list_unreal_actors",
-        description="List actors in the current Unreal Engine level with optional class and tag filters.",
+        description=(
+            "List the current level's actors, one page at a time, with world transforms, tags and "
+            "attachment (parent, children). Filter by class (optionally with subclasses), tag and "
+            "label. total counts every match; a page stops at max_results or the response budget, "
+            "and next_offset is where the next one starts."
+        ),
         response=UnrealListActorsResponse,
         read_only=True,
         idempotent=True,
@@ -527,31 +540,79 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 "class_filter",
                 str,
                 "",
-                description="Filter by UClass name (empty string = no filter).",
+                description=(
+                    "Keep actors whose class has this name (StaticMeshActor, BP_Door_C) or path "
+                    "(/Script/Engine.StaticMeshActor); empty keeps every class."
+                ),
                 convert=_optional_text,
             ),
             ToolParam(
                 "tag_filter",
                 str,
                 "",
-                description="Filter by actor tag (empty string = no filter).",
+                description="Keep actors with this actor tag, ignoring case (empty string = no filter).",
                 convert=_optional_text,
             ),
-            ToolParam("max_results", int, 200, description="Maximum number of actors to return."),
+            ToolParam("max_results", int, 200, description="Most actors in the page, 1 to 5000."),
+            ToolParam("offset", int, 0, description="Matching actors to skip: the previous page's next_offset."),
+            ToolParam(
+                "label_filter",
+                str,
+                "",
+                description="Keep actors whose label contains this text, ignoring case (empty = no filter).",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "include_subclasses",
+                bool,
+                False,
+                description=(
+                    "Also keep actors whose class derives from class_filter's: Light keeps PointLight, "
+                    "SpotLight and Blueprints derived from them."
+                ),
+            ),
         ),
     ),
     UnrealTool(
         name="get_unreal_actor_info",
         description=(
-            "Get detailed information about a specific actor including transform, components, and tags. The path "
-            "must name a live actor of the level open in the editor; a deleted actor, or one of a map that is not "
-            "open, is not found, and no map is loaded to look for it."
+            "Get detailed information about a specific actor including transform, components, tags and "
+            "attachment (parent and children). The path must name a live actor of the level open in the "
+            "editor; a deleted actor, or one of a map that is not open, is not found, and no map is loaded "
+            "to look for it."
         ),
         response=UnrealGetActorInfoResponse,
         read_only=True,
         idempotent=True,
         method="get_actor_info",
         params=(ToolParam("actor_path", str, description="Full object path of the actor."),),
+    ),
+    UnrealTool(
+        name="list_unreal_actor_components",
+        description=(
+            "List an actor's components, one page at a time: class, root and editor-only flags, and "
+            "for scene components the component they are attached to, world location, mobility and "
+            "visibility; primitive components add world bounds (center, half-size, sphere radius)."
+        ),
+        response=UnrealListActorComponentsResponse,
+        read_only=True,
+        idempotent=True,
+        method="list_actor_components",
+        params=(
+            ToolParam("actor_path", str, description="Full object path of the actor."),
+            ToolParam(
+                "class_filter",
+                str,
+                "",
+                description=(
+                    "Keep components whose class has this name or path or derives from it "
+                    "(PrimitiveComponent keeps meshes, shapes and sprites); empty keeps all."
+                ),
+                convert=_optional_text,
+            ),
+            ToolParam("offset", int, 0, description="Components to skip: the previous page's next_offset."),
+            ToolParam("max_results", int, 200, description="Most components in the page, 1 to 5000."),
+        ),
     ),
     UnrealTool(
         name="search_unreal_assets",
@@ -628,7 +689,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_camera_view",
-        description="Set the editor viewport camera position and rotation.",
+        description=(
+            "Set the editor viewport camera position and rotation and return the camera read back. Each axis of "
+            "location within 4398046511104 cm (2^42) of the origin and pitch from -90 to 90 degrees, the furthest "
+            "Unreal takes; a group left out keeps its value."
+        ),
         response=UnrealSetCameraViewResponse,
         read_only=False,
         idempotent=True,
@@ -647,9 +712,9 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="focus_unreal_on_actor",
         description=(
-            "Focus the editor viewport camera on a specific actor and select it. With distance 0 the camera "
-            "looks at the center of the actor's bounds and backs off until they fit a view fov degrees across "
-            "and aspect_ratio wide per unit of height: by default UE's default 90-degree field of view on the "
+            "Focus the editor viewport camera on a specific actor and make it the whole selection. With distance 0 "
+            "the camera looks at the center of the actor's bounds and backs off until they fit a view fov degrees "
+            "across and aspect_ratio wide per unit of height: by default UE's default 90-degree field of view on the "
             "16:9 of the default capture. Editor Python cannot read the viewport's field of view, so pass fov "
             "when it was changed, and aspect_ratio for a capture of another shape. distance reports the "
             "distance used, and fit_warning says when an actor without bounds got the default 500 cm. "
@@ -694,7 +759,13 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     # -- Scene manipulation ---------------------------------------------------
     UnrealTool(
         name="spawn_unreal_actor",
-        description="Spawn an actor from a class or asset path.",
+        description=(
+            "Spawn an actor from a class or asset path, with its label, in one undoable editor transaction; the "
+            "label and transform are read back. Refused: a class Unreal does not let you place (the level's "
+            "WorldSettings and other per-level singletons, game-framework classes such as GameModeBase or "
+            "PlayerController, a bare Brush), an abstract class, a map or an actor in a level, and a label Unreal "
+            "would not take (leading or trailing whitespace, over 1023 characters, 'None')."
+        ),
         response=UnrealSpawnActorResponse,
         read_only=False,
         method="spawn_actor",
@@ -706,18 +777,30 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("rotation_pitch", float, 0.0, description="Spawn pitch in degrees (rotation about Y)."),
             ToolParam("rotation_yaw", float, 0.0, description="Spawn yaw in degrees (rotation about Z)."),
             ToolParam("rotation_roll", float, 0.0, description="Spawn roll in degrees (rotation about X)."),
-            ToolParam("label", str, "", description="Optional actor label in the outliner."),
+            ToolParam(
+                "label",
+                str,
+                "",
+                description=(
+                    "Optional actor label in the outliner: no leading or trailing whitespace, at most 1023 "
+                    "characters, not 'None'."
+                ),
+            ),
         ),
         arguments=_spawn_arguments,
     ),
     UnrealTool(
         name="delete_unreal_actor",
-        description="Delete an actor from the level. DESTRUCTIVE operation.",
+        description=(
+            "Delete an actor from the level, in one undoable editor transaction. DESTRUCTIVE operation. A path that "
+            "names no actor of the level open in the editor (or a label) is NotFoundError; the level's "
+            "WorldSettings, its builder brush and other actors the editor keeps out of the Outliner are refused."
+        ),
         response=UnrealDeleteActorResponse,
         read_only=False,
         destructive=True,
         method="delete_actor",
-        params=(ToolParam("actor_path", str),),
+        params=(ToolParam("actor_path", str, description="Full actor path, as list_unreal_actors reports it."),),
     ),
     UnrealTool(
         name="set_unreal_actor_transform",
@@ -775,7 +858,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="call_unreal_actor_function",
-        description="Call a BlueprintCallable UFUNCTION on an actor.",
+        description=(
+            "Call a BlueprintCallable UFUNCTION on an actor of the level open in the editor, as one undo step that "
+            "records the actor and its root component first."
+        ),
         response=UnrealCallActorFunctionResponse,
         read_only=False,
         destructive=True,
@@ -863,17 +949,52 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_actor_visibility",
-        description="Set actor visibility in the Unreal level.",
+        description=(
+            "Show or hide an actor, in one undoable editor transaction, and read every flag back. scope 'editor' "
+            "is the editor's hide (the Outliner's eye): the level viewport and captures honour it, and it lasts the "
+            "editor session unless persistent also sets the hidden-at-editor-startup flag saved with the level. "
+            "scope 'game' is hidden in game, saved with the level: Play In Editor and the packaged game honour it, "
+            "the level viewport still draws the actor. 'all' (the default) sets both. propagate applies the same "
+            "to every actor attached under it. actors lists each actor's hidden_in_editor, "
+            "hidden_in_editor_at_startup and hidden_in_game read back."
+        ),
         response=UnrealSetActorVisibilityResponse,
         read_only=False,
         idempotent=True,
         destructive=True,
         method="set_actor_visibility",
         params=(
-            ToolParam("actor_path", str),
-            ToolParam("visible", bool, True),
-            ToolParam("propagate", bool, True),
+            ToolParam("actor_path", str, description="Full actor path."),
+            ToolParam("visible", bool, True, description="Show the actor (true) or hide it (false)."),
+            ToolParam(
+                "propagate",
+                bool,
+                True,
+                description=(
+                    "Apply the same to every actor attached under it, children of children included; a hidden "
+                    "parent hides none of them."
+                ),
+            ),
+            ToolParam(
+                "scope",
+                str,
+                "all",
+                description=(
+                    "Which visibility to set: 'editor' (level viewport and captures), 'game' (Play In Editor and "
+                    "the packaged game) or 'all'."
+                ),
+            ),
+            ToolParam(
+                "persistent",
+                bool,
+                False,
+                description=(
+                    "Editor scopes only: also set the hidden-at-editor-startup flag saved with the level, so the "
+                    "editor hiding outlasts a reload. Not while Play In Editor runs."
+                ),
+            ),
         ),
+        check=_visibility_request,
     ),
     # -- Materials, lighting and rendering --------------------------------------
     UnrealTool(
@@ -1305,16 +1426,52 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="query_unreal_scene_graph",
-        description="Query the Unreal scene graph hierarchy.",
+        description=(
+            "Read the level's attachment hierarchy as a tree: the level (or the root_path actor), "
+            "the actors attached to it and theirs, max_depth levels down, optionally with each "
+            "actor's components. One page of the root's children at a time; total_actors and "
+            "total_depth cover the whole tree."
+        ),
         response=UnrealQuerySceneGraphResponse,
         read_only=True,
         idempotent=True,
         method="query_scene_graph",
         params=(
-            ToolParam("root_path", Optional[str], None),
-            ToolParam("max_depth", int, 10),
-            ToolParam("include_components", bool, False),
-            ToolParam("class_filter", Optional[str], None),
+            ToolParam(
+                "root_path",
+                Optional[str],
+                None,
+                description="Actor whose attached actors form the tree; null or empty starts at the level.",
+            ),
+            ToolParam(
+                "max_depth",
+                int,
+                10,
+                description="Levels below the root to include, 1 to 64 (the root's children are level 1).",
+            ),
+            ToolParam(
+                "include_components",
+                bool,
+                False,
+                description="Give each actor its components: name, class, is_root, attach_parent.",
+            ),
+            ToolParam(
+                "class_filter",
+                Optional[str],
+                None,
+                description=(
+                    "Keep actors whose class has this name or path, and the actors above them "
+                    "(matches_filter false); null keeps every actor."
+                ),
+            ),
+            ToolParam(
+                "include_subclasses",
+                bool,
+                False,
+                description="Also keep actors whose class derives from class_filter's.",
+            ),
+            ToolParam("offset", int, 0, description="Root children to skip: the previous page's next_offset."),
+            ToolParam("max_results", int, 100, description="Most root children in the page, 1 to 5000."),
         ),
     ),
     UnrealTool(
@@ -1400,7 +1557,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="get_unreal_actor_by_semantic_label",
-        description="Find level actors whose actor tags match a label: exact, contains or regex, ignoring case.",
+        description=(
+            "Find level actors whose actor tags match a label: exact, contains or regex, ignoring case. "
+            "One page at a time: total_matches counts every match, and next_offset is where the next "
+            "page starts."
+        ),
         response=UnrealGetActorBySemanticLabelResponse,
         read_only=True,
         idempotent=True,
@@ -1409,6 +1570,7 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             ToolParam("label", str),
             ToolParam("match_mode", str, "exact"),
             ToolParam("max_results", int, 100),
+            ToolParam("offset", int, 0, description="Matching actors to skip: the previous page's next_offset."),
         ),
     ),
     # -- Geometry and modeling (GeometryScript) --------------------------------------

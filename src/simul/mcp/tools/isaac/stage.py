@@ -1,14 +1,359 @@
 """Asset & Stage Operations tools for Isaac Sim."""
 
 import textwrap
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
+from ...schemas.common import ErrorResponse
 from ._shared import (
     OPEN_ASSET_CORE,
     _compose_script,
     _pyval,
 )
+from .graph import script_guard_source
 from .._meta import SandboxedPath, tool_meta
+
+# What the in-place save is about to write, read before anything is written so
+# the sandbox can police it: the stage's own file and every other dirty layer
+# a save writes along with it, plus the timeline state.
+SAVE_PROBE_SCRIPT = textwrap.dedent("""\
+    import json
+    import omni.usd
+
+    ctx = omni.usd.get_context()
+    stage = ctx.get_stage()
+    if stage is None:
+        print(json.dumps({"error": "No stage is currently open"}))
+    else:
+        try:
+            import omni.timeline
+            timeline_stopped = bool(omni.timeline.get_timeline_interface().is_stopped())
+        except Exception:
+            timeline_stopped = None
+        session = stage.GetSessionLayer()
+        dirty = sorted({
+            layer.identifier for layer in stage.GetUsedLayers()
+            if layer.dirty and not layer.anonymous and layer != session
+        })
+        print(json.dumps({
+            "stage_url": ctx.get_stage_url() or "",
+            "dirty_layers": dirty,
+            "timeline_stopped": timeline_stopped,
+        }))
+""")
+
+# Shared by the save scripts: refuse while the timeline is not stopped, since a
+# playing or paused simulation has written simulated poses into the stage that
+# stopping it would reset. Defines _timeline_refusal(allow).
+TIMELINE_GUARD_CORE = """\
+    def _timeline_refusal(allow):
+        try:
+            import omni.timeline
+            stopped = omni.timeline.get_timeline_interface().is_stopped()
+        except Exception:
+            return None
+        if stopped or allow:
+            return None
+        return {
+            "error": (
+                "The timeline is playing or paused, so the stage holds simulated poses that "
+                "stopping it would reset. Stop the simulation first, or pass "
+                "allow_while_playing=true to save the current state."
+            ),
+            "error_type": "RefusedOperation",
+            "override": "allow_while_playing",
+        }
+"""
+
+# File types Kit does not open as USD layers; named in the error so the caller
+# knows to convert first rather than retry the path.
+CONVERT_FIRST_SUFFIXES: tuple[str, ...] = (".obj", ".fbx", ".gltf", ".glb", ".stl", ".dae", ".3ds", ".ply")
+
+# Resolves which prim of an asset a reference targets, adds the reference,
+# checks that it composed something and holds no code-running node, and
+# corrects or reports a metersPerUnit / upAxis mismatch. Every failure undoes
+# what the call created or changed. Defines _import_asset(...) and
+# _reference_on_prim(...); needs script_guard_source() for the node check.
+REFERENCE_ASSET_CORE = """\
+    import math
+
+    def _unique_path(stage, path):
+        if not stage.GetPrimAtPath(path).IsValid():
+            return path
+        index = 1
+        while stage.GetPrimAtPath(path + "_" + str(index)).IsValid():
+            index += 1
+        return path + "_" + str(index)
+
+    def _first_missing(stage, path):
+        # The top-most prim on the way to path that does not exist yet:
+        # removing it undoes every ancestor DefinePrim creates along with path.
+        current = Sdf.Path(path)
+        top = None
+        while current != Sdf.Path.absoluteRootPath and not stage.GetPrimAtPath(current).IsValid():
+            top = current
+            current = current.GetParentPath()
+        return top
+
+    def _failure(message, error_type, code=None, **extra):
+        result = {"error": message, "error_type": error_type}
+        if code is not None:
+            result["details"] = {"code": code}
+        result.update(extra)
+        return result
+
+    def _asset_root(layer, asset_prim_path):
+        # (prim path to reference or None for the defaultPrim, its name, warning, failure)
+        if asset_prim_path is not None:
+            if layer.GetPrimAtPath(asset_prim_path) is None:
+                return None, None, None, _failure(
+                    "No prim " + asset_prim_path + " in " + layer.identifier + "; nothing was changed",
+                    "NotFoundError",
+                )
+            return asset_prim_path, Sdf.Path(asset_prim_path).name, None, None
+        if layer.defaultPrim:
+            return None, str(layer.defaultPrim).strip("/").split("/")[-1], None, None
+        for spec in layer.rootPrims:
+            if spec.specifier == Sdf.SpecifierDef:
+                return str(spec.path), spec.name, (
+                    "The asset has no defaultPrim; referenced its first root prim "
+                    + str(spec.path) + ". Pass asset_prim_path to choose another."
+                ), None
+        return None, None, None, _failure(
+            "The asset has no defaultPrim and no root prim to reference: " + layer.identifier
+            + "; nothing was changed",
+            "ValidationError", "ASSET_HAS_NO_PRIMS",
+        )
+
+    def _metrics(stage, layer):
+        root = layer.pseudoRoot
+        asset_meters = float(root.GetInfo("metersPerUnit")) if root.HasInfo("metersPerUnit") else None
+        asset_up = str(root.GetInfo("upAxis")) if root.HasInfo("upAxis") else None
+        stage_meters = float(UsdGeom.GetStageMetersPerUnit(stage)) or 1.0
+        stage_up = str(UsdGeom.GetStageUpAxis(stage))
+        scale = None
+        if asset_meters is not None and not math.isclose(asset_meters, stage_meters, rel_tol=1e-9):
+            scale = asset_meters / stage_meters
+        rotate_x = None
+        if asset_up is not None and asset_up != stage_up:
+            rotate_x = 90.0 if (asset_up, stage_up) == ("Y", "Z") else -90.0
+        notes = []
+        if asset_meters is None:
+            notes.append("the asset does not author metersPerUnit (USD's fallback is centimetres); no scale applied")
+        if asset_up is None:
+            notes.append("the asset does not author upAxis; no rotation applied")
+        return {
+            "asset_meters_per_unit": asset_meters,
+            "asset_up_axis": asset_up,
+            "stage_meters_per_unit": stage_meters,
+            "stage_up_axis": stage_up,
+            "scale_needed": scale,
+            "rotate_x_needed": rotate_x,
+            "applied": False,
+            "notes": notes,
+        }
+
+    def _needs_correction(units):
+        return units["scale_needed"] is not None or units["rotate_x_needed"] is not None
+
+    def _add_correction_ops(prim, units):
+        # Suffixed ops, so set_isaac_prim_transform leaves them alone, at the
+        # end of the op order: innermost, converting before any transform the
+        # caller sets on this prim.
+        xformable = UsdGeom.Xformable(prim)
+        if units["rotate_x_needed"] is not None:
+            attr = prim.GetAttribute("xformOp:rotateX:unitsResolve")
+            op = UsdGeom.XformOp(attr) if attr.IsValid() else xformable.AddRotateXOp(
+                UsdGeom.XformOp.PrecisionFloat, "unitsResolve")
+            op.Set(units["rotate_x_needed"])
+        if units["scale_needed"] is not None:
+            scale = units["scale_needed"]
+            attr = prim.GetAttribute("xformOp:scale:unitsResolve")
+            op = UsdGeom.XformOp(attr) if attr.IsValid() else xformable.AddScaleOp(
+                UsdGeom.XformOp.PrecisionFloat, "unitsResolve")
+            op.Set(Gf.Vec3f(scale, scale, scale))
+        units["applied"] = True
+        units["correction_prim"] = str(prim.GetPath())
+        units["xform_op_order"] = [op.GetOpName() for op in xformable.GetOrderedXformOps()]
+
+    def _references_undo(stage, prim):
+        # Restores the edit target's references list op on prim as it is now.
+        target = stage.GetEditTarget()
+        layer = target.GetLayer()
+        spec_path = target.MapToSpecPath(prim.GetPath())
+        spec = layer.GetPrimAtPath(spec_path)
+        had = spec is not None and spec.HasInfo("references")
+        previous = spec.GetInfo("references") if had else None
+
+        def _undo():
+            current = layer.GetPrimAtPath(spec_path)
+            if current is None:
+                return
+            if had:
+                current.SetInfo("references", previous)
+            else:
+                current.ClearInfo("references")
+
+        return _undo
+
+    def _add_reference(prim, asset_path, root_path):
+        # "already", "nothing" (and undone) or "added"
+        reference = Sdf.Reference(asset_path, root_path) if root_path else Sdf.Reference(asset_path)
+        existing = prim.GetMetadata("references")
+        for item in (existing.GetAppliedItems() if existing else []):
+            if item.assetPath == reference.assetPath and item.primPath == reference.primPath:
+                return "already"
+        before = len(prim.GetPrimStack())
+        prim.GetReferences().AddReference(reference)
+        if len(prim.GetPrimStack()) <= before:
+            return "nothing"
+        return "added"
+
+    def _composed_nothing(asset_path, root_path, root_name):
+        return _failure(
+            "The reference to " + asset_path + " composed nothing"
+            + (" (prim " + root_path + ")" if root_path else " (its defaultPrim " + str(root_name) + ")")
+            + "; nothing was changed",
+            "ValidationError", "REFERENCE_COMPOSED_NOTHING",
+        )
+
+    def _code_nodes_refusal(found):
+        return _failure(
+            "The asset contains node(s) that run Python given as data ("
+            + ", ".join(found[:5]) + "). Script execution is disabled by "
+            "security.allow_script_execution; nothing was changed.",
+            "ScriptExecutionDisabled", None, script_capable_prims=found,
+        )
+
+    def _import_asset(stage, asset_path, requested, asset_prim_path, correct_units, guard):
+        layer = Sdf.Layer.FindOrOpen(asset_path)
+        root_path, root_name, warning, failure = _asset_root(layer, asset_prim_path)
+        if failure is not None:
+            return failure
+        units = _metrics(stage, layer)
+        target = _unique_path(stage, requested)
+        created = _first_missing(stage, target)
+        wrapped = correct_units and _needs_correction(units)
+        if wrapped:
+            # The correction sits on a wrapper Xform with the reference on its
+            # child, so the asset root's own transform (in asset units) is
+            # converted too, and a transform the caller later sets on the
+            # wrapper cannot drop it.
+            wrapper = UsdGeom.Xform.Define(stage, target).GetPrim()
+            _add_correction_ops(wrapper, units)
+            holder = stage.DefinePrim(Sdf.Path(target).AppendChild(root_name))
+        else:
+            holder = stage.DefinePrim(target)
+            if _needs_correction(units):
+                units["notes"].append("mismatch reported, not corrected (correct_units=false)")
+        if _add_reference(holder, asset_path, root_path) != "added":
+            stage.RemovePrim(created)
+            return _composed_nothing(asset_path, root_path, root_name)
+        found = _script_capable_prims_under(holder) if guard else []
+        if found:
+            stage.RemovePrim(created)
+            return _code_nodes_refusal(found)
+        result = {
+            "referenced_prim": root_path or "/" + root_name,
+            "used_default_prim": root_path is None,
+            "asset_root_path": str(holder.GetPath()),
+            "prim_type": holder.GetTypeName(),
+            "child_count": len(holder.GetChildren()),
+            "units": units,
+        }
+        if warning is not None:
+            result["warning"] = warning
+        return result
+
+    def _reference_on_prim(stage, prim_path, asset_path, asset_prim_path, correct_units, guard):
+        layer = Sdf.Layer.FindOrOpen(asset_path)
+        root_path, root_name, warning, failure = _asset_root(layer, asset_prim_path)
+        if failure is not None:
+            return failure
+        prim = stage.GetPrimAtPath(prim_path)
+        created = None
+        if not prim.IsValid():
+            created = _first_missing(stage, prim_path)
+            prim = stage.DefinePrim(prim_path)
+        if prim.IsInstanceProxy():
+            return _failure("Prim is inside an instance and cannot be edited here: " + prim_path, "ValidationError",
+                            "INSTANCE_PROXY")
+        undo = _references_undo(stage, prim)
+
+        def _roll_back():
+            if created is not None:
+                stage.RemovePrim(created)
+            else:
+                undo()
+
+        status = _add_reference(prim, asset_path, root_path)
+        if status == "already":
+            return {"already_referenced": True, "referenced_prim": root_path or "/" + root_name}
+        if status == "nothing":
+            _roll_back()
+            return _composed_nothing(asset_path, root_path, root_name)
+        found = _script_capable_prims_under(prim) if guard else []
+        if found:
+            _roll_back()
+            return _code_nodes_refusal(found)
+        units = _metrics(stage, layer)
+        declined = None
+        if _needs_correction(units) and correct_units:
+            own_ops = [
+                op.GetOpName() for op in UsdGeom.Xformable(prim).GetOrderedXformOps()
+                if not op.GetOpName().endswith(":unitsResolve")
+            ] if prim.IsA(UsdGeom.Xformable) else None
+            if own_ops is None:
+                declined = (
+                    "correct_units was not applied: the prim is a " + prim.GetTypeName()
+                    + ", not Xformable."
+                )
+            elif own_ops:
+                # Ops from the asset root are in asset units; corrected in
+                # place they would apply unconverted.
+                declined = (
+                    "correct_units was not applied: the prim already has transform ops ("
+                    + ", ".join(own_ops) + "), which a correction here would leave unconverted. "
+                    "import_isaac_asset wraps the reference in a corrected Xform instead."
+                )
+            else:
+                _add_correction_ops(prim, units)
+            if declined is not None:
+                units["notes"].append(declined)
+        elif _needs_correction(units):
+            units["notes"].append("mismatch reported, not corrected (correct_units=false)")
+        result = {
+            "already_referenced": False,
+            "referenced_prim": root_path or "/" + root_name,
+            "used_default_prim": root_path is None,
+            "prim_type": prim.GetTypeName(),
+            "child_count": len(prim.GetChildren()),
+            "units": units,
+        }
+        # The caller asked for the correction, so a refusal to apply it is
+        # surfaced at the top level, not only inside units.notes.
+        warnings = [text for text in (warning, declined) if text is not None]
+        if warnings:
+            result["warning"] = " ".join(warnings)
+        return result
+"""
+
+
+def _convert_first_hint(path: str) -> str:
+    """Return the conversion hint for a non-USD asset path, or an empty string.
+
+    Args:
+        path: The asset path or URL the caller passed.
+
+    Returns:
+        A sentence naming the converter for OBJ/FBX/glTF-style files, or "".
+    """
+    if path.lower().endswith(CONVERT_FIRST_SUFFIXES):
+        return (
+            " Only USD layers (.usd, .usda, .usdc, .usdz) are referenced: convert OBJ, FBX, glTF "
+            "and similar files to USD first (omni.kit.asset_converter, through "
+            "execute_isaac_script)."
+        )
+    return ""
 
 
 class StageAssetMixin:
@@ -84,9 +429,12 @@ class StageAssetMixin:
     @tool_meta(
         name="save_isaac_stage",
         description=(
-            "Save the current stage, overwriting the file on disk. Optionally provide a "
-            "file path to save-as to a new location; an existing file there is refused "
-            "unless overwrite=true. "
+            "Save the current stage. In place (no file_path), the stage's file and every other "
+            "dirty layer the save writes must be inside the write sandbox. With file_path, "
+            "save-as there; an existing local file is refused unless overwrite=true, and a URL "
+            "target always needs overwrite=true because its existence cannot be checked. "
+            "Refused while the timeline is playing or paused (simulated poses would be saved) "
+            "unless allow_while_playing=true. "
             "Paths: sandbox (security.allowed_paths); URLs need an allowed write scheme."
         ),
         read_only=False,
@@ -95,39 +443,65 @@ class StageAssetMixin:
         sandboxed_paths=(SandboxedPath("file_path", write=True),),
     )
     async def save_isaac_stage(
-        self, file_path: Optional[str] = None, overwrite: bool = False
+        self,
+        file_path: Optional[str] = None,
+        overwrite: bool = False,
+        allow_while_playing: bool = False,
     ) -> Dict[str, Any]:
         """
-        Save the current stage. If file_path is given, saves to that path.
+        Save the current stage, in place or to file_path.
 
-        Saving in place always writes the stage's own file. A save-as target
-        that already exists is refused unless ``overwrite`` is set; the check
-        runs inside Isaac Sim because the file system is Isaac's.
+        An in-place save first asks Isaac Sim which files it would write (the
+        stage's own file and any other dirty layer) and checks each against
+        the write sandbox. A save-as target that already exists is refused
+        unless ``overwrite`` is set; the check runs inside Isaac Sim because
+        the file system is Isaac's, and a URL target, whose existence cannot
+        be checked from there, needs ``overwrite`` in every case.
 
         Args:
             file_path: Optional path to save to. None saves to current location.
-            overwrite: Replace an existing file at ``file_path``.
+            overwrite: Replace an existing file at ``file_path``; required for
+                any URL target.
+            allow_while_playing: Save even while the timeline is playing or
+                paused. Off by default: the stage then holds simulated poses
+                that stopping the simulation would reset.
 
         Returns:
-            Dict confirming the stage was saved, or a RefusedOperation error
-            naming the file that would have been overwritten.
+            Dict confirming the stage was saved, a SandboxError naming the
+            layer outside the sandbox, or a RefusedOperation error naming the
+            override that would let the save through.
         """
         denial = self._sandbox_denial(file_path, write=True)
         if denial is not None:
             return denial
+        _allow = _pyval(bool(allow_while_playing))
         if file_path:
-            _file_path = _pyval(self._path_policy.authorize(file_path, write=True))
+            target = self._path_policy.authorize(file_path, write=True)
+            if self._path_policy.url_scheme(target) not in (None, "file") and not overwrite:
+                return self._refusal(
+                    f"Refusing to save to {target} without overwrite=true: whether a file "
+                    "already exists at a URL cannot be checked before writing it.",
+                    file_path=target,
+                    override="overwrite",
+                )
+            _file_path = _pyval(target)
             _overwrite = _pyval(overwrite)
-            script = textwrap.dedent(f"""\
+            script = _compose_script(
+                """\
                 import json
                 import os
                 import omni.usd
-
+                """,
+                TIMELINE_GUARD_CORE,
+                f"""\
                 ctx = omni.usd.get_context()
                 target = {_file_path}
                 current = ctx.get_stage_url() or ""
+                refusal = _timeline_refusal({_allow})
                 same_file = os.path.exists(target) and os.path.exists(current) and os.path.samefile(target, current)
-                if os.path.exists(target) and not same_file and not {_overwrite}:
+                if refusal is not None:
+                    print(json.dumps(refusal))
+                elif os.path.exists(target) and not same_file and not {_overwrite}:
                     print(json.dumps({{
                         "error": "Refusing to overwrite existing file " + target + ". "
                                  "Pass overwrite=true to replace it.",
@@ -141,27 +515,66 @@ class StageAssetMixin:
                         print(json.dumps({{"file_path": target, "saved": True}}))
                     else:
                         print(json.dumps({{"error": f"Failed to save stage: {{error}}"}}))
-            """)
-        else:
-            script = textwrap.dedent("""\
-                import json
-                import omni.usd
+                """,
+            )
+            return await self._execute_json_script(script)
 
-                ctx = omni.usd.get_context()
-                stage = ctx.get_stage()
-                if stage is None:
-                    print(json.dumps({"error": "No stage is currently open"}))
+        probe = await self._execute_json_script(SAVE_PROBE_SCRIPT)
+        if not probe.get("success"):
+            return probe
+        url = str(probe.get("stage_url") or "")
+        if not url or url.startswith("anon:"):
+            return ErrorResponse(
+                error="The stage has never been saved, so it has no file to save in place. Pass file_path.",
+                error_type="ValueError",
+            ).model_dump()
+        layers: List[str] = [url] + [layer for layer in probe.get("dirty_layers") or [] if layer != url]
+        for layer in layers:
+            layer_denial = self._sandbox_denial(layer, write=True)
+            if layer_denial is not None:
+                layer_denial["details"]["layer"] = layer
+                layer_denial["details"]["note"] = (
+                    "An in-place save writes the stage's file and every dirty layer; "
+                    "this one is outside the write sandbox, so nothing was saved."
+                )
+                return layer_denial
+        if probe.get("timeline_stopped") is False and not allow_while_playing:
+            return self._refusal(
+                "The timeline is playing or paused, so the stage holds simulated poses that "
+                "stopping it would reset. Stop the simulation first, or pass "
+                "allow_while_playing=true to save the current state.",
+                file_path=url,
+                override="allow_while_playing",
+            )
+        script = _compose_script(
+            """\
+            import json
+            import omni.usd
+            """,
+            TIMELINE_GUARD_CORE,
+            f"""\
+            ctx = omni.usd.get_context()
+            expected = {_pyval(url)}
+            refusal = _timeline_refusal({_allow})
+            if (ctx.get_stage_url() or "") != expected:
+                print(json.dumps({{
+                    "error": "The open stage changed since it was checked (now "
+                             + str(ctx.get_stage_url()) + "); nothing was saved",
+                }}))
+            elif refusal is not None:
+                print(json.dumps(refusal))
+            else:
+                result, error, saved_paths = await ctx.save_stage_async()
+                if result:
+                    print(json.dumps({{
+                        "file_path": expected,
+                        "saved": True,
+                        "layers_checked": {_pyval(layers)},
+                    }}))
                 else:
-                    url = ctx.get_stage_url()
-                    if not url:
-                        print(json.dumps({"error": "Stage has no file path. Use file_path parameter."}))
-                    else:
-                        result, error, saved_paths = await ctx.save_stage_async()
-                        if result:
-                            print(json.dumps({"file_path": url, "saved": True}))
-                        else:
-                            print(json.dumps({"error": f"Failed to save stage: {error}"}))
-            """)
+                    print(json.dumps({{"error": f"Failed to save stage: {{error}}"}}))
+            """,
+        )
         return await self._execute_json_script(script)
 
     @tool_meta(
@@ -216,8 +629,18 @@ class StageAssetMixin:
     @tool_meta(
         name="import_isaac_asset",
         description=(
-            "Import an external asset (USD, USDZ, OBJ, FBX) into the current stage at a "
-            "target path. "
+            "Import a USD asset (.usd, .usda, .usdc, .usdz) into the current stage as a "
+            "reference on a new prim. An existing prim at target_path is never merged into: "
+            "the import goes to the first free target_path_N, reported as target_path. "
+            "Without a defaultPrim the asset's first root prim is referenced (reported), or "
+            "pass asset_prim_path; a reference that composes nothing is undone and fails. "
+            "A metersPerUnit/upAxis mismatch the asset authors is corrected: target_path "
+            "becomes an Xform carrying xformOp:scale:unitsResolve / "
+            "xformOp:rotateX:unitsResolve and the asset is referenced on its child "
+            "<target_path>/<asset root name>, reported as asset_root_path "
+            "(correct_units=false only reports it). With security.allow_script_execution "
+            "off, an asset containing code-running OmniGraph nodes is refused. "
+            "OBJ/FBX/glTF need converting to USD first. "
             "Paths: sandbox (security.allowed_paths); URLs need an allowed scheme."
         ),
         read_only=False,
@@ -227,47 +650,84 @@ class StageAssetMixin:
         self,
         asset_path: str,
         target_path: str = "/World/ImportedAsset",
+        asset_prim_path: Optional[str] = None,
+        correct_units: bool = True,
     ) -> Dict[str, Any]:
         """
-        Import a USD asset into the current stage as a reference.
+        Import a USD asset into the current stage as a reference on a new prim.
 
         Args:
             asset_path: File path or URL to the USD asset.
-            target_path: USD path where the asset should be placed.
+            target_path: USD path for the new prim. When a prim already exists
+                there the import goes to the first free ``<target_path>_N``.
+            asset_prim_path: Prim inside the asset to reference. Defaults to
+                the asset's defaultPrim, or its first root prim when it has
+                none.
+            correct_units: When the asset authors a metersPerUnit or upAxis
+                that differs from the stage's, make ``target_path`` an Xform
+                with a uniform ``xformOp:scale:unitsResolve`` (asset / stage
+                metersPerUnit) and an ``xformOp:rotateX:unitsResolve``
+                (+-90 degrees), and reference the asset on its child named
+                after the asset root, so the root's own transform is
+                converted too. With false the mismatch is only reported.
+                Metrics the asset does not author are not guessed at.
 
         Returns:
-            Dict confirming the asset was imported.
+            Dict with the ``target_path`` used (and ``requested_target_path``),
+            ``asset_root_path`` (where the asset's root prim composes:
+            ``target_path``, or its child when a correction was applied), the
+            ``referenced_prim``, the composed ``prim_type`` and
+            ``child_count``, and ``units`` (both sides' metrics, the correction
+            needed and whether it was applied).
         """
+        problem = _asset_prim_path_problem(asset_prim_path)
+        if problem is not None:
+            return problem
         denial = self._sandbox_denial(asset_path)
         if denial is not None:
             return denial
         _asset_path = _pyval(self._path_policy.authorize(asset_path))
-        _target_path = _pyval(target_path)
         script = _compose_script(
             """\
             import json
             import omni.usd
-            from pxr import Sdf, UsdGeom
+            from pxr import Gf, Sdf, UsdGeom
             """,
             OPEN_ASSET_CORE,
+            script_guard_source(),
+            REFERENCE_ASSET_CORE,
             f"""\
+            asset_path = {_asset_path}
+            requested = {_pyval(target_path)}
+            asset_prim_path = {_pyval(asset_prim_path)}
+            correct_units = {_pyval(bool(correct_units))}
+            guard = {_pyval(not self.settings.security.allow_script_execution)}
+            convert_hint = {_pyval(_convert_first_hint(asset_path))}
+            """,
+            """\
             stage = omni.usd.get_context().get_stage()
-            asset_error = _open_asset({_asset_path}) if stage is not None else None
+            asset_error = _open_asset(asset_path) if stage is not None else None
             if stage is None:
-                print(json.dumps({{"error": "No stage is currently open"}}))
+                print(json.dumps({"error": "No stage is currently open"}))
             elif asset_error is not None:
-                print(json.dumps({{"error": asset_error}}))
+                print(json.dumps({"error": asset_error + convert_hint, "error_type": "NotFoundError"}))
+            elif not Sdf.Path.IsValidPathString(requested) or not Sdf.Path(requested).IsAbsolutePath():
+                print(json.dumps({
+                    "error": "target_path is not an absolute prim path: " + requested,
+                    "error_type": "ValidationError",
+                }))
             else:
-                prim = stage.DefinePrim({_target_path})
-                if not prim.IsValid():
-                    print(json.dumps({{"error": "Failed to create prim at: " + {_target_path}}}))
-                else:
-                    prim.GetReferences().AddReference({_asset_path})
-                    print(json.dumps({{
-                        "asset_path": {_asset_path},
-                        "target_path": {_target_path},
+                target = _unique_path(stage, requested)
+                result = _import_asset(stage, asset_path, requested, asset_prim_path, correct_units, guard)
+                if "error" not in result:
+                    result.update({
+                        "asset_path": asset_path,
+                        "target_path": target,
+                        "requested_target_path": requested,
+                        "renamed": target != requested,
                         "imported": True,
-                    }}))
+                    })
+                print(json.dumps(result))
             """,
         )
         return await self._execute_json_script(script)
@@ -275,7 +735,15 @@ class StageAssetMixin:
     @tool_meta(
         name="add_isaac_reference",
         description=(
-            "Add a USD reference to a prim so it composes in content from another USD file. "
+            "Add a USD reference to a prim (created when missing) so it composes in content "
+            "from another USD file. Without a defaultPrim the asset's first root prim is "
+            "referenced (reported), or pass asset_prim_path; a reference that composes nothing "
+            "is undone and fails, and the same reference twice is reported, not duplicated. "
+            "A metersPerUnit/upAxis mismatch is reported; correct_units=true adds unitsResolve "
+            "ops on the prim only when it has no transform ops of its own (otherwise use "
+            "import_isaac_asset, which wraps the reference). With "
+            "security.allow_script_execution off, an asset containing code-running OmniGraph "
+            "nodes is refused. "
             "Paths: sandbox (security.allowed_paths); URLs need an allowed scheme."
         ),
         read_only=False,
@@ -285,52 +753,96 @@ class StageAssetMixin:
         self,
         prim_path: str,
         reference_path: str,
+        asset_prim_path: Optional[str] = None,
+        correct_units: bool = False,
     ) -> Dict[str, Any]:
         """
-        Add a USD reference to an existing prim.
+        Add a USD reference to a prim.
 
         Args:
-            prim_path: USD path of the prim to add the reference to.
+            prim_path: USD path of the prim to add the reference to; created
+                as a typeless prim when it does not exist.
             reference_path: File path or URL to the referenced USD asset.
+            asset_prim_path: Prim inside the asset to reference. Defaults to
+                the asset's defaultPrim, or its first root prim when it has
+                none.
+            correct_units: Correct a metersPerUnit/upAxis mismatch the asset
+                authors with ``unitsResolve`` scale and rotateX ops on the
+                prim. Applied only when the prim then has no other transform
+                ops: ops the asset root brings are in asset units and would
+                stay unconverted (reported in ``units.notes``; use
+                import_isaac_asset, which wraps the reference). Off by default
+                here: the prim may carry other references.
 
         Returns:
-            Dict confirming the reference was added.
+            Dict with ``added`` (false when the same reference was already
+            there), ``referenced_prim``, ``total_references`` and ``units``.
         """
+        problem = _asset_prim_path_problem(asset_prim_path)
+        if problem is not None:
+            return problem
         denial = self._sandbox_denial(reference_path)
         if denial is not None:
             return denial
-        _prim_path = _pyval(prim_path)
         _ref_path = _pyval(self._path_policy.authorize(reference_path))
         script = _compose_script(
             """\
             import json
             import omni.usd
-            from pxr import Sdf
+            from pxr import Gf, Sdf, UsdGeom
             """,
             OPEN_ASSET_CORE,
+            script_guard_source(),
+            REFERENCE_ASSET_CORE,
             f"""\
+            prim_path = {_pyval(prim_path)}
+            asset_path = {_ref_path}
+            asset_prim_path = {_pyval(asset_prim_path)}
+            correct_units = {_pyval(bool(correct_units))}
+            guard = {_pyval(not self.settings.security.allow_script_execution)}
+            convert_hint = {_pyval(_convert_first_hint(reference_path))}
+            """,
+            """\
             stage = omni.usd.get_context().get_stage()
-            asset_error = _open_asset({_ref_path}) if stage is not None else None
+            asset_error = _open_asset(asset_path) if stage is not None else None
             if stage is None:
-                print(json.dumps({{"error": "No stage is currently open"}}))
+                print(json.dumps({"error": "No stage is currently open"}))
             elif asset_error is not None:
-                print(json.dumps({{"error": asset_error}}))
+                print(json.dumps({"error": asset_error + convert_hint, "error_type": "NotFoundError"}))
+            elif not Sdf.Path.IsValidPathString(prim_path) or not Sdf.Path(prim_path).IsAbsolutePath():
+                print(json.dumps({
+                    "error": "prim_path is not an absolute prim path: " + prim_path,
+                    "error_type": "ValidationError",
+                }))
             else:
-                prim = stage.GetPrimAtPath({_prim_path})
-                if not prim.IsValid():
-                    prim = stage.DefinePrim({_prim_path})
-                if not prim.IsValid():
-                    print(json.dumps({{"error": "Cannot create prim: " + {_prim_path}}}))
-                else:
-                    prim.GetReferences().AddReference({_ref_path})
-                    refs = prim.GetMetadata("references")
-                    ref_count = len(refs.GetAddedOrExplicitItems()) if refs else 0
-                    print(json.dumps({{
-                        "prim_path": {_prim_path},
-                        "reference_path": {_ref_path},
-                        "added": True,
-                        "total_references": ref_count,
-                    }}))
+                result = _reference_on_prim(stage, prim_path, asset_path, asset_prim_path, correct_units, guard)
+                if "error" not in result:
+                    prim = stage.GetPrimAtPath(prim_path)
+                    references = prim.GetMetadata("references")
+                    result.update({
+                        "prim_path": prim_path,
+                        "reference_path": asset_path,
+                        "added": not result.pop("already_referenced"),
+                        "total_references": len(references.GetAppliedItems()) if references else 0,
+                    })
+                print(json.dumps(result))
             """,
         )
         return await self._execute_json_script(script)
+
+
+def _asset_prim_path_problem(asset_prim_path: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Return a ValueError envelope when ``asset_prim_path`` is not a prim path.
+
+    Args:
+        asset_prim_path: The prim inside the asset the caller named, or None.
+
+    Returns:
+        The error envelope, or None when the value is usable or omitted.
+    """
+    if asset_prim_path is None or asset_prim_path.startswith("/"):
+        return None
+    return ErrorResponse(
+        error=f"asset_prim_path must be an absolute prim path such as /Robot, got {asset_prim_path!r}",
+        error_type="ValueError",
+    ).model_dump()

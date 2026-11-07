@@ -365,12 +365,76 @@ _ID_COLLECTIONS: Dict[str, str] = {
     "VectorFont": "fonts",
 }
 
+# The Principled BSDF input each assign_material texture drives.
+_TEXTURE_SOCKETS: Dict[str, str] = {
+    "base_color": "Base Color",
+    "metallic": "Metallic",
+    "roughness": "Roughness",
+    "normal": "Normal",
+}
+
+# The settings each light type has besides energy, color and use_shadow, as
+# set_light_params takes them. A sun's softness is its angle and an area
+# light's its size; shadow_soft_size is the radius of point and spot lights.
+_LIGHT_TYPE_SETTINGS: Dict[str, Tuple[str, ...]] = {
+    "POINT": ("shadow_soft_size",),
+    "SPOT": ("shadow_soft_size", "spot_size", "spot_blend"),
+    "SUN": ("angle",),
+    "AREA": ("shape", "size", "size_y"),
+}
+
+# Limits of the light settings: Blender 5.0.1's hard limits, which it clamps
+# to silently, except that energy may not be negative here (Blender allows
+# it). None leaves that side open. The angles are 1 degree and pi as Blender
+# stores them, in single precision, so a value read back passes again; the
+# MCP schemas repeat them as LIGHT_ANGLE_MIN and LIGHT_ANGLE_MAX.
+_LIGHT_ANGLE_MIN = 0.01745329238474369
+_LIGHT_ANGLE_MAX = 3.1415927410125732
+_LIGHT_LIMITS: Dict[str, Tuple[float, Optional[float]]] = {
+    "energy": (0.0, None),
+    "shadow_soft_size": (0.0, None),
+    "spot_size": (_LIGHT_ANGLE_MIN, _LIGHT_ANGLE_MAX),
+    "spot_blend": (0.0, 1.0),
+    "angle": (0.0, _LIGHT_ANGLE_MAX),
+    "size": (0.0, None),
+    "size_y": (0.0, None),
+}
+
+_AREA_LIGHT_SHAPES = ("SQUARE", "RECTANGLE", "DISK", "ELLIPSE")
+
+# uv_unwrap_mesh methods and the uv operator each runs.
+_UV_UNWRAP_METHODS: Dict[str, str] = {
+    "SMART_PROJECT": "smart_project",
+    "CUBE_PROJECT": "cube_project",
+}
+
 # Modifier types whose viewport and render results can differ through a
 # second level setting: (viewport setting, render setting).
 _RENDER_LEVEL_SETTINGS: Dict[str, Tuple[str, str]] = {
     "MULTIRES": ("levels", "render_levels"),
     "SUBSURF": ("levels", "render_levels"),
 }
+
+
+class ValidationError(ValueError):
+    """Arguments a Blender tool refuses, with a stable reason in ``details.code``.
+
+    The class name is the envelope's ``error_type`` in both modes: the server
+    names an exception by its class, and so does the add-on's bridge. It
+    subclasses ValueError, which these refusals raised before they had a type.
+    """
+
+    def __init__(self, message: str, code: str, **details: Any) -> None:
+        super().__init__(message)
+        self.details: Dict[str, Any] = {"code": code, **details}
+
+
+class NotFoundError(ValueError):
+    """Something an argument names does not exist; ``details.code`` names what."""
+
+    def __init__(self, message: str, code: str, **details: Any) -> None:
+        super().__init__(message)
+        self.details: Dict[str, Any] = {"code": code, **details}
 
 
 class UnsavedChangesError(RuntimeError):
@@ -393,31 +457,6 @@ class UnsavedChangesError(RuntimeError):
             "call open_blender_file with discard_unsaved=true to discard them."
         )
         self.details = {"blend_file_path": open_file, "is_dirty": True}
-
-
-class ValidationError(ValueError):
-    """A SimReady request refused before anything changed.
-
-    Its class name is the ``error_type`` clients see (the Blender bridge
-    reports the class name), and ``details["code"]`` names the reason, so a
-    caller can tell them apart without parsing the message.
-    """
-
-    def __init__(self, message: str, code: str, **details: Any) -> None:
-        super().__init__(message)
-        self.details: Dict[str, Any] = {"code": code, **details}
-
-
-class NotFoundError(ValidationError):
-    """A SimReady request naming an object that does not exist (``details.code`` ObjectNotFound)."""
-
-    def __init__(self, names: Sequence[str]) -> None:
-        super().__init__(
-            f"Object{'s' if len(names) > 1 else ''} not found: {', '.join(names)}; "
-            "nothing was changed",
-            "ObjectNotFound",
-            objects=list(names),
-        )
 
 
 # 4x4 matrices as row lists of floats. The SimReady tools compose and invert
@@ -1401,6 +1440,92 @@ def _finite_triple(value: Any, what: str) -> Tuple[float, float, float]:
     return (triple[0], triple[1], triple[2])
 
 
+def _finite_number(value: Any, what: str) -> float:
+    """A finite real number as a float (not a bool), or a ValidationError naming ``what``."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise ValidationError(f"{what} must be a number, got {value!r}", "invalid_value", field=what)
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValidationError(f"{what} must be finite, got {value!r}", "invalid_value", field=what)
+    return number
+
+
+def _unit_value(value: Any, what: str) -> float:
+    """A finite number in [0, 1], or a ValidationError naming ``what``."""
+    number = _finite_number(value, what)
+    if not 0.0 <= number <= 1.0:
+        raise ValidationError(
+            f"{what} must lie between 0 and 1, got {value!r}", "out_of_range", field=what
+        )
+    return number
+
+
+def _unit_color(value: Any, what: str) -> Tuple[float, float, float, Optional[float]]:
+    """An RGB or RGBA colour in [0, 1] as (r, g, b, alpha), alpha None for RGB.
+
+    Blender's Base Color socket takes four numbers and refused three with
+    "sequences of dimension 0 should contain 4 items, not 3".
+    """
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__len__") or len(value) not in (3, 4):
+        raise ValidationError(
+            f"{what} must be [r, g, b] or [r, g, b, a], got {value!r}", "invalid_value", field=what
+        )
+    channels = [_unit_value(channel, what) for channel in value]
+    return (channels[0], channels[1], channels[2], channels[3] if len(channels) == 4 else None)
+
+
+def _real_path(path: str) -> str:
+    """A file path in one spelling: absolute, symlinks resolved, case-folded where the OS folds."""
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _image_file(image: Any) -> Optional[str]:
+    """The file an image datablock reads, as ``_real_path`` spells it; None when it reads none."""
+    path = getattr(image, "filepath", "") or ""
+    if not path:
+        return None
+    resolve = getattr(getattr(bpy, "path", None), "abspath", None)
+    if resolve is not None:
+        # Blender-relative paths (//textures/a.png) are relative to the .blend
+        # file, or to the library the image is linked from.
+        path = resolve(path, library=getattr(image, "library", None))
+    return _real_path(path)
+
+
+def _name_list(names: Sequence[str], limit: int = 5) -> str:
+    """``'a', 'b' and 3 more`` for the first ``limit`` names."""
+    shown = ", ".join(f"'{name}'" for name in names[:limit])
+    rest = len(names) - limit
+    return shown + (f" and {rest} more" if rest > 0 else "")
+
+
+def _live_links(socket: Any) -> List[Any]:
+    """The links into a socket that Blender evaluates: neither muted nor invalid."""
+    return [
+        link
+        for link in socket.links
+        if not getattr(link, "is_muted", False) and getattr(link, "is_valid", True)
+    ]
+
+
+def _link_source(link: Any) -> Tuple[Any, Any]:
+    """The node and output socket a link really comes from, through any Reroute nodes.
+
+    Returns:
+        That node and socket, or the last Reroute's when one has nothing
+        plugged in.
+    """
+    source, output = link.from_node, link.from_socket
+    for _hop in range(1000):
+        if source.type != "REROUTE":
+            break
+        feeding = [live for socket in source.inputs for live in _live_links(socket)]
+        if not feeding:
+            break
+        source, output = feeding[0].from_node, feeding[0].from_socket
+    return source, output
+
+
 def _mesh_index(value: Any, what: str, vertex_count: int) -> int:
     """A vertex index of an edge or face, checked to be an integer within the vertex list."""
     if isinstance(value, bool) or not isinstance(value, numbers.Integral):
@@ -2021,46 +2146,124 @@ class BlenderRuntimeSession:
             "frame_end": scene.frame_end,
         }
 
-    def get_material_info(self, material_name: str) -> Dict[str, Any]:
+    def get_material_info(self, material_name: str, max_nodes: int = 50) -> Dict[str, Any]:
         """
-        Get material information with bounded node tree traversal.
+        Get a material's shading: its Principled BSDF values and what drives them.
 
-        Traverses at most ``_MAX_MATERIAL_NODE_DEPTH`` levels from the
-        output node to keep context small.
+        ``principled_params`` holds the values of the Principled BSDF that
+        feeds the active Material Output; an input driven by a link has None
+        there, as its own value is unused, and ``linked_inputs`` names the
+        node, socket and, for an image texture (also behind a Normal Map
+        node), the image's file, colour space and whether it is packed.
+        ``nodes`` lists at most ``max_nodes`` nodes, those feeding the output
+        first; ``node_count`` counts them all.
 
         Args:
             material_name: Name of the Blender material.
+            max_nodes: Most nodes to list.
 
         Returns:
-            Dictionary with node summary and Principled BSDF parameters.
+            Dictionary with the node list and count, Principled BSDF values,
+            linked inputs, the render method and the user count.
         """
+        if isinstance(max_nodes, bool) or not isinstance(max_nodes, int) or max_nodes < 1:
+            raise ValidationError(
+                f"max_nodes must be a whole number of at least 1, got {max_nodes!r}",
+                "out_of_range",
+                field="max_nodes",
+            )
         blender_module: Any = bpy
         mat = blender_module.data.materials.get(material_name)
         if mat is None:
-            raise ValueError(f"Material not found: {material_name}")
+            raise NotFoundError(f"Material not found: {material_name}", "material_not_found")
 
-        use_nodes = bool(getattr(mat, "use_nodes", False))
-        nodes: List[Dict[str, str]] = []
-        principled_params: Optional[Dict[str, Any]] = None
-
-        if use_nodes and mat.node_tree:
-            for node in mat.node_tree.nodes:
-                nodes.append(
-                    {
-                        "name": node.name,
-                        "node_type": node.bl_idname,
-                        "label": getattr(node, "label", ""),
-                    }
-                )
-                if node.bl_idname == "ShaderNodeBsdfPrincipled":
-                    principled_params = self._extract_principled_params(node)
+        tree = self._material_tree(mat)
+        listed: List[Any] = []
+        principled = None
+        if tree is not None:
+            listed = self._nodes_feeding_output(tree, max_nodes)
+            principled = self._principled_node(mat)
 
         return {
             "material_name": material_name,
-            "use_nodes": use_nodes,
-            "nodes": nodes,
-            "principled_params": principled_params,
+            "use_nodes": tree is not None,
+            "nodes": [
+                {"name": node.name, "node_type": node.bl_idname, "label": getattr(node, "label", "")}
+                for node in listed
+            ],
+            "node_count": 0 if tree is None else len(tree.nodes),
+            "principled_params": (
+                None if principled is None else self._extract_principled_params(principled)
+            ),
+            "linked_inputs": {} if principled is None else self._linked_inputs(principled),
+            "surface_render_method": self._render_method(mat),
+            "users": int(getattr(mat, "users", 0)),
         }
+
+    def _nodes_feeding_output(self, tree: Any, limit: int) -> List[Any]:
+        """Up to ``limit`` nodes: those the active output reads, nearest first, then the rest."""
+        output = self._material_output(tree)
+        ordered: List[Any] = []
+        # Node names are unique within a tree; bpy may wrap one node in a new
+        # Python object at each access, so identity cannot tell them apart.
+        seen: set = set()
+        pending = [] if output is None else [output]
+        while pending and len(ordered) < limit:
+            node = pending.pop(0)
+            if node.name in seen:
+                continue
+            seen.add(node.name)
+            ordered.append(node)
+            pending.extend(link.from_node for socket in node.inputs for link in socket.links)
+        for node in tree.nodes:
+            if len(ordered) >= limit:
+                break
+            if node.name not in seen:
+                seen.add(node.name)
+                ordered.append(node)
+        return ordered
+
+    @staticmethod
+    def _linked_inputs(bsdf: Any) -> Dict[str, Dict[str, Any]]:
+        """What drives each linked input of a Principled BSDF, images included.
+
+        A muted link drives nothing, so its input is not listed; a source
+        behind Reroute nodes, and an image behind a Normal Map node, are
+        followed to the node that provides them.
+        """
+        blender_module: Any = bpy
+        linked: Dict[str, Dict[str, Any]] = {}
+        for socket in bsdf.inputs:
+            live = _live_links(socket)
+            if not live:
+                continue
+            source, output = _link_source(live[0])
+            entry: Dict[str, Any] = {
+                "from_node": source.name,
+                "from_node_type": source.bl_idname,
+                "from_socket": output.name,
+            }
+            texture = source
+            if source.type == "NORMAL_MAP":
+                color = source.inputs.get("Color")
+                feeding = [] if color is None else _live_links(color)
+                texture = _link_source(feeding[0])[0] if feeding else None
+            image = (
+                getattr(texture, "image", None)
+                if texture is not None and texture.type == "TEX_IMAGE"
+                else None
+            )
+            if image is not None:
+                path = getattr(image, "filepath", "") or ""
+                resolve = getattr(getattr(blender_module, "path", None), "abspath", None)
+                entry.update(
+                    image_name=image.name,
+                    image_path=(resolve(path) if resolve and path else path) or None,
+                    image_colorspace=image.colorspace_settings.name,
+                    image_packed=getattr(image, "packed_file", None) is not None,
+                )
+            linked[socket.name] = entry
+        return linked
 
     def get_distance_between(
         self, object_name_a: str, object_name_b: str
@@ -3159,52 +3362,609 @@ class BlenderRuntimeSession:
         object_name: str,
         material_name: Optional[str] = None,
         base_color: Optional[List[float]] = None,
-        metallic: float = 0.0,
-        roughness: float = 0.5,
+        metallic: Optional[float] = None,
+        roughness: Optional[float] = None,
+        slot_index: Optional[int] = None,
+        face_indices: Optional[List[int]] = None,
+        link: str = "DATA",
+        single_user: bool = False,
+        reuse_existing: bool = True,
+        base_color_texture: Optional[str] = None,
+        metallic_texture: Optional[str] = None,
+        roughness_texture: Optional[str] = None,
+        normal_texture: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Create a Principled BSDF material and assign it to an object.
+        Assign a Principled BSDF material to an object, reusing it when it exists.
+
+        The material named ``material_name`` is reused when it exists (so a
+        repeated call changes nothing more), and created otherwise; pass
+        ``reuse_existing=False`` to always create a new one. Shading arguments
+        left out keep the material's own values (Blender's defaults for a new
+        one), so an existing material can be assigned as it is.
+
+        By default the material replaces the object's: it goes into slot 0
+        and every face uses slot 0. ``slot_index`` puts it into that slot
+        instead (the slot count appends one) and leaves the faces alone;
+        ``face_indices`` assigns it to those faces only, through its existing
+        slot or a new one. ``link="OBJECT"`` puts it in this object's slot
+        instead of the mesh's, but faces and the slot count belong to the
+        mesh: with link OBJECT, changing either on mesh data that other
+        objects share is refused unless ``single_user`` gives this object its
+        own copy of the mesh first.
+
+        An image already loaded in the file keeps its colour space: an input
+        that reads it differently gets its own image datablock. Everything is
+        checked before the scene changes, and a failure later removes what
+        the call created.
 
         Args:
-            object_name: Object to assign material to.
-            material_name: Material name (auto-generated if omitted).
-            base_color: Base color RGBA [r, g, b, a].
+            object_name: Object to assign the material to (mesh, curve, text,
+                or another type with material slots).
+            material_name: Material name; Material_<object> when omitted.
+            base_color: RGB or RGBA in [0, 1]; the alpha becomes the
+                Principled Alpha, and below 1 the material renders blended.
             metallic: Metallic value 0-1.
             roughness: Roughness value 0-1.
+            slot_index: Slot to put the material in; the slot count adds one.
+            face_indices: Mesh faces to assign the material to.
+            link: DATA (the mesh's slot, shared by linked duplicates) or
+                OBJECT (this object's slot).
+            single_user: Give this object its own copy of shared data first,
+                so the change leaves the objects sharing it alone.
+            reuse_existing: Reuse a material of that name when one exists.
+            base_color_texture: Image file driving Base Color (in the colour
+                space Blender loads it in: sRGB, or linear for float images).
+            metallic_texture: Image file driving Metallic (Non-Color).
+            roughness_texture: Image file driving Roughness (Non-Color).
+            normal_texture: Tangent-space normal map image (Non-Color),
+                through a Normal Map node.
 
         Returns:
-            Dictionary with object_name and material_name.
+            Dictionary with the material, whether it was created, the slot,
+            the link, the faces assigned, the object's slots, the Principled
+            values, its render method, the textures and warnings.
         """
         blender_module: Any = bpy
         obj = self._get_object_or_raise(object_name)
-        if obj.data is None:
-            raise ValueError(f"Object '{object_name}' has no data to receive materials")
+        data = obj.data
+        if data is None or not hasattr(data, "materials"):
+            raise ValidationError(
+                f"Object '{object_name}' is a {obj.type} object, which takes no materials",
+                "no_material_slots",
+                object_type=obj.type,
+            )
+        if getattr(obj, "library", None) is not None:
+            raise ValidationError(
+                f"Object '{object_name}' is linked from library '{obj.library.name}' and "
+                "cannot be changed; make it local first",
+                "linked_from_library",
+            )
+        link = link.upper() if isinstance(link, str) else link
+        if link not in ("DATA", "OBJECT"):
+            raise ValidationError(
+                f"link must be DATA or OBJECT, got {link!r}", "invalid_value", field="link"
+            )
+        color = None if base_color is None else _unit_color(base_color, "base_color")
+        for label, value in (("metallic", metallic), ("roughness", roughness)):
+            if value is not None:
+                _unit_value(value, label)
+        slot_count = len(obj.material_slots)
+        requested_slot: Any = slot_index
+        if requested_slot is not None and (
+            isinstance(requested_slot, bool)
+            or not isinstance(requested_slot, numbers.Integral)
+            or not 0 <= int(requested_slot) <= slot_count
+        ):
+            raise ValidationError(
+                f"slot_index must lie between 0 and {slot_count} (the slot count, which "
+                f"adds a slot), got {slot_index!r}",
+                "out_of_range",
+                field="slot_index",
+            )
+        faces = None
+        if face_indices is not None:
+            if obj.type != "MESH":
+                raise ValidationError(
+                    f"face_indices applies to mesh objects; '{object_name}' is a {obj.type} object",
+                    "invalid_value",
+                    field="face_indices",
+                )
+            faces = self._checked_face_indices(data, face_indices)
+        writes_faces = obj.type == "MESH" and (faces is not None or slot_index is None)
+        if writes_faces:
+            self._require_object_mode(obj, "assign materials to its faces")
+        textures = self._texture_files(
+            {
+                "base_color": base_color_texture,
+                "metallic": metallic_texture,
+                "roughness": roughness_texture,
+                "normal": normal_texture,
+            }
+        )
+        name = material_name or f"Material_{object_name}"
+        material = blender_module.data.materials.get(name) if reuse_existing else None
+        shading = bool(
+            color is not None or metallic is not None or roughness is not None or textures
+        )
+        if material is not None and shading:
+            if getattr(material, "library", None) is not None:
+                raise ValidationError(
+                    f"Material '{name}' is linked from a library and cannot be changed; assign "
+                    "it without shading arguments, or pass reuse_existing=false for a local one",
+                    "linked_from_library",
+                )
+            if self._principled_node(material) is None:
+                raise ValidationError(
+                    f"Material '{name}' has no Principled BSDF to take base_color, metallic, "
+                    "roughness or textures; assign it without them, or pass "
+                    "reuse_existing=false for a new material",
+                    "no_principled_bsdf",
+                )
 
-        mat_name = material_name or f"Material_{object_name}"
-        mat = blender_module.data.materials.new(name=mat_name)
-        mat.use_nodes = True
-        tree = mat.node_tree
-        bsdf = None
-        for node in tree.nodes:
-            if node.type == "BSDF_PRINCIPLED":
-                bsdf = node
-                break
-
-        if bsdf is not None:
-            color = base_color or [0.8, 0.8, 0.8, 1.0]
-            bsdf.inputs["Base Color"].default_value = tuple(color)
-            bsdf.inputs["Metallic"].default_value = metallic
-            bsdf.inputs["Roughness"].default_value = roughness
-
-        if hasattr(obj.data, "materials"):
-            obj.data.materials.append(mat)
+        # Where the material goes and what that does to the data, worked out
+        # before anything changes.
+        if faces is not None and slot_index is None:
+            index = next(
+                (i for i, slot in enumerate(obj.material_slots) if slot.material == material),
+                slot_count,
+            )
         else:
-            raise ValueError(f"Object '{object_name}' does not support materials")
+            index = 0 if slot_index is None else int(slot_index)
+        appends = index == slot_count
+        previous_faces: Optional[List[int]] = None
+        new_faces: Optional[List[int]] = None
+        if writes_faces:
+            previous_faces = self._face_materials(data)
+            new_faces = list(previous_faces)
+            for face in range(len(new_faces)) if faces is None else faces:
+                new_faces[face] = index
+        face_change = new_faces is not None and new_faces != previous_faces
+        changes_data = link == "DATA" or appends or face_change
+        sharers = self._other_users(obj)
+        linked_data = getattr(data, "library", None) is not None
+        # single_user also makes library data local, as Blender's Make Single User does.
+        copy_data = bool(single_user and (sharers or linked_data))
+        kind = obj.type.title() if obj.type != "MESH" else "Mesh"
+        if sharers and link == "OBJECT" and (appends or face_change) and not copy_data:
+            what = "assigning faces" if face_change else "adding a slot"
+            raise ValidationError(
+                f"{kind} data '{data.name}' is shared with {_name_list(sharers)}; with "
+                f"link='OBJECT' the slot's material is this object's, but {what} changes the "
+                f"shared data for all of them. Pass single_user=true to give '{object_name}' "
+                "its own copy first, or slot_index to an existing slot to change only the "
+                "material",
+                "shared_data",
+                shared_with=sharers,
+            )
+        if linked_data and changes_data and not copy_data:
+            raise ValidationError(
+                f"{kind} data '{data.name}' is linked from a library and cannot be changed; "
+                "pass single_user=true for a local copy, or link='OBJECT' with slot_index "
+                "to an existing slot",
+                "linked_from_library",
+            )
+        if copy_data:
+            # Blender 5.0.1 ignores obj.data = copy, without an error, while
+            # the object is in Edit Mode.
+            self._require_object_mode(obj, "give it its own copy of its data")
+        warnings = self._material_warnings(obj, link, textures, sharers, copy_data)
+        replaced = None if appends else obj.material_slots[index].material
 
+        created = material is None
+        new_images: List[Any] = []
+        appended = False
+        made_copy: Any = None
+        # Set once the copy really is the object's data.
+        original_data: Any = None
+        previous_slot: Optional[Tuple[int, str, Any]] = None
+        faces_written = False
+        try:
+            images = self._load_texture_images(textures, new_images)
+            if copy_data:
+                made_copy = data.copy()
+                obj.data = made_copy
+                if obj.data != made_copy:
+                    raise RuntimeError(
+                        f"Blender kept '{data.name}' on '{object_name}' instead of its copy; "
+                        "nothing was changed"
+                    )
+                original_data, data = data, made_copy
+            if material is None:
+                material = blender_module.data.materials.new(name=name)
+                if material.node_tree is None:
+                    # Before Blender 5.0 a new material has no node tree until
+                    # use_nodes is set; 5.0 always has one and deprecates the flag.
+                    material.use_nodes = True
+            if shading:
+                self._shade_principled(material, color, metallic, roughness, images)
+            if appends:
+                data.materials.append(material if link == "DATA" else None)
+                appended = True
+            slot = obj.material_slots[index]
+            previous_slot = (index, slot.link, slot.material)
+            slot.link = link
+            slot.material = material
+            if face_change and new_faces is not None:
+                faces_written = True
+                self._set_face_materials(data, new_faces)
+        except Exception:
+            # Each step is undone on its own, so one that fails does not keep
+            # the others from running.
+            def undo(step: Callable[[], Any]) -> None:
+                try:
+                    step()
+                except Exception:
+                    self.logger.exception("Could not undo part of a failed material assignment")
+
+            def restore_faces() -> None:
+                if faces_written and previous_faces is not None and original_data is None:
+                    self._set_face_materials(data, previous_faces)
+
+            def restore_data() -> None:
+                # Only the copy this call made is removed, its faces and slots
+                # with it, and only once no object uses it: removing data an
+                # object still uses deletes that object.
+                if made_copy is None:
+                    return
+                if original_data is not None and obj.data == made_copy:
+                    obj.data = original_data
+                if obj.data == made_copy:
+                    self.logger.error(
+                        "Left the copy '%s' on '%s': Blender did not take the original back",
+                        made_copy.name,
+                        object_name,
+                    )
+                    return
+                self._data_collection(obj).remove(made_copy)
+
+            def restore_slot() -> None:
+                # The slot's link and an OBJECT-linked material are the
+                # object's, so they are restored also after a copy is dropped.
+                if appended:
+                    if original_data is None:
+                        data.materials.pop(index=-1)
+                elif previous_slot is not None:
+                    restored = obj.material_slots[previous_slot[0]]
+                    restored.link = previous_slot[1]
+                    restored.material = previous_slot[2]
+
+            def remove_material() -> None:
+                if created and material is not None:
+                    blender_module.data.materials.remove(material)
+
+            def remove_images() -> None:
+                for image in new_images:
+                    blender_module.data.images.remove(image)
+
+            for step in (restore_faces, restore_data, restore_slot, remove_material, remove_images):
+                undo(step)
+            raise
+
+        if original_data is not None:
+            library = getattr(original_data, "library", None)
+            if library is not None:
+                # A local copy of library data keeps its name.
+                kept = f"; {_name_list(sharers)} keep the linked one" if sharers else ""
+                warnings.append(
+                    f"'{object_name}' now has a local copy of {kind.lower()} data "
+                    f"'{original_data.name}' from library '{library.name}'{kept}"
+                )
+            else:
+                kept = f", which {_name_list(sharers)} keep" if sharers else ""
+                warnings.append(
+                    f"'{object_name}' now has its own copy '{data.name}' of {kind.lower()} data "
+                    f"'{original_data.name}'{kept}"
+                )
+        if not created and shading and material.users > 1:
+            warnings.append(
+                f"Material '{material.name}' has {material.users} users; the changed shading "
+                "shows wherever it is used"
+            )
+        if replaced is not None and replaced != material and not replaced.users:
+            warnings.append(
+                f"Material '{replaced.name}' has no users now; Blender discards it when the "
+                "file is saved and reopened (set its use_fake_user to keep it)"
+            )
+        bsdf = self._principled_node(material)
         return {
             "object_name": object_name,
-            "material_name": mat.name,
+            "material_name": material.name,
+            "created": created,
+            "slot_index": index,
+            "link": link,
+            "faces_assigned": (
+                None if new_faces is None else len(new_faces) if faces is None else len(faces)
+            ),
+            "material_slots": [
+                slot.material.name if slot.material else None for slot in obj.material_slots
+            ],
+            "principled_params": None if bsdf is None else self._extract_principled_params(bsdf),
+            "surface_render_method": self._render_method(material),
+            "textures": textures,
+            "warnings": warnings,
         }
+
+    @staticmethod
+    def _other_users(obj: Any) -> List[str]:
+        """The other objects whose data is ``obj``'s, by name.
+
+        Counted from the objects rather than ``data.users``, which a fake
+        user or another datablock's reference raises too.
+        """
+        blender_module: Any = bpy
+        data = obj.data
+        return sorted(
+            other.name
+            for other in blender_module.data.objects
+            if other.name != obj.name and getattr(other, "data", None) == data
+        )
+
+    @staticmethod
+    def _data_collection(obj: Any) -> Any:
+        """The bpy.data collection that holds an object's data."""
+        blender_module: Any = bpy
+        name = {
+            "MESH": "meshes",
+            "CURVE": "curves",
+            "SURFACE": "curves",
+            "FONT": "curves",
+            "META": "metaballs",
+            "CURVES": "hair_curves",
+            "POINTCLOUD": "pointclouds",
+            "VOLUME": "volumes",
+            "GREASEPENCIL": "grease_pencils",
+        }.get(obj.type, "meshes")
+        return getattr(blender_module.data, name)
+
+    @staticmethod
+    def _checked_face_indices(mesh: Any, face_indices: Sequence[Any]) -> List[int]:
+        """Face indices in range, each once, at least one, in the order given."""
+        if not face_indices:
+            raise ValidationError(
+                "face_indices must name at least one face", "invalid_value", field="face_indices"
+            )
+        count = len(mesh.polygons)
+        checked: List[int] = []
+        seen: set = set()
+        for value in face_indices:
+            if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+                raise ValidationError(
+                    f"face_indices index {value!r} is not an integer",
+                    "invalid_value",
+                    field="face_indices",
+                )
+            index = int(value)
+            if index < 0 or index >= count:
+                raise ValidationError(
+                    f"face_indices index {index} out of range [0, {count})",
+                    "out_of_range",
+                    field="face_indices",
+                )
+            if index in seen:
+                raise ValidationError(
+                    f"face_indices lists face {index} twice", "invalid_value", field="face_indices"
+                )
+            seen.add(index)
+            checked.append(index)
+        return checked
+
+    def _texture_files(self, textures: Dict[str, Optional[str]]) -> Dict[str, str]:
+        """The texture paths given, each allowed by the sandbox and an existing file."""
+        files: Dict[str, str] = {}
+        for key, path in textures.items():
+            if path is None:
+                continue
+            resolved = self._deny_outside_sandbox(path)
+            if not os.path.isfile(resolved):
+                raise NotFoundError(
+                    f"{key}_texture '{path}' is not a file",
+                    "texture_not_found",
+                    field=f"{key}_texture",
+                    path=path,
+                )
+            files[key] = resolved
+        return files
+
+    @staticmethod
+    def _load_texture_images(textures: Dict[str, str], new_images: List[Any]) -> Dict[str, Any]:
+        """Find or load each texture image, in the colour space its socket reads it in.
+
+        A data map (metallic, roughness, normal) is read Non-Color; a base
+        colour reads the colour space Blender loads the file in: sRGB for an
+        8-bit image, linear for a float one such as an EXR. An image of the same
+        file already read that way is reused, so a repeated call adds no
+        datablock. An image already in the file is never changed, since other
+        materials may read it: when every one of the file reads the other way,
+        this input gets a datablock of its own. Images the call loads are added
+        to ``new_images``, for the caller to remove on failure.
+        bpy.data.images.load accepts a file that is no image and only fails to
+        read it later, so an image that reads as 0 x 0 pixels is refused.
+        """
+        blender_module: Any = bpy
+        images: Dict[str, Any] = {}
+        for key, path in textures.items():
+            data_map = key != "base_color"
+            same_file = [
+                image
+                for image in blender_module.data.images
+                if _image_file(image) == _real_path(path)
+            ]
+            image = next(
+                (
+                    candidate
+                    for candidate in same_file
+                    if bool(candidate.colorspace_settings.is_data) == data_map
+                ),
+                None,
+            )
+            fresh = image is None
+            if image is None:
+                image = blender_module.data.images.load(path, check_existing=False)
+                new_images.append(image)
+            if not image.size[0]:
+                raise ValidationError(
+                    f"{key}_texture '{path}' is not an image Blender can read",
+                    "not_an_image",
+                    field=f"{key}_texture",
+                    path=path,
+                )
+            if fresh and data_map:
+                image.colorspace_settings.name = "Non-Color"
+            images[key] = image
+        return images
+
+    def _material_warnings(
+        self,
+        obj: Any,
+        link: str,
+        textures: Dict[str, str],
+        sharers: List[str],
+        copy_data: bool,
+    ) -> List[str]:
+        """Warnings about where an assignment shows: shared data, missing UVs."""
+        warnings: List[str] = []
+        data = obj.data
+        if link == "DATA" and sharers and not copy_data:
+            kind = "Mesh" if obj.type == "MESH" else obj.type.title()
+            warnings.append(
+                f"{kind} data '{data.name}' is shared with {_name_list(sharers)}; its slots "
+                "and face assignments change on all of them (single_user=true changes only "
+                "this object)"
+            )
+        if textures and obj.type == "MESH" and not len(data.uv_layers):
+            warnings.append(
+                f"Mesh '{data.name}' has no UV map, which image textures need; run "
+                "uv_unwrap_blender_mesh on the object"
+            )
+        return warnings
+
+    def _shade_principled(
+        self,
+        material: Any,
+        color: Optional[Tuple[float, float, float, Optional[float]]],
+        metallic: Optional[float],
+        roughness: Optional[float],
+        images: Dict[str, Any],
+    ) -> None:
+        """Set the given values and textures on the material's Principled BSDF."""
+        bsdf = self._principled_node(material)
+        if color is not None:
+            red, green, blue, alpha = color
+            bsdf.inputs["Base Color"].default_value = (red, green, blue, 1.0)
+            material.diffuse_color = (red, green, blue, 1.0 if alpha is None else alpha)
+            if alpha is not None:
+                bsdf.inputs["Alpha"].default_value = alpha
+                self._set_render_method(material, transparent=alpha < 1.0)
+        if metallic is not None:
+            bsdf.inputs["Metallic"].default_value = metallic
+        if roughness is not None:
+            bsdf.inputs["Roughness"].default_value = roughness
+        for row, (key, image) in enumerate(images.items()):
+            self._link_texture(material.node_tree, bsdf, key, image, row)
+
+    @staticmethod
+    def _set_render_method(material: Any, transparent: bool) -> None:
+        """Blend the material when it is transparent, as alpha alone does not.
+
+        Blender 4.2+ (EEVEE Next) sets this as surface_render_method; earlier
+        versions as blend_method.
+        """
+        if hasattr(material, "surface_render_method"):
+            material.surface_render_method = "BLENDED" if transparent else "DITHERED"
+        else:
+            material.blend_method = "BLEND" if transparent else "OPAQUE"
+
+    @staticmethod
+    def _render_method(material: Any) -> Optional[str]:
+        """The material's render method (surface_render_method, else blend_method)."""
+        for name in ("surface_render_method", "blend_method"):
+            value = getattr(material, name, None)
+            if value is not None:
+                return str(value)
+        return None
+
+    def _link_texture(self, tree: Any, bsdf: Any, key: str, image: Any, row: int) -> None:
+        """Drive one Principled input with an image texture, replacing what drove it."""
+        socket = bsdf.inputs[_TEXTURE_SOCKETS[key]]
+        for old in list(socket.links):
+            source = old.from_node
+            tree.links.remove(old)
+            self._drop_unused_texture_node(tree, source)
+        x, y = bsdf.location[0], bsdf.location[1]
+        texture = tree.nodes.new("ShaderNodeTexImage")
+        texture.image = image
+        texture.label = f"{_TEXTURE_SOCKETS[key]} Texture"
+        texture.location = (x - 700, y - 300 * row)
+        if key == "normal":
+            normal_map = tree.nodes.new("ShaderNodeNormalMap")
+            normal_map.location = (x - 250, y - 300 * row)
+            tree.links.new(texture.outputs["Color"], normal_map.inputs["Color"])
+            tree.links.new(normal_map.outputs["Normal"], socket)
+        else:
+            tree.links.new(texture.outputs["Color"], socket)
+
+    def _drop_unused_texture_node(self, tree: Any, node: Any) -> None:
+        """Remove an Image Texture, Normal Map or Reroute node that no longer feeds anything.
+
+        The nodes upstream of it go too when nothing else uses them, so a
+        replaced texture behind Reroutes leaves no stray nodes.
+        """
+        if node.type not in ("TEX_IMAGE", "NORMAL_MAP", "REROUTE") or any(
+            output.is_linked for output in node.outputs
+        ):
+            return
+        upstream = [link.from_node for socket in node.inputs for link in socket.links]
+        tree.nodes.remove(node)
+        for source in upstream:
+            self._drop_unused_texture_node(tree, source)
+
+    @staticmethod
+    def _material_output(tree: Any) -> Any:
+        """The node tree's active Material Output, else its first one, else None."""
+        outputs = [node for node in tree.nodes if node.type == "OUTPUT_MATERIAL"]
+        return next((node for node in outputs if node.is_active_output), None) or next(
+            iter(outputs), None
+        )
+
+    def _material_tree(self, material: Any) -> Any:
+        """The material's node tree when it renders with nodes, else None.
+
+        Blender 5.0 materials always use nodes and deprecate Material.use_nodes
+        (removed in 6.0), so it is read only before 5.0.
+        """
+        tree = getattr(material, "node_tree", None)
+        if tree is None:
+            return None
+        if self._is_blender_5_plus:
+            return tree
+        return tree if material.use_nodes else None
+
+    def _principled_node(self, material: Any) -> Any:
+        """The Principled BSDF feeding the active output's Surface, else the first one."""
+        tree = self._material_tree(material)
+        if tree is None:
+            return None
+        output = self._material_output(tree)
+        surface = None if output is None else output.inputs.get("Surface")
+        for link in [] if surface is None else _live_links(surface):
+            source = _link_source(link)[0]
+            if source.type == "BSDF_PRINCIPLED":
+                return source
+        return next((node for node in tree.nodes if node.type == "BSDF_PRINCIPLED"), None)
+
+    @staticmethod
+    def _face_materials(mesh: Any) -> List[int]:
+        """Every face's material index, in face order."""
+        values = [0] * len(mesh.polygons)
+        mesh.polygons.foreach_get("material_index", values)
+        return values
+
+    @staticmethod
+    def _set_face_materials(mesh: Any, values: List[int]) -> None:
+        """Write every face's material index."""
+        mesh.polygons.foreach_set("material_index", values)
+        mesh.update()
 
     def add_modifier(
         self,
@@ -3381,12 +4141,27 @@ class BlenderRuntimeSession:
 
     @staticmethod
     def _require_object_mode(obj: Any, action: str) -> None:
-        """Refuse to change an object's mesh data while it is edited in another mode."""
+        """Refuse to change an object's data while it, or its data, is edited in another mode.
+
+        Edit Mode keeps its own copy of the data and writes it back on leaving,
+        over what was changed meanwhile, also when the data is edited through
+        another object that shares it.
+        """
         mode = getattr(obj, "mode", "OBJECT")
         if mode != "OBJECT":
-            raise ValueError(
+            raise ValidationError(
                 f"Object '{obj.name}' is in {mode.replace('_', ' ').title()} Mode; "
-                f"switch it to Object Mode to {action}"
+                f"switch it to Object Mode to {action}",
+                "wrong_mode",
+                mode=mode,
+            )
+        data: Any = getattr(obj, "data", None)
+        if getattr(data, "is_editmode", False):
+            raise ValidationError(
+                f"The data '{data.name}' of '{obj.name}' is in Edit Mode through another "
+                f"object that shares it; switch that object to Object Mode to {action}",
+                "wrong_mode",
+                mode="EDIT",
             )
 
     @staticmethod
@@ -3563,45 +4338,359 @@ class BlenderRuntimeSession:
         spot_size: Optional[float] = None,
         spot_blend: Optional[float] = None,
         shadow_soft_size: Optional[float] = None,
+        light_type: Optional[str] = None,
+        angle: Optional[float] = None,
+        size: Optional[float] = None,
+        size_y: Optional[float] = None,
+        shape: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Set properties on a light object.
+        Set properties on a light object, checked for its type and range.
+
+        Each setting must belong to the light's type (after ``light_type``,
+        when given): shadow_soft_size is the radius of POINT and SPOT lights,
+        spot_size and spot_blend are SPOT's, angle is a SUN's softness, and
+        shape, size and size_y are an AREA light's (size_y for RECTANGLE and
+        ELLIPSE). A value outside its range is refused rather than clamped,
+        and energy may not be negative. Nothing changes unless every value is
+        valid. The reply reports every setting of the light's type as stored.
 
         Args:
             light_name: Light object name.
-            energy: Light energy/power.
-            color: Light color RGB [r, g, b].
+            energy: Light power in watts (irradiance in W/m² for SUN), >= 0.
+            color: Light color RGB [r, g, b], each >= 0.
             use_shadow: Enable shadow casting.
-            spot_size: Spot cone angle in radians (SPOT only).
-            spot_blend: Spot edge blend factor (SPOT only).
-            shadow_soft_size: Shadow softness / radius.
+            spot_size: Spot cone angle in radians, 1 degree to pi (SPOT).
+            spot_blend: Spot edge softness 0-1 (SPOT).
+            shadow_soft_size: Light radius for soft shadows, >= 0 (POINT, SPOT).
+            light_type: Change the light to POINT, SUN, SPOT or AREA first.
+            angle: Sun's angular diameter in radians, 0 to pi (SUN).
+            size: Area light size, >= 0 (AREA; its width for RECTANGLE and ELLIPSE).
+            size_y: Area light height, >= 0 (AREA with shape RECTANGLE or ELLIPSE).
+            shape: Area light shape: SQUARE, RECTANGLE, DISK or ELLIPSE (AREA).
 
         Returns:
-            Dictionary with light_name, light_type, energy, color.
+            Dictionary with light_name, light_type, energy, color, use_shadow,
+            the settings of its type and warnings.
         """
         obj = self._get_object_or_raise(light_name)
         if obj.type != "LIGHT":
-            raise ValueError(f"Object '{light_name}' is type '{obj.type}', not LIGHT")
+            raise ValidationError(
+                f"Object '{light_name}' is type '{obj.type}', not LIGHT",
+                "not_a_light",
+                object_type=obj.type,
+            )
         light = obj.data
+        target = light.type if light_type is None else str(light_type).upper()
+        if target not in _LIGHT_TYPE_SETTINGS:
+            raise ValidationError(
+                f"light_type must be one of {', '.join(_LIGHT_TYPE_SETTINGS)}, got {light_type!r}",
+                "invalid_value",
+                field="light_type",
+            )
+        typed: Dict[str, Any] = {
+            name: value
+            for name, value in (
+                ("shadow_soft_size", shadow_soft_size),
+                ("spot_size", spot_size),
+                ("spot_blend", spot_blend),
+                ("angle", angle),
+                ("shape", shape),
+                ("size", size),
+                ("size_y", size_y),
+            )
+            if value is not None
+        }
+        for name in typed:
+            if name not in _LIGHT_TYPE_SETTINGS[target]:
+                raise ValidationError(
+                    self._light_setting_error(name, light_name, target),
+                    "setting_not_for_light_type",
+                    field=name,
+                    light_type=target,
+                )
+        numbers_given: Dict[str, Any] = {
+            name: value for name, value in typed.items() if name != "shape"
+        }
+        if energy is not None:
+            numbers_given["energy"] = energy
+        for name, value in numbers_given.items():
+            low, high = _LIGHT_LIMITS[name]
+            number = _finite_number(value, name)
+            if number < low or (high is not None and number > high):
+                bound = f"at least {low:g}" if high is None else f"between {low:g} and {high:g}"
+                raise ValidationError(f"{name} must be {bound}, got {value!r}", "out_of_range", field=name)
+        rgb: Any = color
+        if rgb is not None:
+            if isinstance(rgb, (str, bytes)) or not hasattr(rgb, "__len__") or len(rgb) != 3:
+                raise ValidationError(f"color must be [r, g, b], got {rgb!r}", "invalid_value", field="color")
+            if any(_finite_number(channel, "color") < 0 for channel in rgb):
+                raise ValidationError(
+                    f"color channels must be at least 0, got {rgb!r}", "out_of_range", field="color"
+                )
+        shadows: Any = use_shadow
+        if shadows is not None and not isinstance(shadows, bool):
+            raise ValidationError(
+                f"use_shadow must be true or false, got {shadows!r}", "invalid_value", field="use_shadow"
+            )
+        if shape is not None:
+            shape = str(shape).upper()
+            if shape not in _AREA_LIGHT_SHAPES:
+                raise ValidationError(
+                    f"shape must be one of {', '.join(_AREA_LIGHT_SHAPES)}, got {shape!r}",
+                    "invalid_value",
+                    field="shape",
+                )
+        if size_y is not None:
+            effective = shape or (light.shape if light.type == "AREA" else "SQUARE")
+            if effective not in ("RECTANGLE", "ELLIPSE"):
+                raise ValidationError(
+                    f"size_y applies to RECTANGLE and ELLIPSE area lights, and '{light_name}' "
+                    f"would be {effective}; pass shape as well",
+                    "setting_not_for_light_type",
+                    field="size_y",
+                    shape=effective,
+                )
+
+        if light.type != target:
+            light.type = target
+            # The light datablock's Python struct keeps its old type's
+            # settings until it is fetched again.
+            light = obj.data
         if energy is not None:
             light.energy = energy
         if color is not None:
-            light.color = tuple(color[:3])
+            light.color = tuple(color)
         if use_shadow is not None:
             light.use_shadow = use_shadow
-        if spot_size is not None and light.type == "SPOT":
-            light.spot_size = spot_size
-        if spot_blend is not None and light.type == "SPOT":
-            light.spot_blend = spot_blend
-        if shadow_soft_size is not None:
-            light.shadow_soft_size = shadow_soft_size
+        if shape is not None:
+            light.shape = shape
+        for name, value in typed.items():
+            if name != "shape":
+                setattr(light, name, value)
 
-        return {
+        result: Dict[str, Any] = {
             "light_name": light_name,
             "light_type": light.type,
             "energy": light.energy,
             "color": list(light.color),
+            "use_shadow": bool(light.use_shadow),
         }
+        for name in _LIGHT_TYPE_SETTINGS[light.type]:
+            result[name] = getattr(light, name)
+        users = int(getattr(light, "users", 1))
+        result["warnings"] = (
+            [f"Light data '{light.name}' is shared by {users} objects; all of them changed"]
+            if users > 1
+            else []
+        )
+        return result
+
+    @staticmethod
+    def _light_setting_error(name: str, light_name: str, light_type: str) -> str:
+        """Why a setting does not apply to a light type, and what does instead."""
+        owners = [kind for kind, settings in _LIGHT_TYPE_SETTINGS.items() if name in settings]
+        message = (
+            f"{name} applies to {' and '.join(owners)} lights, and '{light_name}' is a "
+            f"{light_type} light"
+        )
+        if name == "shadow_soft_size" and light_type == "SUN":
+            return f"{message}; a sun's softness is its angle"
+        if name == "shadow_soft_size" and light_type == "AREA":
+            return f"{message}; an area light's softness is its size"
+        return f"{message}; pass light_type to change its type"
+
+    def uv_unwrap_mesh(
+        self,
+        object_name: str,
+        method: str = "SMART_PROJECT",
+        uv_map_name: Optional[str] = None,
+        angle_limit: float = math.radians(66.0),
+        island_margin: float = 0.0,
+        cube_size: float = 1.0,
+    ) -> Dict[str, Any]:
+        """
+        Generate UV coordinates for every face of a mesh object, hidden ones included.
+
+        SMART_PROJECT splits the mesh into islands where faces meet at more
+        than ``angle_limit`` and packs them (Blender's Smart UV Project);
+        CUBE_PROJECT projects each face onto the cube side it faces, at
+        ``cube_size``. The result goes into ``uv_map_name`` (created when
+        missing), else the active UV map, else a new "UVMap". The active UV
+        map stays what it was (a mesh's first UV map becomes active and the
+        render UV map, as Blender makes it); the reply names the active and
+        render UV maps, the one image textures read. The operators need Edit
+        Mode, so the object briefly becomes the active, only selected object
+        and its hidden faces are shown; its mesh selection and hidden faces,
+        the object selection and the active object are restored afterwards.
+        The object, and Blender, must be in Object Mode.
+
+        Args:
+            object_name: Mesh object to unwrap.
+            method: SMART_PROJECT or CUBE_PROJECT.
+            uv_map_name: UV map to write; the active one (or a new UVMap) if omitted.
+            angle_limit: SMART_PROJECT: island angle in radians, above 0 to pi/2.
+            island_margin: SMART_PROJECT: space between islands, 0-1.
+            cube_size: CUBE_PROJECT: size of the projection cube, above 0.
+
+        Returns:
+            Dictionary with the UV map written, whether it was created, the
+            method, the mesh's UV map names, the active and render UV maps, the
+            face count and warnings.
+        """
+        blender_module: Any = bpy
+        obj = self._get_object_or_raise(object_name)
+        if obj.type != "MESH":
+            raise ValidationError(
+                f"Object '{object_name}' is not a MESH (type={obj.type})",
+                "not_a_mesh",
+                object_type=obj.type,
+            )
+        self._require_object_mode(obj, "unwrap it")
+        context_mode = getattr(blender_module.context, "mode", "OBJECT")
+        if context_mode != "OBJECT":
+            raise ValidationError(
+                f"Blender is in {context_mode.replace('_', ' ').title()} mode; switch to Object Mode "
+                "to unwrap a mesh",
+                "wrong_mode",
+                mode=context_mode,
+            )
+        operator = _UV_UNWRAP_METHODS.get(str(method).upper())
+        if operator is None:
+            raise ValidationError(
+                f"method must be one of {', '.join(_UV_UNWRAP_METHODS)}, got {method!r}",
+                "invalid_value",
+                field="method",
+            )
+        limits: List[Tuple[str, Any, float, Optional[float], bool]] = [
+            ("angle_limit", angle_limit, 0.0, math.pi / 2, True),
+            ("island_margin", island_margin, 0.0, 1.0, False),
+            ("cube_size", cube_size, 0.0, None, True),
+        ]
+        for label, value, low, high, open_low in limits:
+            number = _finite_number(value, label)
+            if (number <= low if open_low else number < low) or (high is not None and number > high):
+                raise ValidationError(
+                    f"{label} must be {'above' if open_low else 'at least'} {low:g}"
+                    + (f" and at most {high:g}" if high is not None else "")
+                    + f", got {value!r}",
+                    "out_of_range",
+                    field=label,
+                )
+        mesh = obj.data
+        for owner, what in ((obj, "Object"), (mesh, "Mesh")):
+            library = getattr(owner, "library", None)
+            if library is not None:
+                raise ValidationError(
+                    f"{what} '{owner.name}' is linked from library '{library.name}' and cannot "
+                    "be changed; make it local first",
+                    "linked_from_library",
+                )
+        if not obj.visible_get():
+            raise ValidationError(
+                f"Object '{object_name}' is hidden in the view layer and cannot enter Edit Mode; "
+                "unhide it first",
+                "hidden_object",
+            )
+
+        layer = mesh.uv_layers.get(uv_map_name) if uv_map_name else mesh.uv_layers.active
+        previous_uv = mesh.uv_layers.active
+        previous_uv_name = None if previous_uv is None else previous_uv.name
+        created = layer is None
+        if created:
+            layer = mesh.uv_layers.new(name=uv_map_name or "UVMap")
+            if layer is None:
+                raise ValidationError(
+                    f"Mesh '{mesh.name}' has the most UV maps Blender allows", "too_many_uv_maps"
+                )
+        mesh.uv_layers.active = layer
+        # Leaving Edit Mode rebuilds the mesh's layers, so a UV layer struct
+        # fetched before it points at freed memory afterwards (on Blender 5.0.1
+        # its name read back as ""): layers are looked up again by name.
+        uv_name = layer.name
+
+        view_layer = blender_module.context.view_layer
+        previous_active = view_layer.objects.active
+        previous_selected = [other for other in view_layer.objects if other.select_get()]
+        domains = ("vertices", "edges", "polygons")
+        flags = {
+            (domain, flag): self._element_flags(getattr(mesh, domain), flag)
+            for domain in domains
+            for flag in ("select", "hide")
+        }
+        try:
+            for other in previous_selected:
+                other.select_set(False)
+            obj.select_set(True)
+            view_layer.objects.active = obj
+            _bpy_op(
+                f"Failed to enter Edit Mode on '{object_name}'",
+                blender_module.ops.object.mode_set,
+                mode="EDIT",
+            )
+            try:
+                # The operators skip hidden faces: show them for the unwrap.
+                blender_module.ops.mesh.reveal(select=True)
+                blender_module.ops.mesh.select_all(action="SELECT")
+                options = (
+                    {"angle_limit": angle_limit, "island_margin": island_margin}
+                    if operator == "smart_project"
+                    else {"cube_size": cube_size}
+                )
+                _bpy_op(
+                    f"Failed to unwrap '{object_name}'",
+                    getattr(blender_module.ops.uv, operator),
+                    **options,
+                )
+            finally:
+                blender_module.ops.object.mode_set(mode="OBJECT")
+        except Exception:
+            stale = mesh.uv_layers.get(uv_name)
+            if created and stale is not None:
+                mesh.uv_layers.remove(stale)
+            raise
+        finally:
+            for (domain, flag), values in flags.items():
+                getattr(mesh, domain).foreach_set(flag, values)
+            restored_uv = None if previous_uv_name is None else mesh.uv_layers.get(previous_uv_name)
+            if restored_uv is not None:
+                mesh.uv_layers.active = restored_uv
+            mesh.update()
+            obj.select_set(False)
+            for other in previous_selected:
+                other.select_set(True)
+            view_layer.objects.active = previous_active
+
+        warnings: List[str] = []
+        sharers = self._other_users(obj)
+        if sharers:
+            warnings.append(
+                f"Mesh '{mesh.name}' is shared with {_name_list(sharers)}; their UVs changed too"
+            )
+        active = mesh.uv_layers.active
+        render = next((uv for uv in mesh.uv_layers if getattr(uv, "active_render", False)), None)
+        if render is not None and render.name != uv_name:
+            warnings.append(
+                f"Image textures read the render UV map '{render.name}', not '{uv_name}'"
+            )
+        return {
+            "object_name": object_name,
+            "uv_map": uv_name,
+            "created_uv_map": created,
+            "method": str(method).upper(),
+            "uv_layer_names": [uv.name for uv in mesh.uv_layers],
+            "active_uv_map": None if active is None else active.name,
+            "render_uv_map": None if render is None else render.name,
+            "face_count": len(mesh.polygons),
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def _element_flags(elements: Any, flag: str) -> List[bool]:
+        """One flag (select or hide) of every vertex, edge or face, in order."""
+        values = [False] * len(elements)
+        elements.foreach_get(flag, values)
+        return values
 
     # -- End Phase 3 methods -------------------------------------------------
 
@@ -7361,7 +8450,7 @@ class BlenderRuntimeSession:
             Dict with object_name, applied_properties and cleared_properties.
 
         Raises:
-            NotFoundError: For an unknown object (``details.code`` ObjectNotFound).
+            NotFoundError: For an unknown object (``details.code`` object_not_found).
             ValidationError: For an unknown group, field or clear name, an
                 invalid value, an additional label named after a semantic
                 field's taxonomy (class, hierarchy, wikidata_qcode, qcode) that
@@ -7369,7 +8458,7 @@ class BlenderRuntimeSession:
                 that neither stores nor clears anything, Edit Mode, or a linked
                 object; ``details.code`` names which.
         """
-        obj = self._simready_object(object_name)
+        obj = self._get_object_or_raise(object_name)
         self._simready_editable([obj], "apply_simready_metadata")
         writes = self._simready_writes(metadata or {})
         removals = self._simready_clear_keys(obj, clear or [])
@@ -7506,9 +8595,9 @@ class BlenderRuntimeSession:
             stored), has_simready_data and invalid_values.
 
         Raises:
-            NotFoundError: For an unknown object (``details.code`` ObjectNotFound).
+            NotFoundError: For an unknown object (``details.code`` object_not_found).
         """
-        obj = self._simready_object(object_name)
+        obj = self._get_object_or_raise(object_name)
         stored = self._read_simready_properties(obj)
         valid, invalid = self._simready_checked(stored)
         return {
@@ -7653,7 +8742,7 @@ class BlenderRuntimeSession:
             the export leaves them out) and meters_per_unit.
 
         Raises:
-            NotFoundError: For an unknown object (``details.code`` ObjectNotFound).
+            NotFoundError: For an unknown object (``details.code`` object_not_found).
             ValidationError: For an empty object list, a listed object outside
                 the view layer, or a bad severity, offset or limit.
         """
@@ -8448,7 +9537,7 @@ class BlenderRuntimeSession:
 
         Raises:
             PermissionError: If the path is outside the sandbox policy.
-            NotFoundError: For an unknown object (``details.code`` ObjectNotFound).
+            NotFoundError: For an unknown object (``details.code`` object_not_found).
             ValidationError: For an unsupported extension (UnsupportedExtension),
                 an empty object_names (EmptyObjectList), an unknown check
                 (UnknownCheck), a listed object that cannot be exported
@@ -8836,7 +9925,7 @@ class BlenderRuntimeSession:
             and warnings.
 
         Raises:
-            NotFoundError: For unknown objects (``details.code`` ObjectNotFound,
+            NotFoundError: For unknown objects (``details.code`` object_not_found,
                 ``details.objects`` the missing names). Nothing is changed.
             ValidationError: Nothing is changed. ``details.code`` names the
                 reason: InvalidRootName, NoChildren, RootIsChild, RootExists,
@@ -9095,26 +10184,32 @@ class BlenderRuntimeSession:
         """Clean up resources for the Blender session."""
         self.logger.debug("Blender runtime session cleaned up")
 
-    def _simready_object(self, object_name: str) -> Any:
-        """The named object, or NotFoundError (code ObjectNotFound) for the SimReady tools."""
-        return self._simready_objects([object_name])[0]
-
     def _simready_objects(self, object_names: Sequence[str]) -> List[Any]:
-        """The named objects in order; NotFoundError naming every missing one."""
+        """The named objects in order, or one NotFoundError naming every missing one.
+
+        Its ``details`` are _get_object_or_raise's (code object_not_found and
+        the first missing object_name) plus ``objects``, all the missing names.
+        """
         found: List[Any] = []
         missing: List[str] = []
         for name in object_names:
             try:
                 found.append(self._get_object_or_raise(name))
-            except ValueError:
+            except NotFoundError:
                 missing.append(name)
         if missing:
-            raise NotFoundError(missing)
+            raise NotFoundError(
+                f"Object{'s' if len(missing) > 1 else ''} not found: {', '.join(missing)}; "
+                "nothing was changed",
+                "object_not_found",
+                object_name=missing[0],
+                objects=missing,
+            )
         return found
 
     def _get_object_or_raise(self, object_name: str) -> Any:
         """
-        Look up a Blender object by name or raise ValueError.
+        Look up a Blender object by name or raise NotFoundError (a ValueError).
 
         Args:
             object_name: Object name to look up.
@@ -9130,14 +10225,18 @@ class BlenderRuntimeSession:
         )
         obj = objects.get(object_name)
         if obj is None:
-            raise ValueError(f"Object not found: {object_name}")
+            raise NotFoundError(
+                f"Object not found: {object_name}", "object_not_found", object_name=object_name
+            )
         return obj
 
     def _extract_principled_params(self, node: Any) -> Dict[str, Any]:
         """
         Extract common Principled BSDF input values.
 
-        Version-aware: Blender 4.0+ renamed several socket labels.
+        Version-aware: Blender 4.0+ renamed several socket labels. An input a
+        link drives reports None: its own value is unused, and reporting it
+        made a textured Base Color read as the default grey.
 
         Args:
             node: ShaderNodeBsdfPrincipled node.
@@ -9160,6 +10259,10 @@ class BlenderRuntimeSession:
         for sock_name in target_sockets:
             sock = node.inputs.get(sock_name)
             if sock is None:
+                continue
+            if getattr(sock, "is_linked", False) and _live_links(sock):
+                # A muted link drives nothing: the socket's own value applies.
+                params[sock_name] = None
                 continue
             value = sock.default_value
             # Convert Vector/Color to list for serialisation
@@ -11707,6 +12810,7 @@ class BlenderRuntimeAdapter:
             "execute_blender_script",
             "create_blender_mesh_from_data",
             "blender_clean_mesh",
+            "blender_uv_unwrap",
             "apply_simready_metadata",
             "get_simready_metadata",
             "validate_simready_compliance",

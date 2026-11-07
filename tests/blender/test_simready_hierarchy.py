@@ -274,12 +274,13 @@ def test_a_missing_child_changes_nothing(scene: Any) -> None:
     names = [o.name for o in scene.objects]
 
     with pytest.raises(
-        blender_runtime.NotFoundError, match="Object not found: does_not_exist; nothing was changed"
+        blender_runtime.NotFoundError,
+        match="Objects not found: does_not_exist, ghost; nothing was changed",
     ) as excinfo:
-        scene.session.setup_simready_hierarchy("crate_asset", ["Cube", "does_not_exist"])
+        scene.session.setup_simready_hierarchy("crate_asset", ["Cube", "does_not_exist", "ghost"])
 
-    assert _code(excinfo) == "ObjectNotFound"
-    assert excinfo.value.details["objects"] == ["does_not_exist"]
+    assert _code(excinfo) == "object_not_found"
+    assert excinfo.value.details["objects"] == ["does_not_exist", "ghost"]
     assert [o.name for o in scene.objects] == names
     assert scene.get("Cube").parent is None
     # A retry after fixing the list gets the requested name, not crate_asset.001.

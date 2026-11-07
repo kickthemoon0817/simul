@@ -403,6 +403,9 @@ def test_every_simready_tool_reports_an_unknown_object_as_not_found(
     with pytest.raises(blender_runtime.NotFoundError) as excinfo:
         call(session, tmp_path)
 
-    assert excinfo.value.details == {"code": "ObjectNotFound", "objects": ["ghost"]}
+    # The code every Blender tool reports for an unknown object.
+    assert excinfo.value.details["code"] == "object_not_found"
+    assert excinfo.value.details["object_name"] == "ghost"
+    assert excinfo.value.details.get("objects", ["ghost"]) == ["ghost"]
     assert "Object not found: ghost" in str(excinfo.value)
     assert box.obj.props == {}

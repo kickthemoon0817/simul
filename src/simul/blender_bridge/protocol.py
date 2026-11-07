@@ -30,10 +30,17 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # Version 10: setup_rigid_body, add_force_field and add_rigid_body_constraint take new settings
 # (kinematic, direction, axis, limits, springs, motors, ...) and check them up front;
 # bake_simulation takes allow_long_bake and refuses a bake over its work budget without it.
-# Version 11: apply_simready_metadata takes clear; validate_simready_compliance takes check_metadata,
+# Version 11: assign_material replaces the object's material instead of appending a slot, reuses
+# a material of the same name, and takes slot_index, face_indices, link, single_user,
+# reuse_existing and texture files; get_material_info takes max_nodes; set_light_params takes
+# light_type, angle, size, size_y and shape and refuses settings of another light type;
+# uv_unwrap_mesh is new. An older add-on would reject the arguments, or, left without them,
+# append a slot no face uses (the bug the new assignment fixes).
+# Version 12: apply_simready_metadata takes clear; validate_simready_compliance takes check_metadata,
 # check_physics, check_geometry, include_children, severity, offset and limit;
-# setup_simready_hierarchy takes reuse_root; export_simready_usd takes skip_checks.
-PROTOCOL_VERSION = 11
+# setup_simready_hierarchy takes reuse_root; export_simready_usd takes skip_checks and writes
+# rigid body constraints as UsdPhysics joints; unknown objects raise NotFoundError.
+PROTOCOL_VERSION = 12
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 
