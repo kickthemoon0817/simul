@@ -28,6 +28,18 @@ from ..utils.paths import PathPolicy
 from ..utils.regex_guard import (
     exponential_regex_construct as _exponential_regex_construct,
 )
+from ._unreal_errors import (
+    CONNECTION_ERROR,
+    NOT_FOUND_ERROR,
+    TIMEOUT_ERROR,
+    UnrealConnectionError,
+    UnrealError,
+    UnrealTimeoutError,
+    remote_control_error,
+    remote_control_error_type,
+    remote_control_message,
+    script_not_found,
+)
 from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_scripts import (
     ACTOR_HELPERS,
@@ -347,15 +359,162 @@ _LOCAL_SOCKET_ERRNOS = frozenset(
 )
 
 
+def _http_status(exc: BaseException) -> Optional[int]:
+    """The HTTP status Remote Control answered a failed request with, or None."""
+    if isinstance(exc, UnrealError):
+        return exc.status
+    if aiohttp is not None and isinstance(exc, aiohttp.ClientResponseError):
+        return exc.status
+    return None
+
+
 def _refusal(exc: BaseException) -> Optional[Dict[str, Any]]:
     """The authentication-error fields when Remote Control answered 401, else None."""
-    if aiohttp is not None and isinstance(exc, aiohttp.ClientResponseError) and exc.status == 401:
+    if _http_status(exc) == 401:
         return {
             "status": 401,
             "error": PASSPHRASE_REFUSED_ERROR,
             "error_type": "AuthenticationError",
         }
     return None
+
+
+#: The Passphrase header a batch carries when no passphrase is configured
+#: (``UnrealRuntimeSession._request_headers``): any non-empty value that is not
+#: an MD5 digest, so it never matches a configured passphrase.
+BATCH_PASSPHRASE_PLACEHOLDER = "simul-no-passphrase"
+
+
+async def _response_text(resp: Any) -> str:
+    """An error response's body as text; empty when it cannot be read."""
+    try:
+        reader = getattr(resp, "text", None)
+        if reader is not None:
+            return str(await reader())
+        # A response double that only decodes JSON.
+        return json.dumps(await resp.json())
+    except Exception:
+        return ""
+
+
+#: Sets one console variable and reads it back; expects ``args`` = {"name",
+#: "value"}. UE's GetConsoleVariableStringValue returns "" for a name it has
+#: no variable for, so the command is sent only for a variable that exists:
+#: an r.* console command is never run. (A string variable holding "" reads as
+#: missing; the tool sets numbers only.) Bools read back as true or false,
+#: ints with %d and floats with %g (FConsoleVariableConversionHelper, UE 5.7).
+SET_CONSOLE_VARIABLE = """
+import json, unreal
+previous = unreal.SystemLibrary.get_console_variable_string_value(args["name"])
+if previous == "":
+    print(json.dumps({"known": False}))
+else:
+    unreal.SystemLibrary.execute_console_command(None, args["name"] + " " + args["value"])
+    print(json.dumps({"known": True, "previous_value": previous,
+                      "value": unreal.SystemLibrary.get_console_variable_string_value(args["name"])}))
+"""
+
+
+def _console_value_matches(read_back: str, requested: str) -> bool:
+    """Whether a console variable read back holds the requested number.
+
+    Floats read back with six significant digits (%g), so they match within
+    that precision; ``true`` and ``false`` are 1 and 0.
+    """
+    words = {"true": 1.0, "false": 0.0}
+    try:
+        got = words.get(read_back.strip().lower())
+        got = float(read_back) if got is None else got
+        wanted = float(requested)
+    except ValueError:
+        return False
+    return math.isclose(got, wanted, rel_tol=1e-5, abs_tol=1e-6)
+
+
+#: The keys of one batch operation, as Remote Control names them.
+_BATCH_KEYS = ("RequestId", "URL", "Verb", "Body")
+
+#: The HTTP verbs Remote Control routes a batched request by (UE 5.7
+#: RemotePayloadSerializer's ParseHttpVerb, less OPTIONS, which no simul use
+#: needs).
+BATCH_VERBS = ("GET", "PUT", "POST", "PATCH", "DELETE")
+
+#: Most operations one ``batch_operations`` call sends. The editor runs them
+#: back to back on its game thread, inside one HTTP request.
+MAX_BATCH_OPERATIONS = 100
+
+
+def _batch_requests(operations: Any) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Shape ``batch_operations``' operations as Remote Control reads them.
+
+    A malformed batch is refused rather than forwarded: UE 5.7's batch route
+    is one HTTP request the editor parses and runs on its game thread, and a
+    request it was not written for is where its assertions fire.
+
+    Args:
+        operations: The caller's operations.
+
+    Returns:
+        Each operation with its keys in ``_BATCH_KEYS`` order, its Verb in
+        upper case and a unique RequestId, and None; or no operations and why
+        the request is malformed.
+    """
+    if not isinstance(operations, list) or not operations:
+        return [], "operations must be a non-empty JSON array of operation objects"
+    if len(operations) > MAX_BATCH_OPERATIONS:
+        return [], f"a batch takes at most {MAX_BATCH_OPERATIONS} operations, got {len(operations)}"
+    shaped: List[Dict[str, Any]] = []
+    for index, operation in enumerate(operations):
+        if not isinstance(operation, dict):
+            return [], f"operation {index} must be an object with URL, Verb and an optional Body, got {operation!r}"
+        fields: Dict[str, Any] = {}
+        for key, value in operation.items():
+            canonical = next((name for name in _BATCH_KEYS if name.lower() == str(key).lower()), None)
+            if canonical is None:
+                return [], f"operation {index} has an unknown key {key!r}; use RequestId, URL, Verb and Body"
+            if canonical in fields:
+                return [], f"operation {index} gives {canonical} twice"
+            fields[canonical] = value
+        request_id = fields.get("RequestId")
+        if request_id is not None and (not isinstance(request_id, int) or isinstance(request_id, bool)):
+            return [], f"operation {index}'s RequestId must be an integer, got {request_id!r}"
+        url = fields.get("URL")
+        if not isinstance(url, str) or not url.startswith("/remote/"):
+            return [], f"operation {index} needs URL, a Remote Control route such as /remote/object/call"
+        # Unreal's router may match routes ignoring case, so compare that way.
+        if url.split("?", 1)[0].rstrip("/").lower() == "/remote/batch":
+            return [], f"operation {index} is a batch: a batch cannot contain another"
+        verb = fields.get("Verb")
+        if not isinstance(verb, str) or verb.upper() not in BATCH_VERBS:
+            return [], f"operation {index}'s Verb must be one of {', '.join(BATCH_VERBS)}, got {verb!r}"
+        fields["Verb"] = verb.upper()
+        if "Body" in fields and not isinstance(fields["Body"], dict):
+            return [], f"operation {index}'s Body must be a JSON object"
+        shaped.append(fields)
+    given = [fields["RequestId"] for fields in shaped if fields.get("RequestId") is not None]
+    if len(set(given)) != len(given):
+        return [], "RequestId values must be unique: Remote Control matches each Body to its RequestId"
+    taken = set(given)
+    next_id = 1
+    requests: List[Dict[str, Any]] = []
+    for fields in shaped:
+        request_id = fields.get("RequestId")
+        if request_id is None:
+            while next_id in taken:
+                next_id += 1
+            request_id = next_id
+            taken.add(request_id)
+        requests.append({"RequestId": request_id, **{key: fields[key] for key in _BATCH_KEYS[1:] if key in fields}})
+    return requests, None
+
+
+def _is_python_call(path: str, body: Optional[Dict[str, Any]]) -> bool:
+    """Whether a request runs Python in the editor (``ExecutePythonCommandEx``)."""
+    return (
+        path == "/remote/object/call"
+        and body is not None
+        and body.get("functionName") == "ExecutePythonCommandEx"
+    )
 
 
 def _not_sent(exc: BaseException) -> Optional[str]:
@@ -700,6 +859,7 @@ class UnrealRuntimeSession(LoggerMixin):
             else 0
         )
         last_exc: Optional[Exception] = None
+        headers = self._request_headers(path)
 
         for attempt in range(retries + 1):
             try:
@@ -707,6 +867,8 @@ class UnrealRuntimeSession(LoggerMixin):
                 kwargs: Dict[str, Any] = {}
                 if body is not None:
                     kwargs["json"] = body
+                if headers:
+                    kwargs["headers"] = headers
 
                 async with getattr(session, method.lower())(path, **kwargs) as resp:
                     if resp.status >= 500 and attempt < retries:
@@ -724,8 +886,13 @@ class UnrealRuntimeSession(LoggerMixin):
                             min(self.retry_base_delay * (2**attempt), 8.0)
                         )
                         continue
-                    # 4xx errors are client bugs — never retry them
-                    resp.raise_for_status()
+                    # 4xx errors are client bugs — never retry them. Remote
+                    # Control says why in the body, which raise_for_status
+                    # would drop.
+                    if resp.status >= 400:
+                        raise remote_control_error(
+                            resp.status, await _response_text(resp), method, path
+                        )
                     if response_kind == "image":
                         from io import BytesIO
 
@@ -751,6 +918,9 @@ class UnrealRuntimeSession(LoggerMixin):
 
             except Exception as exc:
                 last_exc = exc
+                if isinstance(exc, UnrealError):
+                    # Remote Control answered; a 5xx was already retried above.
+                    raise
                 is_transient = isinstance(
                     exc,
                     (
@@ -785,9 +955,99 @@ class UnrealRuntimeSession(LoggerMixin):
                     await self._recycle_session()
                     await asyncio.sleep(delay)
                     continue
-                raise
+                raise self._transport_error(
+                    exc, method, path, body, timeout_override, retry_safe
+                ) from exc
 
         raise last_exc  # type: ignore[misc]
+
+    def _request_headers(self, path: str) -> Dict[str, str]:
+        """Headers one request adds to the session's defaults.
+
+        UE 5.7's batch route reads the Passphrase header without checking it
+        is there (``Request.Headers[PassphraseHeader].Last()``,
+        FWebRemoteControlModule::HandleBatchRequest), which aborts the editor
+        on a failed assertion when it is missing. Every other route looks it
+        up first. Without a configured passphrase a batch therefore carries a
+        placeholder: Remote Control accepts any value while passphrases are
+        not enforced (WebRemoteControlInternalUtils::CheckPassphrase), and
+        an editor that enforces them refuses this client with HTTP 401 before
+        the batch route runs, with or without the header. The placeholder must
+        not be empty, because UE's HTTP server drops a header without a value.
+
+        Args:
+            path: The request's route.
+
+        Returns:
+            ``Passphrase: <placeholder>`` for a batch sent without a configured
+            passphrase (the session's default headers carry a configured one),
+            otherwise nothing.
+        """
+        if path == "/remote/batch" and not self._passphrase_md5:
+            return {"Passphrase": BATCH_PASSPHRASE_PLACEHOLDER}
+        return {}
+
+    def _transport_error(
+        self,
+        exc: Exception,
+        method: str,
+        path: str,
+        body: Optional[Dict[str, Any]],
+        timeout_override: Optional[float],
+        retry_safe: bool,
+    ) -> Exception:
+        """The error to report for a request Remote Control never answered.
+
+        Args:
+            exc: What the request raised.
+            method: The request's HTTP method.
+            path: The request's route.
+            body: The request's body.
+            timeout_override: The request's timeout, when it had its own.
+            retry_safe: Whether the request only reads.
+
+        Returns:
+            An ``UnrealTimeoutError`` for a timeout, which for a request that
+            changes something says the editor may still be running it; an
+            ``UnrealConnectionError`` for a connection that failed or closed;
+            otherwise ``exc`` itself.
+        """
+        details: Dict[str, Any] = {"route": path}
+        if isinstance(exc, asyncio.TimeoutError):
+            timeout = timeout_override if timeout_override is not None else self.timeout
+            details["timeout_s"] = timeout
+            if _is_python_call(path, body):
+                message = (
+                    f"The editor did not finish the script within {timeout}s. It may still be running "
+                    "in the editor, and Remote Control cannot cancel it: check the editor's state "
+                    "before running it again (UNREAL__TIMEOUT sets the limit)"
+                )
+            elif retry_safe:
+                message = f"Remote Control did not answer {method} {path} within {timeout}s"
+            else:
+                message = (
+                    f"Remote Control did not answer {method} {path} within {timeout}s. The editor "
+                    "may still apply the request: check its state before retrying"
+                )
+            return UnrealTimeoutError(message, TIMEOUT_ERROR, details=details)
+        connection_failed = isinstance(exc, ConnectionError) or (
+            aiohttp is not None and isinstance(exc, aiohttp.ClientConnectionError)
+        )
+        if connection_failed:
+            address = f"{self.host}:{self.port}"
+            if aiohttp is not None and isinstance(exc, aiohttp.ServerDisconnectedError):
+                message = (
+                    f"The editor at {address} closed the connection without answering {method} {path}: "
+                    "it may have crashed or be shutting down"
+                )
+            else:
+                message = f"Cannot reach Remote Control at {address} ({exc})"
+            error = UnrealConnectionError(message, CONNECTION_ERROR, details=details)
+            # Kept for _not_sent, which tells a request that never left this
+            # machine from an endpoint that refused it.
+            error.os_error = getattr(exc, "os_error", None) or (exc if isinstance(exc, OSError) else None)
+            return error
+        return exc
 
     def _load_attachment(self) -> Dict[str, Any]:
         """Pin one attachment for this tool session; never fall back to host/port."""
@@ -1091,8 +1351,9 @@ class UnrealRuntimeSession(LoggerMixin):
                 # A timeout's text is empty.
                 "error": str(exc) or f"No answer within {self.ping_timeout}s",
             }
-            if aiohttp is not None and isinstance(exc, aiohttp.ClientResponseError):
-                failure["status"] = exc.status
+            status = _http_status(exc)
+            if status is not None:
+                failure["status"] = status
             not_sent = _not_sent(exc)
             if not_sent is not None:
                 failure["error"] = not_sent
@@ -1172,7 +1433,10 @@ class UnrealRuntimeSession(LoggerMixin):
         A failure whose ``error_type`` is PIEActive or one of
         ``expected_errors`` is the editor refusing the request as asked (Play
         In Editor running, a path that names nothing it can use): the
-        caller's to fix, not a fault, so it is logged at INFO.
+        caller's to fix, not a fault, so it is logged at INFO. So is a script
+        that raised ``SimulNotFound`` (``_unreal_errors.script_not_found``),
+        which is reported as ``NotFoundError`` with its message rather than
+        as a ``ScriptError`` traceback.
 
         Args:
             code: The script.
@@ -1183,6 +1447,10 @@ class UnrealRuntimeSession(LoggerMixin):
                 for a request it refused as asked.
         """
         result = self._parse_python_json(await self._execute_python(code))
+        not_found = script_not_found(str(result.get("error") or ""))
+        if not_found is not None:
+            self.logger.info("Unreal refused the request (%s): %s", NOT_FOUND_ERROR, not_found)
+            return {"success": False, "error_type": NOT_FOUND_ERROR, "error": not_found}
         if result.get("error"):
             error_type = result.get("error_type")
             if error_type == PIE_ACTIVE or error_type in expected_errors:
@@ -2769,16 +3037,23 @@ component.set_material({slot_index!r}, material)
         setting_value: str,
     ) -> Dict[str, Any]:
         """
-        Set rendering or post-process settings via console command.
+        Set one numeric rendering console variable and read it back.
 
-        Uses ``ExecuteConsoleCommand`` on the KismetSystemLibrary.
+        Only existing ``r.*`` and ``sg.*`` console variables are set, through
+        the editor's console. Post-process settings live on PostProcessVolume
+        actors and cameras, not in console variables, so this tool does not
+        change them.
 
         Args:
-            setting_name: Render setting / console variable name.
-            setting_value: Value as string.
+            setting_name: Console variable name, r.* or sg.* (r.ScreenPercentage).
+            setting_value: A single number, as text (75, 0.5, 1e3).
 
         Returns:
-            Dictionary with setting_name, applied status.
+            ``setting_name``, ``applied`` (Unreal holds the requested value,
+            read back), ``value`` (read back, as Unreal formats it) and
+            ``previous_value``. A variable Unreal does not have fails with
+            ``NotFoundError`` and changes nothing; a value Unreal did not take
+            fails with ``RenderSettingNotApplied`` and the values read back.
         """
         # This is a fixed rendering tool, not another arbitrary console/code
         # dispatcher when SECURITY__ALLOW_SCRIPT_EXECUTION is false.
@@ -2790,20 +3065,38 @@ component.set_material({slot_index!r}, material)
             r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", setting_value
         ):
             raise ValueError("setting_value must be a single numeric value")
-        command = f"{setting_name} {setting_value}"
-        body: Dict[str, Any] = {
-            "objectPath": ("/Script/Engine.Default__KismetSystemLibrary"),
-            "functionName": "ExecuteConsoleCommand",
-            "parameters": {
-                "WorldContextObject": None,
-                "Command": command,
-            },
-        }
-        await self._http_put("/remote/object/call", body)
-
+        args = {"name": setting_name, "value": setting_value}
+        state = await self._execute_json_script(f"args = {args!r}\n" + SET_CONSOLE_VARIABLE)
+        if state.get("error"):
+            return {"setting_name": setting_name, **state}
+        result: Dict[str, Any] = {"setting_name": setting_name, "requested_value": setting_value}
+        if not state.get("known"):
+            self.logger.info("Unreal has no console variable %s", setting_name)
+            return {
+                **result,
+                "success": False,
+                "applied": False,
+                "error": f"Unreal has no console variable named {setting_name}; nothing was changed",
+                "error_type": NOT_FOUND_ERROR,
+            }
+        previous, value = str(state["previous_value"]), str(state["value"])
+        result.update(previous_value=previous, value=value)
+        if _console_value_matches(value, setting_value):
+            return {**result, "applied": True}
+        if value == previous:
+            reason = (
+                f"Unreal kept {setting_name} at {value}: the variable is read-only while the editor "
+                "runs (many r.* variables take effect only at startup, from Config/DefaultEngine.ini), "
+                "or a higher-priority source set it; the editor log says which"
+            )
+        else:
+            reason = f"Unreal set {setting_name} to {value}, not {setting_value}: it limits or rounds this variable"
         return {
-            "setting_name": setting_name,
-            "applied": True,
+            **result,
+            "success": False,
+            "applied": False,
+            "error": reason,
+            "error_type": "RenderSettingNotApplied",
         }
 
     # ------------------------------------------------------------------
@@ -3371,29 +3664,70 @@ component.set_material({slot_index!r}, material)
 
     async def batch_operations(
         self,
-        operations: List[Dict[str, Any]],
+        operations: Any,
     ) -> Dict[str, Any]:
         """
         Execute multiple Remote Control operations in one HTTP call.
 
+        Each operation is sent as ``{"RequestId", "URL", "Verb", "Body"}`` in
+        that order, with a unique RequestId: Remote Control hands each Body to
+        the RequestId it read last before it (UE 5.7
+        GetBatchRequestStructDelimiters), so an operation without one, a
+        repeated one or one written after its Body would run with another
+        operation's body. Operations without a RequestId get the next free
+        ones, in order.
+
         Args:
-            operations: List of operation dicts, each with RequestId,
-                Url, Verb, and Body keys matching the Remote Control batch API.
+            operations: List of operation objects, or that list as JSON text.
+                Each has ``URL`` (a Remote Control route such as
+                ``/remote/object/call``), ``Verb`` (``GET``, ``PUT``, ...), an
+                optional ``Body`` object and an optional integer
+                ``RequestId``; key names ignore case, as Remote Control's do.
 
         Returns:
-            Dict with results, total, succeeded, failed.
+            Dict with results (Remote Control's per-operation answers, each
+            failed one also carrying ``error`` and ``error_type``), total,
+            succeeded and failed; or a ValidationError envelope when an
+            operation is malformed, before anything is sent.
         """
         if not self.settings.security.allow_script_execution:
             return self._script_execution_denied()
-        body: Dict[str, Any] = {"Requests": operations}
-        response = await self._http_put("/remote/batch", body)
+        if isinstance(operations, str):
+            try:
+                operations = json.loads(operations)
+            except ValueError as exc:
+                return {
+                    "success": False,
+                    "error": f"operations is not valid JSON: {exc}",
+                    "error_type": "ValidationError",
+                }
+        requests, problem = _batch_requests(operations)
+        if problem is not None:
+            return {"success": False, "error": problem, "error_type": "ValidationError"}
+        response = await self._http_put("/remote/batch", {"Requests": requests})
         responses = response.get("Responses", [])
-        succeeded = sum(1 for r in responses if r.get("ResponseCode", 500) < 400)
+        results: List[Any] = []
+        for answer in responses:
+            code = answer.get("ResponseCode", 500) if isinstance(answer, dict) else 500
+            if isinstance(answer, dict) and isinstance(code, int) and code >= 400:
+                raw = answer.get("ResponseBody")
+                message = remote_control_message(raw if isinstance(raw, str) else json.dumps(raw))
+                answer = {
+                    **answer,
+                    "error": message or f"HTTP {code}",
+                    "error_type": remote_control_error_type(code, message),
+                }
+            results.append(answer)
+        succeeded = sum(
+            1
+            for r in results
+            if isinstance(r, dict) and isinstance(r.get("ResponseCode"), int) and r["ResponseCode"] < 400
+        )
         return {
-            "results": responses,
-            "total": len(operations),
+            "results": results,
+            "total": len(requests),
             "succeeded": succeeded,
-            "failed": len(operations) - succeeded,
+            "failed": len(requests) - succeeded,
         }
 
     async def query_scene_graph(

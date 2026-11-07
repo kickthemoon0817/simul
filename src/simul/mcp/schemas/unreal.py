@@ -825,8 +825,16 @@ class UnrealSetRenderSettingsResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    setting_name: str = Field(..., description="Setting name")
-    applied: bool = Field(True, description="Whether the setting was applied")
+    setting_name: str = Field(..., description="Console variable name")
+    requested_value: Optional[str] = Field(None, description="The value asked for")
+    applied: bool = Field(
+        ..., description="Whether the variable reads back as the requested value"
+    )
+    value: Optional[str] = Field(
+        None,
+        description="The variable read back after the write, as Unreal formats it (true/false for a bool)",
+    )
+    previous_value: Optional[str] = Field(None, description="The variable before the write")
 
 
 # ------------------------------------------------------------------
