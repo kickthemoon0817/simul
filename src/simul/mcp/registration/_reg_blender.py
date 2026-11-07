@@ -1367,8 +1367,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="export_simready_usd",
         description=(
-            "Export a SimReady-compliant USD file from Blender. Validates objects before export, "
-            "selects the requested objects, and carries simready_ custom properties into USD attributes."
+            "Export Blender objects as a SimReady USD asset a simulator reads: from the simready_ "
+            "metadata it authors UsdPhysics rigid bodies, mass, mesh colliders and physics materials, "
+            "and UsdSemantics labels. The asset root is the default prim and holds its materials; "
+            "metersPerUnit follows the scene's Unit Scale. Listed objects export with their "
+            "descendants, hidden ones too; lights, cameras and the World are left out by default. "
+            "Refuses when validation finds errors unless force=true. Returns each object's prim path."
         ),
         hints=DESTRUCTIVE,
         operation="export_simready_usd",
