@@ -16,8 +16,10 @@ Old Package ... not cleaned up by GC", losing unsaved work.
 
 Each call therefore goes through ``RUNNER_SOURCE``'s ``run``, installed as a
 module in ``sys.modules`` and refreshed on every call. ``run`` compiles the
-code into a fresh dict holding only ``__name__`` and the ``unreal`` module,
-and clears that dict when the call ends, returned or raised. The command
+code into a fresh dict holding what a fresh ``__main__`` holds
+(``__builtins__`` the module, ``__name__``, ``__doc__``, ``__spec__``...) and
+the ``unreal`` module, and clears that dict when the call ends, returned or
+raised. The command
 itself is one expression that binds nothing in the shared dict. Clearing
 breaks the usual dict-to-function cycles at once; any cycle left (a class
 holding an object, say) is unreachable and is collected by Python's
@@ -26,6 +28,19 @@ collector, which the plugin runs before every Unreal garbage collection
 needed here. In statement mode ``sys.displayhook`` would keep the last
 expression's value in ``builtins._``, so ``run`` swaps in one that only
 prints it.
+
+That collection is also where UE 5.7 crashes on a library-function wrapper
+(``builtin_function_or_method_with_closure``, whose weak-reference slot lies
+one pointer past the object) that is part of the garbage. A class is always
+in a cycle, and a class the script defined used to stay in the shared dict,
+so one holding such a function was never collected. ``run`` therefore keeps,
+for the editor's lifetime, the wrappers the script's top-level classes hold
+(in attributes, containers, methods' default arguments and closures); the
+classes themselves are collected without them.
+
+A ``py`` console command (``KismetSystemLibrary.ExecuteConsoleCommand``)
+runs its code in the shared dict, past the runner, so ``python_command``
+refuses one.
 
 The source travels base64-encoded: UE treats an ``ExecuteFile`` command whose
 first ``.py`` is followed by whitespace as the path of a file to run, and the
@@ -50,28 +65,90 @@ RUNNER_MODULE = "_simul_unreal_runner_v1"
 #: run itself: this is the execution path, not a new one, and the same
 #: script-execution policy gates what reaches it.
 RUNNER_SOURCE = '''
-import base64, sys
+import base64, builtins, itertools, sys, types
 
 def _source(encoded):
-    return base64.b64decode(encoded).decode("utf-8")
+    # utf-8-sig: a file saved as "UTF-8 with BOM" starts with U+FEFF, which
+    # compile() refuses in a str; Unreal, compiling bytes, skipped it.
+    return base64.b64decode(encoded).decode("utf-8-sig")
 
 def _display(value):
     if value is not None:
         print(repr(value))
 
+def _namespace():
+    # What a fresh __main__ holds, as the console dict Unreal copied from it.
+    main = vars(sys.modules["__main__"]) if "__main__" in sys.modules else {}
+    namespace = {key: main.get(key) for key in ("__doc__", "__package__", "__loader__", "__spec__")}
+    namespace.update(__name__="__main__", __builtins__=builtins, unreal=sys.modules["unreal"])
+    return namespace
+
+# The library-function wrappers the script's classes held, kept for the
+# editor's lifetime so that Python's collector never sweeps one. The dict
+# hangs off sys, in no cycle: this source runs again on every call, and this
+# module, whose functions make its dict a cycle, may be replaced; dropped,
+# the dict would free the wrappers by reference count, which is safe.
+_kept = sys.__dict__.setdefault("_simul_unreal_kept_v1", {})
+
+def _unsafe(value):
+    kind = type(value)
+    return kind.__name__ == "builtin_function_or_method_with_closure" or (
+        0 < kind.__weakrefoffset__ >= kind.__basicsize__ and not kind.__itemsize__)
+
+def _keep_unsafe(namespace, budget=10000):
+    pending = [value for value in namespace.values()
+               if isinstance(value, type) and value.__module__ == "__main__"]
+    seen = set()
+    while pending and len(seen) < budget:
+        value = pending.pop()
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        if _unsafe(value):
+            _kept[id(value)] = value
+        elif isinstance(value, type):
+            if value.__module__ == "__main__":
+                pending.extend(vars(value).values())
+        elif isinstance(value, (staticmethod, classmethod)):
+            pending.append(value.__func__)
+        elif isinstance(value, property):
+            pending.extend((value.fget, value.fset, value.fdel))
+        elif isinstance(value, types.FunctionType):
+            pending.extend(value.__defaults__ or ())
+            pending.extend((value.__kwdefaults__ or {}).values())
+            for cell in value.__closure__ or ():
+                try:
+                    pending.append(cell.cell_contents)
+                except ValueError:
+                    pass
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            pending.extend(itertools.islice(value, budget))
+        elif isinstance(value, dict):
+            pending.extend(itertools.islice(value.values(), budget))
+        elif type(value).__module__ == "__main__" and isinstance(getattr(value, "__dict__", None), dict):
+            pending.extend(itertools.islice(value.__dict__.values(), budget))
+
 def run(mode, code, guard=""):
-    namespace = {"__name__": "__main__", "unreal": sys.modules["unreal"]}
-    displayhook = sys.displayhook
+    namespace = _namespace()
     try:
         if guard:
             exec(compile(_source(guard), "<string>", "exec"), namespace)
         if mode == "eval":
             return eval(compile(_source(code), "<string>", "eval"), namespace)
+        displayhook = sys.displayhook
         if mode == "single":
             sys.displayhook = _display
-        exec(compile(_source(code), "<string>", mode), namespace)
+        try:
+            exec(compile(_source(code), "<string>", mode), namespace)
+        finally:
+            # A hook the script installed itself stays.
+            if sys.displayhook is _display:
+                sys.displayhook = displayhook
     finally:
-        sys.displayhook = displayhook
+        try:
+            _keep_unsafe(namespace)
+        except Exception:
+            pass  # a guard against an engine crash, never a reason to fail the call
         namespace.clear()
 '''
 
@@ -94,6 +171,39 @@ def _key(mapping: Dict[str, Any], name: str) -> Optional[str]:
     return next((key for key in mapping if str(key).lower() == name.lower()), None)
 
 
+# A console command Unreal hands to Python: FParse::Command(&Cmd, "PY")
+# matches "py" ignoring case after spaces and tabs, followed by anything but
+# a letter or digit ("py.x" runs ".x"). Unreal runs each line of a command,
+# and each part between "|", as a command of its own (FParse::Line); the
+# split here also cuts inside quotes, so it refuses more, never less.
+_PY_CONSOLE = re.compile(r"[ \t]*py(?![^\W_])", re.IGNORECASE)
+_CONSOLE_PARTS = re.compile(r"[\r\n|]")
+
+
+def console_runs_python(command: str) -> bool:
+    """Whether a console command, or one part of it, is a ``py`` command."""
+    return any(_PY_CONSOLE.match(part) for part in _CONSOLE_PARTS.split(command))
+
+
+def _refuse_python_console(body: Dict[str, Any], function_key: str) -> None:
+    """Refuse an ``ExecuteConsoleCommand`` call whose command runs Python.
+
+    ``py <code>`` runs the code in the editor's shared console dict
+    (``FPythonScriptPlugin::Exec_Runtime``), past the runner: a name it binds
+    there, such as a world's package, aborts the editor at the next map change.
+    """
+    if str(body[function_key]).lower() != "executeconsolecommand":
+        return
+    parameters = body.get(_key(body, "parameters") or "parameters")
+    command_key = _key(parameters, "Command") if isinstance(parameters, dict) else None
+    if command_key is not None and console_runs_python(str(parameters[command_key])):
+        raise ValueError(
+            "A py console command runs its Python in the editor's shared console namespace, where what "
+            "it binds outlives the call and can abort the editor at the next map change; run the code "
+            "with execute_unreal_script, or ExecutePythonCommandEx, instead"
+        )
+
+
 def python_command(path: str, body: Optional[Dict[str, Any]]) -> Optional[Tuple[str, str, str]]:
     """What a request runs, when it runs Python source in the editor.
 
@@ -107,13 +217,16 @@ def python_command(path: str, body: Optional[Dict[str, Any]]) -> Optional[Tuple[
         ``ExecutePythonCommand`` on the Python library; otherwise None.
 
     Raises:
-        ValueError: The ``ExecutionMode`` is not one Unreal has.
+        ValueError: The ``ExecutionMode`` is not one Unreal has, or the call
+            is an ``ExecuteConsoleCommand`` of a ``py`` command, which no
+            runner can isolate.
     """
     if path.rstrip("/").lower() != "/remote/object/call" or not isinstance(body, dict):
         return None
     object_key, function_key = _key(body, "objectPath"), _key(body, "functionName")
     if object_key is None or function_key is None:
         return None
+    _refuse_python_console(body, function_key)
     if str(body[object_key]).lower() != PYTHON_LIBRARY.lower():
         return None
     function = str(body[function_key]).lower()
@@ -154,12 +267,17 @@ def runner_command(code: str, mode: str, guard: str = "") -> str:
         mode: ``exec``, ``single`` or ``eval``.
         guard: Source to run first in the same namespace, or "".
     """
+    # The module, replaced unless it is a plain module: a subclass could
+    # carry a ``run`` property that the refresh below would not override.
+    name = repr(RUNNER_MODULE)
     install = (
-        f"__import__('sys').modules.setdefault({RUNNER_MODULE!r}, "
-        f"__import__('types').ModuleType({RUNNER_MODULE!r}))"
+        f"(lambda s, t: s.modules[{name}] if type(s.modules.get({name})) is t.ModuleType "
+        f"else s.modules.__setitem__({name}, t.ModuleType({name})) or s.modules[{name}])"
+        "(__import__('sys'), __import__('types'))"
     )
-    # The runner's own frame shows as "<simul runner>" in a traceback, so
-    # the caller's frames, "<string>", stand apart from it.
+    # A traceback shows two frames before the script's own: this command's,
+    # always File "<string>", line 1, and the runner's, "<simul runner>".
+    # The script's frames follow as "<string>" with its own line numbers.
     return (
         f"(lambda m: (exec(compile({RUNNER_SOURCE!r}, '<simul runner>', 'exec'), m.__dict__), m)[1])({install})"
         f".run({mode!r}, {_encode(code)!r}, {_encode(guard) if guard else ''!r})"
