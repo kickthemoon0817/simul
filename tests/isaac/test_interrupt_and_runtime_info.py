@@ -94,7 +94,9 @@ def test_interrupt_surfaces_a_bridge_error_envelope() -> None:
     result = asyncio.run(IsaacTools(client).interrupt_script())
 
     assert result["success"] is False
-    assert result["error_type"] == "UnknownAction"
+    # An older bridge's refusal of the action, not an exception inside Kit.
+    assert result["error_type"] == "UnsupportedOperation"
+    assert result["details"] == {"exception_type": "UnknownAction"}
 
 
 def test_runtime_info_over_the_bridge_carries_bridge_and_client_sections() -> None:

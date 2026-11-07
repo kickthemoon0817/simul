@@ -14,6 +14,29 @@ from ._shared import (
 from .._meta import tool_meta
 
 
+def _typed_aspect_failures(payload: Dict[str, Any], aspects: List[str]) -> Dict[str, Any]:
+    """Give each failed aspect of a prim-detail answer a type from the vocabulary.
+
+    An aspect is read on its own and fails in place, so its failure is a
+    payload inside the answer that the envelope does not see. The bridge names
+    it after the exception its reader raised inside Kit (an ``AttributeError``,
+    a ``TypeError``): the engine's failure, kept as ``exception_type``.
+    """
+    for aspect in aspects:
+        section = payload.get(aspect)
+        if not isinstance(section, dict) or section.get("success") is not False:
+            continue
+        name = section.get("error_type")
+        if isinstance(name, str) and name and not error_types.is_known(name):
+            section["error_type"] = error_types.engine_failure_type(name)
+            details = section.get("details")
+            details = dict(details) if isinstance(details, dict) else {}
+            details.setdefault("exception_type", name)
+            section["details"] = details
+        error_types.normalize_error_payload(section)
+    return payload
+
+
 class CoreToolsMixin:
     @tool_meta(
         name="get_isaac_prim_detail",
@@ -62,7 +85,7 @@ class CoreToolsMixin:
             "get_prim_detail", {"prim_path": prim_path, "aspects": requested}
         )
         if bridge_result is not None:
-            return bridge_result
+            return _typed_aspect_failures(bridge_result, requested)
 
         detail: Dict[str, Any] = {
             "success": True,
@@ -74,7 +97,7 @@ class CoreToolsMixin:
             # Aspects are independent reads: one that fails is reported in
             # place rather than discarding the rest of the answer.
             detail[aspect] = await method(prim_path)
-        return detail
+        return _typed_aspect_failures(detail, requested)
 
     @tool_meta(
         name="execute_isaac_script",
@@ -173,19 +196,10 @@ class CoreToolsMixin:
             ).model_dump()
 
         if not result.success:
-            failure = self._script_failure(result)
-            raised = failure["error_type"]
-            if error_types.family_of(raised) in (
-                error_types.ENGINE_ERROR,
-                error_types.VALIDATION_ERROR,
-                error_types.NOT_FOUND_ERROR,
-            ):
-                # The agent's own code raised (a NameError, a ValueError): a
-                # ScriptError, as on Unreal, naming what it raised. A transport
-                # failure keeps its class.
-                failure["error_type"] = error_types.SCRIPT_ERROR
-                failure["details"] = {**(failure.get("details") or {}), "exception_type": raised}
-            return failure
+            # Whatever the agent's script raised (a NameError, an OSError, a
+            # ConnectionRefusedError of its own) is a ScriptError, as on
+            # Unreal, naming it; only the transport's own failures keep theirs.
+            return self._script_failure(result, raised=error_types.SCRIPT_ERROR)
 
         output = result.output.strip()
         if output:

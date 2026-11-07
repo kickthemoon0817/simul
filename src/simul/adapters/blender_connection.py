@@ -55,6 +55,16 @@ class AttachmentTargetChanged(AttachmentError):
     error_type = "AttachmentTargetChanged"
 
 
+class NoBlenderBridge(AttachmentError):
+    """No GUI Blender with the bridge add-on answers: there is nothing to attach to.
+
+    A RuntimeError like the rest of the family; its ``error_type`` is the
+    ``ConnectionError`` of an engine that is not reachable.
+    """
+
+    error_type = "ConnectionError"
+
+
 class BlenderConnection:
     """Session-compatible proxy pinned to a verified process, document and window."""
 
@@ -263,7 +273,7 @@ class BlenderAttachments:
         if instance_id is not None:
             live = [entry for entry in live if entry["instance_id"] == instance_id]
         if not live:
-            raise RuntimeError(
+            raise NoBlenderBridge(
                 "No matching GUI Blender bridge. Enable the Simul Blender Bridge add-on in the existing window."
             )
         if len(live) != 1:
@@ -312,7 +322,7 @@ class BlenderAttachments:
             latest["document_id"] != info["document_id"]
             or selected not in latest["windows"]
         ):
-            raise RuntimeError(
+            raise AttachmentTargetChanged(
                 "Blender changed while attaching; inspect instances and attach again"
             )
         target = {"document_id": info["document_id"], **selected}

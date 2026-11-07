@@ -1401,14 +1401,26 @@ and it is sent with `isError: true`. `error_type` is always one of the names
 below (`simul.mcp.error_types`): seven classes that mean the same on every
 backend, and domain types where a backend says more than a class would.
 Nothing else reaches a client. A library's or Python's exception name
-(`ClientConnectorError`, `ConnectionResetError`, `KeyError`, an
-`AttributeError` raised inside the engine) is mapped onto its family and kept
-in `details.exception_type`: a name with `Timeout` in it is a `TimeoutError`;
-`Connection*`, `BrokenPipeError` and `OSError` are a `ConnectionError`;
+(`ClientConnectorError`, `ConnectionResetError`, `KeyError`) is mapped onto
+its family and kept in `details.exception_type`: a name with `Timeout` in it
+is a `TimeoutError`; `Connection*` and `BrokenPipeError` a `ConnectionError`;
 `*NotFound*`, `FileNotFoundError`, `KeyError` and `LookupError` a
 `NotFoundError`; `ValueError`, `TypeError`, `JSONDecodeError`, `Invalid*` and
 `*ValidationError` a `ValidationError`; `PermissionError` a
-`PermissionDenied`; anything else an `EngineError`.
+`PermissionDenied`; anything else (`OSError`, `RuntimeError`, `ImportError`,
+`ModuleNotFoundError`) an `EngineError`.
+
+An exception raised by code running inside Isaac Sim is the engine's,
+whatever its name: a tool's own script that raises (a `TypeError` from a
+changed Kit API, an `OSError` from a full disk, a `ModuleNotFoundError` for a
+removed `omni.isaac.*` module) is an `EngineError`, and an agent's
+`execute_isaac_script` that raises is a `ScriptError`, both naming it in
+`details.exception_type`. Only the transports' own failures keep a class of
+their own: the bridge's refusals (`StageUnavailable` is `InvalidState`,
+`UnsafeExecutionDisabled` is `ScriptExecutionDisabled`, `PrimNotFound` is
+`NotFoundError`, `RequestTimeout` is `TimeoutError`), an empty reply
+(`ConnectionError`), a reply that is not JSON (`BridgeProtocolError`) and a
+script the bridge stopped at its timeout (`TimeoutError`).
 
 | `error_type` | Meaning | What to do |
 |---|---|---|
@@ -1430,7 +1442,7 @@ Domain types of the server:
 | `SessionRequired` | The tool keeps per-client state and the request has no client identity |
 | `PermissionDenied` | The caller may not act on what it named: another agent's claim, a file the process may not read or write |
 | `ScriptExecutionDisabled` | `security.allow_script_execution` is off; the arbitrary-code tools (`execute_isaac_script`, ...) answer this instead of an unknown-tool error |
-| `PayloadTooLarge` | A script or request is larger than the transport accepts |
+| `PayloadTooLarge` | A script, request or reply is larger than the transport accepts |
 
 Domain types of the engines:
 
@@ -1440,7 +1452,7 @@ Domain types of the engines:
 | `AuthenticationError` | The engine refused the credentials (python_server token, Remote Control passphrase) |
 | `UnsupportedOperation` | The backend or its mode cannot do this (`attach_blender_window` outside attached mode) |
 | `InvalidState` | Not possible in the current state (nothing claimed to release, a folder that already holds the import) |
-| `ScriptError` | An agent's script raised inside the engine; `details.exception_type` names what it raised, `details.traceback` where |
+| `ScriptError` | An agent's script raised inside the engine, whatever it raised (an `OSError` or a `ConnectionRefusedError` of its own included); `details.exception_type` names it, `details.traceback` says where |
 | `EmptyOutput` | The engine's script printed nothing where the tool expected its reply |
 | `InvalidAssetType` | The asset is not of the kind the tool needs |
 | `UnsupportedFormat` | The file format is not one the tool reads or writes |
@@ -1456,10 +1468,11 @@ Domain types of the engines:
 | `IncompatibleBody` | The Unreal body cannot simulate as asked; `details.problems` says why |
 | `EditorExited` | The Unreal editor exited while `simul unreal setup` waited for it |
 | `BridgeUnavailable` | The Isaac Sim bridge extension the tool needs is not configured |
-| `BridgeProtocolError` | A bridge (Isaac Sim's, Blender's) answered outside its protocol: another version, a malformed or unmatched reply; the request may have run |
+| `BridgeProtocolError` | A transport (Isaac Sim's bridge or stock socket, Blender's bridge) answered outside its protocol: another version, a reply that is not JSON, malformed or unmatched; the request may have run |
 | `ResponseEncodingError` | Blender's bridge could not encode the result; the operation may have run |
 | `AttachmentError`, `AttachmentStale`, `AttachmentTargetChanged` | The attached Blender window could not be used, its process went away, or it loaded another file |
 | `UnsavedChangesError` | Blender refuses to replace a file with unsaved changes without the flag |
+| `KeyframesPartlyInserted` | Blender refused a key part way through a batch; the keys before it stay, and `details` gives how many went in and the one refused |
 | `LoadError` | A headless USD file could not be opened; `details.reason` says why |
 | `StageBusy` | A headless USD stage is serving a call that cannot run beside this one; retry shortly |
 | `ComputationError` | A headless USD computation failed |
@@ -1483,7 +1496,9 @@ secret is echoed as `***`: an argument, a mapping key or a settings path, at
 any depth (`token`, `password`, `passphrase`, `passwd`, `pwd`, `secret`, `key`,
 `api_key`, `auth`, `authorization`, `credential`, `cookie`, `bearer`, `jwt`,
 `pin`; `access_key`, `apiKey`, `/persistent/auth_token`, but not `author` or
-`keyframe`).
+`keyframe`). `error` and each `details.errors` message are cut at 2 000
+characters (`"... <38042 more characters>"`), so a message that quotes a long
+argument stays small too.
 
 Arguments that do not fit the input schema are refused before the tool runs,
 but through the same envelope as every other failure: the call spends a

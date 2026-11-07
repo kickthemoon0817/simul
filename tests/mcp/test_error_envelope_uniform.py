@@ -17,10 +17,12 @@ Pinned through real FastMCP clients:
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import errno
 import json
 import re
+import time
 from pathlib import Path
 from typing import Annotated, Any, Dict, List
 
@@ -208,6 +210,30 @@ def test_a_long_argument_is_echoed_by_size_at_the_schema_layer(tmp_path: Path) -
     (result,) = _run(_usd_server(tmp_path), [("load_usd_file", {"file_path": 1, "x": "y" * 5000})])
 
     assert _json(result)["details"]["input"] == {"file_path": 1, "x": "<5000 characters>"}
+
+
+def test_a_message_quoting_a_long_argument_is_cut(tmp_path: Path) -> None:
+    """The tool's own refusal quotes the value; only details.input was bounded."""
+    instance = _isaac_server(tmp_path)
+
+    (result,) = _run(instance, [("configure_isaac_physics_scene", {"solver_type": "Q" * 40_000})])
+
+    payload = _json(result)
+    limit = error_types.MAX_MESSAGE_CHARS
+    assert payload["error"].endswith("more characters>") and len(payload["error"]) < limit + 40
+    (error,) = payload["details"]["errors"]
+    assert len(error["message"]) < limit + 40
+    assert len(result.content[-1].text) < 3 * limit
+    record = instance.usage_tracker.get_recent(tool_name="configure_isaac_physics_scene")[0]
+    assert len(record["error"]) < limit + 40
+
+
+def test_a_long_argument_name_is_echoed_by_its_size(tmp_path: Path) -> None:
+    (result,) = _run(_usd_server(tmp_path), [("load_usd_file", {"file_path": 1, "k" * 5000: 1})])
+
+    payload = _json(result)
+    assert payload["details"]["input"] == {"file_path": 1, "<name 1 of 5000 characters>": 1}
+    assert len(result.content[-1].text) < 2000
 
 
 def test_a_large_list_or_mapping_is_echoed_by_its_first_entries_and_a_count(
@@ -410,6 +436,9 @@ def test_a_schema_refusal_is_rate_limited_and_recorded(tmp_path: Path) -> None:
         (OSError(errno.EHOSTUNREACH, "No route to host"), "ConnectionError"),
         (OSError("closed"), "ConnectionError"),
         (OSError(errno.ENOSPC, "No space left on device"), "EngineError"),
+        (ModuleNotFoundError("No module named 'omni.isaac.core'"), "EngineError"),
+        (ImportError("cannot import name 'World'"), "EngineError"),
+        (asyncio.InvalidStateError("Result is not set."), "EngineError"),
         (ValueError("seed must be an integer"), "ValidationError"),
         (TypeError("expected str"), "ValidationError"),
         (json.JSONDecodeError("bad", "{", 0), "ValidationError"),
@@ -427,6 +456,119 @@ def test_a_schema_refusal_is_rate_limited_and_recorded(tmp_path: Path) -> None:
 def test_exceptions_map_onto_the_shared_classes(exc: BaseException, expected: Any) -> None:
     assert classify_exception(exc) == expected
     assert classify_exception(exc) in error_types.VOCABULARY
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        # Relayed from an engine, OSError is its failure (a full disk inside
+        # Kit or Blender), not a connection that broke.
+        ("OSError", "EngineError"),
+        ("ModuleNotFoundError", "EngineError"),
+        ("ImportError", "EngineError"),
+        ("InvalidStateError", "EngineError"),
+        ("ClientOSError", "ConnectionError"),
+        ("ConnectionRefusedError", "ConnectionError"),
+        ("InvalidRequest", "ValidationError"),
+    ],
+)
+def test_names_map_onto_their_family(name: str, expected: str) -> None:
+    assert error_types.family_of(name) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "transport_failure", "raised", "expected"),
+    [
+        # The bridge's and the client's own failures keep their meaning.
+        ("StageUnavailable", False, "EngineError", "InvalidState"),
+        ("UnsafeExecutionDisabled", False, "ScriptError", "ScriptExecutionDisabled"),
+        ("PrimNotFound", False, "EngineError", "NotFoundError"),
+        ("RequestTimeout", False, "ScriptError", "TimeoutError"),
+        ("EmptyResponse", False, "ScriptError", "ConnectionError"),
+        ("ScriptTooLargeForSocket", False, "ScriptError", "PayloadTooLarge"),
+        ("JSONDecodeError", True, "ScriptError", "BridgeProtocolError"),
+        ("ScriptInterrupted", True, "ScriptError", "TimeoutError"),
+        ("TimeoutError", True, "ScriptError", "TimeoutError"),
+        # Anything the engine's code raised is the engine's, or the agent's script's.
+        ("OSError", False, "EngineError", "EngineError"),
+        ("TimeoutError", False, "ScriptError", "ScriptError"),
+        ("ConnectionRefusedError", False, "ScriptError", "ScriptError"),
+        ("JSONDecodeError", False, "ScriptError", "ScriptError"),
+        ("ModuleNotFoundError", False, "EngineError", "EngineError"),
+        ("TypeError", False, "EngineError", "EngineError"),
+        ("ScriptInterrupted", False, "ScriptError", "ScriptError"),
+    ],
+)
+def test_isaac_failures_are_read_by_where_they_came_from(
+    name: str, transport_failure: bool, raised: str, expected: str
+) -> None:
+    assert (
+        error_types.engine_failure_type(name, transport_failure=transport_failure, raised=raised)
+        == expected
+    )
+
+
+def test_a_long_message_parses_in_linear_time() -> None:
+    """A bpy-enum pattern with an optional [\\w.]* group backtracked quadratically.
+
+    "solver_type must be one of TGS, PGS, got 'Z9Z9...'" took 4.6 s at 40 KB and
+    froze every other client meanwhile.
+    """
+    for message in (
+        "solver_type must be one of TGS, PGS, got '" + "Z9" * 50_000 + "'",
+        "x" * 100_000,
+        ("a" * 50 + " = ") * 2000,
+        'enum "' * 20_000,
+        'enum "x" not found in (' * 5000,
+    ):
+        started = time.perf_counter()
+        errors = error_types.errors_from_message(message)
+        payload = error_types.normalize_error_payload(
+            {"success": False, "error": message, "error_type": "ValueError"}
+        )
+        elapsed = time.perf_counter() - started
+        assert elapsed < 0.05, (message[:40], elapsed)
+        assert len(errors[0]["message"]) <= error_types.MAX_MESSAGE_CHARS + 40
+        assert len(payload["error"]) <= error_types.MAX_MESSAGE_CHARS + 40
+
+
+def test_the_bpy_enum_parse_still_names_the_field_and_the_choices() -> None:
+    (error,) = error_types.errors_from_message(
+        "TypeError: bpy_struct: item.type = val: enum \"BOXX\" not found in ('BOX', 'SPHERE')"
+    )
+
+    assert error["field"] == "type"
+    assert error["constraint"] == {"expected": ["BOX", "SPHERE"]}
+    assert error["input"] == "BOXX" and error["suggestion"] == "BOX"
+
+
+def test_a_huge_argument_does_not_hold_up_another_client(tmp_path: Path) -> None:
+    """The tool's own refusal quotes the value; the envelope reads a bounded copy."""
+    instance = _isaac_server(tmp_path, security={"rate_limiting_enabled": False})
+
+    async def run() -> tuple:
+        async with Client(instance.mcp, mode="legacy") as big, Client(instance.mcp, mode="legacy") as other:
+            started = time.perf_counter()
+            slow = asyncio.create_task(
+                big.call_tool(
+                    "configure_isaac_physics_scene",
+                    {"solver_type": "Z9" * 50_000},
+                    raise_on_error=False,
+                )
+            )
+            await asyncio.sleep(0)
+            await other.call_tool("ping_isaac", {}, raise_on_error=False)
+            other_done = time.perf_counter() - started
+            result = await slow
+            return result, other_done, time.perf_counter() - started
+
+    result, other_done, total = asyncio.run(run())
+
+    payload = _json(result)
+    assert payload["error_type"] == "ValidationError"
+    assert "solver_type" in payload["error"]
+    assert len(result.content[-1].text) < 8000
+    assert total < 2.0 and other_done < 2.0
 
 
 def test_the_isaac_bridge_protocol_error_is_not_a_validation_error() -> None:
@@ -486,6 +628,10 @@ def test_library_exception_names_map_by_class_name() -> None:
             {"error_type": "TransformNotApplied", "details": None},
         ),
         (
+            {"success": False, "error": "disk full", "error_type": "OSError"},
+            {"error_type": "EngineError", "details": {"exception_type": "OSError"}},
+        ),
+        (
             {"success": False, "error_type": "RefusedOperation", "error": "kept"},
             {"error_type": "RefusedOperation"},
         ),
@@ -539,11 +685,47 @@ def test_no_tool_source_spells_a_type_outside_the_vocabulary() -> None:
     for source in sorted(_SRC.rglob("*.py")):
         if "cli" in source.relative_to(_SRC).parts:
             continue
-        for name in _ERROR_TYPE_LITERAL.findall(source.read_text()):
-            found.setdefault(name, []).append(str(source.relative_to(_SRC)))
+        where = str(source.relative_to(_SRC))
+        text = source.read_text()
+        for name in _ERROR_TYPE_LITERAL.findall(text):
+            found.setdefault(name, []).append(where)
+        for name in _positional_failure_names(ast.parse(text)):
+            found.setdefault(name, []).append(where)
     assert found
-    outside = {name: files for name, files in found.items() if not error_types.is_known(name)}
+    # In the vocabulary, or mapped on purpose (the transports' own names);
+    # never left to fall through to EngineError unnoticed.
+    outside = {name: files for name, files in found.items() if not error_types.is_mapped(name)}
     assert outside == {}
+    bridge = {
+        name for name, files in found.items() if any(f.startswith("bridge_ext") for f in files)
+    }
+    assert {"StageUnavailable", "UnsafeExecutionDisabled", "PrimNotFound"} <= bridge
+
+
+# Calls that name a failure by position: the bridge's BridgeResponse.failure(
+# request_id, name, message), UnrealError(message, error_type), and the
+# keyword forms ScriptResult(error_name=...) / failure(name=...).
+_POSITIONAL = {"failure": 1, "UnrealError": 1, "UnrealTimeoutError": 1, "UnrealConnectionError": 1}
+_NAME_KEYWORDS = {"error_type", "error_name", "name"}
+
+
+def _positional_failure_names(tree: ast.AST) -> List[str]:
+    names: List[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+        index = _POSITIONAL.get(callee)
+        if index is not None and len(node.args) > index:
+            argument = node.args[index]
+            if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                names.append(argument.value)
+        for keyword in node.keywords:
+            if keyword.arg in _NAME_KEYWORDS and (callee in _POSITIONAL or keyword.arg != "name"):
+                value = keyword.value
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    names.append(value.value)
+    return names
 
 
 # ---------------------------------------------------------------------------

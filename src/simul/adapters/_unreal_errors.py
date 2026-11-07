@@ -112,8 +112,11 @@ class UnrealConnectionError(UnrealError, ConnectionError):
 # Remote Control builds its error body with an unescaped printf,
 # ``{ "errorMessage": "%s" }`` (WebRemoteControlInternalUtils::
 # CreateUTF8ErrorMessage, UE 5.7), so a message with a newline or a quote is
-# not valid JSON; this takes whatever sits between the quotes.
-_ERROR_MESSAGE = re.compile(r'"errorMessage"\s*:\s*"(.*)"\s*}\s*$', re.DOTALL)
+# not valid JSON; ``_unescaped_message`` takes whatever sits between the
+# quotes. Read with str methods: the message can echo a caller's long
+# argument, and a backtracking ``(.*)"\s*}`` scanned it once per occurrence.
+_ERROR_MESSAGE_KEY = '"errorMessage"'
+_ERROR_MESSAGE_START = re.compile(r'\s*:\s*"')
 
 # Remote Control's wording for a name that resolves to nothing (UE 5.7
 # RemoteControlModule::ResolveObject / ResolveObjectProperty, and the call and
@@ -151,8 +154,22 @@ def remote_control_message(body: str) -> str:
         if isinstance(message, str):
             return message.strip()
         return text
-    match = _ERROR_MESSAGE.search(text)
-    return match.group(1).strip() if match else text
+    return _unescaped_message(text)
+
+
+def _unescaped_message(text: str) -> str:
+    """The text between ``"errorMessage": "`` and the body's closing ``" }``, or ``text``."""
+    key = text.find(_ERROR_MESSAGE_KEY)
+    if key < 0:
+        return text
+    start = _ERROR_MESSAGE_START.match(text, key + len(_ERROR_MESSAGE_KEY))
+    body = text.rstrip()
+    if start is None or not body.endswith("}"):
+        return text
+    body = body[:-1].rstrip()
+    if not body.endswith('"') or len(body) - 1 < start.end():
+        return text
+    return body[start.end():-1].strip()
 
 
 def remote_control_error_type(status: int, message: str) -> str:
@@ -211,8 +228,10 @@ SCRIPT_NOT_FOUND_CLASS = "SimulNotFound"
 
 # The traceback's last line for it: "SimulNotFound: <message>", qualified by
 # its module when the script ran in one.
+# The message is the rest of the line, stripped afterwards: a lazy ``.+?``
+# before ``\s*$`` rescanned a long run of spaces once per character.
 _SCRIPT_NOT_FOUND = re.compile(
-    r"^(?:[\w.]+\.)?" + SCRIPT_NOT_FOUND_CLASS + r": (?P<message>.+?)\s*$", re.MULTILINE
+    r"^(?:[\w.]+\.)?" + SCRIPT_NOT_FOUND_CLASS + r": (?P<message>[^\n]*)", re.MULTILINE
 )
 
 
@@ -227,4 +246,5 @@ def script_not_found(failure: str) -> Optional[str]:
         ``SimulNotFound``, otherwise None.
     """
     matches = list(_SCRIPT_NOT_FOUND.finditer(failure))
-    return matches[-1].group("message") if matches else None
+    message = matches[-1].group("message").strip() if matches else ""
+    return message or None
