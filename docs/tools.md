@@ -779,7 +779,7 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | Group | Tools |
 |---|---|
 | Scene and files | `get_blender_info`, `get_blender_file_info`, `summarize_blender_scene`, `list_blender_scene_objects`, `search_blender_objects`, `open_blender_file`, `save_blender_file`, `import_blender_file`, `export_blender_file` |
-| Objects | `create_blender_object`, `delete_blender_object`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `get_blender_mesh_info`, `add_blender_modifier` |
+| Objects | `create_blender_object`, `delete_blender_object`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `clean_blender_mesh`, `get_blender_mesh_info`, `add_blender_modifier`, `apply_blender_modifier`, `remove_blender_modifier` |
 | Measurement | `get_blender_bounding_box`, `check_blender_object_bounds`, `get_blender_distance_between` |
 | Materials and lights | `get_blender_material_info`, `assign_blender_material`, `set_blender_light_params` |
 | Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake` |
@@ -834,6 +834,55 @@ Behaviour worth knowing:
   until then. An add-on built before `rotation_quaternion` and
   `keep_transform` still answers calls that leave them at their defaults, with
   its own behaviour; the newer reply fields then come back `null`.
+- `create_blender_mesh_from_data` checks everything before it creates
+  anything: each vertex is exactly `[x, y, z]` finite numbers, each index is
+  an integer within the vertex list, no face repeats a vertex or the vertex
+  set of another face (in any order), no edge joins a vertex to itself or
+  repeats another edge, and `collection_name` names a collection in the
+  current scene that is not linked from a library. Blender's `from_pydata`
+  flattens the vertex list, so a vertex of 2 or 4 numbers used to shift every
+  later vertex, and faces such as `[0,1,2,1]` with duplicates froze Blender
+  5.0.1's Decimate. The new mesh is then validated (`mesh.validate()`), and
+  when any step fails the mesh and object made so far are removed: an orphan
+  object, or one in another scene, made whole-scene exports fail. `warnings`
+  reports a renamed object (`probe.001`), a collection the view layer
+  excludes, and any change validation made.
+- `clean_blender_mesh` repairs a mesh made elsewhere (an import, a script).
+  It always validates the mesh, removing faces that repeat a vertex and
+  duplicate faces and edges, then optionally merges vertices within
+  `merge_distance`, dissolves edges and faces smaller than
+  `dissolve_degenerate_distance`, and recalculates normals. It reports the
+  counts before and after; mesh data shared by several objects changes for
+  all of them.
+- `add_blender_modifier` checks each `params` key against the modifier
+  type's RNA: an unknown name is refused with the closest names, an enum takes
+  one of its items (matched case-insensitively; an enum flag such as
+  Decimate's `delimit` takes a list), a number must lie within the setting's
+  hard limits, which Blender would otherwise clamp silently, and an object,
+  collection or other datablock setting takes its name, such as
+  `{"object": "Cutter"}` for BOOLEAN. Blender silently drops a datablock its
+  poll refuses (a camera for a Boolean), which is reported as an error. The
+  reply's `params` echo the stored settings. A refused call removes the
+  modifier again, and an object without a modifier stack (camera, light,
+  empty) is refused up front. DECIMATE is refused on a mesh whose validation
+  would change it, as Decimate's collapse can loop forever there; the check
+  validates a throwaway copy (0.16 s for a million faces).
+- `apply_blender_modifier` is Blender's Apply: the modifier's result replaces
+  the mesh data. A modifier below others is applied to the base mesh without
+  them, with a warning; mesh data shared with other objects is copied first
+  (`made_single_user`). A modifier disabled in the viewport is refused, as
+  Blender 5.0.1 drops it unapplied. `remove_blender_modifier` removes one
+  without applying it. Both, and `clean_blender_mesh`, need the object in
+  Object Mode.
+- `get_blender_mesh_info` reports the stored mesh's counts and, as
+  `evaluated_*`, the counts after the modifiers enabled in the viewport, which
+  is the geometry an export writes (94 triangles where the base cube has 6
+  faces after Bevel, Decimate, Triangulate and Weld). A mesh in Edit Mode is
+  written back from the edit mesh first, so the counts include unsaved edits.
+  USD export evaluates modifiers for render, so `warnings` names modifiers
+  whose render settings differ (`show_render`, Subdivision `render_levels`).
+  An object Blender does not evaluate (outside the view layer) has null
+  evaluated counts.
 - `capture_blender_viewport` captures the 3D View the user sees in attached
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
