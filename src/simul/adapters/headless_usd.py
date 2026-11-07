@@ -22,6 +22,7 @@ from ..usd import editing
 from ..usd.editing import USDEditError
 from ..usd.reader import USDStageInfo, USDPrimInfo
 from ..usd.summarize import SceneSummary
+from ..usd.validation import USDLoadError, check_usd_file, open_root_layer
 
 logger = get_logger(__name__)
 
@@ -54,7 +55,6 @@ class HeadlessUSDSession(LoggerMixin):
 
         self.logger.info("Headless USD session initialized")
 
-    @monitor_performance("headless_session.load_stage")
     def load_stage(self, file_path: Union[str, Path]) -> Optional[str]:
         """
         Load a USD stage from file.
@@ -63,31 +63,57 @@ class HeadlessUSDSession(LoggerMixin):
             file_path: Path to USD file
 
         Returns:
-            Stage identifier or None if failed
+            Stage identifier or None if failed; ``load_stage_or_raise``
+            reports why.
         """
-        file_path = str(Path(file_path).resolve())
-
-        # Validate file
-        if not self._validate_usd_file(file_path):
-            return None
-
         try:
-            stage = self.usd_reader.open_stage(file_path)
-            if stage:
-                stage_id = self._generate_stage_id(file_path)
-                self._active_stages[stage_id] = stage
-                self._bbox_caches[stage_id] = BBoxCache(stage)
-                self._stage_paths[stage_id] = file_path
-
-                self.logger.info(f"Loaded USD stage: {file_path} -> {stage_id}")
-                return stage_id
-            else:
-                self.logger.error(f"Failed to load USD stage: {file_path}")
-                return None
-
+            return self.load_stage_or_raise(file_path)
+        except USDLoadError as e:
+            self.logger.error(str(e))
+            return None
         except Exception as e:
             self.logger.error(f"Error loading USD stage {file_path}: {e}")
             return None
+
+    @monitor_performance("headless_session.load_stage")
+    def load_stage_or_raise(self, file_path: Union[str, Path]) -> str:
+        """
+        Load a USD stage from file, saying why when it cannot.
+
+        Args:
+            file_path: Path to USD file
+
+        Returns:
+            Stage identifier
+
+        Raises:
+            USDLoadError: The file failed the access checks shared with
+                validation (missing, not a file, extension outside
+                ``usd.allowed_extensions``, unreadable, empty, over
+                ``usd.max_file_size_mb``) or pxr could not parse it; the
+                error carries pxr's own reason.
+        """
+        file_path = str(Path(file_path).resolve())
+        facts = check_usd_file(file_path, self.settings.usd)
+        # Held while the reader opens the stage, which then finds the layer in
+        # pxr's registry instead of parsing the file a second time.
+        root_layer = open_root_layer(file_path, facts.head)
+
+        stage = self.usd_reader.open_stage(file_path)
+        if not stage:
+            raise USDLoadError(
+                file_path,
+                "OpenFailed",
+                f"pxr parsed the {root_layer.GetFileFormat().formatId} layer but could not "
+                "compose a stage from it; the server log has pxr's diagnostic",
+            )
+        stage_id = self._generate_stage_id(file_path)
+        self._active_stages[stage_id] = stage
+        self._bbox_caches[stage_id] = BBoxCache(stage)
+        self._stage_paths[stage_id] = file_path
+
+        self.logger.info(f"Loaded USD stage: {file_path} -> {stage_id}")
+        return stage_id
 
     def unload_stage(self, stage_id: str) -> bool:
         """
@@ -518,28 +544,6 @@ class HeadlessUSDSession(LoggerMixin):
                 except Exception as e:
                     self.logger.error(f"Error getting mesh info for {prim_path}: {e}")
         return None
-
-    def _validate_usd_file(self, file_path: str) -> bool:
-        """Validate USD file before loading."""
-        path = Path(file_path)
-
-        # Check if file exists
-        if not path.exists():
-            self.logger.error(f"USD file not found: {file_path}")
-            return False
-
-        # Check file extension
-        if not any(file_path.lower().endswith(ext) for ext in self.settings.usd.allowed_extensions):
-            self.logger.error(f"Invalid USD file extension: {file_path}")
-            return False
-
-        # Check file size
-        file_size_mb = path.stat().st_size / (1024 * 1024)
-        if file_size_mb > self.settings.usd.max_file_size_mb:
-            self.logger.error(f"USD file too large: {file_size_mb:.1f}MB > {self.settings.usd.max_file_size_mb}MB")
-            return False
-
-        return True
 
     def _generate_stage_id(self, file_path: str) -> str:
         """Generate a unique stage identifier."""
