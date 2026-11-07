@@ -43,8 +43,10 @@ from ._unreal_errors import (
 )
 from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_scripts import (
+    ACTOR_COMPONENTS,
     ACTOR_EXISTS,
     ACTOR_HELPERS,
+    ACTOR_INFO,
     ADD_COMPONENT,
     ASSIGN_MATERIAL,
     CREATE_MATERIAL_INSTANCE,
@@ -55,12 +57,16 @@ from ._unreal_scripts import (
     FIND_ACTORS_BY_TAG,
     FOCUS_ACTOR,
     INCOMPATIBLE_BODY,
+    INFO_CHILDREN,
     INTERCHANGE_INFO,
+    LIST_ACTORS,
+    LISTED_CHILDREN,
     LOADED_MAP,
     MATERIAL_INFO,
     PIE_ACTIVE,
     PLACE_BASIC_SHAPES,
     ROBOTICS_SCENE_ANALYSIS,
+    SCENE_GRAPH,
     SCENE_SUMMARY,
     SET_ACTOR_PARENT,
     SET_ACTOR_TRANSFORM,
@@ -177,6 +183,11 @@ logger = get_logger(__name__)
 # above this the caller gets the path on the editor host instead. Kept local to
 # the adapter so this layer does not depend on the MCP layer.
 MAX_INLINE_CAPTURE_BYTES = 262_144
+#: Characters of JSON a page of a scene read's entries may take. The MCP layer
+#: trims any result above 40,000 characters (``mcp.result_budget``), so a page
+#: stops here and leaves room for the rest of the reply; a page that fits needs
+#: no trim, and its count and next offset stay exact.
+PAGE_BUDGET_BYTES = 30_000
 # Editor-relative screenshot directories HighResShot writes into, per platform.
 _SCREENSHOT_SUBDIRS = ("MacEditor", "WindowsEditor", "LinuxEditor", "Mac", "Windows", "Linux")
 # Interval between screenshot polls; each poll is one cheap Remote Control call.
@@ -1935,55 +1946,156 @@ class UnrealRuntimeSession(LoggerMixin):
     # Phase 1 session methods — Scene Read Operations
     # ------------------------------------------------------------------
 
+    async def _paged_read(self, script: str, args: Dict[str, Any], noun: str, total_key: str) -> Dict[str, Any]:
+        """Run a paged scene read and say how to get the rest.
+
+        The editor script renders one page (``_unreal_scripts.page``) and
+        reports where it ended; this adds ``truncated`` and, when more is
+        left, a ``hint`` naming the offset of the next page.
+
+        Args:
+            script: The editor script, run after ``args``.
+            args: The script's arguments; ``budget`` is set here.
+            noun: What the page lists, plural, for the hint.
+            total_key: The result's key for every match.
+
+        Returns:
+            The script's result with ``truncated`` and ``hint``, or its error.
+        """
+        args = {**args, "budget": PAGE_BUDGET_BYTES}
+        result = await self._execute_json_script(f"args = {args!r}\n" + script)
+        if result.get("error"):
+            return result
+        ended = result.pop("page_ended_by", None)
+        next_offset = result.get("next_offset")
+        result["truncated"] = next_offset is not None
+        if next_offset is not None:
+            stop = (
+                f"the page reached the {PAGE_BUDGET_BYTES}-character response budget before max_results"
+                if ended == "response_budget"
+                else "the page reached max_results"
+            )
+            result["hint"] = (
+                f"Returned {result.get('count')} of {result.get(total_key)} {noun} from offset "
+                f"{result.get('offset')}; {stop}. Call again with offset={next_offset} for the next page."
+            )
+        return result
+
+    @staticmethod
+    def _check_page(offset: int, max_results: int) -> None:
+        """Refuse an offset or page size out of range before anything is sent."""
+        if not 1 <= max_results <= 5000:
+            raise ValueError("max_results must be between 1 and 5000")
+        if offset < 0:
+            raise ValueError("offset must be 0 or more")
+
     async def list_actors(
         self,
         class_filter: Optional[str] = None,
         tag_filter: Optional[str] = None,
         max_results: int = 200,
+        offset: int = 0,
+        label_filter: Optional[str] = None,
+        include_subclasses: bool = False,
     ) -> Dict[str, Any]:
-        """List actors with actual world transforms, class names and actor tags.
+        """List level actors, one page at a time, with world transforms, tags and attachment.
+
+        Every level actor that passes the filters is counted in ``total``; the
+        page holds those from ``offset`` on, up to ``max_results``, and stops
+        early rather than exceed the response budget, so ``count`` is what
+        came back and ``next_offset`` is where the next page starts. Each
+        entry has the actor's attachment parent and children (the first 20,
+        with ``child_count``).
 
         While Play In Editor runs, Unreal's editor lists no level actors, so
         the editor world is read directly (``_unreal_scripts.EDITOR_WORLD``'s
         ``level_actors``) and ``pie_active`` is True: the same actors, as
         they are in the editor rather than in the running game, and possibly
         the builder brush and helper actors the Outliner hides.
-        """
-        if not 1 <= max_results <= 5000:
-            raise ValueError("max_results must be between 1 and 5000")
-        code = ACTOR_HELPERS + EDITOR_WORLD + f"""
-class_filter = {class_filter!r}
-tag_filter = {tag_filter!r}
-actors = []
-truncated = False
-for actor in level_actors():
-    cls = actor.get_class()
-    if class_filter and class_filter not in (cls.get_name(), cls.get_path_name()):
-        continue
-    if tag_filter and not actor.actor_has_tag(tag_filter):
-        continue
-    if len(actors) == {max_results!r}:
-        truncated = True
-        break
-    actors.append(actor_info(actor))
-print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncated,
-                  "pie_active": pie_active()}}))
-"""
-        return await self._execute_json_script(code)
 
-    async def get_actor_info(self, actor_path: str) -> Dict[str, Any]:
-        """Read an actor's world transform, components, tags and visibility, and ``pie_active``.
+        Args:
+            class_filter: Keep actors whose class has this name
+                (StaticMeshActor, BP_Door_C) or path
+                (/Script/Engine.StaticMeshActor); None keeps every class.
+            tag_filter: Keep actors with this actor tag (case-insensitive, as
+                Unreal compares tags); None keeps every actor.
+            max_results: Most actors in the page, 1 to 5000.
+            offset: Matching actors to skip before the page starts.
+            label_filter: Keep actors whose label contains this text,
+                ignoring case; None keeps every actor.
+            include_subclasses: Also keep actors whose class derives from
+                class_filter's (class_filter Light keeps PointLight and a
+                Blueprint derived from it).
 
         Returns:
-            The actor's info. A not-found error naming the path when it names
-            no live actor of the level open in the editor: nothing there, an
-            actor already deleted, or one of a map that is not open, which
-            is never loaded (``_unreal_scripts.ACTOR_HELPERS``' ``actor_at``).
+            ``actors``, ``count``, ``total``, ``offset``, ``next_offset``,
+            ``truncated``, ``hint`` (when more are left), ``warnings`` and
+            ``pie_active``; or a ScriptError envelope.
         """
-        return await self._execute_json_script(
-            ACTOR_HELPERS
-            + f"\nprint(json.dumps(dict(actor_info(actor_at({actor_path!r})), pie_active=pie_active())))"
-        )
+        self._check_page(offset, max_results)
+        args = {
+            "class_filter": class_filter or None,
+            "include_subclasses": bool(include_subclasses),
+            "tag_filter": tag_filter or None,
+            "label_filter": label_filter or None,
+            "offset": offset,
+            "max_results": max_results,
+            "listed_children": LISTED_CHILDREN,
+        }
+        return await self._paged_read(LIST_ACTORS, args, "actors", "total")
+
+    async def get_actor_info(self, actor_path: str) -> Dict[str, Any]:
+        """Read an actor's world transform, components, tags, visibility and attachment.
+
+        Returns:
+            ``actor_info``'s fields, the attachment ``parent`` (the actor the
+            root component is attached to, or None), ``children`` (the first
+            200 actors attached to it) and ``child_count``, and ``pie_active``.
+            A not-found error naming the path when it names no live actor of
+            the level open in the editor: nothing there, an actor already
+            deleted, or one of a map that is not open, which is never loaded
+            (``_unreal_scripts.ACTOR_HELPERS``' ``actor_at``).
+        """
+        args = {"actor_path": actor_path, "listed_children": INFO_CHILDREN}
+        return await self._execute_json_script(f"args = {args!r}\n" + ACTOR_INFO)
+
+    async def list_actor_components(
+        self,
+        actor_path: str,
+        class_filter: Optional[str] = None,
+        offset: int = 0,
+        max_results: int = 200,
+    ) -> Dict[str, Any]:
+        """List an actor's components, one page at a time.
+
+        Every component is listed, editor-only ones (sprites, arrows)
+        included, with its class, whether it is the root and editor-only;
+        scene components add the component they are attached to (its name,
+        or its path when it belongs to another actor), world location,
+        mobility and visibility, and primitive components their world bounds
+        (box center and half-size, and bounding sphere radius, in cm).
+
+        Args:
+            actor_path: Full object path of the actor.
+            class_filter: Keep components whose class has this name or path or
+                derives from it (PrimitiveComponent keeps every mesh, shape
+                and sprite); None keeps every component.
+            offset: Components to skip before the page starts.
+            max_results: Most components in the page, 1 to 5000.
+
+        Returns:
+            ``actor_path``, ``components``, ``count``, ``total``, ``offset``,
+            ``next_offset``, ``truncated``, ``hint``, ``warnings`` and
+            ``pie_active``; or a ScriptError envelope (no such actor).
+        """
+        self._check_page(offset, max_results)
+        args = {
+            "actor_path": actor_path,
+            "class_filter": class_filter or None,
+            "offset": offset,
+            "max_results": max_results,
+        }
+        return await self._paged_read(ACTOR_COMPONENTS, args, "components", "total")
 
     async def search_assets(
         self,
@@ -4179,50 +4291,68 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         max_depth: int = 10,
         include_components: bool = False,
         class_filter: Optional[str] = None,
+        include_subclasses: bool = False,
+        offset: int = 0,
+        max_results: int = 100,
     ) -> Dict[str, Any]:
         """
-        Query the scene graph hierarchy starting from a root actor.
+        Read the level's attachment hierarchy as a tree, one page of the root's children at a time.
+
+        One editor script reads the editor world's level actors and who is
+        attached to whom (``_unreal_scripts.SCENE_GRAPH``): an actor attached
+        to nothing is a child of the level. The tree starts at the level, or
+        at the actor at ``root_path``, and goes ``max_depth`` levels down. The
+        page holds the root's children from ``offset`` on, each with its
+        descendants, up to ``max_results`` of them and within the response
+        budget; a subtree too large for a page on its own is cut shallower
+        (``depth_limited``). Query a subtree whole with its actor as
+        ``root_path``.
 
         Args:
-            root_path: Root actor path (None for level root).
-            max_depth: Maximum traversal depth.
-            include_components: Include component sub-trees.
-            class_filter: Filter actors by UClass name.
+            root_path: Actor whose attached actors form the tree; None or empty
+                starts at the level, whose children are the actors attached
+                to nothing.
+            max_depth: Levels below the root to include, 1 to 64 (the root's
+                children are level 1). A node whose children are deeper has
+                ``children_truncated``.
+            include_components: Give each actor its components (name, class,
+                whether it is the root, the component it is attached to).
+            class_filter: Keep actors whose class has this name or path, and
+                the actors above them, which get ``matches_filter`` false.
+            include_subclasses: Also keep actors whose class derives from
+                class_filter's.
+            offset: Root children to skip before the page starts.
+            max_results: Most root children in the page, 1 to 5000.
 
         Returns:
-            Dict with root tree, total_actors, total_depth.
+            ``root`` (name, path, class_name, child_count, children; actors
+            nest the same way), ``total_actors`` and ``total_depth`` (every
+            actor below the root and the deepest level, whatever the page and
+            max_depth), ``returned_actors``, ``count``, ``total`` (the root's
+            children), ``offset``, ``next_offset``, ``truncated``, ``hint``,
+            ``depth_limited``, ``warnings`` and ``pie_active``; or a
+            ScriptError envelope (no actor at root_path).
         """
-        # Fetch all actors first
-        search_body: Dict[str, Any] = {
-            "Query": "",
-            "Filter": "Actor",
+        self._check_page(offset, max_results)
+        if not 1 <= max_depth <= 64:
+            raise ValueError("max_depth must be between 1 and 64")
+        args = {
+            "root_path": root_path or None,
+            "max_depth": max_depth,
+            "include_components": bool(include_components),
+            "class_filter": class_filter or None,
+            "include_subclasses": bool(include_subclasses),
+            "offset": offset,
+            "max_results": max_results,
         }
-        if class_filter:
-            search_body["Filter"] = class_filter
-
-        response = await self._http_put("/remote/search/assets", search_body)
-        actors = response.get("Assets", [])
-
-        # Build tree
-        tree: Dict[str, Any] = {"name": "Root", "path": root_path or "/", "children": []}
-        depth = 0
-        for actor in actors[:max_depth * 50]:
-            path = actor.get("Path", "")
-            if root_path and not path.startswith(root_path):
-                continue
-            node = {
-                "name": actor.get("Name", ""),
-                "path": path,
-                "class": actor.get("Class", ""),
-                "children": [],
-            }
-            tree["children"].append(node)
-
-        return {
-            "root": tree,
-            "total_actors": len(tree["children"]),
-            "total_depth": min(depth + 1, max_depth),
-        }
+        result = await self._paged_read(SCENE_GRAPH, args, "children of the root", "total")
+        if result.get("depth_limited"):
+            cut = ", ".join(f"{item['path']} (to depth {item['depth']})" for item in result["depth_limited"])
+            result["truncated"] = True
+            result.setdefault("warnings", []).append(
+                f"Too large for one page, so drawn shallower: {cut}. Query each with root_path set to it."
+            )
+        return result
 
     async def analyze_scene_for_robotics(
         self,
@@ -4371,13 +4501,16 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         label: str,
         match_mode: str = "exact",
         max_results: int = 100,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
-        Find level actors whose actor tags match a semantic label.
+        Find level actors whose actor tags match a semantic label, one page at a time.
 
         Semantic labels are actor tags (Actor > Tags in the Details panel).
         Matching ignores case, as Unreal's own tag comparison does. One editor
-        script reads every actor's tags.
+        script reads every actor's tags and counts every match; the page holds
+        the matches from ``offset`` on, up to ``max_results``, and stops early
+        rather than exceed the response budget.
 
         Args:
             label: Semantic label (actor tag) to search for.
@@ -4386,29 +4519,31 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 for in each tag; a repeated group that holds a quantifier or
                 alternatives, as in (\\w+)+, is refused because it can run for
                 hours); every mode ignores case.
-            max_results: Maximum number of actors to return, 1 to 5000.
+            max_results: Most actors in the page, 1 to 5000.
+            offset: Matching actors to skip before the page starts.
 
         Returns:
             Dict with ``actors`` (each match as a ``list_unreal_actors``
-            entry, tags included), ``total_matches`` (every matching actor,
-            those past max_results too), ``truncated``, ``label_searched`` and
-            ``pie_active`` (while Play In Editor runs, the editor world is
-            searched, as in ``list_actors``), or a ``ScriptError`` envelope
-            when the editor script failed.
+            entry, tags and attachment included), ``count`` (in the page),
+            ``total_matches`` (every matching actor), ``offset``,
+            ``next_offset``, ``truncated``, ``hint`` (when more are left),
+            ``label_searched`` and ``pie_active`` (while Play In Editor runs,
+            the editor world is searched, as in ``list_actors``), or a
+            ``ScriptError`` envelope when the editor script failed.
 
         Raises:
             ValueError: match_mode is not exact, contains or regex; in regex
                 mode, label is not a valid regular expression or repeats a
                 group that holds a quantifier or alternatives (see
-                ``simul.utils.regex_guard``); or max_results is out of range.
+                ``simul.utils.regex_guard``); or max_results or offset is out
+                of range.
         """
         modes = ("exact", "contains", "regex")
         if match_mode not in modes:
             raise ValueError(
                 f"match_mode must be one of {', '.join(modes)}, got {match_mode!r}"
             )
-        if not 1 <= max_results <= 5000:
-            raise ValueError("max_results must be between 1 and 5000")
+        self._check_page(offset, max_results)
         if match_mode == "regex":
             try:
                 re.compile(label)
@@ -4424,10 +4559,14 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                     "between the repetitions is tried. Repeat a plain character "
                     "class instead (\\w+ rather than (\\w+)+), or use contains mode"
                 )
-        args = {"label": label, "match_mode": match_mode, "max_results": max_results}
-        return await self._execute_json_script(
-            f"args = {args!r}\n" + FIND_ACTORS_BY_TAG
-        )
+        args = {
+            "label": label,
+            "match_mode": match_mode,
+            "offset": offset,
+            "max_results": max_results,
+            "listed_children": LISTED_CHILDREN,
+        }
+        return await self._paged_read(FIND_ACTORS_BY_TAG, args, "matching actors", "total_matches")
 
     # ------------------------------------------------------------------
     # Phase 8: Geometry & Modeling (GeometryScript)
