@@ -1047,12 +1047,19 @@ Behaviour worth knowing:
 - `insert_blender_keyframes` keys many frames in one call: per entry of
   `channels` a `data_path`, an `index` (-1 for every element), `frames` and a
   value per frame, up to 10 000 keys (frames times elements) a call. Each value
-  is keyed as `insert_blender_keyframe` keys a given one, and the same
-  `interpolation` and `keyframe_type` go to every key. Every entry is checked
-  first, and a locked or sampled F-curve is refused before anything is keyed;
-  should Blender still refuse a key part way, the error says how many keys went
-  in. On Blender 5.0.1 it inserted 6 000 keys (a 6-DOF arm over 1 000 frames)
-  in 0.09 s, which took some 13 000 calls of 55 ms one key at a time.
+  is keyed as `insert_blender_keyframe` keys a given one (Blender then
+  evaluates the object's animation), and the same `interpolation` and
+  `keyframe_type` go to every key. Every entry is checked before anything is
+  keyed: a channel keyed twice on one frame is refused, and so is an F-curve
+  Blender keys nothing on: locked, sampled, or under an F-modifier, not muted
+  or invalid, that overrides its keys (all but Cycles, Stepped, Noise and an
+  additive Generator; on Blender 5.0.1 a LIMITS modifier did). Should Blender
+  still refuse a key part way (an NLA setup it cannot remap a key onto), the
+  keys that went in stay, the reply is a `KeyframesPartlyInserted` error whose
+  `details` give the keys inserted and the one refused, and in attached mode
+  the call is one undo step. On Blender 5.0.1 it inserted 6 000 keys (a 6-DOF
+  arm over 1 000 frames) in 0.09 s, which took some 13 000 calls of 55 ms one
+  key at a time.
 - `get_blender_keyframes` lists the keyed channels a page at a time: each
   channel's data path, array index, the pose bone it animates (`bone_name`),
   its key count and `frame_range` (in float frames, since a key can sit between
@@ -1075,7 +1082,10 @@ Behaviour worth knowing:
   to that mode (a new bone's is QUATERNION, where Blender ignores
   `rotation_euler`). The reply gives the transform as stored, the rotation as
   XYZ Euler angles and as a quaternion, and `world_head` and `world_tail`, where
-  Blender evaluates the bone afterwards. Key it with `insert_blender_keyframe`
+  Blender evaluates the bone afterwards. Channels the bone locks
+  (`lock_location`, `lock_rotation`, `lock_scale`) are written all the same, as
+  `set_blender_object_transform` writes an object's: the locks only stop
+  Blender's interactive transform tools. Key it with `insert_blender_keyframe`
   or `insert_blender_keyframes` on `pose.bones["Bone"].<property>`.
 - `get_blender_object_trajectory` is not read-only: each sample is a frame
   change, so frame-change handlers run, and an unbaked rigid-body world is
@@ -1104,24 +1114,26 @@ Behaviour worth knowing:
   `get_blender_trajectories` samples up to 32 objects and bones in one pass,
   setting each frame once for all of them, with the same samples, paging and
   side effects.
-- A trajectory comes a page at a time. A page holds as many samples as fit in
-  one reply at their widest, so the same request always pages the same way, and
-  up to `limit`; `next_offset` (null on the last page) is the next call's
-  `offset`, and the pages join into exactly what one long reply would hold,
-  velocities at their edges included. A 1 000-frame trajectory came back as
-  frames 1-199 before; it is now 15 pages of 70 samples with every field, or 3
-  pages with `fields: ["location"]`.
+- A trajectory comes a page at a time. A page holds the samples that fit in
+  one reply, measured as they are written, up to `limit`; `next_offset` (null on
+  the last page) is the next call's `offset`, and the pages join into exactly
+  what one long reply would hold, velocities at their edges included. A
+  1 000-frame trajectory came back as frames 1-199 before; it is now 9 pages of
+  about 120 samples with every field, or 2 with `fields: ["location"]` (596 a
+  page). 32 targets with every field fit 3 frames a page.
 - For an unbaked rigid-body world, frames its memory cache already holds are
   read, not simulated again: the walk jumps to the cache's last frame and steps
   on from there (`simulated_frames` counts the frames it stepped). What the
   cache holds is read from its English info text; anything else (outdated,
-  frames skipped, a translated interface) walks from the cache start. A walk
-  over 200 000 bodies times frames is refused before any frame is set, with
-  what it would cost: bake first (`bake_blender_simulation`), sample fewer
-  frames, or pass `max_simulated_frames` to go ahead, which also bounds the
-  walk when given. On Blender 5.0.1 on an M-series Mac a body-frame took about
-  35 microseconds headless and 61 in a GUI Blender, so the bound is some 12 s
-  there, inside the 30 s an attached call waits by default
+  frames skipped, a translated interface) walks from the cache start. A page
+  ends before a sample whose simulation would pass 200 000 bodies times frames
+  (or `max_simulated_frames` when given), so each call does at most that much
+  and the next page goes on. A request whose first sample alone needs more is
+  refused before any frame is set, with what it would cost: bake first
+  (`bake_blender_simulation`), sample fewer frames, or pass
+  `max_simulated_frames` to go ahead. On Blender 5.0.1 on an M-series Mac a
+  body-frame took about 35 microseconds headless and 61 in a GUI Blender, so the
+  bound is some 12 s there, inside the 30 s an attached call waits by default
   (`BLENDER__CONNECTION_TIMEOUT`); a confirmed walk that takes longer keeps
   running in Blender after the call times out, and a later call reads what it
   cached. A 2-point request on 1 000 unbaked bodies over 1 000 frames took 29 s

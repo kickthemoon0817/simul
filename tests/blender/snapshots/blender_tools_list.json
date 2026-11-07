@@ -1575,7 +1575,7 @@
           "max_simulated_frames": {
             "anyOf": [{"type": "integer"}, {"type": "null"}],
             "default": null,
-            "description": "Most frames of unbaked rigid-body simulation the call may step through. None steps through up to 200 000 bodies times frames and refuses more, which can take minutes."
+            "description": "Most frames of unbaked rigid-body simulation the call may step through; the page ends before a sample that needs more. None allows up to 200 000 bodies times frames, and a request whose first sample needs more is refused."
           }
         },
         "required": ["object_name", "start_frame", "end_frame"]
@@ -1613,7 +1613,12 @@
             "description": "Last frame of trajectory (inclusive); not before start_frame.",
             "type": "integer"
           },
-          "step": {"default": 1, "description": "Frames between samples; at least 1.", "type": "integer"},
+          "step": {
+            "default": 1,
+            "description": "Frames between samples; at least 1.",
+            "minimum": 1,
+            "type": "integer"
+          },
           "fields": {
             "anyOf": [
               {
@@ -1648,7 +1653,7 @@
           "max_simulated_frames": {
             "anyOf": [{"type": "integer"}, {"type": "null"}],
             "default": null,
-            "description": "Most frames of unbaked rigid-body simulation the call may step through; None allows up to 200 000 bodies times frames."
+            "description": "Most frames of unbaked rigid-body simulation the call may step through, as for get_object_trajectory; None allows up to 200 000 bodies times frames."
           }
         },
         "required": ["targets", "start_frame", "end_frame"]

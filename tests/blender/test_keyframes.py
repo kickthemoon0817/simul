@@ -91,6 +91,7 @@ class FCurve:
         "lock",
         "group",
         "sampled_points",
+        "modifiers",
     )
 
     def __init__(self, data_path: str, array_index: int, *frames: float) -> None:
@@ -100,6 +101,8 @@ class FCurve:
         self.lock = False
         self.group: Any = None
         self.sampled_points: List[Any] = []
+        # FModifier stand-ins: type, mute, is_valid and, for a generator, use_additive.
+        self.modifiers: List[Any] = []
 
     @property
     def keyframe_points(self) -> KeyframePoints:
@@ -756,7 +759,11 @@ class TestInsertKeyframe:
 
         session.insert_keyframe("Ball", "location", 20, index=0, value=10.0)
 
-        assert [k.co for k in curve.keyframe_points] == [[1, 0.0], [20, 10.0], [30, 0.0]]
+        assert [k.co for k in curve.keyframe_points] == [
+            [1, 0.0],
+            [20, 10.0],
+            [30, 0.0],
+        ]
         # Frame 1 is on the first key, 0.
         assert ball.location == [0.0, 0.0, 0.0]
 
@@ -1256,9 +1263,9 @@ class TestInsertKeyframes:
             "LINEAR"
         }
         assert {k.type for points in keys.values() for k in points} == {"BREAKDOWN"}
-        # Frame 1 is the current one: the property shows its key, the others what they did.
+        # Blender evaluates the animation: frame 1's keys, and gear's only key.
         assert ball.location == [0.0, 0.0, 0.0]
-        assert ball.props["gear"] == 1
+        assert ball.props["gear"] == 3
 
     def test_checks_every_entry_before_keying_any(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1270,10 +1277,6 @@ class TestInsertKeyframes:
             (
                 {"data_path": "location", "frames": [1, 2], "values": [[0, 0, 0]]},
                 "2 frames but 1 values",
-            ),
-            (
-                {"data_path": "location", "frames": [1, 1], "values": [[0, 0, 0]] * 2},
-                "given twice",
             ),
             (
                 {"data_path": "location", "frames": [1], "values": [[0, 0]]},
@@ -1355,20 +1358,111 @@ class TestInsertKeyframes:
         ball.location = [7.0, 7.0, 7.0]
         session = session_on(monkeypatch, BLENDER_5_0, ball)
 
+        result = session.insert_keyframes(
+            "Ball",
+            [
+                {
+                    "data_path": "location",
+                    "frames": [3, 4, 5],
+                    "values": [[1, 1, 1]] * 3,
+                }
+            ],
+        )
+
+        # Returned, not raised: the keys stay, and an attached add-on records the
+        # completed call as an undo step.
+        assert result["success"] is False
+        assert result["error_type"] == "KeyframesPartlyInserted"
+        assert "after this call inserted 6 keys, which stay" in result["error"]
+        assert result["details"] == {
+            "inserted": 6,
+            "refused": {"data_path": "location", "index": -1, "frame": 5.0},
+        }
+        # Blender evaluates what went in: frame 1 holds the first key, 1.
+        assert ball.location == [1.0, 1.0, 1.0]
+
+    def test_refuses_a_channel_keyed_twice_on_one_frame(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The later key replaced the earlier, and key_count counted both."""
+        ball = keyed_ball(BLENDER_5_0)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        twice = {"data_path": "location", "frames": [2, 2], "values": [[0, 0, 0]] * 2}
+        whole = {"data_path": "location", "frames": [5], "values": [[1, 2, 3]]}
+        element = {"data_path": "location", "index": 1, "frames": [5], "values": [9]}
+
         with pytest.raises(
-            RuntimeError, match="after this call inserted 6 keys, which stay"
+            ValueError, match=r"channels\[0\] keys location\[0\] at frame 2 twice"
         ):
-            session.insert_keyframes(
-                "Ball",
-                [
-                    {
-                        "data_path": "location",
-                        "frames": [3, 4, 5],
-                        "values": [[1, 1, 1]] * 3,
-                    }
-                ],
-            )
-        assert ball.location == [7.0, 7.0, 7.0]
+            session.insert_keyframes("Ball", [twice])
+        with pytest.raises(
+            ValueError,
+            match=r"channels\[1\] and channels\[0\] both key location\[1\] at frame 5",
+        ):
+            session.insert_keyframes("Ball", [whole, element])
+        assert ball.calls == []
+        other = {"data_path": "location", "index": 1, "frames": [6], "values": [9]}
+        assert session.insert_keyframes("Ball", [whole, other])["key_count"] == 4
+
+    @pytest.mark.parametrize(
+        ("modifier", "keyed"),
+        [
+            (SimpleNamespace(type="LIMITS", mute=False, is_valid=True), False),
+            (SimpleNamespace(type="ENVELOPE", mute=False, is_valid=True), False),
+            (SimpleNamespace(type="LIMITS", mute=True, is_valid=True), True),
+            (SimpleNamespace(type="LIMITS", mute=False, is_valid=False), True),
+            (SimpleNamespace(type="CYCLES", mute=False, is_valid=True), True),
+            (
+                SimpleNamespace(
+                    type="GENERATOR", mute=False, is_valid=True, use_additive=False
+                ),
+                False,
+            ),
+            (
+                SimpleNamespace(
+                    type="GENERATOR", mute=False, is_valid=True, use_additive=True
+                ),
+                True,
+            ),
+        ],
+        ids=[
+            "limits",
+            "envelope",
+            "muted-limits",
+            "invalid-limits",
+            "cycles",
+            "generator",
+            "additive-generator",
+        ],
+    )
+    def test_refuses_an_fcurve_an_fmodifier_overrides_before_keying(
+        self, monkeypatch: pytest.MonkeyPatch, modifier: Any, keyed: bool
+    ) -> None:
+        """A LIMITS modifier on location[2] let index 0 be keyed first; those keys stayed."""
+        blocked = FCurve("location", 2, 1)
+        blocked.modifiers = [modifier]
+        ball = keyed_ball(BLENDER_5_0, blocked)
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+        channels = [
+            {
+                "data_path": "location",
+                "index": 0,
+                "frames": [1, 2, 3],
+                "values": [1, 2, 3],
+            },
+            {"data_path": "location", "index": 2, "frames": [4], "values": [5]},
+        ]
+
+        if keyed:
+            assert session.insert_keyframes("Ball", channels)["key_count"] == 4
+            return
+        with pytest.raises(
+            ValueError,
+            match=rf"channels\[1\]: the F-curve of location\[2\] has a {modifier.type} "
+            "F-modifier that overrides its keys",
+        ):
+            session.insert_keyframes("Ball", channels)
+        assert ball.calls == []
 
     def test_refuses_an_empty_call_and_unknown_choices(
         self, monkeypatch: pytest.MonkeyPatch

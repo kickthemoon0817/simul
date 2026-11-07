@@ -1217,6 +1217,14 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         operation="get_keyframes",
         request=BlenderGetKeyframesRequest,
         response=BlenderGetKeyframesResponse,
+        added_params=(
+            "data_path",
+            "bone_name",
+            "include_keys",
+            "offset",
+            "key_offset",
+            "limit",
+        ),
     ),
     BlenderTool(
         name="insert_blender_keyframes",
@@ -1309,6 +1317,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         },
         request=BlenderGetTrajectoryRequest,
         response=BlenderGetTrajectoryResponse,
+        added_params=("bone_name", "fields", "offset", "limit", "max_simulated_frames"),
     ),
     BlenderTool(
         name="get_blender_trajectories",
@@ -1323,6 +1332,7 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         response=BlenderGetTrajectoriesResponse,
         params={
             "targets": Param(List[BlenderTrajectoryTarget]),
+            "step": Param(AdvertisedFrameStep),
             "fields": Param(Optional[List[BlenderTrajectoryField]]),
         },
     ),

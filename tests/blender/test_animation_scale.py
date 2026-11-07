@@ -167,16 +167,45 @@ class TestTrajectoryPages:
         with pytest.raises(ValueError, match=r"Unknown trajectory fields \['speed'\]"):
             session.get_object_trajectory("Cart", 1, 10, fields=["speed"])
 
-    def test_a_page_holds_as_many_samples_whatever_their_values(
+    def test_a_page_holds_what_fits_as_written(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
-        """The page size is known before the walk, so the walk is known before it starts."""
+        """Pages sized for the widest numbers came out a third full."""
         counts = []
-        for speed in (1e-7, 123456.789):
+        for speed in (0.0, 123456.789):
             cart, animate = _cart(speed)
             session, _, _ = _session(monkeypatch, cart, animate=animate)
-            counts.append(session.get_object_trajectory("Cart", 1, 1000)["point_count"])
-        assert counts[0] == counts[1]
+            page = session.get_object_trajectory("Cart", 1, 1000)
+            counts.append(page["point_count"])
+            assert len(json.dumps(page)) <= blender_runtime.RESULT_PAGE_BYTES
+            assert len(json.dumps(page)) > 0.9 * blender_runtime.RESULT_PAGE_BYTES
+        assert counts[0] > counts[1]
+
+    def test_a_page_of_many_targets_is_full_too(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """32 targets with every field took a call per frame, the page a third full."""
+        carts = [FakeTransformObject(f"Cart{n}") for n in range(32)]
+
+        def animate(frame: int) -> None:
+            for n, cart in enumerate(carts):
+                cart.location = FakeVector((0.123456 * frame * (n + 1), -0.5, 1.25))
+                cart.rotation_euler = FakeEuler((0.01 * frame, 0.2, -0.3))
+
+        session, _, _ = _session(monkeypatch, *carts, animate=animate)
+
+        page = session.get_trajectories(
+            [{"object_name": cart.name} for cart in carts], 1, 1000
+        )
+
+        assert page["point_count"] >= 3
+        size = len(json.dumps(page))
+        assert 0.8 * blender_runtime.RESULT_PAGE_BYTES < size
+        assert size <= blender_runtime.RESULT_PAGE_BYTES
+        assert all(
+            len(trajectory["points"]) == page["point_count"]
+            for trajectory in page["trajectories"]
+        )
 
     def test_limit_offset_and_step(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
@@ -420,12 +449,13 @@ class TestRigidBodyWalk:
 
         message = str(refused.value)
         assert (
-            "through 999 frames (frames 2-1000) of 1000 bodies, 999000 bodies x frames"
-            in message
+            "Sampling frame 990 steps the unbaked rigid-body simulation through 989 "
+            "frames (frames 2-990) of 1000 bodies, 989000 bodies x frames" in message
         )
+        assert "(999 for every sample of this page)" in message
         assert (
             "bake_blender_simulation" in message
-            and "max_simulated_frames=999" in message
+            and "max_simulated_frames=989" in message
         )
         assert frames == []
 
@@ -460,9 +490,32 @@ class TestRigidBodyWalk:
         assert result["simulated_frames"] == 999
         assert frames == [*range(1, 1001), 1]
         frames.clear()
+        bounded = session.get_object_trajectory("Body", 1, 30, max_simulated_frames=10)
+        # The page ends before frame 12, which would need an eleventh frame.
+        assert [p["frame"] for p in bounded["points"]] == list(range(1, 12))
+        assert (bounded["simulated_frames"], bounded["next_offset"]) == (10, 11)
+        assert frames == [*range(1, 12), 1]
+        frames.clear()
         with pytest.raises(ValueError, match="max_simulated_frames is 10"):
-            session.get_object_trajectory("Body", 1, 30, max_simulated_frames=10)
+            session.get_object_trajectory("Body", 20, 30, max_simulated_frames=10)
         assert frames == []
+
+    def test_a_page_ends_where_its_simulation_would_pass_the_bound(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Unasked, a page simulates no more than the bound; the next page goes on."""
+        world = _world(bodies=1000)
+        world.point_cache.frame_end = 1000
+        session, _, frames = _session(
+            monkeypatch, FakeTransformObject("Body"), world=world
+        )
+
+        page = session.get_object_trajectory("Body", 1, 1000, 50, fields=["location"])
+
+        # 200 000 bodies x frames is 200 frames of 1 000 bodies: up to frame 201.
+        assert [p["frame"] for p in page["points"]] == [1, 51, 101, 151, 201]
+        assert (page["simulated_frames"], page["next_offset"]) == (200, 5)
+        assert frames == [*range(1, 202), 1]
 
     @pytest.mark.parametrize("state", ["baked", "disabled"])
     def test_a_baked_or_disabled_world_is_read_not_walked(

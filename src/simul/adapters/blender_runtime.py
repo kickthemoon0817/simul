@@ -975,6 +975,35 @@ def _like(current: Any, value: float) -> Any:
     return float(value)
 
 
+# F-modifiers that leave an F-curve's keys in effect, as Blender judges them
+# (BKE_fcurve_are_keyframes_usable); a generator only when it adds to the keys.
+_KEY_SAFE_MODIFIERS = frozenset({"CYCLES", "STEPPED", "NOISE"})
+_ADDITIVE_MODIFIERS = frozenset({"GENERATOR", "FNGENERATOR"})
+
+
+def _unkeyable(fcurve: Any) -> Optional[str]:
+    """Why Blender keys nothing on an F-curve, or None when it does.
+
+    keyframe_insert refuses a locked F-curve (or one in a locked group), a
+    sampled one, and one under an F-modifier, not muted or invalid, that
+    overrides its keys: on Blender 5.0.1 a LIMITS modifier did.
+    """
+    group = fcurve.group
+    if fcurve.lock or (group is not None and group.lock):
+        return "is locked"
+    if len(fcurve.sampled_points):
+        return "is sampled"
+    for modifier in reversed(list(fcurve.modifiers)):
+        if modifier.mute or not modifier.is_valid:
+            continue
+        if modifier.type in _KEY_SAFE_MODIFIERS:
+            continue
+        if modifier.type in _ADDITIVE_MODIFIERS and modifier.use_additive:
+            continue
+        return f"has a {modifier.type} F-modifier that overrides its keys"
+    return None
+
+
 class _KeyedProperty:
     """The property (or element of it) a keyframe call keys, read and written through its owner.
 
@@ -4582,11 +4611,14 @@ class BlenderRuntimeSession:
         Insert many keyframes in one call: for each property, one value per frame.
 
         Each value is keyed through its property, as insert_keyframe keys a
-        given value, so NLA remapping applies; afterwards every property shows
-        what it showed before, except where a key is on the current frame.
-        Every entry is checked before anything is keyed, and a channel Blender
-        refuses (locked, or sampled) is refused up front; should Blender still
-        refuse a key part way, the error says how many keys went in.
+        given value, so NLA remapping applies; Blender then evaluates the
+        object's animation, so every property shows what its animation gives at
+        the current frame. Every entry is checked before anything is keyed: a
+        channel keyed twice on one frame, and an F-curve Blender keys nothing
+        on (locked, sampled, or under an F-modifier that overrides its keys),
+        are refused up front. Should Blender still refuse a key part way, the
+        keys that went in stay, recorded as one undo step in attached mode, and
+        the reply is a KeyframesPartlyInserted error naming them.
 
         Args:
             object_name: Name of the object.
@@ -4619,6 +4651,9 @@ class BlenderRuntimeSession:
         fcurves = action_fcurves(obj.animation_data, self._blender_version) or []
         plans = []
         total = 0
+        # (data_path, element, frame) -> the entry keying it; element -1 for a
+        # property that is not an array.
+        keyed_by: Dict[Tuple[str, int, float], int] = {}
         for number, channel in enumerate(channels):
             label = f"channels[{number}]"
             data_path = channel.get("data_path")
@@ -4636,30 +4671,45 @@ class BlenderRuntimeSession:
                 )
             if not all(math.isfinite(frame) for frame in frames):
                 raise ValueError(f"{label}: frames must be finite")
-            if len(set(frames)) != len(frames):
-                raise ValueError(f"{label}: a frame is given twice")
             try:
                 keyed = _KeyedProperty(obj, data_path, index)
                 coerced = [keyed.coerce(value) for value in values]
             except ValueError as exc:
                 raise ValueError(f"{label}: {exc}") from None
+            if keyed.index >= 0:
+                elements = [keyed.index]
+            elif keyed.length is None:
+                elements = [-1]
+            else:
+                elements = list(range(keyed.length))
+            for frame in frames:
+                for element in elements:
+                    slot = (data_path, element, frame)
+                    if slot in keyed_by:
+                        earlier = keyed_by[slot]
+                        twice = (
+                            f"{label} keys"
+                            if earlier == number
+                            else f"{label} and channels[{earlier}] both key"
+                        )
+                        raise ValueError(
+                            f"{twice} {_channel_name(data_path, element)} at frame "
+                            f"{frame:g}{' twice' if earlier == number else ''}; give "
+                            "each channel's frame once"
+                        )
+                    keyed_by[slot] = number
             for fcurve in fcurves:
                 if fcurve.data_path != data_path or index not in (-1, fcurve.array_index):
                     continue
-                # A property that is not an array has one channel, index 0.
-                curve = _channel_name(
-                    data_path, -1 if keyed.length is None else fcurve.array_index
-                )
-                group = getattr(fcurve, "group", None)
-                if fcurve.lock or (group is not None and group.lock):
-                    raise ValueError(
-                        f"{label}: the F-curve of {curve} is locked, and Blender keys "
-                        "no locked F-curve"
+                reason = _unkeyable(fcurve)
+                if reason is not None:
+                    # A property that is not an array has one channel, index 0.
+                    curve = _channel_name(
+                        data_path, -1 if keyed.length is None else fcurve.array_index
                     )
-                if len(fcurve.sampled_points):
                     raise ValueError(
-                        f"{label}: the F-curve of {curve} is sampled, and Blender keys "
-                        "no sampled F-curve"
+                        f"{label}: the F-curve of {curve} {reason}, and Blender keys "
+                        "no such F-curve"
                     )
             total += len(frames) * keyed.elements
             plans.append((keyed, frames, coerced))
@@ -4670,10 +4720,8 @@ class BlenderRuntimeSession:
                 "frames over several calls"
             )
 
-        blender_module: Any = bpy
-        current_frame = blender_module.context.scene.frame_current
         inserted = 0
-        finished = False
+        refused: Optional[Dict[str, Any]] = None
         try:
             for keyed, frames, coerced in plans:
                 for frame, value in zip(frames, coerced):
@@ -4684,24 +4732,35 @@ class BlenderRuntimeSession:
                         frame=frame,
                         keytype=keyframe_type,
                     ):
-                        raise RuntimeError(
-                            f"Blender inserted no keyframe on '{object_name}' "
-                            f"{_channel_name(keyed.data_path, keyed.index)} at frame "
-                            f"{frame}, after this call inserted {inserted} keys, which "
-                            "stay; it refuses an F-curve that is locked, sampled or "
-                            "overridden by an F-modifier, and a key its NLA setup "
-                            "cannot remap"
-                        )
+                        refused = {
+                            "data_path": keyed.data_path,
+                            "index": keyed.index,
+                            "frame": frame,
+                        }
+                        break
                     inserted += keyed.elements
-            finished = True
+                if refused is not None:
+                    break
         finally:
             for keyed, _frames, _coerced in plans:
                 keyed.restore()
-            if finished:
-                # A key on the current frame is what its property shows.
-                for keyed, frames, coerced in plans:
-                    if current_frame in frames:
-                        keyed.write(coerced[frames.index(current_frame)])
+        if inserted:
+            self._evaluate_animation(obj)
+        if refused is not None:
+            # Returned rather than raised: the keys that went in stay, and an
+            # attached add-on records a completed call as an undo step.
+            return {
+                "success": False,
+                "error": (
+                    f"Blender inserted no keyframe on '{object_name}' "
+                    f"{_channel_name(refused['data_path'], refused['index'])} at frame "
+                    f"{refused['frame']:g}, after this call inserted {inserted} keys, "
+                    "which stay; it refuses a key its NLA setup cannot remap onto the "
+                    "active action, such as an action at zero influence"
+                ),
+                "error_type": "KeyframesPartlyInserted",
+                "details": {"inserted": inserted, "refused": refused},
+            }
 
         report: List[Dict[str, Any]] = []
         fcurves = action_fcurves(obj.animation_data, self._blender_version) or []
@@ -5019,7 +5078,10 @@ class BlenderRuntimeSession:
         quaternion, either converted to that mode as set_blender_object_transform
         converts an object's. A converted rotation keeps the bone's current
         quaternion sign, or the Euler angles nearest its current ones. Every
-        value is checked before any is written. Key the result with
+        value is checked before any is written. Channels the bone locks
+        (lock_location, lock_rotation, lock_scale) are written all the same, as
+        set_blender_object_transform writes an object's: the locks only stop
+        Blender's interactive transform tools. Key the result with
         insert_blender_keyframe on 'pose.bones["<bone>"].<property>'.
 
         Args:
@@ -5479,9 +5541,11 @@ class BlenderRuntimeSession:
         is not read-only: frame-change handlers run, an unbaked rigid-body
         world is stepped on from where its cache ends (filling the cache), and
         the frame and subframe current before the call are set again
-        afterwards. A page holds as many samples as fit in one reply at their
-        widest; next_offset says where the next page starts, and the pages of
-        a request join into exactly what one long reply would hold.
+        afterwards. A page holds the samples that fit in one reply, measured
+        as they are written, and ends before a sample whose rigid-body
+        simulation would pass the bound; next_offset says where the next page
+        starts, and the pages of a request join into exactly what one long
+        reply would hold.
 
         Args:
             object_name: Name of the object to track (an armature for bone_name).
@@ -5496,8 +5560,9 @@ class BlenderRuntimeSession:
                 next_offset); the samples are start_frame, start_frame + step, ...
             limit: Most samples to return; None returns as many as fit.
             max_simulated_frames: Most frames of unbaked rigid-body simulation
-                the call may step through. None steps through up to 200 000
-                bodies times frames and refuses more, which can take minutes.
+                the call may step through; the page ends before a sample that
+                needs more. None allows up to 200 000 bodies times frames, and a
+                request whose first sample needs more is refused.
 
         Returns:
             Dict with object_name, bone_name, rotation_mode (the object's or
@@ -5562,8 +5627,8 @@ class BlenderRuntimeSession:
                 next_offset).
             limit: Most samples per target to return; None returns as many as fit.
             max_simulated_frames: Most frames of unbaked rigid-body simulation
-                the call may step through; None allows up to 200 000 bodies
-                times frames.
+                the call may step through, as for get_object_trajectory; None
+                allows up to 200 000 bodies times frames.
 
         Returns:
             Dict with fps, time_origin_frame, total_points, offset, point_count
@@ -5624,20 +5689,26 @@ class BlenderRuntimeSession:
         total = len(frames)
         if offset > total:
             raise ValueError(f"offset {offset} is past the last of the {total} samples")
-        # A page holds as many samples as fit at their widest, so a request
-        # always pages the same way and the walk is known before it starts.
+        # A page holds the samples that fit in one reply, measured as they are
+        # written. Its most samples (each as narrow as a sample can be) bound
+        # the walk planned before any frame is set.
         headers = sum(
             _json_size({key: value for key, value in target.items() if key != "obj"})
             + len(', "points": []')
             for target in resolved
         )
-        widest = len(resolved) * (_json_size(self._widest_point(wanted)) + 2)
-        capacity = max(1, (RESULT_PAGE_BYTES - 1500 - headers) // widest)
-        count = min(total - offset, capacity if limit is None else min(limit, capacity))
-        sampled = frames[max(offset - 1, 0) : offset + count]
-        walk, simulated, warning = self._trajectory_walk(
-            scene, list(sampled), max_simulated_frames
+        room = RESULT_PAGE_BYTES - 1500 - headers
+        narrowest = len(resolved) * (_json_size(self._narrowest_point(wanted)) + 2)
+        most = max(1, room // narrowest)
+        count = min(total - offset, most if limit is None else min(limit, most))
+        # The sample before the page gives its first velocity and continuity.
+        seed = 1 if offset > 0 else 0
+        sampled = list(frames[offset - seed : offset + count])
+        walk, simulated, warning, usable, resume = self._trajectory_walk(
+            scene, sampled, max_simulated_frames, seed
         )
+        count = min(count, usable - seed)
+        sampled = sampled[:usable]
 
         original_frame: int = scene.frame_current
         original_subframe: float = scene.frame_subframe
@@ -5647,30 +5718,42 @@ class BlenderRuntimeSession:
         wanted_samples = set(sampled)
         previous: List[Optional[Dict[str, Any]]] = [None] * len(resolved)
         points: List[List[Dict[str, Any]]] = [[] for _ in resolved]
+        used = 0
+        last_set: Optional[int] = None
         try:
             for frame in walk:
                 scene.frame_set(frame)
+                last_set = frame
                 if frame not in wanted_samples:
                     continue
                 depsgraph = blender_module.context.evaluated_depsgraph_get()
-                for number, target in enumerate(resolved):
-                    sample = self._trajectory_sample(depsgraph, target, previous[number])
-                    if frame in returned:
-                        points[number].append(
-                            self._trajectory_point(
-                                frame,
-                                sample,
-                                previous[number],
-                                wanted,
-                                fps,
-                                time_origin,
-                                step,
-                            )
+                samples = [
+                    self._trajectory_sample(depsgraph, target, previous[number])
+                    for number, target in enumerate(resolved)
+                ]
+                if frame in returned:
+                    row = [
+                        self._trajectory_point(
+                            frame, sample, previous[number], wanted, fps, time_origin, step
                         )
-                    previous[number] = sample
+                        for number, sample in enumerate(samples)
+                    ]
+                    cost = sum(_json_size(point) + 2 for point in row)
+                    # A page always holds its first sample.
+                    if points[0] and used + cost > room:
+                        break
+                    for number, point in enumerate(row):
+                        points[number].append(point)
+                    used += cost
+                previous = list(samples)
         finally:
             scene.frame_set(original_frame, subframe=original_subframe)
 
+        count = len(points[0])
+        if simulated:
+            # A page that filled up early stepped only as far as the last frame set.
+            reached = resume if last_set is None else min(last_set, resume + simulated)
+            simulated = max(0, reached - resume)
         next_offset = offset + count if offset + count < total else None
         return {
             "fps": fps,
@@ -5723,20 +5806,19 @@ class BlenderRuntimeSession:
         return tuple(name for name in TRAJECTORY_FIELDS if name in fields)
 
     @staticmethod
-    def _widest_point(fields: Tuple[str, ...]) -> Dict[str, Any]:
-        """A sample as wide as these fields can make it: the unit of a page's size."""
-        wide = -1.23456789e-05  # as long as a float _f32 returns can be
-        point: Dict[str, Any] = {"frame": -FRAME_LIMIT}
-        widths: Dict[str, Any] = {
-            "time": -1.23456789012e-05,
-            "location": [wide] * 3,
-            "rotation_euler": [wide] * 3,
-            "rotation_quaternion": [wide] * 4,
-            "local_rotation": [wide] * 4,
-            "velocity": [wide] * 3,
+    def _narrowest_point(fields: Tuple[str, ...]) -> Dict[str, Any]:
+        """A sample as narrow as these fields can make it: what bounds a page's samples."""
+        point: Dict[str, Any] = {"frame": 0}
+        narrow: Dict[str, Any] = {
+            "time": 0.0,
+            "location": [0.0] * 3,
+            "rotation_euler": [0.0] * 3,
+            "rotation_quaternion": [0.0] * 4,
+            "local_rotation": [0.0] * 3,
+            "velocity": None,
         }
         for name in fields:
-            point[name] = widths[name]
+            point[name] = narrow[name]
         return point
 
     def _trajectory_target(
@@ -5795,52 +5877,61 @@ class BlenderRuntimeSession:
         return None
 
     def _trajectory_walk(
-        self, scene: Any, samples: List[int], max_simulated_frames: Optional[int]
-    ) -> Tuple[List[int], int, Optional[str]]:
+        self,
+        scene: Any,
+        samples: List[int],
+        max_simulated_frames: Optional[int],
+        seed: int = 0,
+    ) -> Tuple[List[int], int, Optional[str], int, int]:
         """The frames to set, in order, so each sample shows its frame's simulation.
 
         An unbaked rigid-body world advances only from one frame to the next,
         so jumping to a frame it has not simulated leaves the bodies where they
         were. Frames its memory cache holds are read, not simulated again: the
         walk jumps to the last of them and steps on from there, to the last
-        sample or the cache end, after which Blender holds the bodies.
+        sample or the cache end, after which Blender holds the bodies. The
+        walk serves the samples, in order, whose simulation stays within the
+        budget (or ``max_simulated_frames``); the page ends before the others.
+
+        Args:
+            scene: The scene to walk.
+            samples: The frames to sample, ascending.
+            max_simulated_frames: The confirmed most frames to simulate, or None
+                for the bodies x frames budget.
+            seed: How many leading samples only seed the page (its velocity):
+                a walk that serves none of the rest is refused.
 
         Returns:
-            The frames to set, the frames of simulation they step through, and
-            a warning for samples past the cache end.
+            The frames to set, the frames of simulation they step through, a
+            warning for samples past the cache end, how many of the samples the
+            walk serves, and the frame the stepping resumes from.
 
         Raises:
-            ValueError: When the simulation needed is over the budget, or over
-                ``max_simulated_frames``.
+            ValueError: When even the page's first sample needs more simulation
+                than the budget, or than ``max_simulated_frames``.
         """
-        frames = sorted(set(samples))
         world = getattr(scene, "rigidbody_world", None)
-        if world is None or not getattr(world, "enabled", True) or not frames:
-            return frames, 0, None
+        if world is None or not getattr(world, "enabled", True) or not samples:
+            return list(samples), 0, None, len(samples), 0
         cache = world.point_cache
         start, end = int(cache.frame_start), int(cache.frame_end)
-        warning = None
-        if frames[-1] > end:
-            warning = (
-                f"Samples after frame {end} are past the rigid-body cache end: "
-                f"Blender simulates nothing later and holds the bodies at their "
-                f"frame-{end} pose there"
-            )
-        if cache.is_baked:
-            return frames, 0, warning
-        last = min(frames[-1], end)
         resume = max(self._cached_through(cache), start)
-        simulated = max(0, last - resume)
-        if simulated:
+        usable = len(samples)
+        if not cache.is_baked:
             bodies = self._rigid_bodies(world)
-            cost = simulated * max(bodies, 1)
-            over = (
-                simulated > max_simulated_frames
+            allowed = (
+                max_simulated_frames
                 if max_simulated_frames is not None
-                else cost > TRAJECTORY_SIMULATION_BUDGET
+                else TRAJECTORY_SIMULATION_BUDGET // max(bodies, 1)
             )
-            if over:
-                allowed = (
+            usable = sum(
+                1 for frame in samples if max(0, min(frame, end) - resume) <= allowed
+            )
+            if usable <= seed:
+                first = min(samples[seed], end)
+                needed = first - resume
+                every = max(0, min(samples[-1], end) - resume)
+                limit = (
                     f"max_simulated_frames is {max_simulated_frames}"
                     if max_simulated_frames is not None
                     else f"that is over the {TRAJECTORY_SIMULATION_BUDGET} bodies x "
@@ -5848,16 +5939,29 @@ class BlenderRuntimeSession:
                     "Blender's main thread"
                 )
                 raise ValueError(
-                    f"Sampling up to frame {last} steps the unbaked rigid-body "
-                    f"simulation through {simulated} frames (frames {resume + 1}-{last}) "
-                    f"of {bodies} bodies, {cost} bodies x frames; {allowed}. Bake it "
-                    "first with bake_blender_simulation, sample fewer frames, or pass "
-                    f"max_simulated_frames={simulated} or more to go ahead; a walk that "
+                    f"Sampling frame {samples[seed]} steps the unbaked rigid-body "
+                    f"simulation through {needed} frames (frames {resume + 1}-{first}) "
+                    f"of {bodies} bodies, {needed * max(bodies, 1)} bodies x frames; "
+                    f"{limit}. Bake it first with bake_blender_simulation, sample "
+                    f"fewer frames, or pass max_simulated_frames={needed} or more to go "
+                    f"ahead ({every} for every sample of this page); a walk that "
                     "outlasts the client's timeout (BLENDER__CONNECTION_TIMEOUT, 30 s "
                     "by default) keeps running in Blender after the call gives up"
                 )
+        served = samples[:usable]
+        warning = None
+        if served[-1] > end:
+            warning = (
+                f"Samples after frame {end} are past the rigid-body cache end: "
+                f"Blender simulates nothing later and holds the bodies at their "
+                f"frame-{end} pose there"
+            )
+        if cache.is_baked:
+            return served, 0, warning, usable, resume
+        last = min(served[-1], end)
+        simulated = max(0, last - resume)
         stepped = range(resume, last + 1) if simulated else range(0)
-        return sorted(set(frames) | set(stepped)), simulated, warning
+        return sorted(set(served) | set(stepped)), simulated, warning, usable, resume
 
     @staticmethod
     def _cached_through(cache: Any) -> int:
