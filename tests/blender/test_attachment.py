@@ -613,6 +613,48 @@ def test_addon_bundles_the_error_message_helper(tmp_path: Path) -> None:
     assert completed.stdout.strip() == "Failed to add rigid body: poll() failed"
 
 
+def test_addon_bundles_the_shared_import_reference_readers(tmp_path: Path) -> None:
+    """blender_runtime's import sandbox reads references with utils/asset_references.py, shared with Unreal.
+
+    An interpreter without simul (and without bpy) imports the bundled
+    runtime, so the readers come from the add-on's own copy and refuse an
+    OBJ whose MTL names a file outside the sandbox.
+    """
+    import subprocess
+    import sys
+    import zipfile
+
+    addon = BlenderAttachments.build_addon(tmp_path / "addon.zip")
+    with zipfile.ZipFile(addon) as archive:
+        assert "simul_blender_bridge/utils/asset_references.py" in archive.namelist()
+        archive.extractall(tmp_path / "addons")
+    sbx, outside = tmp_path / "sbx", tmp_path / "outside"
+    sbx.mkdir()
+    outside.mkdir()
+    (outside / "secret.png").write_bytes(b"\x89PNG")
+    (sbx / "cube.obj").write_text("mtllib cube.mtl\n")
+    (sbx / "cube.mtl").write_text("newmtl M\nmap_Kd ../outside/secret.png\n")
+    probe = (
+        "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
+        "from simul_blender_bridge.adapters import blender_runtime as runtime; "
+        "inside = lambda path: Path(path).resolve().is_relative_to(Path(sys.argv[2]).resolve()); "
+        "reads = runtime._obj_reads(Path(sys.argv[2]) / 'cube.obj'); "
+        "print(runtime.outside_references.__module__); "
+        "print(runtime.outside_references(reads, type('P', (), {'is_allowed': staticmethod(inside), "
+        "'resolve': staticmethod(lambda path: Path(path).resolve())})()))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(tmp_path / "addons"), str(sbx)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert completed.stdout.splitlines() == [
+        "simul_blender_bridge.utils.asset_references",
+        str([str((outside / "secret.png").resolve())]),
+    ]
+
+
 def test_addon_bundles_the_regex_guard(tmp_path: Path) -> None:
     """blender_runtime imports utils/regex_guard.py, so the ZIP must carry it.
 

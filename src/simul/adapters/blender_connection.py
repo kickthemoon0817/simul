@@ -574,6 +574,7 @@ class BlenderAttachments:
             "blender_bridge/protocol.py": "blender_bridge/protocol.py",
             "adapters/blender_runtime.py": "adapters/blender_runtime.py",
             "adapters/simready_usd.py": "adapters/simready_usd.py",
+            "utils/asset_references.py": "utils/asset_references.py",
             "utils/errors.py": "utils/errors.py",
             "utils/paths.py": "utils/paths.py",
             "utils/private_files.py": "utils/private_files.py",
