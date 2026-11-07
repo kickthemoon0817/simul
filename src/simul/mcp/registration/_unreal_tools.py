@@ -911,7 +911,15 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_render_settings",
-        description="Set rendering or post-process settings via console command.",
+        description=(
+            "Set one numeric rendering console variable (r.* or sg.*, e.g. r.ScreenPercentage 75) and "
+            "read it back. applied is true only when the variable holds the value afterwards. A "
+            "variable Unreal does not have fails with NotFoundError and changes nothing; a value "
+            "Unreal did not take (a read-only variable such as r.RayTracing, which only startup "
+            "config sets, or one it limits) fails with RenderSettingNotApplied, giving value and "
+            "previous_value. Post-process settings live on PostProcessVolume actors, not in console "
+            "variables, so this tool does not change them."
+        ),
         response=UnrealSetRenderSettingsResponse,
         read_only=False,
         idempotent=True,
@@ -1105,13 +1113,27 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     # -- Advanced agent tools ------------------------------------------------------
     UnrealTool(
         name="batch_unreal_operations",
-        description="Execute multiple Remote Control operations in one HTTP call.",
+        description=(
+            "Execute several Remote Control requests in one HTTP call, in order. Each result is "
+            "Remote Control's answer (RequestId, ResponseCode, ResponseBody); a failed one also has "
+            "error and error_type. Operations without a RequestId are numbered for you."
+        ),
         response=UnrealBatchOperationsResponse,
         read_only=False,
         destructive=True,
         script=True,
         method="batch_operations",
-        params=(ToolParam("operations", str, convert=json.loads),),
+        params=(
+            ToolParam(
+                "operations",
+                str,
+                description=(
+                    'JSON array of operations: [{"URL": "/remote/object/call", "Verb": "PUT", '
+                    '"Body": {"objectPath": "...", "functionName": "..."}, "RequestId": 1}]. '
+                    "RequestId is optional and must be a unique integer."
+                ),
+            ),
+        ),
     ),
     UnrealTool(
         name="query_unreal_scene_graph",

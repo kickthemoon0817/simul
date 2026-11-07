@@ -656,19 +656,23 @@ def _unreal_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, port: int) -
 def test_unreal_editor_refuses_the_connection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """aiohttp's exception escapes the session and is named by its class."""
+    """aiohttp's exception is reported in the shared taxonomy, as ConnectionError.
+
+    It used to escape the session and be named by its class, ClientConnectorError.
+    """
     port = _refused_port()
     instance = _unreal_server(monkeypatch, tmp_path, port)
-    message, raised = _aiohttp_refusal(port)
+    aiohttp_message, raised = _aiohttp_refusal(port)
     assert raised == "ClientConnectorError"
+    message = f"Cannot reach Remote Control at 127.0.0.1:{port} ({aiohttp_message})"
 
     payload = _call(instance, "execute_unreal_script", code=CODE)
 
     assert payload == {
         "success": False,
         "error": message,
-        "error_type": "ClientConnectorError",
-        "details": None,
+        "error_type": "ConnectionError",
+        "details": {"route": "/remote/object/call"},
     }
     assert _records(instance, "execute_unreal_script") == [
         {
@@ -688,7 +692,9 @@ def test_unreal_health_check_reports_the_refusal(
 
     payload = _call(instance, "unreal_health_check")
 
-    assert payload["error"].startswith(f"Cannot connect to host 127.0.0.1:{port}")
+    assert payload["error"].startswith(
+        f"Cannot reach Remote Control at 127.0.0.1:{port} (Cannot connect to host 127.0.0.1:{port}"
+    )
     assert payload == {
         "reachable": False,
         "connected": False,
@@ -698,3 +704,40 @@ def test_unreal_health_check_reports_the_refusal(
     assert _records(instance, "unreal_health_check") == [
         {"success": False, "error": payload["error"]}
     ]
+
+
+def test_unreal_remote_control_refusal_keeps_its_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Remote Control's errorMessage and status reach the client, in the shared taxonomy.
+
+    aiohttp's raise_for_status used to drop the body: ``404, message=''``,
+    named ClientResponseError.
+    """
+    from simul.adapters._unreal_errors import remote_control_error
+    from simul.adapters.unreal_runtime import UnrealRuntimeSession
+
+    path = "/Game/Map.Map:PersistentLevel.Nope"
+    refusal = remote_control_error(
+        404,
+        '{ "errorMessage": "Object: %s does not exist when trying to resolve property: " }' % path,
+        "PUT",
+        "/remote/object/describe",
+    )
+
+    async def refuse(self: Any, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        raise refusal
+
+    monkeypatch.setattr(UnrealRuntimeSession, "_http_put", refuse)
+    settings = Settings(unreal={"port": _refused_port(), "max_retries": 0, "tool_surface": "full"})
+    instance = _server(monkeypatch, tmp_path, settings, unreal=True)
+
+    payload = _call(instance, "describe_unreal_object", object_path=path)
+
+    message = f"Object: {path} does not exist when trying to resolve property:"
+    assert payload == {
+        "success": False,
+        "error": f"Remote Control refused PUT /remote/object/describe (HTTP 404): {message}",
+        "error_type": "NotFoundError",
+        "details": {"status": 404, "route": "/remote/object/describe", "remote_control_message": message},
+    }

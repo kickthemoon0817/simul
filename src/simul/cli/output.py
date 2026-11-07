@@ -24,6 +24,8 @@ from rich.console import Console
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
 
+from ..utils.errors import exception_type_name
+
 # Global context variable — set by the top-level Typer callback.
 _json_mode: ContextVar[Optional[bool]] = ContextVar("_json_mode", default=None)
 
@@ -225,9 +227,14 @@ def run_or_exit(
     except Exception as exc:
         if not catch_exceptions:
             raise
+        # Named as the MCP envelope names it: by the error_type a structured
+        # exception declares (an Unreal transport failure's NotFoundError,
+        # TimeoutError, ...), else by its class.
+        error_type = exception_type_name(exc)
         if is_json_mode():
-            emit_error(str(exc), type(exc).__name__)
-        console.print(f"[red]{type(exc).__name__}: {rich_escape(str(exc))}[/red]")
+            details = getattr(exc, "details", None)
+            emit_error(str(exc), error_type, details if isinstance(details, dict) else None)
+        console.print(f"[red]{error_type}: {rich_escape(str(exc))}[/red]")
         raise typer.Exit(1)
 
     if not isinstance(result, dict):
