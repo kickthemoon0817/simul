@@ -363,11 +363,15 @@ class SmartFakeClientSession:
         self._put_responses = put_responses or {}
         self._put_fn = put_fn
         self.closed = False
+        # Per-request headers, by path, of every PUT that carried some.
+        self.headers: Dict[str, Any] = {}
 
     def get(self, path: str) -> FakeResponse:
         return self._get_responses.get(path, FakeResponse({}, 404))
 
-    def put(self, path: str, json: Any = None) -> FakeResponse:
+    def put(self, path: str, json: Any = None, headers: Any = None) -> FakeResponse:
+        if headers is not None:
+            self.headers[path] = headers
         if self._put_fn:
             return self._put_fn(path, json)
         return self._put_responses.get(path, FakeResponse({}, 404))
@@ -1029,73 +1033,8 @@ class TestUnrealRuntimeSessionPhase3:
         assert result["function_name"] == "GetActorBounds"
         assert result["return_value"] == '{"ReturnValue": 42}'
 
-    # -- set_actor_parent --
-
-    def test_set_actor_parent_attach(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_actor_parent attaches child to parent."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "K2_AttachToActor":
-                return FakeResponse({})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.set_actor_parent(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Child_0",
-            parent_path="/Game/Maps/Test.Test:PersistentLevel.Parent_0",
-        ))
-
-        assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Child_0"
-        assert result["parent_path"] == "/Game/Maps/Test.Test:PersistentLevel.Parent_0"
-
-    def test_set_actor_parent_detach(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_actor_parent detaches when parent_path is None."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "K2_DetachFromActor":
-                return FakeResponse({})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.set_actor_parent(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Child_0",
-            parent_path=None,
-        ))
-
-        assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Child_0"
-        assert result["parent_path"] is None
-
-    # -- add_component --
-
-    def test_add_component_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """add_component creates and returns component path."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "AddComponentByClass":
-                return FakeResponse({
-                    "ReturnValue": "/Game/Maps/Test.Test:PersistentLevel.Cube_0.PointLight_0"
-                })
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.add_component(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Cube_0",
-            component_class="PointLightComponent",
-            component_name="PointLight_0",
-        ))
-
-        assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
-        assert result["component_class"] == "PointLightComponent"
-        assert "PointLight_0" in result["component_path"]
+    # set_actor_parent and add_component run editor scripts:
+    # tests/unreal/test_actor_hierarchy.py runs them against a fake editor.
 
     # -- set_actor_visibility --
 
@@ -1403,24 +1342,30 @@ class TestUnrealRuntimeSessionPhase4:
     def test_set_render_settings_success(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """set_render_settings applies a console command."""
+        """set_render_settings sets the variable in one script and reads it back."""
         session = self._make_session(monkeypatch)
+        scripts = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "ExecuteConsoleCommand":
-                return FakeResponse({})
-            return FakeResponse({}, 404)
+            scripts.append((json or {}).get("parameters", {}).get("PythonCommand", ""))
+            return python_json_response({"known": True, "previous_value": "100", "value": "75"})
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
         result = asyncio.run(session.set_render_settings(
             setting_name="r.ScreenPercentage",
-            setting_value="100",
+            setting_value="75",
         ))
 
-        assert result["setting_name"] == "r.ScreenPercentage"
-        assert result["applied"] is True
+        assert result == {
+            "setting_name": "r.ScreenPercentage",
+            "requested_value": "75",
+            "previous_value": "100",
+            "value": "75",
+            "applied": True,
+        }
+        (script,) = scripts
+        assert "args = {'name': 'r.ScreenPercentage', 'value': '75'}" in script
 
 
 class TestUnrealRuntimeSessionPhase5:
@@ -1615,21 +1560,22 @@ class TestUnrealRuntimeSessionPhase7:
         session._session = SmartFakeClientSession(put_responses={
             "/remote/batch": FakeResponse({
                 "Responses": [
-                    {"RequestId": "1", "ResponseCode": 200},
-                    {"RequestId": "2", "ResponseCode": 500},
+                    {"RequestId": 1, "ResponseCode": 200},
+                    {"RequestId": 2, "ResponseCode": 500},
                 ],
             }),
         })
 
         ops = [
-            {"RequestId": "1", "Url": "/remote/object/call", "Verb": "PUT", "Body": {}},
-            {"RequestId": "2", "Url": "/remote/object/call", "Verb": "PUT", "Body": {}},
+            {"RequestId": 1, "Url": "/remote/object/call", "Verb": "PUT", "Body": {}},
+            {"RequestId": 2, "Url": "/remote/object/call", "Verb": "PUT", "Body": {}},
         ]
         result = asyncio.run(session.batch_operations(operations=ops))
 
         assert result["total"] == 2
         assert result["succeeded"] == 1
         assert result["failed"] == 1
+        assert result["results"][1]["error_type"] == "EngineError"
 
     def test_generate_procedural_scene_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """generate_procedural_scene spawns the planned pieces in one editor script."""

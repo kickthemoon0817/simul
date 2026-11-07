@@ -1433,7 +1433,8 @@
    "tool": "set_unreal_actor_parent",
    "case": "required",
    "arguments": {
-    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0"
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0"
    },
    "envelope": [
     {
@@ -1448,7 +1449,8 @@
      "method": "set_actor_parent",
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
-      "parent_path": null
+      "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0",
+      "detach": false
      }
     }
    ],
@@ -1470,7 +1472,8 @@
    "case": "every argument",
    "arguments": {
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
-    "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0"
+    "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0",
+    "detach": false
    },
    "envelope": [
     {
@@ -1485,7 +1488,8 @@
      "method": "set_actor_parent",
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
-      "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0"
+      "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0",
+      "detach": false
      }
     }
    ],
@@ -1523,7 +1527,8 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "component_class": "PointLightComponent",
-      "component_name": null
+      "component_name": null,
+      "parent_component": null
      }
     }
    ],
@@ -1546,7 +1551,8 @@
    "arguments": {
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
     "component_class": "PointLightComponent",
-    "component_name": "Lamp"
+    "component_name": "Lamp",
+    "parent_component": "Base"
    },
    "envelope": [
     {
@@ -1562,7 +1568,8 @@
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
       "component_class": "PointLightComponent",
-      "component_name": "Lamp"
+      "component_name": "Lamp",
+      "parent_component": "Base"
      }
     }
    ],
@@ -3156,12 +3163,7 @@
     {
      "method": "batch_operations",
      "arguments": {
-      "operations": [
-       {
-        "objectPath": "/Script/Engine.Default__KismetSystemLibrary",
-        "functionName": "GetEngineVersion"
-       }
-      ]
+      "operations": "[{\"objectPath\": \"/Script/Engine.Default__KismetSystemLibrary\", \"functionName\": \"GetEngineVersion\"}]"
      }
     }
    ],
@@ -4635,6 +4637,83 @@
    ]
   },
   {
+   "tool": "set_unreal_actor_parent",
+   "case": "invalid",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "parent_path": ""
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_parent",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorParentResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "Pass parent_path to attach the actor, or detach=true to detach it from its parent",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "parent_path": "",
+       "detach": false
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "Pass parent_path to attach the actor, or detach=true to detach it from its parent"
+    }
+   ]
+  },
+  {
+   "tool": "set_unreal_actor_parent",
+   "case": "invalid",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0",
+    "detach": true
+   },
+   "envelope": [
+    {
+     "tool": "set_unreal_actor_parent",
+     "label": "Unreal",
+     "response_model": "UnrealSetActorParentResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "Pass parent_path to attach the actor, or detach=true to detach it from its parent, not both",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "parent_path": "/Game/Maps/Test.Test:PersistentLevel.Table_0",
+       "detach": true
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "Pass parent_path to attach the actor, or detach=true to detach it from its parent, not both"
+    }
+   ]
+  },
+  {
    "tool": "control_unreal_ui",
    "case": "invalid",
    "arguments": {
@@ -4774,20 +4853,24 @@
      "params": null
     }
    ],
-   "session": [],
+   "session": [
+    {
+     "method": "batch_operations",
+     "arguments": {
+      "operations": "not json"
+     }
+    }
+   ],
    "result": {
     "is_error": false,
     "payload": {
-     "success": false,
-     "error": "Expecting value: line 1 column 1 (char 0)",
-     "error_type": "JSONDecodeError",
-     "details": null
+     "success": true,
+     "method": "batch_operations"
     }
    },
    "usage": [
     {
-     "success": false,
-     "error": "Expecting value: line 1 column 1 (char 0)"
+     "success": true
     }
    ]
   },
