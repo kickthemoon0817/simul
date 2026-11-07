@@ -224,22 +224,15 @@ print(json.dumps({{'saved': bool(les.save_current_level())}}))
             assert [p["code"] for p in refused["details"]["problems"]] == ["NO_PHYSICS_COLLISION"], refused
             assert (await physics_state(client, sensor))["actors"][sensor]["simulate"] is False
 
-            # Saving the dirty packages writes the edits, and they survive a reload.
-            # Only /Game packages: Save All would also write any dirty engine or
-            # plugin package into the shared engine install. The packages are held
-            # inside a function only: a Python reference to the old map's package
-            # when load_map replaces it is a world leak, which Unreal makes fatal
-            # (EditorServer.cpp CheckForWorldGCLeaks, UE 5.7.4).
+            # Saving the test's own map writes the edits, and they survive a reload.
+            # Never Save All here: an earlier import in the same editor can leave
+            # engine or plugin content dirty, and Save All writes it into the
+            # shared engine install.
             reloaded = await client._execute_json_script(f"""
 import unreal, json
-def save_game_packages():
-    ls = unreal.EditorLoadingAndSavingUtils
-    packages = [p for p in list(ls.get_dirty_map_packages()) + list(ls.get_dirty_content_packages())
-                if p.get_name().startswith('/Game/')]
-    return bool(ls.save_packages(packages, True))
-saved = save_game_packages()
+ok = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).save_current_level()
 unreal.EditorLoadingAndSavingUtils.load_map({level!r})
-print(json.dumps({{'saved': saved}}))
+print(json.dumps({{'saved': bool(ok)}}))
 """)
             assert reloaded == {"saved": True}, reloaded
             state = await physics_state(client, cube, ghost)
