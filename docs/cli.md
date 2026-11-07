@@ -119,6 +119,7 @@ lifecycle.
 | `ping` | Check connectivity |
 | `runtime-info` | Transport, bridge state (`busy`, `current_action`) and runtime diagnostics |
 | `interrupt` | Stop the script the bridge is running |
+| `claims [--port N] [--agent ID] [--clear]` | List the instance claims the MCP servers on this machine hold, or clear them ([configuration.md](configuration.md#multi-agent-claims)) |
 | `bridge-capabilities` / `bridge-config` | Read the bridge's capability envelope or settings |
 | `bridge-set-unsafe --enable/--disable [--restart]` | Toggle the bridge's raw `execute_script` action (not a security boundary; see [configuration.md](configuration.md#security)) |
 
