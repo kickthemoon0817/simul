@@ -1114,3 +1114,57 @@ def test_attach_blender_window_names_why_an_instance_cannot_be_attached(
     assert says in payload["error"]
     assert "exited" not in payload["error"]
     assert [entry["instance_id"] for entry in payload["details"]["instances"]] == ["one"]
+
+
+@pytest.mark.parametrize("instance_id", ["one", None])
+def test_attach_names_an_add_on_built_for_another_protocol(
+    settings: Settings,
+    advertised: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_fastmcp: Any,
+    instance_id: Optional[str],
+) -> None:
+    """Live review: an add-on of the previous protocol was told to "Enable the add-on"."""
+    endpoint, _ = advertised
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        BridgeFiles.write(
+            Path(settings.blender.discovery_dir) / "instance-one.json",
+            {**endpoint, "port": listener.getsockname()[1], "protocol": PROTOCOL_VERSION - 1},
+        )
+        server = SimulMCPServer(settings, backends={"blender"})
+        tool = next(t for t in server.mcp.tools if t.name == "attach_blender_window")
+        payload = json.loads(asyncio.run(tool.func(instance_id=instance_id)).content[0].text)
+        # The add-on was only seen to listen: it was sent nothing.
+        accepted, _ = listener.accept()
+        with accepted:
+            accepted.settimeout(1)
+            assert accepted.recv(1) == b""
+
+    assert payload["success"] is False
+    assert payload["error_type"] == "ProtocolMismatch", payload
+    assert f"speaks protocol {PROTOCOL_VERSION - 1}" in payload["error"]
+    assert "simul blender install-bridge" in payload["error"]
+    assert "Enable the Simul Blender Bridge add-on" not in payload["error"]
+    assert payload["details"]["instances"][0]["protocol_mismatch"] is True
+
+
+def test_a_stale_record_of_another_protocol_is_not_called_a_mismatch(
+    settings: Settings, advertised: tuple
+) -> None:
+    """A Blender that exited leaves its record; the rebuild advice would not apply to it."""
+    endpoint, _ = advertised
+    with socket.socket() as closed:
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+    BridgeFiles.write(
+        Path(settings.blender.discovery_dir) / "instance-one.json",
+        {**endpoint, "port": port, "protocol": PROTOCOL_VERSION - 1},
+    )
+    attachments = BlenderAttachments(settings)
+    [entry] = attachments.instances()
+    assert entry["reachable"] is False
+    assert entry["protocol_mismatch"] is False
+    with pytest.raises(RuntimeError, match="No matching GUI Blender bridge"):
+        attachments.attach()

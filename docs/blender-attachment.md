@@ -28,8 +28,9 @@ server dependencies into Blender. After upgrading Simul, rebuild and reinstall
 the ZIP. Restart Blender before attaching again so all loaded bridge modules
 use the new version; Simul does not restart the editor automatically. A server
 and an add-on that speak different bridge protocols refuse each other with the
-`install-bridge` fix instead of misreading a call; protocol 5 is the first that
-records agent edits as undo steps.
+`install-bridge` fix instead of misreading a call (`error_type:
+"ProtocolMismatch"`); protocol 5 is the first that records agent edits as undo
+steps, and protocol 13 the first whose requests start with their token.
 
 ## Select and verify the target
 
@@ -53,8 +54,11 @@ An `instance_id` that no running Blender has is refused with
 `error_type: "NotFoundError"` and the IDs and PIDs of the instances there are.
 One whose Blender took the connection but did not answer within 2 seconds is
 `InstanceBusy` (a long script, render or modal dialog holds its main thread;
-attach again once it is free), and one that refused the connection is
-`AttachmentStale`.
+attach again once it is free), one that refused the connection is
+`AttachmentStale`, and one whose add-on speaks another bridge protocol is
+`ProtocolMismatch`, with the `install-bridge` fix; `instances` marks such an
+instance `protocol_mismatch: true`. Attaching without an `instance_id` reports
+a busy or mismatched instance the same way when no other one answers.
 
 The existing Blender and SimReady MCP tools use this connection. For example,
 `get_blender_info` reports the selected process/window and `create_blender_object`

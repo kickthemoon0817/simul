@@ -83,6 +83,12 @@ def protocol_mismatch_message(addon: Any, server: Any) -> str:
     )
 
 
+class ProtocolMismatch(ValueError):
+    """The add-on speaks another bridge protocol; the message says how to rebuild it."""
+
+    error_type = "ProtocolMismatch"
+
+
 class BridgeRemoteError(RuntimeError):
     """A rejected operation, with the remote policy diagnostic preserved."""
 
@@ -206,9 +212,11 @@ class BridgeWire:
             BridgeConnectionLost: The connection ended before the reply.
             ConnectionRefusedError: Nothing listens on the endpoint.
             BridgeRemoteError: The add-on refused or failed the request.
+            ProtocolMismatch: The add-on's discovery record names another
+                protocol; nothing was sent.
         """
         if endpoint.get("protocol") != PROTOCOL_VERSION:
-            raise ValueError(
+            raise ProtocolMismatch(
                 protocol_mismatch_message(endpoint.get("protocol"), PROTOCOL_VERSION)
             )
         if endpoint.get("host") != "127.0.0.1":

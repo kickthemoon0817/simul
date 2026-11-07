@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import inspect
 import logging
+import socket
 import time
 import uuid
 import zipfile
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..blender_bridge.protocol import BridgeFiles, BridgeRemoteError, BridgeWire
+from ..blender_bridge.protocol import BridgeFiles, BridgeRemoteError, BridgeWire, ProtocolMismatch
 from ..config import Settings
 from ..utils.discovery import DiscoveryDir
 from ..utils.paths import PathPolicy, SandboxDenied
@@ -63,6 +64,12 @@ class InstanceBusy(AttachmentError):
     """The Blender instance is running but did not answer in time: its main thread is busy."""
 
     error_type = "InstanceBusy"
+
+
+class InstanceProtocolMismatch(AttachmentError):
+    """The Blender instance runs an add-on built for another bridge protocol."""
+
+    error_type = "ProtocolMismatch"
 
 
 class BlenderRequestTimeout(TimeoutError):
@@ -382,10 +389,26 @@ class BlenderAttachments:
                         # A bridge that took the connection but did not answer in
                         # time is running with its main thread busy.
                         "busy": isinstance(exc, TimeoutError),
+                        # Its add-on was built for another protocol, so it was not
+                        # asked; a record whose Blender has exited is merely stale.
+                        "protocol_mismatch": isinstance(exc, ProtocolMismatch)
+                        and self._listening(endpoint),
                         "error": str(exc),
                     }
                 )
         return results
+
+    @staticmethod
+    def _listening(endpoint: dict[str, Any]) -> bool:
+        """Whether something accepts connections on the record's port; nothing is sent."""
+        port = endpoint.get("port")
+        if endpoint.get("host") != "127.0.0.1" or type(port) is not int or not 1 <= port <= 65535:
+            return False
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return True
+        except OSError:
+            return False
 
     def attach(
         self, instance_id: str | None = None, window_id: str | None = None
@@ -404,6 +427,9 @@ class BlenderAttachments:
             busy = [entry for entry in entries if entry.get("busy")]
             if busy:
                 raise self._busy(busy[0]["instance_id"], entries)
+            outdated = [entry for entry in entries if entry.get("protocol_mismatch")]
+            if outdated:
+                raise self._mismatch(outdated[0], entries)
             raise RuntimeError(
                 "No matching GUI Blender bridge. Enable the Simul Blender Bridge add-on in the existing window."
             )
@@ -437,11 +463,20 @@ class BlenderAttachments:
             {"instance_id": instance_id, "instances": self._known(entries)},
         )
 
+    def _mismatch(self, entry: dict[str, Any], entries: list[dict[str, Any]]) -> InstanceProtocolMismatch:
+        instance_id = entry["instance_id"]
+        return InstanceProtocolMismatch(
+            f"Blender instance {instance_id} cannot be attached: {entry.get('error')}",
+            {"instance_id": instance_id, "instances": self._known(entries)},
+        )
+
     def _no_instance(self, instance_id: str, entries: list[dict[str, Any]]) -> AttachmentError:
         """Explain why ``instance_id`` cannot be attached, naming the instances there are."""
         entry = next((e for e in entries if e["instance_id"] == instance_id), None)
         if entry is not None and entry.get("busy"):
             return self._busy(instance_id, entries)
+        if entry is not None and entry.get("protocol_mismatch"):
+            return self._mismatch(entry, entries)
         details = {"instance_id": instance_id, "instances": self._known(entries)}
         if entry is not None and not entry["reachable"]:
             return AttachmentStale(
