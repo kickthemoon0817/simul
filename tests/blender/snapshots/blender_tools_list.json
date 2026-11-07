@@ -1865,19 +1865,202 @@
     "apply_simready_metadata": {
       "name": "apply_simready_metadata",
       "title": "Apply Simready Metadata",
-      "description": "Apply NVIDIA SimReady metadata (semantic labels, physics properties, material info) to a Blender object as custom properties. Stored with simready_ prefix for USD export.",
+      "description": "Store NVIDIA SimReady metadata (semantic labels, physics properties, material info) on a Blender object as simready_ custom properties, which export_simready_usd writes as UsdPhysics and UsdSemantics schemas. Omitted fields keep their stored value; clear removes stored values. An additional label named after a field's taxonomy (class, hierarchy, wikidata_qcode) sets that field. Unknown fields, invalid values, Edit Mode and linked objects are refused, before anything changes.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "object_name": {"description": "Target Blender object.", "type": "string"},
           "metadata": {
-            "additionalProperties": true,
-            "description": "Dict with optional keys ``semantic``, ``physics``, ``material``, each containing relevant sub-fields.",
-            "type": "object"
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "description": "Combined SimReady metadata for an asset.\n\nGroups semantic, physics, and material properties into a single model\nthat is stored as Blender custom properties with a ``simready_`` prefix\nand written by export_simready_usd.",
+                "properties": {
+                  "semantic": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "description": "Semantic labeling for SimReady assets.\n\nexport_simready_usd writes each field as a UsdSemantics LabelsAPI taxonomy\n(``class``, ``hierarchy``, ``wikidata_qcode``, and each additional label's\nkey), or with Isaac Sim's SemanticsAPI convention where Blender's USD has\nno UsdSemantics. Validation requires a label of some taxonomy on each mesh\nor an exported object above it.",
+                        "properties": {
+                          "semantic_class": {
+                            "anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}],
+                            "default": null,
+                            "description": "Human-readable classification, e.g. 'cup', 'truck'"
+                          },
+                          "semantic_hierarchy": {
+                            "anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}],
+                            "default": null,
+                            "description": "Ordered relational hierarchy, e.g. 'machine/vehicle/emergency_vehicle/fire_engine'"
+                          },
+                          "semantic_qcode": {
+                            "anyOf": [{"pattern": "^Q[1-9][0-9]*$", "type": "string"}, {"type": "null"}],
+                            "default": null,
+                            "description": "Wikidata Q-code, e.g. 'Q1420'"
+                          },
+                          "additional_labels": {
+                            "anyOf": [
+                              {
+                                "patternProperties": {"^[A-Za-z_][A-Za-z0-9_]*$": {"minLength": 1, "type": "string"}},
+                                "type": "object"
+                              },
+                              {"type": "null"}
+                            ],
+                            "default": null,
+                            "description": "Custom labels such as sku or product_id; each key becomes a semantics taxonomy, so it must be an identifier. A key that is a field's taxonomy (class, hierarchy, wikidata_qcode, or the older qcode) sets that field instead, and must not disagree with it"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      {"type": "null"}
+                    ],
+                    "default": null,
+                    "description": "Semantic labeling data"
+                  },
+                  "physics": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "description": "Physics properties for SimReady assets.\n\nexport_simready_usd writes them as UsdPhysics schemas: RigidBodyAPI,\nMassAPI, CollisionAPI with a MeshCollisionAPI approximation on the meshes,\nand a physics material (UsdPhysics.MaterialAPI) bound with the physics\npurpose. collider_type and the friction values also apply to meshes below\nthe object that set none of their own.",
+                        "properties": {
+                          "mass_kg": {
+                            "anyOf": [{"minimum": 0.0, "type": "number"}, {"type": "null"}],
+                            "default": null,
+                            "description": "Mass in kilograms"
+                          },
+                          "collider_type": {
+                            "anyOf": [
+                              {
+                                "enum": [
+                                  "convexHull",
+                                  "convexDecomposition",
+                                  "meshSimplification",
+                                  "none",
+                                  "boundingCube",
+                                  "boundingSphere",
+                                  "mesh",
+                                  "box",
+                                  "sphere",
+                                  "capsule"
+                                ],
+                                "type": "string"
+                              },
+                              {"type": "null"}
+                            ],
+                            "default": null,
+                            "description": "UsdPhysics mesh collision approximation: convexHull, convexDecomposition, meshSimplification, none (the triangle mesh), boundingCube or boundingSphere; also mesh, box, sphere and capsule (written as none, boundingCube, boundingSphere and convexHull)"
+                          },
+                          "static_friction": {
+                            "anyOf": [{"minimum": 0.0, "type": "number"}, {"type": "null"}],
+                            "default": null,
+                            "description": "Static friction coefficient"
+                          },
+                          "dynamic_friction": {
+                            "anyOf": [{"minimum": 0.0, "type": "number"}, {"type": "null"}],
+                            "default": null,
+                            "description": "Dynamic friction coefficient"
+                          },
+                          "restitution": {
+                            "anyOf": [{"maximum": 1.0, "minimum": 0.0, "type": "number"}, {"type": "null"}],
+                            "default": null,
+                            "description": "Restitution (bounciness)"
+                          },
+                          "density": {
+                            "anyOf": [{"minimum": 0.0, "type": "number"}, {"type": "null"}],
+                            "default": null,
+                            "description": "Material density in kg/m³"
+                          },
+                          "is_rigid_body": {
+                            "anyOf": [{"type": "boolean"}, {"type": "null"}],
+                            "default": null,
+                            "description": "Whether the object is a rigid body; false clears an earlier true"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      {"type": "null"}
+                    ],
+                    "default": null,
+                    "description": "Physics properties"
+                  },
+                  "material": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "description": "Material properties for SimReady assets.\n\nStored as metadata only: export_simready_usd keeps them as userProperties\nattributes; no USD schema carries them.",
+                        "properties": {
+                          "substrate_type": {
+                            "anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}],
+                            "default": null,
+                            "description": "Physical substrate, e.g. metal, wood, plastic, glass, rubber, fabric, ceramic, concrete, stone"
+                          },
+                          "material_naming": {
+                            "anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}],
+                            "default": null,
+                            "description": "SimReady material name: prefix_surfacetype_description, e.g. 'opaque_metal_brushed_aluminum'"
+                          },
+                          "shader_type": {
+                            "anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}],
+                            "default": null,
+                            "description": "Target shader, e.g. OmniPBR, OmniGlass, SimPBR"
+                          },
+                          "texel_density": {
+                            "anyOf": [{"exclusiveMinimum": 0.0, "type": "number"}, {"type": "null"}],
+                            "default": null,
+                            "description": "Target texel density in pixels per meter"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      {"type": "null"}
+                    ],
+                    "default": null,
+                    "description": "Material properties"
+                  }
+                },
+                "type": "object"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "The ``semantic``, ``physics`` and ``material`` groups to store."
+          },
+          "clear": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "semantic_class",
+                    "semantic_hierarchy",
+                    "semantic_qcode",
+                    "mass_kg",
+                    "collider_type",
+                    "static_friction",
+                    "dynamic_friction",
+                    "restitution",
+                    "density",
+                    "is_rigid_body",
+                    "substrate_type",
+                    "material_naming",
+                    "shader_type",
+                    "texel_density",
+                    "semantic",
+                    "physics",
+                    "material",
+                    "additional_labels",
+                    "all"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "Stored values to remove: field names such as mass_kg, a group (semantic, physics, material), additional_labels, or all."
           }
         },
-        "required": ["object_name", "metadata"]
+        "required": ["object_name"]
       },
       "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
@@ -1885,7 +2068,7 @@
     "get_simready_metadata": {
       "name": "get_simready_metadata",
       "title": "Get Simready Metadata",
-      "description": "Read NVIDIA SimReady metadata from a Blender object. Returns semantic labels, physics properties, and material info stored as simready_ custom properties.",
+      "description": "Read NVIDIA SimReady metadata from a Blender object: semantic labels, physics properties and material info stored as simready_ custom properties. Stored values that break the rules are listed in invalid_values instead of failing the call.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1898,7 +2081,7 @@
     "validate_simready_compliance": {
       "name": "validate_simready_compliance",
       "title": "Validate Simready Compliance",
-      "description": "Validate Blender objects against NVIDIA SimReady conventions: naming (lowercase_underscore), scale (meters), clean transforms, material segmentation, hierarchy.",
+      "description": "Validate the Blender objects export_simready_usd would export against the SimReady Robotics-Prop rules and Isaac Sim's asset checks; any error makes them non-compliant. Errors: an asset root that is not the identity, a rigid body skewed in the world, no material, no semantic label on a mesh or an exported object above it, invalid stored values, a rigid body without mass, without a collider or nested in another with no joint, a constraint the export cannot write as a joint (MOTOR), degenerate faces. Warnings: names, sizes and units, scaled parts, an empty slot faces use, missing colliders, what a joint leaves out, UVs, n-gons. Filter by severity and page with offset/limit (next_offset).",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1906,13 +2089,57 @@
           "object_names": {
             "anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}],
             "default": null,
-            "description": "Objects to check.  ``None`` checks all mesh objects."
+            "description": "Objects to check, each with its descendants unless include_children is false. Null checks the scene's objects that are visible in renders. An empty list is refused."
           },
-          "check_naming": {"default": true, "description": "Validate naming convention.", "type": "boolean"},
-          "check_scale": {"default": true, "description": "Validate real-world meter scale.", "type": "boolean"},
-          "check_transforms": {"default": true, "description": "Validate clean transforms.", "type": "boolean"},
-          "check_materials": {"default": true, "description": "Validate material segmentation.", "type": "boolean"},
-          "check_hierarchy": {"default": true, "description": "Validate hierarchy structure.", "type": "boolean"}
+          "check_naming": {
+            "default": true,
+            "description": "Validate object, material and mesh-data names.",
+            "type": "boolean"
+          },
+          "check_scale": {
+            "default": true,
+            "description": "Validate real-world size in the scene's units.",
+            "type": "boolean"
+          },
+          "check_transforms": {
+            "default": true,
+            "description": "Validate the asset root's and the parts' transforms.",
+            "type": "boolean"
+          },
+          "check_materials": {"default": true, "description": "Validate material slots.", "type": "boolean"},
+          "check_hierarchy": {"default": true, "description": "Validate hierarchy structure.", "type": "boolean"},
+          "check_metadata": {
+            "default": true,
+            "description": "Validate semantic labels, colliders and stored values.",
+            "type": "boolean"
+          },
+          "check_physics": {
+            "default": true,
+            "description": "Validate rigid bodies (mass, colliders, nesting) and the joints their constraints become.",
+            "type": "boolean"
+          },
+          "check_geometry": {
+            "default": true,
+            "description": "Validate UVs, n-gons and degenerate faces.",
+            "type": "boolean"
+          },
+          "include_children": {
+            "default": true,
+            "description": "Also check the descendants of the listed objects.",
+            "type": "boolean"
+          },
+          "severity": {
+            "default": "all",
+            "description": "Return all issues, or only error or warning issues.",
+            "enum": ["all", "error", "warning"],
+            "type": "string"
+          },
+          "offset": {"default": 0, "description": "Index of the first issue returned.", "type": "integer"},
+          "limit": {
+            "default": 50,
+            "description": "Most issues returned (1 to 500); next_offset gives the next page.",
+            "type": "integer"
+          }
         }
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
@@ -1921,7 +2148,7 @@
     "export_simready_usd": {
       "name": "export_simready_usd",
       "title": "Export Simready Usd",
-      "description": "Export Blender objects as a SimReady USD asset a simulator reads: from the simready_ metadata it authors UsdPhysics rigid bodies, mass, mesh colliders and physics materials, and UsdSemantics labels. The asset root is the default prim and holds its materials; metersPerUnit follows the scene's Unit Scale. Listed objects export with their descendants, hidden ones too; lights, cameras and the World are left out by default. Refuses when validation finds errors unless force=true. Returns each object's prim path.",
+      "description": "Export Blender objects as a SimReady USD asset a simulator reads: from the simready_ metadata it authors UsdPhysics rigid bodies, mass, mesh colliders and physics materials, and UsdSemantics labels; rigid body constraints between exported objects become UsdPhysics joints (fixed, revolute, prismatic, spherical, D6 with limits). The asset root is the default prim and holds its materials and joints; metersPerUnit follows the scene's Unit Scale. Listed objects export with their descendants, hidden ones too; lights, cameras and the World are left out by default. Refuses when validation finds errors; skip_checks leaves a check out, force=true ignores every error. Returns each object's prim path.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1937,7 +2164,11 @@
             "description": "Also keep the simready_ custom properties (and Blender's names) as userProperties attributes, which Blender's USD import reads back as custom properties.",
             "type": "boolean"
           },
-          "validate_before_export": {"default": true, "description": "Validate the meshes first.", "type": "boolean"},
+          "validate_before_export": {
+            "default": true,
+            "description": "First run every validate_simready_compliance check on the exported objects, the asset root included, after writing Edit Mode's edits back to the mesh.",
+            "type": "boolean"
+          },
           "include_children": {
             "default": true,
             "description": "Export the descendants of the listed objects.",
@@ -1952,6 +2183,29 @@
             "default": false,
             "description": "Export although validation found errors.",
             "type": "boolean"
+          },
+          "skip_checks": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "naming",
+                    "scale",
+                    "transforms",
+                    "materials",
+                    "hierarchy",
+                    "metadata",
+                    "physics",
+                    "geometry"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "Validation checks to leave out (naming, scale, transforms, materials, hierarchy, metadata, physics, geometry), so that one check that does not apply does not need force, which also lets every other error through."
           }
         },
         "required": ["file_path"]
@@ -1962,21 +2216,64 @@
     "setup_simready_hierarchy": {
       "name": "setup_simready_hierarchy",
       "title": "Setup Simready Hierarchy",
-      "description": "Create a SimReady-compliant object hierarchy in Blender with a root empty (XForm equivalent) and parent the given children under it. Optionally applies semantic labels to the root.",
+      "description": "Put Blender objects under a SimReady root empty (an Xform in the USD), keeping where they are, also for objects in excluded collections, skewed by a parent or under constraints. Only listed objects without a listed ancestor are re-parented; existing nesting stays. Needs Object Mode; refuses linked objects. Checks everything first and changes nothing on failure; an existing root name is refused unless reuse_root=true. Optionally stores semantic labels on the root.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "root_name": {"description": "Name for the root empty object.", "type": "string"},
+          "root_name": {
+            "description": "Name for the root empty: a USD identifier (letters, digits and underscores, not starting with a digit).",
+            "type": "string"
+          },
           "child_names": {
-            "description": "Existing objects to parent under the root.",
+            "description": "Existing objects to put under the root.",
             "items": {"type": "string"},
             "type": "array"
           },
           "semantic": {
-            "anyOf": [{"additionalProperties": true, "type": "object"}, {"type": "null"}],
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "description": "Semantic labeling for SimReady assets.\n\nexport_simready_usd writes each field as a UsdSemantics LabelsAPI taxonomy\n(``class``, ``hierarchy``, ``wikidata_qcode``, and each additional label's\nkey), or with Isaac Sim's SemanticsAPI convention where Blender's USD has\nno UsdSemantics. Validation requires a label of some taxonomy on each mesh\nor an exported object above it.",
+                "properties": {
+                  "semantic_class": {
+                    "anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}],
+                    "default": null,
+                    "description": "Human-readable classification, e.g. 'cup', 'truck'"
+                  },
+                  "semantic_hierarchy": {
+                    "anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}],
+                    "default": null,
+                    "description": "Ordered relational hierarchy, e.g. 'machine/vehicle/emergency_vehicle/fire_engine'"
+                  },
+                  "semantic_qcode": {
+                    "anyOf": [{"pattern": "^Q[1-9][0-9]*$", "type": "string"}, {"type": "null"}],
+                    "default": null,
+                    "description": "Wikidata Q-code, e.g. 'Q1420'"
+                  },
+                  "additional_labels": {
+                    "anyOf": [
+                      {
+                        "patternProperties": {"^[A-Za-z_][A-Za-z0-9_]*$": {"minLength": 1, "type": "string"}},
+                        "type": "object"
+                      },
+                      {"type": "null"}
+                    ],
+                    "default": null,
+                    "description": "Custom labels such as sku or product_id; each key becomes a semantics taxonomy, so it must be an identifier. A key that is a field's taxonomy (class, hierarchy, wikidata_qcode, or the older qcode) sets that field instead, and must not disagree with it"
+                  }
+                },
+                "type": "object"
+              },
+              {"type": "null"}
+            ],
             "default": null,
-            "description": "Optional semantic labels dict to apply to the root."
+            "description": "Semantic labels to store on the root."
+          },
+          "reuse_root": {
+            "default": false,
+            "description": "Put the objects under an existing empty named root_name; without it, an existing object of that name is refused.",
+            "type": "boolean"
           }
         },
         "required": ["root_name", "child_names"]
