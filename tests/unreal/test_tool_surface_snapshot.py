@@ -92,8 +92,21 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
     },
     "get_unreal_engine_info": {},
     "get_unreal_loaded_map": {},
-    "list_unreal_actors": {"class_filter": "StaticMeshActor", "tag_filter": "Prop", "max_results": 5},
+    "list_unreal_actors": {
+        "class_filter": "StaticMeshActor",
+        "tag_filter": "Prop",
+        "max_results": 5,
+        "offset": 10,
+        "label_filter": "Chair",
+        "include_subclasses": True,
+    },
     "get_unreal_actor_info": {"actor_path": ACTOR},
+    "list_unreal_actor_components": {
+        "actor_path": ACTOR,
+        "class_filter": "PrimitiveComponent",
+        "offset": 2,
+        "max_results": 3,
+    },
     "search_unreal_assets": {
         "query": "chair",
         "class_names": " StaticMesh, ,Material ",
@@ -211,6 +224,9 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "max_depth": 3,
         "include_components": True,
         "class_filter": "StaticMeshActor",
+        "include_subclasses": True,
+        "offset": 6,
+        "max_results": 7,
     },
     "analyze_unreal_scene_for_robotics": {"analysis_types": "traversability, ,graspability", "actor_filter": "Prop"},
     "generate_unreal_procedural_scene": {
@@ -219,7 +235,7 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "bounds_min": "-100,-100,0",
         "bounds_max": "100, 100, 50",
     },
-    "get_unreal_actor_by_semantic_label": {"label": "chair", "match_mode": "contains", "max_results": 9},
+    "get_unreal_actor_by_semantic_label": {"label": "chair", "match_mode": "contains", "max_results": 9, "offset": 4},
     "generate_unreal_mesh_primitive": {
         "primitive_type": "box",
         "dimensions": '{"x": 100}',

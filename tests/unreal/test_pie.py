@@ -131,6 +131,12 @@ class Actor:
     def get_all_child_actors(self, include_descendants: bool = True) -> List[Any]:
         return []
 
+    def get_attach_parent_actor(self) -> Optional["Actor"]:
+        return None
+
+    def get_attached_actors(self) -> List["Actor"]:
+        return []
+
     def actor_has_tag(self, tag: str) -> bool:
         return tag in self.tags
 

@@ -316,6 +316,12 @@ class Actor:
     def actor_has_tag(self, tag):
         return tag in self.get_editor_property("tags")
 
+    def get_attach_parent_actor(self):
+        return None
+
+    def get_attached_actors(self):
+        return []
+
 
 @pytest.fixture
 def script_session(monkeypatch, tmp_path):
