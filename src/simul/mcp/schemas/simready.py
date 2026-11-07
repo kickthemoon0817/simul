@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+
 class SimReadySemanticLabels(BaseModel):
     """
     Semantic labeling for SimReady assets.
@@ -93,7 +94,10 @@ class SimReadyMaterialProperties(BaseModel):
     )
     shader_type: Optional[str] = Field(
         None,
-        description="Target shader: OmniPBR, OmniGlass, SimPBR",
+        description=(
+            "Target shader recorded as metadata (OmniPBR, OmniGlass, SimPBR). Blender's USD "
+            "exporter still writes UsdPreviewSurface materials; it cannot write OmniPBR or MDL"
+        ),
     )
     texel_density: Optional[float] = Field(
         None, gt=0.0, description="Target texel density in pixels per meter"
@@ -262,6 +266,7 @@ class SimReadySetupHierarchyResponse(BaseModel):
     root_name: str = Field(..., description="Root empty name")
     children: List[str] = Field(..., description="Successfully parented children")
     hierarchy_path: str = Field(..., description="Logical hierarchy path from root")
+
 
 __all__ = [
     "SimReadySemanticLabels",

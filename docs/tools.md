@@ -335,7 +335,7 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | Scene and files | `get_blender_info`, `get_blender_file_info`, `summarize_blender_scene`, `list_blender_scene_objects`, `search_blender_objects`, `open_blender_file`, `save_blender_file`, `import_blender_file`, `export_blender_file` |
 | Objects | `create_blender_object`, `delete_blender_object`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `clean_blender_mesh`, `get_blender_mesh_info`, `add_blender_modifier`, `apply_blender_modifier`, `remove_blender_modifier` |
 | Measurement | `get_blender_bounding_box`, `check_blender_object_bounds`, `get_blender_distance_between` |
-| Materials and lights | `get_blender_material_info`, `assign_blender_material`, `set_blender_light_params` |
+| Materials and lights | `get_blender_material_info`, `assign_blender_material`, `uv_unwrap_blender_mesh`, `set_blender_light_params` |
 | Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake` |
 | Animation | `get_blender_frame`, `set_blender_frame`, `set_blender_frame_range`, `play_blender_animation`, `insert_blender_keyframe`, `delete_blender_keyframe`, `get_blender_keyframes`, `get_blender_object_trajectory` |
 | Camera and viewport | `get_blender_camera_info`, `set_blender_camera_view`, `get_blender_viewport_info`, `focus_blender_on_object`, `capture_blender_viewport`, `capture_blender_viewport_sequence` |
@@ -404,6 +404,63 @@ Behaviour worth knowing:
   whose render settings differ (`show_render`, Subdivision `render_levels`).
   An object Blender does not evaluate (outside the view layer) has null
   evaluated counts.
+- `assign_blender_material` reuses the material named `material_name` when it
+  exists, so repeating a call changes nothing more (it used to create
+  `name.001` each time); `reuse_existing: false` creates a new one. Shading
+  arguments left out keep the material's own values, so an existing or
+  imported material can be assigned as it is. By default the material replaces
+  the object's: it goes into slot 0 and every face uses slot 0 (a second
+  material used to land in a slot no face used, so the USD kept the first).
+  `slot_index` sets one slot (the slot count appends one) and leaves the faces
+  alone; `face_indices` assigns the material to those faces through its slot,
+  or a new one. `link: "OBJECT"` puts it on this object's slot, so linked
+  duplicates that share the mesh keep theirs. `base_color` is RGB or RGBA in
+  0-1: the alpha sets the Principled BSDF's Alpha (exported as USD
+  `opacity`) and, below 1, `surface_render_method: BLENDED`. Image files can
+  drive Base Color (sRGB), Metallic and Roughness (Non-Color), and Normal
+  through a Normal Map node; a new texture replaces the nodes of the old one.
+  Textures pass the filesystem sandbox, and a file Blender cannot read as an
+  image is refused. Textures need UV coordinates (`uv_unwrap_blender_mesh`);
+  a mesh without a UV map gets a warning. Everything is checked before the
+  scene changes, and a failure removes the material, slot and images the call
+  made. Writing face indices needs Object Mode. On Blender 5.0 the tool never
+  touches the deprecated `Material.use_nodes`. Blender's USD exporter writes
+  UsdPreviewSurface materials only: SimReady's `shader_type: OmniPBR` is
+  recorded as metadata, not produced.
+- `get_blender_material_info` reports the Principled BSDF that feeds the
+  active Material Output. An input a link drives reads `null` in
+  `principled_params` (its own value is unused) and appears in
+  `linked_inputs` with the source node and socket and, for an image texture,
+  also behind a Normal Map node, the image's path, colour space and whether it
+  is packed. `nodes` lists at most `max_nodes` (default 50), those feeding the
+  output first; `node_count` counts the whole tree.
+- `uv_unwrap_blender_mesh` generates UVs for every face: `SMART_PROJECT`
+  (islands split where faces meet at more than `angle_limit`, 66 degrees by
+  default, packed with `island_margin`) or `CUBE_PROJECT` (`cube_size`). It
+  writes `uv_map_name`, created when missing, else the active UV map, else a
+  new `UVMap`, which becomes active. The UV operators need Edit Mode, so the
+  object briefly becomes the active, only selected one; the mesh's selection,
+  the object selection and the active object are restored, and a failure
+  removes a UV map the call created. The object and Blender must be in Object
+  Mode, and a hidden object is refused.
+- `set_blender_light_params` checks each setting against the light's type
+  (after `light_type`, when given): `shadow_soft_size` is the radius of POINT
+  and SPOT lights, `spot_size` and `spot_blend` are SPOT's, `angle` is a sun's
+  softness, and `shape`, `size` and `size_y` (RECTANGLE and ELLIPSE) are an
+  area light's. A setting of another type is refused instead of ignored, a
+  value outside Blender's limits is refused instead of clamped, and energy
+  may not be negative. Nothing changes unless every value is valid, and the
+  reply reports every setting of the light's type as stored. Light data shared
+  by several objects is reported. Blender 5.0.1's USD exporter writes a point
+  or spot light as a SphereLight whose `radius` is `shadow_soft_size` (a
+  spot's cone as `shaping:cone:angle`, half of `spot_size` in degrees, and
+  `spot_blend` as its softness), a sun as a DistantLight whose `angle` is half
+  of the sun's `angle` in degrees, and an area light as a RectLight of
+  `size` x `size_y` (`size` x `size` for SQUARE) or a DiskLight of radius
+  `size` / 2.
+- Not covered by granular tools yet (use `execute_blender_script`): smooth
+  or flat shading and custom normals, and UV coordinates given with
+  `create_blender_mesh_from_data`.
 - `capture_blender_viewport` captures the 3D View the user sees in attached
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D

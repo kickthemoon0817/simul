@@ -12,7 +12,7 @@ import pytest
 
 from simul.adapters import blender_runtime
 from simul.config import SecurityConfig, Settings
-from tests.blender.mesh_fakes import FakeRNAProp, FakeRNAProperties
+from tests.blender.mesh_fakes import FakeBpy, FakeRNAProp, FakeRNAProperties
 from tests.fakes import (
     FakeAction,
     FakeActionSlot,
@@ -1210,43 +1210,10 @@ class TestObservationTools:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Material info extracts Principled BSDF parameters."""
-        base_color_sock = SimpleNamespace(default_value=[0.8, 0.2, 0.1, 1.0])
-        metallic_sock = SimpleNamespace(default_value=0.0)
-        roughness_sock = SimpleNamespace(default_value=0.5)
-
-        class FakeInputs:
-            """Fake node inputs with get()."""
-
-            _sockets = {
-                "Base Color": base_color_sock,
-                "Metallic": metallic_sock,
-                "Roughness": roughness_sock,
-            }
-
-            def get(self, name: str) -> Optional[Any]:
-                return self._sockets.get(name)
-
-        principled_node = SimpleNamespace(
-            name="Principled BSDF",
-            bl_idname="ShaderNodeBsdfPrincipled",
-            label="",
-            inputs=FakeInputs(),
-        )
-        output_node = SimpleNamespace(
-            name="Material Output",
-            bl_idname="ShaderNodeOutputMaterial",
-            label="",
-        )
-        node_tree = SimpleNamespace(nodes=[output_node, principled_node])
-        material = SimpleNamespace(
-            name="MetalMat",
-            use_nodes=True,
-            node_tree=node_tree,
-        )
-
-        fake_bpy = self._make_fake_bpy_with_objects(
-            [], materials={"MetalMat": material}
-        )
+        fake_bpy = FakeBpy(version=(4, 1, 0))
+        material = fake_bpy.data.materials.new("MetalMat")
+        material.use_nodes = True
+        material.principled.inputs["Base Color"].default_value = (0.8, 0.2, 0.1, 1.0)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
 
@@ -1275,25 +1242,10 @@ class TestObservationTools:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Blender 4.0+ uses 'Emission Color' socket name."""
-        emission_sock = SimpleNamespace(default_value=[1.0, 0.0, 0.0, 1.0])
-
-        class FakeInputs:
-            _sockets = {"Emission Color": emission_sock}
-
-            def get(self, name: str) -> Optional[Any]:
-                return self._sockets.get(name)
-
-        principled_node = SimpleNamespace(
-            name="Principled BSDF",
-            bl_idname="ShaderNodeBsdfPrincipled",
-            label="",
-            inputs=FakeInputs(),
-        )
-        node_tree = SimpleNamespace(nodes=[principled_node])
-        material = SimpleNamespace(name="Glow", use_nodes=True, node_tree=node_tree)
-        fake_bpy = self._make_fake_bpy_with_objects(
-            [], version=(4, 2, 0), materials={"Glow": material}
-        )
+        fake_bpy = FakeBpy(version=(4, 2, 0))
+        material = fake_bpy.data.materials.new("Glow")
+        material.use_nodes = True
+        material.principled.inputs["Emission Color"].default_value = (1.0, 0.0, 0.0, 1.0)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
 
@@ -6636,11 +6588,8 @@ class TestSceneManipulationTools:
 
     def test_assign_material(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Assign a material with custom BSDF params."""
-        mat_slots = FakeMaterialSlotList()
-        mesh_data = SimpleNamespace(materials=mat_slots)
-        obj = FakeObject("Cube", "MESH", True, data=mesh_data)
-        objs = {"Cube": obj}
-        fake_bpy = self._make_fake_bpy_with_manipulation(objects=objs)
+        fake_bpy = FakeBpy()
+        cube = fake_bpy.add_mesh_object("Cube", [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[0, 1, 2]])
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
@@ -6655,10 +6604,8 @@ class TestSceneManipulationTools:
 
         assert result["object_name"] == "Cube"
         assert result["material_name"] == "RedMetal"
-        assert len(mat_slots) == 1
-        # Verify BSDF node inputs were set
-        created_mat = fake_bpy._created_materials[0]
-        bsdf = created_mat.node_tree.nodes[0]
+        assert len(cube.material_slots) == 1
+        bsdf = fake_bpy.data.materials.get("RedMetal").principled
         assert bsdf.inputs["Metallic"].default_value == 1.0
         assert bsdf.inputs["Roughness"].default_value == 0.1
 
@@ -6666,14 +6613,13 @@ class TestSceneManipulationTools:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Assigning material to an empty (no data) raises ValueError."""
-        obj = FakeObject("Empty", "EMPTY", True, data=None)
-        objs = {"Empty": obj}
-        fake_bpy = self._make_fake_bpy_with_manipulation(objects=objs)
+        fake_bpy = FakeBpy()
+        fake_bpy.add_object("Empty", "EMPTY")
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
 
         session = blender_runtime.BlenderRuntimeSession()
-        with pytest.raises(ValueError, match="has no data"):
+        with pytest.raises(ValueError, match="takes no materials"):
             session.assign_material(object_name="Empty")
 
     # -- add_modifier --------------------------------------------------------

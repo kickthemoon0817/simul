@@ -53,6 +53,7 @@
       "execute_blender_script",
       "create_blender_mesh_from_data",
       "clean_blender_mesh",
+      "uv_unwrap_blender_mesh",
       "apply_simready_metadata",
       "get_simready_metadata",
       "validate_simready_compliance",
@@ -123,6 +124,7 @@
       "execute_blender_script",
       "create_blender_mesh_from_data",
       "clean_blender_mesh",
+      "uv_unwrap_blender_mesh",
       "apply_simready_metadata",
       "get_simready_metadata",
       "validate_simready_compliance",
@@ -192,6 +194,7 @@
       "free_blender_bake",
       "create_blender_mesh_from_data",
       "clean_blender_mesh",
+      "uv_unwrap_blender_mesh",
       "apply_simready_metadata",
       "get_simready_metadata",
       "validate_simready_compliance",
@@ -387,11 +390,14 @@
     "get_blender_material_info": {
       "name": "get_blender_material_info",
       "title": "Get Blender Material Info",
-      "description": "Get material information with bounded node tree traversal.",
+      "description": "Get a Blender material's Principled BSDF values and what drives them: an input a link drives reads null in principled_params, and linked_inputs names its source node and, for an image texture (also behind a Normal Map node), the image file, colour space and packing. Lists at most max_nodes nodes, those feeding the output first, with node_count for the whole tree.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {"material_name": {"description": "Name of the Blender material.", "type": "string"}},
+        "properties": {
+          "material_name": {"description": "Name of the Blender material.", "type": "string"},
+          "max_nodes": {"default": 50, "description": "Most nodes to list.", "type": "integer"}
+        },
         "required": ["material_name"]
       },
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
@@ -717,25 +723,76 @@
     "assign_blender_material": {
       "name": "assign_blender_material",
       "title": "Assign Blender Material",
-      "description": "Assign a Principled BSDF material to a Blender object.",
+      "description": "Assign a Principled BSDF material to a Blender object. A material of that name is reused (repeating the call changes nothing more; reuse_existing=false creates a new one), and shading arguments left out keep the material's values, so an existing material can be assigned as it is. By default it replaces the object's material: slot 0, every face. slot_index puts it in one slot (the slot count adds one); face_indices assigns it to those faces only. link='OBJECT' keeps it off linked duplicates sharing the mesh. base_color is RGB or RGBA in 0-1; alpha below 1 sets the Principled Alpha and blended rendering (exported as USD opacity). Image textures can drive base color, metallic, roughness and normal (they need a UV map: uv_unwrap_blender_mesh). Blender's USD exporter writes UsdPreviewSurface; it does not write OmniPBR or MDL. Everything is checked first; a failure leaves nothing behind.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "object_name": {"description": "Object to assign material to.", "type": "string"},
+          "object_name": {
+            "description": "Object to assign the material to (mesh, curve, text, or another type with material slots).",
+            "type": "string"
+          },
           "material_name": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": null,
-            "description": "Material name (auto-generated if omitted)."
+            "description": "Material name; Material_<object> when omitted."
           },
           "base_color": {
-            "default": [0.8, 0.8, 0.8, 1.0],
-            "description": "Base color RGBA [r, g, b, a].",
-            "items": {"type": "number"},
-            "type": "array"
+            "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
+            "default": null,
+            "description": "RGB or RGBA in [0, 1]; the alpha becomes the Principled Alpha, and below 1 the material renders blended."
           },
-          "metallic": {"default": 0.0, "description": "Metallic value 0-1.", "type": "number"},
-          "roughness": {"default": 0.5, "description": "Roughness value 0-1.", "type": "number"}
+          "metallic": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Metallic value 0-1."
+          },
+          "roughness": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Roughness value 0-1."
+          },
+          "slot_index": {
+            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "default": null,
+            "description": "Slot to put the material in; the slot count adds one."
+          },
+          "face_indices": {
+            "anyOf": [{"items": {"type": "integer"}, "type": "array"}, {"type": "null"}],
+            "default": null,
+            "description": "Mesh faces to assign the material to."
+          },
+          "link": {
+            "default": "DATA",
+            "description": "DATA (the mesh's slot) or OBJECT (this object's slot).",
+            "enum": ["DATA", "OBJECT"],
+            "type": "string"
+          },
+          "reuse_existing": {
+            "default": true,
+            "description": "Reuse a material of that name when one exists.",
+            "type": "boolean"
+          },
+          "base_color_texture": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Image file driving Base Color (sRGB)."
+          },
+          "metallic_texture": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Image file driving Metallic (Non-Color)."
+          },
+          "roughness_texture": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Image file driving Roughness (Non-Color)."
+          },
+          "normal_texture": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Tangent-space normal map image (Non-Color), through a Normal Map node."
+          }
         },
         "required": ["object_name"]
       },
@@ -804,7 +861,7 @@
     "set_blender_light_params": {
       "name": "set_blender_light_params",
       "title": "Set Blender Light Params",
-      "description": "Set light parameters on a Blender light object.",
+      "description": "Set a Blender light's parameters, optionally changing its type first (light_type). Each setting must belong to the light's type: shadow_soft_size is the radius of POINT and SPOT lights, spot_size and spot_blend are SPOT's, angle is a SUN's softness, and shape, size and size_y are an AREA light's; others are refused, as are values outside Blender's limits (which it would clamp silently) and negative energy. The reply echoes every setting of the light's type as stored.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -813,12 +870,12 @@
           "energy": {
             "anyOf": [{"type": "number"}, {"type": "null"}],
             "default": null,
-            "description": "Light energy/power."
+            "description": "Light power in watts (irradiance in W/m² for SUN), >= 0."
           },
           "color": {
             "anyOf": [{"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
             "default": null,
-            "description": "Light color RGB [r, g, b]."
+            "description": "Light color RGB [r, g, b], each >= 0."
           },
           "use_shadow": {
             "anyOf": [{"type": "boolean"}, {"type": "null"}],
@@ -828,17 +885,45 @@
           "spot_size": {
             "anyOf": [{"type": "number"}, {"type": "null"}],
             "default": null,
-            "description": "Spot cone angle in radians (SPOT only)."
+            "description": "Spot cone angle in radians, 1 degree to pi (SPOT)."
           },
           "spot_blend": {
             "anyOf": [{"type": "number"}, {"type": "null"}],
             "default": null,
-            "description": "Spot edge blend factor (SPOT only)."
+            "description": "Spot edge softness 0-1 (SPOT)."
           },
           "shadow_soft_size": {
             "anyOf": [{"type": "number"}, {"type": "null"}],
             "default": null,
-            "description": "Shadow softness / radius."
+            "description": "Light radius for soft shadows, >= 0 (POINT, SPOT)."
+          },
+          "light_type": {
+            "anyOf": [{"enum": ["POINT", "SUN", "SPOT", "AREA"], "type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Change the light to POINT, SUN, SPOT or AREA first."
+          },
+          "angle": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Sun's angular diameter in radians, 0 to pi (SUN)."
+          },
+          "size": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Area light size, >= 0 (AREA; its width for RECTANGLE and ELLIPSE)."
+          },
+          "size_y": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Area light height, >= 0 (AREA with shape RECTANGLE or ELLIPSE)."
+          },
+          "shape": {
+            "anyOf": [
+              {"enum": ["SQUARE", "RECTANGLE", "DISK", "ELLIPSE"], "type": "string"},
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "Area light shape: SQUARE, RECTANGLE, DISK or ELLIPSE (AREA)."
           }
         },
         "required": ["light_name"]
@@ -1289,6 +1374,47 @@
             "default": false,
             "description": "Make face normals point consistently outside.",
             "type": "boolean"
+          }
+        },
+        "required": ["object_name"]
+      },
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "uv_unwrap_blender_mesh": {
+      "name": "uv_unwrap_blender_mesh",
+      "title": "Uv Unwrap Blender Mesh",
+      "description": "Generate UV coordinates for every face of a Blender mesh object, as image textures need: SMART_PROJECT (Smart UV Project: islands split at angle_limit, packed with island_margin) or CUBE_PROJECT (each face projected onto the cube side it faces). Writes uv_map_name (created when missing), else the active UV map, else a new UVMap. Enters Edit Mode briefly and restores the selection and active object. Requires Object Mode.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "object_name": {"description": "Mesh object to unwrap.", "type": "string"},
+          "method": {
+            "default": "SMART_PROJECT",
+            "description": "SMART_PROJECT or CUBE_PROJECT.",
+            "enum": ["SMART_PROJECT", "CUBE_PROJECT"],
+            "type": "string"
+          },
+          "uv_map_name": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "UV map to write; the active one (or a new UVMap) if omitted."
+          },
+          "angle_limit": {
+            "default": 1.1519173063162575,
+            "description": "SMART_PROJECT: island angle in radians, above 0 to pi/2.",
+            "type": "number"
+          },
+          "island_margin": {
+            "default": 0.0,
+            "description": "SMART_PROJECT: space between islands, 0-1.",
+            "type": "number"
+          },
+          "cube_size": {
+            "default": 1.0,
+            "description": "CUBE_PROJECT: size of the projection cube, above 0.",
+            "type": "number"
           }
         },
         "required": ["object_name"]

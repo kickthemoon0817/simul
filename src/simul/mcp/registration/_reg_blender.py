@@ -37,6 +37,7 @@ from typing import (
     Coroutine,
     Dict,
     List,
+    Literal,
     Mapping,
     Optional,
     Tuple,
@@ -146,6 +147,8 @@ from ..schemas.blender import (
     BlenderSetTransformResponse,
     BlenderSetupRigidBodyRequest,
     BlenderSetupRigidBodyResponse,
+    BlenderUVUnwrapRequest,
+    BlenderUVUnwrapResponse,
     BlenderViewportInfoResponse,
 )
 from ..schemas.blender_ui import AgentControl, BlenderUIRequest, BlenderUIResponse
@@ -725,7 +728,13 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_material_info",
-        description="Get material information with bounded node tree traversal.",
+        description=(
+            "Get a Blender material's Principled BSDF values and what drives them: an input a "
+            "link drives reads null in principled_params, and linked_inputs names its source "
+            "node and, for an image texture (also behind a Normal Map node), the image file, "
+            "colour space and packing. Lists at most max_nodes nodes, those feeding the output "
+            "first, with node_count for the whole tree."
+        ),
         hints=READ_ONLY,
         operation="get_material_info",
         request=BlenderMaterialInfoRequest,
@@ -905,12 +914,24 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="assign_blender_material",
-        description="Assign a Principled BSDF material to a Blender object.",
+        description=(
+            "Assign a Principled BSDF material to a Blender object. A material of that name is "
+            "reused (repeating the call changes nothing more; reuse_existing=false creates a new "
+            "one), and shading arguments left out keep the material's values, so an existing "
+            "material can be assigned as it is. By default it replaces the object's material: "
+            "slot 0, every face. slot_index puts it in one slot (the slot count adds one); "
+            "face_indices assigns it to those faces only. link='OBJECT' keeps it off linked "
+            "duplicates sharing the mesh. base_color is RGB or RGBA in 0-1; alpha below 1 sets "
+            "the Principled Alpha and blended rendering (exported as USD opacity). Image textures "
+            "can drive base color, metallic, roughness and normal (they need a UV map: "
+            "uv_unwrap_blender_mesh). Blender's USD exporter writes UsdPreviewSurface; it does not "
+            "write OmniPBR or MDL. Everything is checked first; a failure leaves nothing behind."
+        ),
         hints=OVERWRITING,
         operation="assign_material",
         request=BlenderAssignMaterialRequest,
         response=BlenderAssignMaterialResponse,
-        params={"base_color": Param(List[float], [0.8, 0.8, 0.8, 1.0])},
+        params={"link": Param(Literal["DATA", "OBJECT"], "DATA")},
     ),
     BlenderTool(
         name="add_blender_modifier",
@@ -954,11 +975,22 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="set_blender_light_params",
-        description="Set light parameters on a Blender light object.",
+        description=(
+            "Set a Blender light's parameters, optionally changing its type first (light_type). "
+            "Each setting must belong to the light's type: shadow_soft_size is the radius of POINT "
+            "and SPOT lights, spot_size and spot_blend are SPOT's, angle is a SUN's softness, and "
+            "shape, size and size_y are an AREA light's; others are refused, as are values outside "
+            "Blender's limits (which it would clamp silently) and negative energy. The reply "
+            "echoes every setting of the light's type as stored."
+        ),
         hints=OVERWRITING,
         operation="set_light_params",
         request=BlenderSetLightParamsRequest,
         response=BlenderSetLightParamsResponse,
+        params={
+            "light_type": Param(Optional[Literal["POINT", "SUN", "SPOT", "AREA"]]),
+            "shape": Param(Optional[Literal["SQUARE", "RECTANGLE", "DISK", "ELLIPSE"]]),
+        },
     ),
     # -- File I/O ------------------------------------------------------------
     BlenderTool(
@@ -1188,6 +1220,22 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         operation="clean_mesh",
         request=BlenderCleanMeshRequest,
         response=BlenderCleanMeshResponse,
+    ),
+    BlenderTool(
+        name="uv_unwrap_blender_mesh",
+        description=(
+            "Generate UV coordinates for every face of a Blender mesh object, as image textures "
+            "need: SMART_PROJECT (Smart UV Project: islands split at angle_limit, packed with "
+            "island_margin) or CUBE_PROJECT (each face projected onto the cube side it faces). "
+            "Writes uv_map_name (created when missing), else the active UV map, else a new UVMap. "
+            "Enters Edit Mode briefly and restores the selection and active object. Requires "
+            "Object Mode."
+        ),
+        hints=OVERWRITING,
+        operation="uv_unwrap_mesh",
+        request=BlenderUVUnwrapRequest,
+        response=BlenderUVUnwrapResponse,
+        params={"method": Param(Literal["SMART_PROJECT", "CUBE_PROJECT"], "SMART_PROJECT")},
     ),
     # -- SimReady asset format -----------------------------------------------
     BlenderTool(
