@@ -18,9 +18,13 @@ from aiohttp import web
 from PIL import Image
 
 from simul.adapters import unreal_runtime
+from simul.adapters._unreal_scripts import ACTOR_HELPERS
 from simul.adapters.unreal_runtime import UnrealRuntimeSession
 from simul.config import Settings
+from tests.unreal.editor_world import World, is_valid
 
+# The editor world the actors of the script tests belong to.
+REVIEW_WORLD = World("/Game/Map.Map")
 
 # A generous request timeout, so a slow CI runner never turns connection set-up
 # into a timeout the test did not ask for; only the timeout case shortens it.
@@ -264,6 +268,9 @@ class Actor:
     def get_path_name(self):
         return self.path
 
+    def get_world(self):
+        return REVIEW_WORLD
+
     def get_class(self):
         return SimpleNamespace(
             get_name=lambda: "StaticMeshActor",
@@ -309,14 +316,19 @@ def script_session(monkeypatch, tmp_path):
         EditorActorSubsystem="actors",
         LevelEditorSubsystem="level",
         UnrealEditorSubsystem="editor",
-        load_object=lambda outer, path: actor if path == actor.path else None,
+        find_object=lambda outer, path: actor if path == actor.path else None,
         load_asset=lambda path: material if path == "/Game/Material" else None,
+        SystemLibrary=SimpleNamespace(is_valid=is_valid),
+        LayersSubsystem="layers",
         get_editor_subsystem=lambda name: {
             "actors": SimpleNamespace(get_all_level_actors=lambda: [actor]),
             "level": LevelEditor(),
+            # The editor world, as editor_world() finds it in and out of PIE.
             "editor": SimpleNamespace(
-                get_game_world=lambda: world if world.playing else None
+                get_game_world=lambda: world if world.playing else None,
+                get_editor_world=lambda: None if world.playing else REVIEW_WORLD,
             ),
+            "layers": SimpleNamespace(get_world=lambda: REVIEW_WORLD),
         }[name],
         GameplayStatics=SimpleNamespace(
             is_game_paused=lambda world: world.paused,
@@ -556,8 +568,8 @@ async def test_capture_failed_transfer_preserves_existing_output(monkeypatch, tm
 
 @pytest.mark.asyncio
 async def test_mesh_ops_resolve_actors_with_actor_at():
-    """Mesh ops load their actors by path (ACTOR_HELPERS.actor_at) instead of
-    scanning every level actor, and a missing actor is a ScriptError."""
+    """Mesh ops find their actors by path (ACTOR_HELPERS.actor_at) instead of
+    scanning every level actor, and a missing actor is a script error."""
     session = UnrealRuntimeSession()
     session._execute_python = AsyncMock(
         return_value={
@@ -569,7 +581,9 @@ async def test_mesh_ops_resolve_actors_with_actor_at():
         "/Game/M.M:PersistentLevel.Body", "/Game/M.M:PersistentLevel.Missing", "union"
     )
     script = session._execute_python.call_args.args[0]
-    assert "get_all_level_actors" not in script
+    # The helpers define level_actors(), which the operation never calls.
+    assert script.startswith(ACTOR_HELPERS)
+    assert "level_actors" not in script[len(ACTOR_HELPERS):]
     assert "target_actor = actor_at('/Game/M.M:PersistentLevel.Body')" in script
     assert "tool_actor = actor_at('/Game/M.M:PersistentLevel.Missing')" in script
     compile(script, "apply_mesh_boolean", "exec")
