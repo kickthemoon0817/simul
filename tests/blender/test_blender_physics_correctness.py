@@ -196,7 +196,7 @@ def test_validation_skips_material_check_for_objects_without_slots(install: Any)
 
     result = session.validate_simready_compliance(
         object_names=["Camera", "Light"], check_naming=False, check_hierarchy=False,
-        check_transforms=False,
+        check_transforms=False, check_metadata=False,
     )
 
     assert result["issues"] == []

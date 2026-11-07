@@ -7954,12 +7954,18 @@ class FakeObjectWithProps:
         self._custom_props: Dict[str, Any] = {}
         self.hide_viewport = False
         self.empty_display_type = ""
+        self.matrix_world = FakeMatrix.Translation(location)
+        self.matrix_basis = FakeMatrix.Translation(location)
+        self.matrix_parent_inverse = FakeMatrix.Identity(4)
 
     def __setitem__(self, key: str, value: Any) -> None:
         self._custom_props[key] = value
 
     def __getitem__(self, key: str) -> Any:
         return self._custom_props[key]
+
+    def __delitem__(self, key: str) -> None:
+        del self._custom_props[key]
 
     def keys(self) -> list:
         return list(self._custom_props.keys())
@@ -8161,6 +8167,7 @@ class TestSimReadyMethods:
     def test_validate_compliant_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A well-named, correctly-scaled object with material passes."""
         parent = FakeObjectWithProps(name="root", object_type="EMPTY")
+        parent["simready_semantic_class"] = "cup"
         obj = FakeObjectWithProps(
             name="coffee_cup",
             dimensions=(0.08, 0.08, 0.12),

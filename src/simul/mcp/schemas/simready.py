@@ -1,37 +1,16 @@
-"""SimReady schemas for Blender and Unreal asset workflows."""
+"""SimReady schemas for the Blender SimReady tools.
 
-from typing import Dict, List, Optional
+The metadata models refuse unknown fields, naming the closest valid one, so a
+misspelled field fails instead of being dropped. The Blender runtime
+(``simul.adapters.blender_runtime``) applies the same rules to stored values;
+it ships inside the Blender add-on and cannot import these models, and
+``tests/blender/test_simready_metadata.py`` keeps the two in step.
+"""
 
-from pydantic import BaseModel, Field, field_validator
+import difflib
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
-
-class SimReadySemanticLabels(BaseModel):
-    """
-    Semantic labeling for SimReady assets.
-
-    export_simready_usd writes each field as a UsdSemantics LabelsAPI taxonomy
-    (``class``, ``hierarchy``, ``qcode``, and each additional label's key), or
-    with Isaac Sim's SemanticsAPI convention where Blender's USD has no
-    UsdSemantics.
-    """
-
-    semantic_class: str = Field(
-        ..., description="Human-readable classification, e.g. 'cup', 'truck'"
-    )
-    semantic_hierarchy: Optional[str] = Field(
-        None,
-        description=(
-            "Ordered relational hierarchy, "
-            "e.g. 'machine/vehicle/emergency_vehicle/fire_engine'"
-        ),
-    )
-    semantic_qcode: Optional[str] = Field(
-        None, description="WikiData Q-Code identifier, e.g. 'Q1420'"
-    )
-    additional_labels: Optional[Dict[str, str]] = Field(
-        None, description="Custom labels such as SKU or ProductID"
-    )
-
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 #: collider_type values: the UsdPhysics MeshCollisionAPI approximations, then the
 #: earlier aliases (mesh = none, box = boundingCube, sphere = boundingSphere,
@@ -48,20 +27,116 @@ COLLIDER_TYPES = (
     "sphere",
     "capsule",
 )
+ColliderType = Literal[
+    "convexHull",
+    "convexDecomposition",
+    "meshSimplification",
+    "none",
+    "boundingCube",
+    "boundingSphere",
+    "mesh",
+    "box",
+    "sphere",
+    "capsule",
+]
+
+#: What apply_simready_metadata's ``clear`` accepts: a field, a group,
+#: additional_labels, or all.
+SimReadyClearName = Literal[
+    "semantic_class",
+    "semantic_hierarchy",
+    "semantic_qcode",
+    "mass_kg",
+    "collider_type",
+    "static_friction",
+    "dynamic_friction",
+    "restitution",
+    "density",
+    "is_rigid_body",
+    "substrate_type",
+    "material_naming",
+    "shader_type",
+    "texel_density",
+    "semantic",
+    "physics",
+    "material",
+    "additional_labels",
+    "all",
+]
+
+SimReadySeverity = Literal["all", "error", "warning"]
+
+#: A label key is a USD semantics taxonomy name, so it must be an identifier.
+LabelKey = Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
+NonEmpty = Annotated[str, Field(min_length=1)]
 
 
-class SimReadyPhysicsProperties(BaseModel):
+class _StrictModel(BaseModel):
+    """A model that refuses unknown fields and names the closest valid one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_unknown_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            known = list(cls.model_fields)
+            for key in data:
+                if key not in known:
+                    close = difflib.get_close_matches(str(key), known, n=1, cutoff=0.5)
+                    hint = f" (did you mean '{close[0]}'?)" if close else ""
+                    raise ValueError(
+                        f"unknown field '{key}'{hint}; valid fields: {', '.join(known)}"
+                    )
+        return data
+
+
+class SimReadySemanticLabels(_StrictModel):
+    """
+    Semantic labeling for SimReady assets.
+
+    export_simready_usd writes each field as a UsdSemantics LabelsAPI taxonomy
+    (``class``, ``hierarchy``, ``qcode``, and each additional label's key), or
+    with Isaac Sim's SemanticsAPI convention where Blender's USD has no
+    UsdSemantics. Validation requires a semantic class on each mesh or an
+    object above it.
+    """
+
+    semantic_class: Optional[NonEmpty] = Field(
+        None, description="Human-readable classification, e.g. 'cup', 'truck'"
+    )
+    semantic_hierarchy: Optional[NonEmpty] = Field(
+        None,
+        description=(
+            "Ordered relational hierarchy, "
+            "e.g. 'machine/vehicle/emergency_vehicle/fire_engine'"
+        ),
+    )
+    semantic_qcode: Optional[str] = Field(
+        None, pattern=r"^Q[1-9][0-9]*$", description="Wikidata Q-code, e.g. 'Q1420'"
+    )
+    additional_labels: Optional[Dict[LabelKey, NonEmpty]] = Field(
+        None,
+        description=(
+            "Custom labels such as sku or product_id; each key becomes a semantics "
+            "taxonomy, so it must be an identifier"
+        ),
+    )
+
+
+class SimReadyPhysicsProperties(_StrictModel):
     """
     Physics properties for SimReady assets.
 
     export_simready_usd writes them as UsdPhysics schemas: RigidBodyAPI,
     MassAPI, CollisionAPI with a MeshCollisionAPI approximation on the meshes,
     and a physics material (UsdPhysics.MaterialAPI) bound with the physics
-    purpose.
+    purpose. collider_type and the friction values also apply to meshes below
+    the object that set none of their own.
     """
 
     mass_kg: Optional[float] = Field(None, ge=0.0, description="Mass in kilograms")
-    collider_type: Optional[str] = Field(
+    collider_type: Optional[ColliderType] = Field(
         None,
         description=(
             "UsdPhysics mesh collision approximation: convexHull, convexDecomposition, "
@@ -82,58 +157,50 @@ class SimReadyPhysicsProperties(BaseModel):
     density: Optional[float] = Field(
         None, ge=0.0, description="Material density in kg/m³"
     )
-    is_rigid_body: bool = Field(
-        False, description="Whether the root prim is a rigid body"
+    is_rigid_body: Optional[bool] = Field(
+        None,
+        description="Whether the object is a rigid body; false clears an earlier true",
     )
 
-    @field_validator("collider_type")
-    @classmethod
-    def validate_collider_type(cls, v: Optional[str]) -> Optional[str]:
-        """Validate collider type against allowed values."""
-        if v is not None and v not in COLLIDER_TYPES:
-            raise ValueError(
-                f"collider_type must be one of {list(COLLIDER_TYPES)}, got '{v}'"
-            )
-        return v
 
-
-class SimReadyMaterialProperties(BaseModel):
+class SimReadyMaterialProperties(_StrictModel):
     """
     Material properties for SimReady assets.
 
-    Follows SimReady material naming and shader conventions.
+    Stored as metadata only: export_simready_usd keeps them as userProperties
+    attributes; no USD schema carries them.
     """
 
-    substrate_type: Optional[str] = Field(
+    substrate_type: Optional[NonEmpty] = Field(
         None,
         description=(
-            "Physical substrate: metal, wood, plastic, glass, "
+            "Physical substrate, e.g. metal, wood, plastic, glass, "
             "rubber, fabric, ceramic, concrete, stone"
         ),
     )
-    material_naming: Optional[str] = Field(
+    material_naming: Optional[NonEmpty] = Field(
         None,
         description=(
             "SimReady material name: prefix_surfacetype_description, "
             "e.g. 'opaque_metal_brushed_aluminum'"
         ),
     )
-    shader_type: Optional[str] = Field(
+    shader_type: Optional[NonEmpty] = Field(
         None,
-        description="Target shader: OmniPBR, OmniGlass, SimPBR",
+        description="Target shader, e.g. OmniPBR, OmniGlass, SimPBR",
     )
     texel_density: Optional[float] = Field(
         None, gt=0.0, description="Target texel density in pixels per meter"
     )
 
 
-class SimReadyMetadata(BaseModel):
+class SimReadyMetadata(_StrictModel):
     """
     Combined SimReady metadata for an asset.
 
     Groups semantic, physics, and material properties into a single model
     that is stored as Blender custom properties with a ``simready_`` prefix
-    and carried forward into USD export.
+    and written by export_simready_usd.
     """
 
     semantic: Optional[SimReadySemanticLabels] = Field(
@@ -154,7 +221,16 @@ class SimReadyApplyMetadataRequest(BaseModel):
     """Request to apply SimReady metadata to a Blender object."""
 
     object_name: str = Field(..., description="Name of the Blender object")
-    metadata: SimReadyMetadata = Field(..., description="SimReady metadata to apply")
+    metadata: Optional[SimReadyMetadata] = Field(
+        None, description="SimReady metadata to store; omitted fields keep their value"
+    )
+    clear: Optional[List[SimReadyClearName]] = Field(
+        None,
+        description=(
+            "Stored values to remove before storing metadata: a field, a group, "
+            "additional_labels, or all"
+        ),
+    )
 
 
 class SimReadyApplyMetadataResponse(BaseModel):
@@ -168,12 +244,23 @@ class SimReadyApplyMetadataResponse(BaseModel):
     applied_properties: List[str] = Field(
         ..., description="List of custom property keys written"
     )
+    cleared_properties: List[str] = Field(
+        default_factory=list, description="Custom property keys removed"
+    )
 
 
 class SimReadyGetMetadataRequest(BaseModel):
     """Request to read SimReady metadata from a Blender object."""
 
     object_name: str = Field(..., description="Name of the Blender object")
+
+
+class SimReadyInvalidValue(BaseModel):
+    """A stored simready_ property that breaks the metadata rules."""
+
+    property: str = Field(..., description="Custom property name")
+    value: Any = Field(None, description="The stored value")
+    problem: str = Field(..., description="Why it is invalid")
 
 
 class SimReadyGetMetadataResponse(BaseModel):
@@ -185,10 +272,14 @@ class SimReadyGetMetadataResponse(BaseModel):
     )
     object_name: str = Field(...)
     metadata: Optional[SimReadyMetadata] = Field(
-        None, description="SimReady metadata (null if none found)"
+        None, description="The valid stored metadata (null if none)"
     )
     has_simready_data: bool = Field(
         ..., description="Whether any simready_ properties exist"
+    )
+    invalid_values: List[SimReadyInvalidValue] = Field(
+        default_factory=list,
+        description="Stored values left out of metadata because they break the rules",
     )
 
 
@@ -198,9 +289,14 @@ class SimReadyValidationIssue(BaseModel):
     object_name: str = Field(..., description="Object with the issue")
     check: str = Field(
         ...,
-        description="Check category: naming, scale, transforms, materials, hierarchy",
+        description=(
+            "Check category: naming, scale, transforms, materials, hierarchy, "
+            "metadata or geometry"
+        ),
     )
-    severity: str = Field(..., description="Issue severity: error or warning")
+    severity: str = Field(
+        ..., description="error (makes the asset non-compliant) or warning"
+    )
     message: str = Field(..., description="Human-readable description")
     suggestion: Optional[str] = Field(None, description="Suggested fix")
 
@@ -209,13 +305,35 @@ class SimReadyValidateRequest(BaseModel):
     """Request to validate objects against SimReady conventions."""
 
     object_names: Optional[List[str]] = Field(
-        None, description="Objects to check (null = all scene objects)"
+        None,
+        min_length=1,
+        description=(
+            "Objects to check; null checks the scene's meshes and every object "
+            "above them, asset roots included"
+        ),
     )
-    check_naming: bool = Field(True, description="Check lowercase_underscore naming")
-    check_scale: bool = Field(True, description="Check real-world meter scale")
-    check_transforms: bool = Field(True, description="Check for clean transforms")
-    check_materials: bool = Field(True, description="Check material segmentation")
+    check_naming: bool = Field(
+        True, description="Check object, material and mesh-data names"
+    )
+    check_scale: bool = Field(
+        True, description="Check real-world size in the scene's units"
+    )
+    check_transforms: bool = Field(True, description="Check for applied transforms")
+    check_materials: bool = Field(True, description="Check material slots")
     check_hierarchy: bool = Field(True, description="Check hierarchy structure")
+    check_metadata: bool = Field(
+        True, description="Check semantic class, collider and stored values"
+    )
+    check_geometry: bool = Field(
+        True, description="Check UVs, n-gons and degenerate faces"
+    )
+    severity: SimReadySeverity = Field(
+        "all", description="Return all issues, or only errors or warnings"
+    )
+    offset: int = Field(0, ge=0, description="Index of the first issue returned")
+    limit: int = Field(
+        50, ge=1, le=500, description="Most issues returned; next_offset pages on"
+    )
 
 
 class SimReadyValidateResponse(BaseModel):
@@ -225,11 +343,19 @@ class SimReadyValidateResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    compliant: bool = Field(..., description="True when zero errors found")
+    compliant: bool = Field(
+        ..., description="True when no check found an error (whatever the page)"
+    )
     object_count: int = Field(..., description="Number of objects checked")
     issue_count: int = Field(..., description="Total issues found")
+    error_count: int = Field(0, description="Issues of severity error")
+    warning_count: int = Field(0, description="Issues of severity warning")
     issues: List[SimReadyValidationIssue] = Field(
-        default_factory=list, description="Detailed issue list"
+        default_factory=list, description="This page of the issues"
+    )
+    offset: int = Field(0, description="Index of the first issue in this page")
+    next_offset: Optional[int] = Field(
+        None, description="offset for the next page; null on the last page"
     )
     meters_per_unit: Optional[float] = Field(
         None,
@@ -377,11 +503,21 @@ class SimReadySetupHierarchyRequest(BaseModel):
         ..., description="Name for the root empty (XForm equivalent)"
     )
     child_names: List[str] = Field(
-        ..., description="Existing objects to parent under root"
+        ..., min_length=1, description="Existing objects to put under the root"
     )
     semantic: Optional[SimReadySemanticLabels] = Field(
         None, description="Semantic labels for the root"
     )
+    reuse_root: bool = Field(
+        False, description="Put the objects under an existing empty named root_name"
+    )
+
+
+class SimReadyKeptParent(BaseModel):
+    """A listed object left under its listed parent."""
+
+    object_name: str = Field(..., description="Blender object name")
+    parent: str = Field(..., description="Its parent, also listed")
 
 
 class SimReadySetupHierarchyResponse(BaseModel):
@@ -392,11 +528,30 @@ class SimReadySetupHierarchyResponse(BaseModel):
         None, description="Error message when success is False"
     )
     root_name: str = Field(..., description="Root empty name")
-    children: List[str] = Field(..., description="Successfully parented children")
-    hierarchy_path: str = Field(..., description="Logical hierarchy path from root")
+    root_created: bool = Field(
+        True, description="False when an existing root was reused"
+    )
+    children: List[str] = Field(..., description="The listed objects, now under the root")
+    reparented: List[str] = Field(
+        default_factory=list,
+        description="Objects parented to the root, their world transforms kept",
+    )
+    kept_parent: List[SimReadyKeptParent] = Field(
+        default_factory=list, description="Listed objects left under their listed parent"
+    )
+    hierarchy_path: str = Field(
+        ..., description="The root's prim path in export_simready_usd's USD"
+    )
+    prim_paths: Dict[str, str] = Field(
+        default_factory=dict, description="Each listed object's prim path in that USD"
+    )
 
 
 __all__ = [
+    "COLLIDER_TYPES",
+    "ColliderType",
+    "SimReadyClearName",
+    "SimReadySeverity",
     "SimReadySemanticLabels",
     "SimReadyPhysicsProperties",
     "SimReadyMaterialProperties",
@@ -404,11 +559,11 @@ __all__ = [
     "SimReadyApplyMetadataRequest",
     "SimReadyApplyMetadataResponse",
     "SimReadyGetMetadataRequest",
+    "SimReadyInvalidValue",
     "SimReadyGetMetadataResponse",
     "SimReadyValidationIssue",
     "SimReadyValidateRequest",
     "SimReadyValidateResponse",
-    "COLLIDER_TYPES",
     "SimReadyExportRequest",
     "SimReadyExportedPrim",
     "SimReadySkippedObject",
@@ -416,5 +571,6 @@ __all__ = [
     "SimReadyExportSemantics",
     "SimReadyExportResponse",
     "SimReadySetupHierarchyRequest",
+    "SimReadyKeptParent",
     "SimReadySetupHierarchyResponse",
 ]

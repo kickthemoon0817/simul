@@ -105,7 +105,7 @@ class FakeCollection(list):
     """bpy_prop_collection: iterable, with ``get`` by name."""
 
     def get(self, name: str) -> Optional[FakeObject]:
-        return next((o for o in self if o.name == name), None)
+        return next((o for o in self if o is not None and o.name == name), None)
 
 
 class LayerObjects(FakeCollection):
@@ -185,7 +185,8 @@ class FakeBlender:
         exported = [
             o
             for o in self.layer_objects
-            if o.type in allowed
+            if o is not None
+            and o.type in allowed
             and not o.hide_render
             and (o.selected if selected_only else True)
         ]
@@ -264,6 +265,7 @@ class FakeBlender:
 def _robot() -> List[FakeObject]:
     """robot (empty) > base_link (mesh) > arm_link (mesh), plus a light and a camera."""
     robot = FakeObject("robot", "EMPTY")
+    robot["simready_semantic_class"] = "robot"  # validation requires a class
     base = FakeObject("base_link", parent=robot, materials=["opaque_metal_steel"], data_name="Cube")
     arm = FakeObject("arm_link", parent=base, materials=["opaque_plastic_abs"], data_name="Cylinder")
     light = FakeObject("Light", "LIGHT")
@@ -415,7 +417,7 @@ def test_validation_flags_a_size_implausible_in_the_declared_units(scene: Any) -
     in_millimetres = scene.session.validate_simready_compliance(["mm_part"])
 
     assert in_metres["compliant"] is False
-    [issue] = in_metres["issues"]
+    [issue] = [i for i in in_metres["issues"] if i["check"] == "scale"]
     assert (issue["check"], issue["severity"]) == ("scale", "error")
     assert "500 m" in issue["message"]
     assert in_millimetres["compliant"] is True
@@ -514,7 +516,10 @@ def test_the_asset_root_is_the_default_prim_and_holds_the_materials(scene: Any) 
 def test_lights_and_cameras_are_exported_when_asked_under_a_named_root(scene: Any) -> None:
     path = scene.out / "staged scene.usda"
 
-    result = scene.session.export_simready_usd(str(path), include_lights_and_cameras=True)
+    # Blender's default "Light" and "Camera" names fail validation; the layout is the point.
+    result = scene.session.export_simready_usd(
+        str(path), include_lights_and_cameras=True, validate_before_export=False
+    )
 
     stage = Usd.Stage.Open(str(path))
     assert stage.GetDefaultPrim().GetPath() == Sdf.Path("/staged_scene")
@@ -694,3 +699,12 @@ def test_the_addon_bundles_the_usd_authoring_module(tmp_path: Path) -> None:
         check=True,
     )
     assert completed.stdout.strip() == "simul_blender_bridge.adapters.simready_usd"
+
+
+def test_a_removed_object_left_in_the_view_layer_is_skipped(scene: Any) -> None:
+    """Right after bpy.data.objects.remove, Blender 5.0.1 yields None from view_layer.objects."""
+    scene.fake.layer_objects.append(None)
+
+    result = scene.session.export_simready_usd(str(scene.out / "stale.usda"), object_names=["robot"])
+
+    assert result["object_count"] == 3

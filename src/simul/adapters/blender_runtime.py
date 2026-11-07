@@ -8,6 +8,7 @@ optional `bpy` Python module.
 from __future__ import annotations
 
 import base64
+import difflib
 import io
 import json
 import logging
@@ -17,6 +18,7 @@ import re
 import shutil
 import tempfile
 import uuid
+from array import array
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +29,7 @@ from typing import (
     Dict,
     Iterator,
     List,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -36,6 +39,7 @@ from typing import (
 # The Blender add-on bundles these modules next to this one; simready_usd
 # imports pxr only when it is called.
 from ..utils.regex_guard import exponential_regex_construct
+from .simready_usd import COLLIDER_TYPES as SIMREADY_COLLIDER_TYPES
 from .simready_usd import author_simready_layer, usd_identifier
 
 try:
@@ -2647,171 +2651,352 @@ class BlenderRuntimeSession:
 
     # Custom property prefix for all SimReady metadata stored on Blender objects
     _SIMREADY_PREFIX: str = "simready_"
+    # Additional semantic labels are stored as simready_label_<key>.
+    _SIMREADY_LABEL_PREFIX: str = "simready_label_"
 
     # Valid SimReady naming pattern: lowercase letters, digits, underscores only
     _SIMREADY_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+    _SIMREADY_QCODE_RE = re.compile(r"^Q[1-9][0-9]*$")
+    # A label key names a USD semantics taxonomy, so it must be an identifier.
+    _SIMREADY_LABEL_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    # The metadata fields by group, with the rule a value must meet. The MCP
+    # request models (mcp/schemas/simready.py) state the same rules for the
+    # tool's input schema; this module ships inside the Blender add-on and
+    # cannot import them, so tests/blender/test_simready_metadata.py keeps the
+    # two in step.
+    _SIMREADY_FIELDS: Dict[str, Dict[str, Tuple[Any, ...]]] = {
+        "semantic": {
+            "semantic_class": ("text",),
+            "semantic_hierarchy": ("text",),
+            "semantic_qcode": ("qcode",),
+        },
+        "physics": {
+            "mass_kg": ("number", 0.0, None),
+            "collider_type": ("token", SIMREADY_COLLIDER_TYPES),
+            "static_friction": ("number", 0.0, None),
+            "dynamic_friction": ("number", 0.0, None),
+            "restitution": ("number", 0.0, 1.0),
+            "density": ("number", 0.0, None),
+            "is_rigid_body": ("flag",),
+        },
+        "material": {
+            "substrate_type": ("text",),
+            "material_naming": ("text",),
+            "shader_type": ("text",),
+            "texel_density": ("positive",),
+        },
+    }
+    _SIMREADY_CLEAR_ALL = "all"
+    _SIMREADY_LABELS = "additional_labels"
+
+    @classmethod
+    def _simready_field_names(cls) -> List[str]:
+        return [name for fields in cls._SIMREADY_FIELDS.values() for name in fields]
+
+    @staticmethod
+    def _unknown_name(kind: str, name: Any, choices: Sequence[str]) -> str:
+        """``unknown <kind> 'x' (did you mean 'y'?); valid: ...``."""
+        close = difflib.get_close_matches(str(name), list(choices), n=1, cutoff=0.5)
+        hint = f" (did you mean '{close[0]}'?)" if close else ""
+        return f"unknown {kind} '{name}'{hint}; valid: {', '.join(choices)}"
+
+    @classmethod
+    def _simready_value_problem(cls, rule: Tuple[Any, ...], value: Any) -> Optional[str]:
+        """Why ``value`` breaks ``rule``, or None when it meets it."""
+        kind = rule[0]
+        if kind == "flag":
+            if isinstance(value, bool) or (isinstance(value, int) and value in (0, 1)):
+                return None
+            return "must be true or false"
+        if kind in ("number", "positive"):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                return "must be a number"
+            if kind == "positive":
+                return None if value > 0 else "must be greater than 0"
+            low, high = rule[1], rule[2]
+            if value < low:
+                return f"must be at least {low:g}"
+            if high is not None and value > high:
+                return f"must be at most {high:g}"
+            return None
+        if not isinstance(value, str) or not value.strip():
+            return "must be a non-empty string"
+        if kind == "token" and value not in rule[1]:
+            return f"must be one of {', '.join(rule[1])}"
+        if kind == "qcode" and not cls._SIMREADY_QCODE_RE.match(value):
+            return "must be a Wikidata Q-code such as Q1420"
+        return None
+
+    def _simready_writes(self, metadata: Any) -> List[Tuple[str, Any]]:
+        """The custom properties ``metadata`` sets, or ValueError naming every problem."""
+        if not isinstance(metadata, Mapping):
+            raise ValueError("metadata must be an object with semantic, physics or material")
+        problems: List[str] = []
+        writes: List[Tuple[str, Any]] = []
+        for group, fields in metadata.items():
+            spec = self._SIMREADY_FIELDS.get(group)
+            if spec is None:
+                problems.append(self._unknown_name("group", group, list(self._SIMREADY_FIELDS)))
+                continue
+            if fields is None:
+                continue
+            if not isinstance(fields, Mapping):
+                problems.append(f"{group} must be an object")
+                continue
+            choices = list(spec) + ([self._SIMREADY_LABELS] if group == "semantic" else [])
+            for name, value in fields.items():
+                if group == "semantic" and name == self._SIMREADY_LABELS:
+                    if value is None:
+                        continue
+                    if not isinstance(value, Mapping):
+                        problems.append("semantic.additional_labels must be an object")
+                        continue
+                    for key, label in value.items():
+                        if not self._SIMREADY_LABEL_KEY_RE.match(str(key)):
+                            problems.append(
+                                f"label key '{key}' must be a USD identifier "
+                                "(letters, digits, underscores, not starting with a digit)"
+                            )
+                        elif not isinstance(label, str) or not label.strip():
+                            problems.append(f"label '{key}' must be a non-empty string")
+                        else:
+                            writes.append((f"{self._SIMREADY_LABEL_PREFIX}{key}", label))
+                    continue
+                rule = spec.get(name)
+                if rule is None:
+                    problems.append(self._unknown_name(f"{group} field", name, choices))
+                    continue
+                if value is None:
+                    continue  # null keeps the stored value; clear removes it
+                problem = self._simready_value_problem(rule, value)
+                if problem is not None:
+                    problems.append(f"{group}.{name}={value!r} {problem}")
+                    continue
+                if rule[0] == "flag":
+                    value = 1 if value else 0
+                writes.append((f"{self._SIMREADY_PREFIX}{name}", value))
+        if problems:
+            raise ValueError("Invalid SimReady metadata: " + "; ".join(problems))
+        return writes
+
+    def _simready_clear_keys(self, obj: Any, clear: Sequence[str]) -> List[str]:
+        """The stored custom properties ``clear`` names, or ValueError for an unknown name."""
+        prefix = self._SIMREADY_PREFIX
+        stored = [key for key in obj.keys() if key.startswith(prefix)]
+        choices = (
+            self._simready_field_names()
+            + list(self._SIMREADY_FIELDS)
+            + [self._SIMREADY_LABELS, self._SIMREADY_CLEAR_ALL]
+        )
+        keys: List[str] = []
+        problems: List[str] = []
+        for name in clear:
+            if name == self._SIMREADY_CLEAR_ALL:
+                keys.extend(stored)
+            elif name == self._SIMREADY_LABELS:
+                keys.extend(k for k in stored if k.startswith(self._SIMREADY_LABEL_PREFIX))
+            elif name in self._SIMREADY_FIELDS:
+                keys.extend(f"{prefix}{field}" for field in self._SIMREADY_FIELDS[name])
+                if name == "semantic":
+                    keys.extend(k for k in stored if k.startswith(self._SIMREADY_LABEL_PREFIX))
+            elif name in self._simready_field_names():
+                keys.append(f"{prefix}{name}")
+            else:
+                problems.append(self._unknown_name("clear name", name, choices))
+        if problems:
+            raise ValueError("Invalid clear: " + "; ".join(problems))
+        return list(dict.fromkeys(keys))
 
     def apply_simready_metadata(
         self,
         object_name: str,
-        metadata: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+        clear: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
-        Apply SimReady metadata as custom properties on a Blender object.
+        Store SimReady metadata on a Blender object, for export_simready_usd.
 
-        Properties are stored with a ``simready_`` prefix so they survive
-        USD export as custom attributes.
+        Each value is a ``simready_<field>`` custom property (an additional
+        label ``simready_label_<key>``); export_simready_usd writes them as
+        UsdPhysics and UsdSemantics schemas. A field left out, or null, keeps
+        its stored value; ``clear`` removes stored values before the new ones
+        are written. Unknown groups and fields and invalid values are refused,
+        with the valid names, before anything changes.
 
         Args:
             object_name: Target Blender object.
-            metadata: Dict with optional keys ``semantic``, ``physics``,
-                ``material``, each containing relevant sub-fields.
+            metadata: The ``semantic``, ``physics`` and ``material`` groups to store.
+            clear: Stored values to remove: field names such as mass_kg, a group
+                (semantic, physics, material), additional_labels, or all.
 
         Returns:
-            Dict with object_name and list of applied_properties.
+            Dict with object_name, applied_properties and cleared_properties.
+
+        Raises:
+            ValueError: For an unknown object, group, field or clear name, an
+                invalid value, or a call that neither stores nor clears anything.
         """
         obj = self._get_object_or_raise(object_name)
-        applied: List[str] = []
+        writes = self._simready_writes(metadata or {})
+        removals = self._simready_clear_keys(obj, clear or [])
+        if not writes and not clear:
+            raise ValueError("Nothing to apply: pass metadata values, or clear")
+        present = set(obj.keys())
+        cleared = [key for key in removals if key in present]
+        for key in cleared:
+            del obj[key]
+        for key, value in writes:
+            obj[key] = value
+        return {
+            "object_name": object_name,
+            "applied_properties": [key for key, _ in writes],
+            "cleared_properties": cleared,
+        }
 
-        semantic = metadata.get("semantic")
-        if semantic:
-            for key in ("semantic_class", "semantic_hierarchy", "semantic_qcode"):
-                val = semantic.get(key)
-                if val is not None:
-                    prop_key = f"{self._SIMREADY_PREFIX}{key}"
-                    obj[prop_key] = val
-                    applied.append(prop_key)
-            extra = semantic.get("additional_labels")
-            if extra and isinstance(extra, dict):
-                for label_key, label_val in extra.items():
-                    prop_key = f"{self._SIMREADY_PREFIX}label_{label_key}"
-                    obj[prop_key] = label_val
-                    applied.append(prop_key)
+    @staticmethod
+    def _plain_value(value: Any) -> Any:
+        """A stored custom property as JSON: IDProperty arrays and groups as lists and dicts."""
+        if hasattr(value, "to_list"):
+            return value.to_list()
+        if hasattr(value, "to_dict"):
+            return value.to_dict()
+        if value is None or isinstance(value, (str, int, float, bool, list, dict)):
+            return value
+        return str(value)
 
-        physics = metadata.get("physics")
-        if physics:
-            for key in (
-                "mass_kg",
-                "collider_type",
-                "static_friction",
-                "dynamic_friction",
-                "restitution",
-                "density",
-            ):
-                val = physics.get(key)
-                if val is not None:
-                    prop_key = f"{self._SIMREADY_PREFIX}{key}"
-                    obj[prop_key] = val
-                    applied.append(prop_key)
-            if physics.get("is_rigid_body"):
-                prop_key = f"{self._SIMREADY_PREFIX}is_rigid_body"
-                obj[prop_key] = 1
-                applied.append(prop_key)
+    def _read_simready_properties(self, obj: Any) -> Dict[str, Dict[str, Any]]:
+        """The object's ``simready_*`` custom properties as stored, grouped like the metadata.
 
-        mat = metadata.get("material")
-        if mat:
-            for key in (
-                "substrate_type",
-                "material_naming",
-                "shader_type",
-                "texel_density",
-            ):
-                val = mat.get(key)
-                if val is not None:
-                    prop_key = f"{self._SIMREADY_PREFIX}{key}"
-                    obj[prop_key] = val
-                    applied.append(prop_key)
+        Additional labels (``simready_label_<key>``) are gathered under
+        ``semantic["additional_labels"]``; other ``simready_`` keys that are
+        no metadata field go under ``unknown``, by property name.
+        """
+        groups: Dict[str, Dict[str, Any]] = {name: {} for name in self._SIMREADY_FIELDS}
+        unknown: Dict[str, Any] = {}
+        labels: Dict[str, Any] = {}
+        owner = {
+            field: group for group, fields in self._SIMREADY_FIELDS.items() for field in fields
+        }
+        for key in obj.keys():
+            if not key.startswith(self._SIMREADY_PREFIX):
+                continue
+            value = self._plain_value(obj[key])
+            if key.startswith(self._SIMREADY_LABEL_PREFIX):
+                labels[key[len(self._SIMREADY_LABEL_PREFIX) :]] = value
+                continue
+            field = key[len(self._SIMREADY_PREFIX) :]
+            if field in owner:
+                groups[owner[field]][field] = value
+            else:
+                unknown[key] = value
+        if labels:
+            groups["semantic"][self._SIMREADY_LABELS] = labels
+        groups["unknown"] = unknown
+        return groups
 
-        return {"object_name": object_name, "applied_properties": applied}
+    def _simready_checked(
+        self, stored: Mapping[str, Mapping[str, Any]]
+    ) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+        """Split stored metadata into the values that meet the rules and the ones that do not."""
+        valid: Dict[str, Dict[str, Any]] = {}
+        invalid: List[Dict[str, Any]] = []
+        for group, spec in self._SIMREADY_FIELDS.items():
+            for name, value in (stored.get(group) or {}).items():
+                if group == "semantic" and name == self._SIMREADY_LABELS:
+                    good: Dict[str, str] = {}
+                    for key, label in value.items():
+                        if not self._SIMREADY_LABEL_KEY_RE.match(str(key)):
+                            problem = "label key must be a USD identifier"
+                        elif not isinstance(label, str) or not label.strip():
+                            problem = "must be a non-empty string"
+                        else:
+                            good[key] = label
+                            continue
+                        invalid.append(
+                            {
+                                "property": f"{self._SIMREADY_LABEL_PREFIX}{key}",
+                                "value": label,
+                                "problem": problem,
+                            }
+                        )
+                    if good:
+                        valid.setdefault(group, {})[name] = good
+                    continue
+                broken = self._simready_value_problem(spec[name], value)
+                if broken is None:
+                    if spec[name][0] == "flag":
+                        value = bool(value)
+                    valid.setdefault(group, {})[name] = value
+                else:
+                    invalid.append(
+                        {"property": f"{self._SIMREADY_PREFIX}{name}", "value": value, "problem": broken}
+                    )
+        for key, value in (stored.get("unknown") or {}).items():
+            invalid.append(
+                {
+                    "property": key,
+                    "value": value,
+                    "problem": self._unknown_name(
+                        "SimReady field",
+                        key[len(self._SIMREADY_PREFIX) :],
+                        self._simready_field_names(),
+                    ),
+                }
+            )
+        return valid, invalid
 
     def get_simready_metadata(
         self,
         object_name: str,
     ) -> Dict[str, Any]:
         """
-        Read SimReady metadata stored as custom properties on a Blender object.
+        Read the SimReady metadata stored on a Blender object.
+
+        Stored values that break the metadata rules (set by a script, an
+        import or an older Simul) are not returned as metadata; they are
+        listed in ``invalid_values`` with the problem, so one bad value does
+        not hide the rest.
 
         Args:
             object_name: Blender object to inspect.
 
         Returns:
-            Dict with object_name, metadata (or None), and has_simready_data.
+            Dict with object_name, metadata (null when nothing valid is
+            stored), has_simready_data and invalid_values.
         """
         obj = self._get_object_or_raise(object_name)
         stored = self._read_simready_properties(obj)
-        semantic = stored["semantic"]
-        physics = stored["physics"]
-        material = stored["material"]
-
-        has_data = bool(semantic or physics or material)
-        result_metadata: Optional[Dict[str, Any]] = None
-        if has_data:
-            result_metadata = {}
-            if semantic:
-                result_metadata["semantic"] = semantic
-            if physics:
-                if "is_rigid_body" in physics:
-                    physics["is_rigid_body"] = bool(physics["is_rigid_body"])
-                result_metadata["physics"] = physics
-            if material:
-                result_metadata["material"] = material
-
+        valid, invalid = self._simready_checked(stored)
         return {
             "object_name": object_name,
-            "metadata": result_metadata,
-            "has_simready_data": has_data,
+            "metadata": valid or None,
+            "has_simready_data": bool(valid or invalid),
+            "invalid_values": invalid,
         }
 
-    _SIMREADY_SEMANTIC_KEYS = ("semantic_class", "semantic_hierarchy", "semantic_qcode")
-    _SIMREADY_PHYSICS_KEYS = (
-        "mass_kg",
-        "collider_type",
-        "static_friction",
-        "dynamic_friction",
-        "restitution",
-        "density",
-        "is_rigid_body",
+    # Checks validate_simready_compliance runs, by its check_<name> parameter.
+    _SIMREADY_CHECKS = (
+        "naming",
+        "scale",
+        "transforms",
+        "materials",
+        "hierarchy",
+        "metadata",
+        "geometry",
     )
-    _SIMREADY_MATERIAL_KEYS = (
-        "substrate_type",
-        "material_naming",
-        "shader_type",
-        "texel_density",
-    )
-
-    def _read_simready_properties(self, obj: Any) -> Dict[str, Dict[str, Any]]:
-        """The object's ``simready_*`` custom properties as stored, grouped like the metadata.
-
-        Additional labels (``simready_label_<key>``) are gathered under
-        ``semantic["additional_labels"]``; unknown ``simready_`` keys are left out.
-        """
-        semantic: Dict[str, Any] = {}
-        physics: Dict[str, Any] = {}
-        material: Dict[str, Any] = {}
-        additional_labels: Dict[str, str] = {}
-        prefix = self._SIMREADY_PREFIX
-        for key in obj.keys():
-            if not key.startswith(prefix):
-                continue
-            stripped = key[len(prefix) :]
-            val = obj[key]
-            # Convert IDPropertyArray / other exotic types to Python
-            if hasattr(val, "to_list"):
-                val = val.to_list()
-            elif hasattr(val, "to_dict"):
-                val = val.to_dict()
-
-            if stripped.startswith("label_"):
-                additional_labels[stripped[6:]] = str(val)
-            elif stripped in self._SIMREADY_SEMANTIC_KEYS:
-                semantic[stripped] = val
-            elif stripped in self._SIMREADY_PHYSICS_KEYS:
-                physics[stripped] = val
-            elif stripped in self._SIMREADY_MATERIAL_KEYS:
-                material[stripped] = val
-        if additional_labels:
-            semantic["additional_labels"] = additional_labels
-        return {"semantic": semantic, "physics": physics, "material": material}
+    _SIMREADY_SEVERITIES = ("all", "error", "warning")
+    # validate_simready_compliance returns at most this many issues per page,
+    # and keeps a page under this many bytes of JSON, inside the server's
+    # result budget.
+    _SIMREADY_PAGE_MAX = 500
+    _SIMREADY_PAGE_BYTES = 30_000
+    # A face this small (in square Blender units) has collapsed to a line or point.
+    _SIMREADY_DEGENERATE_AREA = 1e-12
 
     def validate_simready_compliance(
         self,
@@ -2821,130 +3006,349 @@ class BlenderRuntimeSession:
         check_transforms: bool = True,
         check_materials: bool = True,
         check_hierarchy: bool = True,
+        check_metadata: bool = True,
+        check_geometry: bool = True,
+        severity: str = "all",
+        offset: int = 0,
+        limit: int = 50,
     ) -> Dict[str, Any]:
         """
-        Validate objects against NVIDIA SimReady conventions.
+        Validate objects against SimReady conventions; any error makes them non-compliant.
 
-        Checks naming (lowercase_underscore), scale (meter-range dimensions),
-        clean transforms (no stacked rotation/scale), material segmentation,
-        and hierarchy structure.
+        Checks: naming of objects and materials (errors) and mesh data
+        (warning); real-world size in the scene's units; transforms (an asset
+        root must be at the origin unrotated and unscaled, a part unscaled,
+        and a rotated part is a warning; quaternion, axis-angle and delta
+        transforms count); material slots; hierarchy; metadata (a semantic
+        class on the mesh or an ancestor, a collider, invalid stored values);
+        and geometry (UVs, n-gons, degenerate faces).
 
         Args:
-            object_names: Objects to check.  ``None`` checks all mesh objects.
-            check_naming: Validate naming convention.
-            check_scale: Validate real-world meter scale.
-            check_transforms: Validate clean transforms.
-            check_materials: Validate material segmentation.
+            object_names: Objects to check. Null checks the scene's meshes
+                and every object above them, asset roots included. An empty
+                list is refused.
+            check_naming: Validate object, material and mesh-data names.
+            check_scale: Validate real-world size in the scene's units.
+            check_transforms: Validate applied transforms.
+            check_materials: Validate material slots.
             check_hierarchy: Validate hierarchy structure.
+            check_metadata: Validate the SimReady metadata.
+            check_geometry: Validate UVs, n-gons and degenerate faces.
+            severity: Return all issues, or only error or warning issues.
+            offset: Index of the first issue returned.
+            limit: Most issues returned (1 to 500); next_offset gives the
+                next page.
 
         Returns:
-            Dict with compliant flag, object_count, issue_count, issues list.
+            Dict with compliant (no errors at all), object_count, issue_count,
+            error_count, warning_count, issues (the page), offset,
+            next_offset (null on the last page) and meters_per_unit.
+
+        Raises:
+            ValueError: For an empty object list, an unknown object, or a bad
+                severity, offset or limit.
         """
-        issues: List[Dict[str, Any]] = []
+        if object_names is not None and not object_names:
+            raise ValueError(
+                "object_names is empty; list the objects to check, or pass null for the scene"
+            )
+        if severity not in self._SIMREADY_SEVERITIES:
+            raise ValueError(f"severity must be one of {', '.join(self._SIMREADY_SEVERITIES)}")
+        if offset < 0 or not 1 <= limit <= self._SIMREADY_PAGE_MAX:
+            raise ValueError(f"offset must be >= 0 and limit 1 to {self._SIMREADY_PAGE_MAX}")
+        targets = self._simready_validation_targets(object_names)
+        checks = {
+            "naming": check_naming,
+            "scale": check_scale,
+            "transforms": check_transforms,
+            "materials": check_materials,
+            "hierarchy": check_hierarchy,
+            "metadata": check_metadata,
+            "geometry": check_geometry,
+        }
         unit_scale = self._scene_unit_scale()
-
-        if object_names is None:
-            targets = [o for o in self._resolve_object_source(None) if o.type == "MESH"]
-        else:
-            targets = [self._get_object_or_raise(n) for n in object_names]
-
-        for obj in targets:
-            name: str = obj.name
-
-            if check_naming and not self._SIMREADY_NAME_RE.match(name):
-                issues.append(
-                    {
-                        "object_name": name,
-                        "check": "naming",
-                        "severity": "error",
-                        "message": (
-                            f"Name '{name}' violates SimReady convention "
-                            "(lowercase letters, digits, underscores only)"
-                        ),
-                        "suggestion": (
-                            "Rename to: "
-                            + re.sub(r"[^a-z0-9_]", "_", name.lower()).strip("_")
-                        ),
-                    }
-                )
-
-            if check_scale:
-                issues.extend(self._simready_size_issues(obj, unit_scale))
-
-            if check_transforms:
-                rot = tuple(obj.rotation_euler)
-                scl = tuple(obj.scale)
-                has_rotation = any(abs(r) > 1e-6 for r in rot)
-                has_non_unit_scale = any(abs(s - 1.0) > 1e-6 for s in scl)
-                if has_rotation:
-                    issues.append(
-                        {
-                            "object_name": name,
-                            "check": "transforms",
-                            "severity": "warning",
-                            "message": (
-                                f"Non-zero rotation {rot} — SimReady requires "
-                                "applied (zero) transforms"
-                            ),
-                            "suggestion": "Apply rotation: Ctrl+A → Rotation",
-                        }
-                    )
-                if has_non_unit_scale:
-                    issues.append(
-                        {
-                            "object_name": name,
-                            "check": "transforms",
-                            "severity": "warning",
-                            "message": (
-                                f"Non-unit scale {scl} — SimReady requires "
-                                "applied (1,1,1) scale"
-                            ),
-                            "suggestion": "Apply scale: Ctrl+A → Scale",
-                        }
-                    )
-
-            if check_materials and hasattr(getattr(obj, "data", None), "materials"):
-                # Cameras, lights and empties carry no material slots.
-                mat_count = len(obj.data.materials)
-                if mat_count == 0:
-                    issues.append(
-                        {
-                            "object_name": name,
-                            "check": "materials",
-                            "severity": "error",
-                            "message": "No material assigned",
-                            "suggestion": (
-                                "Assign at least one material per mesh prim"
-                            ),
-                        }
-                    )
-
-            if check_hierarchy and obj.parent is None:
-                has_children = len(obj.children) > 0
-                if not has_children and obj.type == "MESH":
-                    issues.append(
-                        {
-                            "object_name": name,
-                            "check": "hierarchy",
-                            "severity": "warning",
-                            "message": (
-                                "Mesh has no parent empty — SimReady assets "
-                                "should be under a root XForm"
-                            ),
-                            "suggestion": (
-                                "Use setup_simready_hierarchy to create a root"
-                            ),
-                        }
-                    )
-
-        error_count = sum(1 for i in issues if i["severity"] == "error")
+        issues = self._simready_issues(targets, checks, unit_scale)
+        errors = sum(1 for issue in issues if issue["severity"] == "error")
+        selected = [i for i in issues if severity == "all" or i["severity"] == severity]
+        page: List[Dict[str, Any]] = []
+        size = 0
+        for issue in selected[offset : offset + limit]:
+            size += len(json.dumps(issue)) + 2
+            if page and size > self._SIMREADY_PAGE_BYTES:
+                break
+            page.append(issue)
+        end = offset + len(page)
         return {
-            "compliant": error_count == 0,
+            "compliant": errors == 0,
             "object_count": len(targets),
             "issue_count": len(issues),
-            "issues": issues,
+            "error_count": errors,
+            "warning_count": len(issues) - errors,
+            "issues": page,
+            "offset": offset,
+            "next_offset": end if end < len(selected) else None,
             "meters_per_unit": unit_scale,
         }
+
+    def _simready_validation_targets(self, object_names: Optional[List[str]]) -> List[Any]:
+        """The listed objects, or the scene's meshes and every object above them."""
+        if object_names is not None:
+            return [self._get_object_or_raise(name) for name in object_names]
+        blender_module: Any = bpy
+        targets: List[Any] = []
+        seen: set = set()
+        for obj in blender_module.context.scene.objects:
+            if obj is None or obj.type != "MESH":
+                continue
+            chain = []
+            current = obj
+            while current is not None and current.name not in seen:
+                chain.append(current)
+                seen.add(current.name)
+                current = current.parent
+            targets.extend(reversed(chain))
+        return targets
+
+    def _simready_issues(
+        self, targets: Sequence[Any], checks: Mapping[str, bool], unit_scale: float
+    ) -> List[Dict[str, Any]]:
+        """Every issue of ``targets``, in object order."""
+        issues: List[Dict[str, Any]] = []
+        stored_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        named: set = set()
+
+        def stored(obj: Any) -> Dict[str, Dict[str, Any]]:
+            if obj.name not in stored_cache:
+                stored_cache[obj.name] = self._read_simready_properties(obj)
+            return stored_cache[obj.name]
+
+        def add(obj: Any, check: str, severity: str, message: str, suggestion: Optional[str]) -> None:
+            issues.append(
+                {
+                    "object_name": obj.name,
+                    "check": check,
+                    "severity": severity,
+                    "message": message,
+                    "suggestion": suggestion,
+                }
+            )
+
+        for obj in targets:
+            is_mesh = obj.type == "MESH"
+            is_root = obj.parent is None and (obj.type == "EMPTY" or bool(obj.children))
+            if checks["naming"]:
+                self._simready_naming_issues(obj, add, named)
+            if checks["scale"]:
+                issues.extend(self._simready_size_issues(obj, unit_scale))
+            if checks["transforms"]:
+                self._simready_transform_issues(obj, is_root, add)
+            if checks["materials"] and is_mesh:
+                slots = self._material_slots(obj)
+                if not slots:
+                    add(obj, "materials", "error", "No material assigned",
+                        "Assign at least one material per mesh prim")
+                empty = [str(i) for i, material in enumerate(slots) if material is None]
+                if empty:
+                    add(obj, "materials", "error",
+                        f"Material slot(s) {', '.join(empty)} hold no material",
+                        "Assign a material to every slot or remove the empty slots")
+            if checks["hierarchy"]:
+                if is_mesh and obj.parent is None and not obj.children:
+                    add(obj, "hierarchy", "warning",
+                        "Mesh has no parent empty — SimReady assets should be under a root XForm",
+                        "Use setup_simready_hierarchy to create a root")
+                elif is_root and obj.type != "EMPTY":
+                    add(obj, "hierarchy", "warning",
+                        f"The asset root is a {obj.type.lower()}, not an empty (Xform)",
+                        "Use setup_simready_hierarchy to put it under a root empty")
+            if checks["metadata"]:
+                self._simready_metadata_issues(obj, is_mesh, stored, add)
+            if checks["geometry"] and is_mesh:
+                self._simready_geometry_issues(obj, add)
+        return issues
+
+    def _simready_naming_issues(self, obj: Any, add: Callable[..., None], named: set) -> None:
+        """Object and material names (errors) and the mesh data name (a warning)."""
+
+        def suggestion(name: str) -> str:
+            return "Rename to: " + (re.sub(r"[^a-z0-9_]+", "_", name.lower()).strip("_") or "part")
+
+        name = obj.name
+        if not self._SIMREADY_NAME_RE.match(name):
+            add(obj, "naming", "error",
+                f"Name '{name}' violates SimReady convention "
+                "(lowercase letters, digits, underscores only)", suggestion(name))
+        if obj.type != "MESH":
+            return
+        for material in self._material_slots(obj):
+            material_name = getattr(material, "name", material)
+            if material is None or ("material", material_name) in named:
+                continue
+            named.add(("material", material_name))
+            if not self._SIMREADY_NAME_RE.match(str(material_name)):
+                add(obj, "naming", "error",
+                    f"Material name '{material_name}' violates SimReady convention; "
+                    "it becomes a prim name in the USD", suggestion(str(material_name)))
+        data_name = getattr(getattr(obj, "data", None), "name", None)
+        if data_name and ("mesh", data_name) not in named:
+            named.add(("mesh", data_name))
+            if not self._SIMREADY_NAME_RE.match(data_name):
+                add(obj, "naming", "warning",
+                    f"Mesh data name '{data_name}' violates SimReady convention; "
+                    "it becomes the mesh prim's name in the USD", suggestion(data_name))
+
+    @staticmethod
+    def _material_slots(obj: Any) -> List[Any]:
+        """The material in each of the object's slots, None for an empty slot."""
+        slots = getattr(obj, "material_slots", None)
+        if slots is not None:
+            return [getattr(slot, "material", None) for slot in slots]
+        data = getattr(obj, "data", None)
+        return list(getattr(data, "materials", None) or [])
+
+    @staticmethod
+    def _simready_rotation(obj: Any) -> Tuple[bool, str]:
+        """Whether the object is rotated (its mode's rotation and the delta), and how."""
+        tolerance = 1e-6
+        mode = getattr(obj, "rotation_mode", "XYZ")
+        if mode == "QUATERNION":
+            w, *xyz = [float(v) for v in getattr(obj, "rotation_quaternion", (1.0, 0.0, 0.0, 0.0))]
+            dw, *dxyz = [
+                float(v) for v in getattr(obj, "delta_rotation_quaternion", (1.0, 0.0, 0.0, 0.0))
+            ]
+            rotated = any(abs(v) > tolerance for v in xyz + dxyz) or (
+                abs(abs(w) - 1.0) > tolerance or abs(abs(dw) - 1.0) > tolerance
+            )
+            return rotated, f"quaternion {tuple(round(v, 6) for v in (w, *xyz))}"
+        if mode == "AXIS_ANGLE":
+            angle = float(tuple(getattr(obj, "rotation_axis_angle", (0.0, 0.0, 1.0, 0.0)))[0])
+            delta = [float(v) for v in getattr(obj, "delta_rotation_euler", (0.0, 0.0, 0.0))]
+            rotated = abs(angle) > tolerance or any(abs(v) > tolerance for v in delta)
+            return rotated, f"axis-angle {angle:.6g} rad"
+        euler = [float(v) for v in getattr(obj, "rotation_euler", (0.0, 0.0, 0.0))]
+        delta = [float(v) for v in getattr(obj, "delta_rotation_euler", (0.0, 0.0, 0.0))]
+        rotated = any(abs(v) > tolerance for v in euler + delta)
+        shown = tuple(round(a + b, 6) for a, b in zip(euler, delta))
+        return rotated, f"Euler {shown} rad" + (" (with a delta rotation)" if any(delta) else "")
+
+    def _simready_transform_issues(
+        self, obj: Any, is_root: bool, add: Callable[..., None]
+    ) -> None:
+        """An asset root must carry no transform; a part no scale (error) and no rotation (warning)."""
+        tolerance = 1e-6
+        scale = [float(v) for v in getattr(obj, "scale", (1.0, 1.0, 1.0))]
+        delta_scale = [float(v) for v in getattr(obj, "delta_scale", (1.0, 1.0, 1.0))]
+        total = [a * b for a, b in zip(scale, delta_scale)]
+        location = [
+            float(a) + float(b)
+            for a, b in zip(
+                getattr(obj, "location", (0.0, 0.0, 0.0)),
+                getattr(obj, "delta_location", (0.0, 0.0, 0.0)),
+            )
+        ]
+        rotated, rotation = self._simready_rotation(obj)
+        what = "The asset root" if is_root else "The object"
+        if any(abs(s - 1.0) > tolerance for s in total):
+            mirrored = " and mirrors it" if any(s < 0 for s in total) else ""
+            delta = " (with a delta scale)" if any(abs(s - 1.0) > tolerance for s in delta_scale) else ""
+            add(obj, "transforms", "error",
+                f"{what} is scaled {tuple(round(s, 6) for s in total)}{delta}{mirrored}; "
+                "SimReady requires applied (1,1,1) scale",
+                "Apply scale: Ctrl+A → Scale (and clear delta transforms)")
+        if rotated:
+            add(obj, "transforms", "error" if is_root else "warning",
+                f"{what} is rotated: {rotation}; SimReady expects applied (zero) rotation",
+                "Apply rotation: Ctrl+A → Rotation (and clear delta transforms)")
+        if is_root and any(abs(v) > tolerance for v in location):
+            add(obj, "transforms", "error",
+                f"The asset root is at {tuple(round(v, 6) for v in location)}, not the origin",
+                "Clear the root's location (Alt+G) and apply the offset to its children")
+
+    def _simready_metadata_issues(
+        self,
+        obj: Any,
+        is_mesh: bool,
+        stored: Callable[[Any], Dict[str, Dict[str, Any]]],
+        add: Callable[..., None],
+    ) -> None:
+        """Invalid stored values, a mesh without a semantic class or collider, a body without mass."""
+        mine = stored(obj)
+        _, invalid = self._simready_checked(mine)
+        for entry in invalid:
+            add(obj, "metadata", "error",
+                f"Stored {entry['property']}={entry['value']!r} {entry['problem']}",
+                "Set a valid value with apply_simready_metadata, or clear it")
+        physics = mine.get("physics") or {}
+        rigid = physics.get("is_rigid_body") in (True, 1)
+        if rigid and physics.get("mass_kg") is None and physics.get("density") is None:
+            add(obj, "metadata", "warning",
+                "Rigid body without mass_kg or density; the simulator assumes a default density",
+                "Set physics.mass_kg (or density) with apply_simready_metadata")
+        if not is_mesh:
+            return
+
+        def inherited(group: str, field: str) -> bool:
+            current = obj
+            while current is not None:
+                value = (stored(current).get(group) or {}).get(field)
+                if value not in (None, ""):
+                    return True
+                current = current.parent
+            return False
+
+        if not inherited("semantic", "semantic_class"):
+            add(obj, "metadata", "error",
+                "No semantic class on the mesh or any object above it",
+                "Set semantic.semantic_class on the asset root or the mesh with "
+                "apply_simready_metadata")
+        if not inherited("physics", "collider_type"):
+            add(obj, "metadata", "warning",
+                "No collider_type on the mesh or any object above it; it will not collide "
+                "in a simulator",
+                "Set physics.collider_type (e.g. convexHull) with apply_simready_metadata")
+
+    def _simready_geometry_issues(self, obj: Any, add: Callable[..., None]) -> None:
+        """UV maps, n-gons and degenerate faces of the mesh the export writes."""
+        mesh, release = self._simready_export_mesh(obj)
+        try:
+            polygons = getattr(mesh, "polygons", None)
+            if polygons is None:
+                return
+            count = len(polygons)
+            if hasattr(polygons, "foreach_get"):
+                corners = array("i", [0]) * count
+                areas = array("f", [0.0]) * count
+                polygons.foreach_get("loop_total", corners)
+                polygons.foreach_get("area", areas)
+            else:
+                corners = array("i", [len(p.vertices) for p in polygons])
+                areas = array("f", [float(p.area) for p in polygons])
+            ngons = sum(1 for c in corners if c > 4)
+            degenerate = sum(1 for a in areas if a <= self._SIMREADY_DEGENERATE_AREA)
+            if count and not len(getattr(mesh, "uv_layers", ())):
+                add(obj, "geometry", "warning", "Mesh has no UV map; textures cannot be mapped",
+                    "Unwrap the mesh (U → Smart UV Project)")
+            if ngons:
+                add(obj, "geometry", "warning",
+                    f"{ngons} of {count} faces are n-gons (more than 4 corners)",
+                    "Triangulate or quad-fill them (Ctrl+T, or a Triangulate modifier)")
+            if degenerate:
+                add(obj, "geometry", "error",
+                    f"{degenerate} of {count} faces are degenerate (zero area)",
+                    "Remove them: Mesh → Clean Up → Degenerate Dissolve, or Merge by Distance")
+        finally:
+            release()
+
+    def _simready_export_mesh(self, obj: Any) -> Tuple[Any, Callable[[], None]]:
+        """The mesh the USD export writes (with modifiers evaluated), and how to release it."""
+        blender_module: Any = bpy
+        modifiers = getattr(obj, "modifiers", None)
+        graph_get = getattr(blender_module.context, "evaluated_depsgraph_get", None)
+        if modifiers and len(modifiers) and graph_get is not None:
+            evaluated = obj.evaluated_get(graph_get())
+            mesh = evaluated.to_mesh()
+            return mesh, evaluated.to_mesh_clear
+        return getattr(obj, "data", None), lambda: None
 
     # A part's largest real-world dimension (Blender units times the scene's
     # Unit Scale) outside these bounds means the scene's units are not the ones
@@ -3077,7 +3481,8 @@ class BlenderRuntimeSession:
             embed_metadata: Also keep the simready_ custom properties (and
                 Blender's names) as userProperties attributes, which Blender's
                 USD import reads back as custom properties.
-            validate_before_export: Validate the meshes first.
+            validate_before_export: First run every validate_simready_compliance
+                check on the exported objects, the asset root included.
             include_children: Export the descendants of the listed objects.
             include_lights_and_cameras: Also export lights, cameras and the
                 World's dome light, which are left out of an asset by default.
@@ -3119,23 +3524,34 @@ class BlenderRuntimeSession:
         issues: Optional[List[Dict[str, Any]]] = None
         validation_passed: Optional[bool] = None
         if validate_before_export:
-            result = self.validate_simready_compliance(
-                object_names=[o.name for o in targets if o.type == "MESH"]
+            # Every exported object is checked, the asset root included.
+            issues = self._simready_issues(
+                targets,
+                {check: True for check in self._SIMREADY_CHECKS},
+                self._scene_unit_scale(),
             )
-            issues = list(result.get("issues") or [])
-            validation_passed = bool(result.get("compliant", True))
+            validation_passed = not any(i["severity"] == "error" for i in issues)
             if not validation_passed and not force:
                 return self._simready_validation_refusal(issues)
 
-        plan = {
-            "objects": [
+        objects = []
+        stored_problems: List[str] = []
+        for obj in targets:
+            valid, invalid = self._simready_checked(self._read_simready_properties(obj))
+            objects.append(
                 {
                     "name": obj.name,
                     "parent": obj.parent.name if obj.parent is not None else None,
-                    **self._read_simready_properties(obj),
+                    "semantic": valid.get("semantic", {}),
+                    "physics": valid.get("physics", {}),
                 }
-                for obj in targets
-            ],
+            )
+            stored_problems.extend(
+                f"{obj.name}: stored {i['property']}={i['value']!r} {i['problem']}; not exported"
+                for i in invalid
+            )
+        plan = {
+            "objects": objects,
             "asset_name": usd_identifier(os.path.splitext(os.path.basename(file_path))[0]),
             "meters_per_unit": self._scene_unit_scale(),
             "embed_metadata": embed_metadata,
@@ -3215,7 +3631,7 @@ class BlenderRuntimeSession:
             "forced": bool(force and validation_passed is False),
             "issue_count": len(issues) if issues is not None else 0,
             "issues": issues[:limit] if issues is not None else None,
-            "warnings": report["warnings"][:limit],
+            "warnings": (stored_problems + report["warnings"])[:limit],
         }
 
     def _simready_validation_refusal(self, issues: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -3270,7 +3686,7 @@ class BlenderRuntimeSession:
         layer_objects = blender_module.context.view_layer.objects
         listed: List[Any] = []
         if object_names is None:
-            candidates = list(blender_module.context.scene.objects)
+            candidates = [o for o in blender_module.context.scene.objects if o is not None]
         else:
             listed = [self._get_object_or_raise(name) for name in object_names]
             outside = sorted(o.name for o in listed if layer_objects.get(o.name) is None)
@@ -3359,7 +3775,9 @@ class BlenderRuntimeSession:
         blender_module: Any = bpy
         context = blender_module.context
         view_layer = context.view_layer
-        layer_objects = list(view_layer.objects)
+        # Right after bpy.data.objects.remove, Blender 5.0.1 yields None for the
+        # removed object here until the view layer syncs again.
+        layer_objects = [o for o in view_layer.objects if o is not None]
         selected = [o for o in layer_objects if o.select_get()]
         active = view_layer.objects.active
         mode = None
@@ -3408,64 +3826,161 @@ class BlenderRuntimeSession:
         root_name: str,
         child_names: List[str],
         semantic: Optional[Dict[str, Any]] = None,
+        reuse_root: bool = False,
     ) -> Dict[str, Any]:
         """
-        Create a SimReady-compliant hierarchy with a root empty (XForm)
-        and parent the given children under it.
+        Put objects under a SimReady root empty (an Xform in the USD), keeping where they are.
 
-        The root empty is placed at the origin with identity transforms,
-        matching SimReady modeling best-practices.  Optionally applies
-        semantic labels to the root.
+        Each listed object without a listed ancestor is parented to the root
+        with its world transform kept; a listed object under another listed
+        object keeps its parent, so an existing nesting stays. Everything is
+        checked before anything changes, and a failure part-way restores the
+        parents and removes a root this call created.
 
         Args:
-            root_name: Name for the root empty object.
-            child_names: Existing objects to parent under the root.
-            semantic: Optional semantic labels dict to apply to the root.
+            root_name: Name for the root empty: lowercase letters, digits, underscores.
+            child_names: Existing objects to put under the root.
+            semantic: Semantic labels to store on the root.
+            reuse_root: Put the objects under an existing empty named root_name;
+                without it, an existing object of that name is refused.
 
         Returns:
-            Dict with root_name, children, hierarchy_path.
+            Dict with root_name, root_created, children, reparented, kept_parent
+            (each with its parent), hierarchy_path (the root's prim path in
+            export_simready_usd's USD) and prim_paths of the children.
+
+        Raises:
+            ValueError: For an invalid root name, an empty or unknown child,
+                an existing root without reuse_root (or one that is not an
+                empty, or would end up under its own child), or invalid
+                semantic labels. Nothing is changed then.
         """
         blender_module: Any = bpy
-
-        # Validate root name follows SimReady conventions
         if not self._SIMREADY_NAME_RE.match(root_name):
             raise ValueError(
                 f"Root name '{root_name}' violates SimReady naming "
                 "(lowercase letters, digits, underscores only)"
             )
+        if not child_names:
+            raise ValueError("child_names is empty; list the objects to put under the root")
+        missing = []
+        children: List[Any] = []
+        for name in dict.fromkeys(child_names):
+            try:
+                children.append(self._get_object_or_raise(name))
+            except ValueError:
+                missing.append(name)
+        if missing:
+            raise ValueError(f"Objects not found: {', '.join(missing)}; nothing was changed")
+        if any(child.name == root_name for child in children):
+            raise ValueError(f"'{root_name}' cannot be put under itself")
+        root = blender_module.data.objects.get(root_name)
+        if root is not None:
+            if not reuse_root:
+                raise ValueError(
+                    f"An object named '{root_name}' already exists; pass reuse_root=true to "
+                    "put the objects under it, or choose another root_name. Nothing was changed"
+                )
+            if root.type != "EMPTY":
+                raise ValueError(
+                    f"'{root_name}' is a {str(root.type).lower()}, not an empty; a SimReady "
+                    "root must be an empty (an Xform in the USD)"
+                )
+            if blender_module.context.scene.objects.get(root_name) is None:
+                raise ValueError(f"'{root_name}' is not in the current scene")
+            above = {a.name for a in self._ancestors(root)}
+            cycle = sorted(child.name for child in children if child.name in above)
+            if cycle:
+                raise ValueError(
+                    f"{', '.join(cycle)} is above '{root_name}'; it cannot also go under it"
+                )
+        semantic_writes = self._simready_writes({"semantic": semantic}) if semantic else []
+        listed = {child.name for child in children}
+        top = [c for c in children if not any(a.name in listed for a in self._ancestors(c))]
+        kept = [c for c in children if c not in top]
 
-        # Create root empty at origin
-        empty = blender_module.data.objects.new(root_name, None)
-        blender_module.context.scene.collection.objects.link(empty)
-        empty.empty_display_type = "PLAIN_AXES"
-        empty.location = (0.0, 0.0, 0.0)
-        empty.rotation_euler = (0.0, 0.0, 0.0)
-        empty.scale = (1.0, 1.0, 1.0)
+        update = getattr(getattr(blender_module.context, "view_layer", None), "update", None)
+        if update is not None:
+            update()  # current world matrices to keep
+        created = root is None
+        if created:
+            root = blender_module.data.objects.new(root_name, None)
+            if root.name != root_name:
+                blender_module.data.objects.remove(root)
+                raise ValueError(f"Blender named the root '{root.name}'; nothing was changed")
+            blender_module.context.scene.collection.objects.link(root)
+            root.empty_display_type = "PLAIN_AXES"
+            root.location = (0.0, 0.0, 0.0)
+            root.rotation_euler = (0.0, 0.0, 0.0)
+            root.scale = (1.0, 1.0, 1.0)
+        undo: List[Tuple[Any, Any, Any, Any]] = []
+        reparented: List[str] = []
+        try:
+            inverse = root.matrix_world.inverted()
+            for child in top:
+                if child.parent is root:
+                    continue
+                undo.append(
+                    (child, child.parent, child.matrix_parent_inverse.copy(), child.matrix_basis.copy())
+                )
+                world = child.matrix_world.copy()
+                child.parent = root
+                # root @ inverse(root) @ basis: the world transform is the basis,
+                # Blender's "Keep Transform" parenting.
+                child.matrix_parent_inverse = inverse
+                child.matrix_basis = world
+                reparented.append(child.name)
+            for key, value in semantic_writes:
+                root[key] = value
+        except Exception:
+            for child, parent, parent_inverse, basis in reversed(undo):
+                # Best effort: one object that refuses must not keep the rest moved.
+                for attribute, value in (
+                    ("parent", parent),
+                    ("matrix_parent_inverse", parent_inverse),
+                    ("matrix_basis", basis),
+                ):
+                    try:
+                        setattr(child, attribute, value)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Could not restore %s.%s", child.name, attribute)
+            if created:
+                blender_module.data.objects.remove(root)
+            raise
+        if update is not None:
+            update()
 
-        # Parent children
-        parented: List[str] = []
-        for child_name in child_names:
-            child = self._get_object_or_raise(child_name)
-            child.parent = empty
-            parented.append(child.name)
+        root_path = f"/{usd_identifier(root.name)}"
 
-        # Apply semantic labels if provided
-        if semantic:
-            self.apply_simready_metadata(
-                empty.name,
-                {"semantic": semantic},
-            )
-
-        hierarchy_parts = [f"/{empty.name}"]
-        for c in parented:
-            hierarchy_parts.append(f"/{empty.name}/{c}")
-        hierarchy_path = hierarchy_parts[0]
+        def prim_path(obj: Any) -> str:
+            names = [usd_identifier(obj.name)]
+            for ancestor in self._ancestors(obj):
+                if ancestor is root:
+                    break
+                names.append(usd_identifier(ancestor.name))
+            return root_path + "/" + "/".join(reversed(names))
 
         return {
-            "root_name": empty.name,
-            "children": parented,
-            "hierarchy_path": hierarchy_path,
+            "root_name": root.name,
+            "root_created": created,
+            "children": [child.name for child in children],
+            "reparented": reparented,
+            "kept_parent": [
+                {"object_name": child.name, "parent": child.parent.name} for child in kept
+            ],
+            "hierarchy_path": root_path,
+            "prim_paths": {child.name: prim_path(child) for child in children},
         }
+
+    @staticmethod
+    def _ancestors(obj: Any) -> Iterator[Any]:
+        """The object's parent, its parent's parent, and so on."""
+        seen: set = set()
+        current = getattr(obj, "parent", None)
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            yield current
+            current = getattr(current, "parent", None)
 
     # -- End SimReady methods --------------------------------------------------
 

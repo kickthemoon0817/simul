@@ -61,6 +61,8 @@ COLLIDER_APPROXIMATIONS: Dict[str, str] = {
     # UsdPhysics has no capsule approximation of a mesh.
     "capsule": "convexHull",
 }
+#: The collider_type values apply_simready_metadata accepts.
+COLLIDER_TYPES: Tuple[str, ...] = tuple(COLLIDER_APPROXIMATIONS)
 
 #: Semantic metadata key -> semantics taxonomy (the LabelsAPI instance name).
 SEMANTIC_TAXONOMIES: Tuple[Tuple[str, str], ...] = (

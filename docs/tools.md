@@ -496,11 +496,50 @@ Behaviour worth knowing:
   USD import reads them back as custom properties. The importer names an object
   merged with its single mesh after the mesh, and imports the `Looks` and
   `PhysicsMaterials` scopes as empties.
-- `validate_simready_compliance` judges sizes in real-world metres: a mesh's
-  world-space size times the scene's Unit Scale (`meters_per_unit` in the
-  result). Above 100 m or below 1 mm is an error, as the scene's units are then
-  not the ones the part was modelled in (a 0.5 m part modelled in millimetres
-  measures 500 m in a metre scene); above 20 m is a warning.
+- `apply_simready_metadata` advertises the real fields of `metadata`
+  (`semantic`, `physics`, `material`) in its input schema, `collider_type` as
+  an enum. An unknown group or field is refused with the closest valid name
+  (`physics.mass`: did you mean `mass_kg`?), and so is an invalid value; the
+  call then writes nothing. A field left out or null keeps its stored value,
+  `is_rigid_body: false` clears an earlier true, and `clear` removes stored
+  values first: a field, a group, `additional_labels` or `all`. Label keys
+  become semantics taxonomies, so they must be identifiers, and
+  `semantic_qcode` must look like `Q1420`. `get_simready_metadata` returns the
+  stored values that meet those rules as `metadata`. The ones that do not (set
+  by a script, an import or an older Simul) are listed in `invalid_values`
+  with the problem, so one bad value does not fail the call.
+- `setup_simready_hierarchy` keeps every object where it is: it parents the
+  listed objects that have no listed ancestor to the root with their world
+  transform kept (the root sits at the origin, so the transform becomes the
+  object's own), and a listed object under another listed object keeps its
+  parent (`reparented` and `kept_parent` in the result). It checks every name,
+  the root and the semantic labels before changing anything, and a failure
+  part-way puts the parents back and removes the root it created. An existing
+  object with the root's name is refused unless `reuse_root: true`, which
+  needs an empty, so a retry never makes `robot.001`. `hierarchy_path` and
+  `prim_paths` are the prim paths `export_simready_usd` writes.
+- `validate_simready_compliance` reports `compliant: false` for any issue of
+  severity `error`; warnings never change it. With `object_names` null it
+  checks the scene's meshes and every object above them, asset roots
+  included; an empty list is refused. The checks:
+
+  | Check | Error | Warning |
+  |---|---|---|
+  | naming | object or material name outside `[a-z][a-z0-9_]*` | mesh data name outside it |
+  | scale | largest real-world size (world-space size × Unit Scale) above 100 m or below 1 mm, as the units are then not the modelling ones | above 20 m |
+  | transforms | asset root not at the origin, rotated or scaled; any object scaled or mirrored | a rotated part |
+  | materials | no material, or an empty slot | |
+  | hierarchy | | a mesh without a parent, or a root that is not an empty |
+  | metadata | no semantic class on the mesh or above it; a stored value that breaks the rules | no collider_type on the mesh or above it; a rigid body without mass or density |
+  | geometry | degenerate (zero-area) faces | no UV map; n-gons |
+
+  Quaternion and axis-angle rotation and delta transforms count, and geometry
+  is read with modifiers applied, as the export writes it. `severity` returns
+  only errors or warnings, and `offset` / `limit` (50 by default, at most 500)
+  page through the issues: `next_offset` is the next page's offset, null on the
+  last. A page also stops before 30 KB of issues so that it fits the result
+  budget; `issue_count`, `error_count` and `warning_count` count them all.
+  `export_simready_usd` runs every check on the objects it exports.
 - `search_blender_objects` refuses a `name_pattern` that repeats a group holding
   a quantifier or alternatives, such as `(\w+)+`: Python's regex search
   backtracks, and on a long object name such a pattern runs for hours on

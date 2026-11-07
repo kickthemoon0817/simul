@@ -147,12 +147,16 @@ from ..schemas.blender_ui import AgentControl, BlenderUIRequest, BlenderUIRespon
 from ..schemas.simready import (
     SimReadyApplyMetadataRequest,
     SimReadyApplyMetadataResponse,
+    SimReadyClearName,
     SimReadyExportRequest,
     SimReadyExportResponse,
     SimReadyGetMetadataRequest,
     SimReadyGetMetadataResponse,
+    SimReadyMetadata,
+    SimReadySemanticLabels,
     SimReadySetupHierarchyRequest,
     SimReadySetupHierarchyResponse,
+    SimReadySeverity,
     SimReadyValidateRequest,
     SimReadyValidateResponse,
 )
@@ -1125,19 +1129,27 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="apply_simready_metadata",
         description=(
-            "Apply NVIDIA SimReady metadata (semantic labels, physics properties, material info) "
-            "to a Blender object as custom properties. Stored with simready_ prefix for USD export."
+            "Store NVIDIA SimReady metadata (semantic labels, physics properties, material info) "
+            "on a Blender object as simready_ custom properties, which export_simready_usd writes "
+            "as UsdPhysics and UsdSemantics schemas. Omitted fields keep their stored value; "
+            "clear removes stored values. Unknown fields and invalid values are refused with "
+            "the valid names, before anything changes."
         ),
         hints=OVERWRITING,
         operation="apply_simready_metadata",
         request=SimReadyApplyMetadataRequest,
         response=SimReadyApplyMetadataResponse,
+        params={
+            "metadata": Param(Optional[SimReadyMetadata]),
+            "clear": Param(Optional[List[SimReadyClearName]]),
+        },
     ),
     BlenderTool(
         name="get_simready_metadata",
         description=(
-            "Read NVIDIA SimReady metadata from a Blender object. Returns semantic labels, "
-            "physics properties, and material info stored as simready_ custom properties."
+            "Read NVIDIA SimReady metadata from a Blender object: semantic labels, physics "
+            "properties and material info stored as simready_ custom properties. Stored values "
+            "that break the rules are listed in invalid_values instead of failing the call."
         ),
         hints=READ_ONLY,
         operation="get_simready_metadata",
@@ -1147,13 +1159,18 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="validate_simready_compliance",
         description=(
-            "Validate Blender objects against NVIDIA SimReady conventions: naming "
-            "(lowercase_underscore), scale (meters), clean transforms, material segmentation, hierarchy."
+            "Validate Blender objects against NVIDIA SimReady conventions; any error makes them "
+            "non-compliant. Checks names (objects, materials, mesh data), real-world size in the "
+            "scene's units, applied transforms (the asset root at the origin, parts unscaled), "
+            "material slots, hierarchy, metadata (semantic class, collider, stored values) and "
+            "geometry (UVs, n-gons, degenerate faces). Filter by severity and page with "
+            "offset/limit (next_offset)."
         ),
         hints=READ_ONLY,
         operation="validate_simready_compliance",
         request=SimReadyValidateRequest,
         response=SimReadyValidateResponse,
+        params={"severity": Param(SimReadySeverity)},
     ),
     BlenderTool(
         name="export_simready_usd",
@@ -1173,13 +1190,16 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="setup_simready_hierarchy",
         description=(
-            "Create a SimReady-compliant object hierarchy in Blender with a root empty (XForm "
-            "equivalent) and parent the given children under it. Optionally applies semantic "
-            "labels to the root."
+            "Put Blender objects under a SimReady root empty (an Xform in the USD), keeping their "
+            "world transforms. Only listed objects without a listed ancestor are re-parented; "
+            "existing nesting stays. Checks everything first and changes nothing on failure; an "
+            "existing root name is refused unless reuse_root=true. Optionally stores semantic "
+            "labels on the root."
         ),
         hints=ADDITIVE,
         operation="setup_simready_hierarchy",
         request=SimReadySetupHierarchyRequest,
         response=SimReadySetupHierarchyResponse,
+        params={"semantic": Param(Optional[SimReadySemanticLabels])},
     ),
 )

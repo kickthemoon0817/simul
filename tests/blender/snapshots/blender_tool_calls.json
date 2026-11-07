@@ -1596,7 +1596,27 @@
             "method": "apply_simready_metadata",
             "arguments": {
               "object_name": "'Cube'",
-              "metadata": "{'semantic': {'semantic_class': 'cup'}, 'physics': {'mass_kg': 2.0, 'collider_type': 'box', 'is_rigid_body': False}, 'material': {'substrate_type': 'metal'}}"
+              "metadata": "{'semantic': {'semantic_class': 'cup'}, 'physics': {'mass_kg': 2.0, 'collider_type': 'box'}, 'material': {'substrate_type': 'metal'}}",
+              "clear": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "SimReadyApplyMetadataResponse"},
+        "usage": [{"tool": "apply_simready_metadata", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_name": "Cube",
+          "metadata": {"physics": {"is_rigid_body": false}},
+          "clear": ["mass_kg", "additional_labels"]
+        },
+        "session_calls": [
+          {
+            "method": "apply_simready_metadata",
+            "arguments": {
+              "object_name": "'Cube'",
+              "metadata": "{'physics': {'is_rigid_body': False}}",
+              "clear": "['mass_kg', 'additional_labels']"
             }
           }
         ],
@@ -1624,7 +1644,8 @@
                 "semantic": {"semantic_class": "cup"},
                 "physics": {"mass_kg": 2, "collider_type": "box"},
                 "material": {"substrate_type": "metal"}
-              }
+              },
+              "clear": null
             }
           }
         }
@@ -1660,7 +1681,12 @@
               "check_scale": "True",
               "check_transforms": "True",
               "check_materials": "True",
-              "check_hierarchy": "True"
+              "check_hierarchy": "True",
+              "check_metadata": "True",
+              "check_geometry": "True",
+              "severity": "'all'",
+              "offset": "0",
+              "limit": "50"
             }
           }
         ],
@@ -1674,7 +1700,12 @@
           "check_scale": false,
           "check_transforms": false,
           "check_materials": false,
-          "check_hierarchy": false
+          "check_hierarchy": false,
+          "check_metadata": false,
+          "check_geometry": false,
+          "severity": "error",
+          "offset": 5,
+          "limit": 10
         },
         "session_calls": [
           {
@@ -1685,7 +1716,12 @@
               "check_scale": "False",
               "check_transforms": "False",
               "check_materials": "False",
-              "check_hierarchy": "False"
+              "check_hierarchy": "False",
+              "check_metadata": "False",
+              "check_geometry": "False",
+              "severity": "'error'",
+              "offset": "5",
+              "limit": "10"
             }
           }
         ],
@@ -1706,7 +1742,12 @@
               "check_scale": true,
               "check_transforms": true,
               "check_materials": true,
-              "check_hierarchy": true
+              "check_hierarchy": true,
+              "check_metadata": true,
+              "check_geometry": true,
+              "severity": "all",
+              "offset": 0,
+              "limit": 50
             }
           }
         }
@@ -1786,7 +1827,12 @@
         "session_calls": [
           {
             "method": "setup_simready_hierarchy",
-            "arguments": {"root_name": "'asset_root'", "child_names": "['Cube']", "semantic": "None"}
+            "arguments": {
+              "root_name": "'asset_root'",
+              "child_names": "['Cube']",
+              "semantic": "None",
+              "reuse_root": "False"
+            }
           }
         ],
         "response": {"checked_against": "SimReadySetupHierarchyResponse"},
@@ -1796,7 +1842,8 @@
         "arguments": {
           "root_name": "asset_root",
           "child_names": ["Cube"],
-          "semantic": {"semantic_class": "cup", "semantic_qcode": "Q81727"}
+          "semantic": {"semantic_class": "cup", "semantic_qcode": "Q81727"},
+          "reuse_root": true
         },
         "session_calls": [
           {
@@ -1804,7 +1851,8 @@
             "arguments": {
               "root_name": "'asset_root'",
               "child_names": "['Cube']",
-              "semantic": "{'semantic_class': 'cup', 'semantic_qcode': 'Q81727'}"
+              "semantic": "{'semantic_class': 'cup', 'semantic_qcode': 'Q81727'}",
+              "reuse_root": "True"
             }
           }
         ],
@@ -1818,7 +1866,14 @@
           "success": false,
           "error": "1 validation error for SimReadySetupHierarchyRequest\nroot_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"root_name": {"bogus": 1}, "child_names": ["Cube"], "semantic": null}}
+          "details": {
+            "input": {
+              "root_name": {"bogus": 1},
+              "child_names": ["Cube"],
+              "semantic": null,
+              "reuse_root": false
+            }
+          }
         }
       }
     }
