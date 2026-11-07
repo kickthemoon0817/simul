@@ -7,6 +7,7 @@ from ._shared import (
     APPLY_COLLISION_CORE,
     APPLY_RIGID_BODY_CORE,
     BIND_MATERIAL_CORE,
+    COERCE_ATTRIBUTE_VALUE_CORE,
     COLLISION_APPROXIMATIONS,
     DEFINE_MATERIAL_CORE,
     DEFINE_PRIM_CORE,
@@ -18,6 +19,7 @@ from ._shared import (
     _pyval,
 )
 from .._meta import tool_meta
+from .graph import _script_execution_refusal, is_script_capable_node_type
 
 # Compound-only glue: reuse an existing material or define a fresh
 # UsdPreviewSurface one. The single-step tool refuses to overwrite, and a
@@ -45,7 +47,9 @@ class CompoundMixin:
             "add_isaac_rigid_body, add_isaac_collision, set_isaac_mass_properties, "
             "create_isaac_material and assign_isaac_material: it runs the same steps in a "
             "single round trip and reports each step's result under 'steps'. Stops at the "
-            "first failing step and names it in 'failed_step'."
+            "first failing step and names it in 'failed_step'; what the earlier steps "
+            "created stays on the stage and is listed in 'left_on_stage'. Vector "
+            "arguments must have 3 components (checked before anything is created)."
         ),
         read_only=False,
     )
@@ -98,8 +102,13 @@ class CompoundMixin:
         Returns:
             Dict with ``prim_path`` and a ``steps`` dict keyed by step name
             (prim, transform, rigid_body, collision, mass, material,
-            bind_material), plus ``error``/``failed_step`` when a step failed.
+            bind_material), plus ``error``/``failed_step`` when a step failed
+            and ``left_on_stage`` naming what the completed steps created.
         """
+        if not self.settings.security.allow_script_execution and is_script_capable_node_type(prim_type):
+            return _script_execution_refusal(
+                f"Refusing to create a {prim_type!r} prim: that type runs code.", prim_type=prim_type
+            )
         if collision is not None and collision not in COLLISION_APPROXIMATIONS:
             return ErrorResponse(
                 error=(
@@ -108,6 +117,20 @@ class CompoundMixin:
                 ),
                 error_type="ValueError",
             ).model_dump()
+        # Checked before anything is sent: a two-element translation used to
+        # raise inside the script after the prim existed, losing the steps
+        # report and leaving the prim behind.
+        for label, vector in (
+            ("translation", translation),
+            ("rotation_euler", rotation_euler),
+            ("scale", scale),
+            ("diffuse_color", diffuse_color),
+        ):
+            if vector is not None and len(vector) != 3:
+                return ErrorResponse(
+                    error=f"{label} must have 3 components; got {len(vector)}. Nothing was created.",
+                    error_type="ValueError",
+                ).model_dump()
         if material_path is None and diffuse_color is not None:
             parent, _, name = prim_path.rpartition("/")
             material_path = f"{parent}/Looks/{name}_Material"
@@ -119,9 +142,9 @@ class CompoundMixin:
             plan.append((
                 "transform",
                 "_set_prim_transform(stage, prim_path, "
-                f"{_pyval(list(translation) if translation else None)}, "
-                f"{_pyval(list(rotation_euler) if rotation_euler else None)}, "
-                f"{_pyval(list(scale) if scale else None)})",
+                f"{_pyval(list(translation) if translation is not None else None)}, "
+                f"{_pyval(list(rotation_euler) if rotation_euler is not None else None)}, "
+                f"{_pyval(list(scale) if scale is not None else None)})",
             ))
         if rigid_body:
             plan.append(("rigid_body", f"_apply_rigid_body(stage, prim_path, {_pyval(bool(kinematic))})"))
@@ -150,8 +173,9 @@ class CompoundMixin:
             """\
             import json
             import omni.usd
-            from pxr import Usd, UsdGeom, UsdPhysics, UsdShade, Sdf, Gf
+            from pxr import Usd, UsdGeom, UsdPhysics, UsdShade, Sdf, Gf, Tf
             """,
+            COERCE_ATTRIBUTE_VALUE_CORE,
             DEFINE_PRIM_CORE,
             XFORM_READ_CORE,
             SET_PRIM_TRANSFORM_CORE,
@@ -168,13 +192,28 @@ class CompoundMixin:
             else:
                 steps = {}
                 result = {"prim_path": prim_path, "steps": steps}
+                created = []
                 for step_name, run_step in plan:
-                    outcome = run_step()
+                    try:
+                        outcome = run_step()
+                    except Exception as exc:
+                        # A step that raises still gets the report of what
+                        # the steps before it left on the stage.
+                        outcome = {"error": type(exc).__name__ + ": " + str(exc).strip()}
                     if "error" in outcome:
                         result["error"] = outcome["error"]
                         result["failed_step"] = step_name
                         break
                     steps[step_name] = outcome
+                    if step_name == "prim" or (step_name == "material" and outcome.get("created")):
+                        created.append(prim_path if step_name == "prim" else material_path)
+                if "error" in result and created:
+                    result["left_on_stage"] = created
+                    result["note"] = (
+                        "The steps before the failure are kept: " + ", ".join(created)
+                        + " exist. Remove them with delete_isaac_prim, or finish the object with the "
+                        "single-step tools."
+                    )
                 print(json.dumps(result))
             """,
         )
