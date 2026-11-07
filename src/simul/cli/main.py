@@ -24,21 +24,27 @@ commands.  When stdout is not a TTY the CLI auto-detects JSON mode.
 
 import asyncio
 import json
+import os
+import signal
 import socket
 import time
 from pathlib import Path
 from typing import Any, Dict, List, NoReturn, Optional, Set, Tuple
 
+import click
 import typer
+from pydantic import ValidationError
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
+from typer.core import TyperGroup
 
 from simul.cli.output import emit, emit_error, fail, is_json_mode, set_json_mode
-from simul.config import Settings, get_settings, load_settings, validate_settings
+from simul.config import ConfigError, Settings, get_settings, inspect_config_file, load_settings
 from simul.tool_surfaces import THIN_BLENDER_TOOLS, THIN_UNREAL_TOOLS, TOOL_SURFACES
 from simul.logging import setup_logging, get_logger
+from simul.utils.paths import state_dir
 
 from simul.cli.isaac import app as isaac_app
 from simul.cli.usd_cli import app as usd_app
@@ -95,11 +101,38 @@ def _global_callback(
         set_json_mode(True)
 
 
+def config_error_exit(exc: ConfigError) -> NoReturn:
+    """Report settings that cannot be used and exit 2.
+
+    The message names each bad setting, where its value came from and why it
+    was refused; under ``--json`` the envelope carries them as
+    ``details.errors``.
+    """
+    fail(exc.message, "ConfigError", {"errors": exc.errors}, exit_code=2)
+
+
+class _SimulGroup(TyperGroup):
+    """The root command group: a ``ConfigError`` from any command exits 2.
+
+    Every command loads the settings, and one bad value (``UNREAL__PORT=70000``)
+    used to end each of them in a Rich traceback with exit 1, even under
+    ``--json``. Commands raise ``ConfigError`` and this reports it once, the
+    same way for all of them; ``--help`` loads no settings and keeps working.
+    """
+
+    def invoke(self, ctx: click.Context) -> Any:
+        try:
+            return super().invoke(ctx)
+        except ConfigError as exc:
+            config_error_exit(exc)
+
+
 app = typer.Typer(
     name="simul",
     help="Simul -- agent toolkit for 3D simulation (MCP server, engine setup, bridges)",
     add_completion=False,
     callback=_global_callback,
+    cls=_SimulGroup,
 )
 console = Console(stderr=True)
 
@@ -122,7 +155,7 @@ app.add_typer(logs_app, name="logs")
 def _resolve_log_path(explicit: Optional[Path], audit: bool, structured: bool) -> Path:
     """Pick the right default log path when the user did not pass one.
 
-    ``audit`` -> ~/.simul/logs/audit.jsonl
+    ``audit`` -> logging.audit_path ($SIMUL_HOME/logs/audit.jsonl by default)
     ``structured`` -> the structured JSON file (newest matching basename)
     otherwise -> human-readable simul.log (newest matching basename)
     """
@@ -319,18 +352,39 @@ def _blender_mode_option() -> Any:
 
 
 def _option_error(message: str) -> NoReturn:
-    """Report an invalid option value and exit 1 (a JSON envelope too in JSON mode)."""
-    console.print(f"[red]{message}[/red]")
-    if is_json_mode():
-        emit_error(message, "ValueError")
-    raise typer.Exit(1)
+    """Report an invalid option value: exit 2 with ``InvalidArgument``, as docs/cli.md says.
+
+    Under ``--json`` the envelope goes to stdout, otherwise the message to stderr.
+    """
+    fail(message, "InvalidArgument", exit_code=2)
 
 
-def _with_section(settings: Settings, section: str, **update: Any) -> Settings:
-    """Return ``settings`` with fields of one frozen section replaced."""
-    return settings.model_copy(
-        update={section: getattr(settings, section).model_copy(update=update)}
-    )
+# The levels LoggingConfig accepts, for --log-level.
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _with_section(settings: Settings, section: str, *, flag: Optional[str] = None, **update: Any) -> Settings:
+    """Return ``settings`` with fields of one frozen section replaced and re-validated.
+
+    ``model_copy(update=...)`` skips validation, so a flag could put a value
+    into the settings that the same value from the environment is refused for.
+
+    Args:
+        settings: The loaded settings.
+        section: The section to change (``logging``).
+        flag: The option the values came from, for the error message.
+        **update: The fields to replace.
+
+    Returns:
+        The new settings.
+    """
+    current = getattr(settings, section)
+    try:
+        replaced = type(current).model_validate({**current.model_dump(), **update})
+    except ValidationError as exc:
+        reasons = "; ".join(problem.get("msg", "invalid") for problem in exc.errors())
+        _option_error(f"{flag or section}: {reasons}")
+    return settings.model_copy(update={section: replaced})
 
 
 def _apply_backend_options(
@@ -366,7 +420,7 @@ def _apply_backend_options(
         value = raw.strip().lower()
         if value not in valid:
             _option_error(f"Unknown {flag} value: {raw!r}. Valid: {', '.join(valid)}")
-        settings = _with_section(settings, section, **{field_name: value})
+        settings = _with_section(settings, section, flag=flag, **{field_name: value})
 
     backend_set: Optional[Set[str]] = None
     if backends is not None:
@@ -396,17 +450,98 @@ def _is_enabled(backend_set: Optional[Set[str]], name: str) -> bool:
 # ---------------------------------------------------------------------------
 # server
 # ---------------------------------------------------------------------------
-@app.command()
-def server(
-    config: Optional[Path] = typer.Option(
+def _config_option() -> Any:
+    """``--config FILE``; a file that is missing or does not load exits 2 with ``ConfigError``."""
+    return typer.Option(
         None,
         "--config",
         "-c",
-        help="Path to configuration file",
-        exists=True,
-        file_okay=True,
+        help=(
+            "YAML configuration file (default: $CONFIG_FILE, else the packaged default.yaml). "
+            "A missing file, invalid YAML or an invalid value exits 2."
+        ),
         dir_okay=False,
-    ),
+    )
+
+
+def _load(config: Optional[Path]) -> Settings:
+    """The settings from ``--config`` when given, otherwise from ``get_settings``."""
+    return load_settings(config) if config else get_settings()
+
+
+def _keep_fastmcp_home_in_state_dir() -> None:
+    """Point FastMCP's data directory at ``<state dir>/fastmcp`` unless ``FASTMCP_HOME`` names one.
+
+    It defaults to the platform's user data directory (``~/Library/Application
+    Support/fastmcp`` on macOS). Nothing simul runs writes there now that the
+    banner and its update check are off, but whatever FastMCP keeps follows
+    ``SIMUL_HOME`` with the rest of simul's state.
+    """
+    if os.environ.get("FASTMCP_HOME"):
+        return
+    import fastmcp
+
+    fastmcp.settings.home = state_dir() / "fastmcp"
+
+
+async def _serve(settings: Settings, transport: str, backends: Optional[Set[str]]) -> bool:
+    """Run the MCP server until it stops; on SIGTERM, stop it the way Ctrl-C does.
+
+    SIGTERM used to end the process at once (exit -15), so
+    ``SimulMCPServer.shutdown`` never ran and the adapters were never closed.
+    Over stdio the handler cancels the server task; the server's ``finally``
+    shuts it down and the command exits 0. Over HTTP/SSE uvicorn already
+    stops gracefully on SIGTERM, then re-raises the signal to the handler it
+    found, which used to be the default one that kills the process before
+    ``shutdown`` runs. A handler that only records the signal is installed
+    for it instead.
+
+    Returns:
+        True when SIGTERM stopped the server.
+    """
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    received: List[int] = []
+
+    def _cancel_once() -> None:
+        if not received:
+            received.append(signal.SIGTERM)
+            if task is not None:
+                task.cancel()
+
+    def _record(signum: int, _frame: Any) -> None:
+        received.append(signum)
+
+    previous: Any = None
+    if transport == "stdio":
+        try:
+            loop.add_signal_handler(signal.SIGTERM, _cancel_once)
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass  # no loop signal handlers here (Windows, a non-main thread)
+    else:
+        try:
+            previous = signal.signal(signal.SIGTERM, _record)
+        except ValueError:
+            pass  # not the main thread
+    try:
+        await start_mcp_server(settings, transport, backends=backends)
+    except asyncio.CancelledError:
+        if not received:
+            raise
+    finally:
+        if transport == "stdio":
+            try:
+                loop.remove_signal_handler(signal.SIGTERM)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass
+        elif previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+    return bool(received)
+
+
+@app.command()
+def server(
+    config: Optional[Path] = _config_option(),
     transport: str = typer.Option(
         "stdio",
         "--transport",
@@ -422,7 +557,7 @@ def server(
     unreal_mode: Optional[str] = _unreal_mode_option(),
     blender_mode: Optional[str] = _blender_mode_option(),
     log_level: Optional[str] = typer.Option(
-        None, "--log-level", "-l", help="Log level (DEBUG, INFO, WARNING, ERROR)"
+        None, "--log-level", "-l", help="Log level: DEBUG, INFO, WARNING, ERROR or CRITICAL"
     ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Enable verbose logging"
@@ -453,10 +588,20 @@ def server(
         from simul.mcp.backends import backend_skip_reason
         from simul.mcp.server import NETWORK_TRANSPORTS, TRANSPORTS
 
-        if config:
-            settings = load_settings(config)
-        else:
-            settings = get_settings()
+        # Flags first: a bad invocation is reported before the settings load.
+        transport = transport.strip().lower()
+        if transport not in TRANSPORTS:
+            _option_error(f"Unknown --transport value: {transport!r}. Valid: {', '.join(TRANSPORTS)}")
+        resolved_level = "DEBUG" if verbose else (log_level.strip().upper() if log_level else None)
+        if resolved_level is not None and resolved_level not in _LOG_LEVELS:
+            _option_error(f"Unknown --log-level value: {log_level!r}. Valid: {', '.join(_LOG_LEVELS)}")
+
+        try:
+            settings = _load(config)
+        except ConfigError as exc:
+            # stdout is the MCP channel over stdio; the error goes to stderr only.
+            console.print(f"[red]ConfigError: {escape(exc.message)}[/red]")
+            raise typer.Exit(2)
 
         settings, backend_set = _apply_backend_options(
             settings, backends, unreal_tools, blender_tools, unreal_mode, blender_mode
@@ -465,22 +610,11 @@ def server(
         # LoggingConfig is frozen on purpose, so rebuild the section rather
         # than assigning into it — assignment raises ValidationError and took
         # both of these flags down with it.
-        resolved_level = (
-            "DEBUG" if verbose else (log_level.upper() if log_level else None)
-        )
         if resolved_level:
-            settings = _with_section(settings, "logging", level=resolved_level)
-
-        transport = transport.strip().lower()
-        if transport not in TRANSPORTS:
-            console.print(
-                f"[red]Unknown --transport value: {transport!r}. "
-                f"Valid: {', '.join(TRANSPORTS)}[/red]"
-            )
-            raise typer.Exit(1)
+            settings = _with_section(settings, "logging", flag="--log-level", level=resolved_level)
 
         if allow_public:
-            settings = _with_section(settings, "server", allow_public=True)
+            settings = _with_section(settings, "server", flag="--allow-public", allow_public=True)
         http_security = None
         if transport in NETWORK_TRANSPORTS:
             from simul.mcp.http_security import HttpSecurityError, resolve_http_security
@@ -545,12 +679,18 @@ def server(
         console.print(Panel.fit("\n".join(lines), title="Starting Server"))
 
         logger.info(f"Starting Simul 3D MCP Server with {transport} transport")
-        asyncio.run(start_mcp_server(settings, transport, backends=backend_set))
+        _keep_fastmcp_home_in_state_dir()
+        if asyncio.run(_serve(settings, transport, backend_set)):
+            logger.info("Stopped on SIGTERM")
+            console.print("[yellow]Server stopped (SIGTERM)[/yellow]")
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Server stopped by user[/yellow]")
     except typer.Exit:
         raise
+    except ConfigError as exc:
+        console.print(f"[red]ConfigError: {escape(exc.message)}[/red]")
+        raise typer.Exit(2)
     except Exception as e:
         console.print(f"[red]Error starting server: {e}[/red]")
         raise typer.Exit(1)
@@ -561,15 +701,7 @@ def server(
 # ---------------------------------------------------------------------------
 @app.command()
 def info(
-    config: Optional[Path] = typer.Option(
-        None,
-        "--config",
-        "-c",
-        help="Path to configuration file",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-    ),
+    config: Optional[Path] = _config_option(),
     backends: Optional[str] = _backends_option(),
     unreal_tools: Optional[str] = _unreal_tools_option(),
     blender_tools: Optional[str] = _blender_tools_option(),
@@ -587,10 +719,7 @@ def info(
         from simul.mcp.backends import NOT_SELECTED, backend_skip_reason
         from simul.mcp.server import SimulMCPServer
 
-        if config:
-            settings = load_settings(config)
-        else:
-            settings = get_settings()
+        settings = _load(config)
         settings, backend_set = _apply_backend_options(
             settings, backends, unreal_tools, blender_tools, unreal_mode, blender_mode
         )
@@ -715,6 +844,8 @@ def info(
             )
         )
 
+    except (typer.Exit, ConfigError):
+        raise
     except Exception as e:
         if is_json_mode():
             emit_error(str(e), "InfoError")
@@ -848,15 +979,7 @@ async def _list_mcp_tools(server_instance: Any) -> List[Dict[str, Any]]:
 
 @app.command()
 def tools(
-    config: Optional[Path] = typer.Option(
-        None,
-        "--config",
-        "-c",
-        help="Path to configuration file",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-    ),
+    config: Optional[Path] = _config_option(),
     backends: Optional[str] = _backends_option(),
     unreal_tools: Optional[str] = _unreal_tools_option(),
     blender_tools: Optional[str] = _blender_tools_option(),
@@ -877,7 +1000,7 @@ def tools(
         from simul.mcp.backends import BACKENDS
         from simul.mcp.server import SimulMCPServer
 
-        settings = load_settings(config) if config else get_settings()
+        settings = _load(config)
         settings, backend_set = _apply_backend_options(
             settings, backends, unreal_tools, blender_tools, unreal_mode, blender_mode
         )
@@ -943,7 +1066,7 @@ def tools(
             table.add_section()
         console.print(table)
 
-    except typer.Exit:
+    except (typer.Exit, ConfigError):
         raise
     except Exception as e:
         if is_json_mode():
@@ -960,40 +1083,49 @@ def validate_config(
     config: Path = typer.Argument(
         ...,
         help="Path to configuration file",
-        exists=True,
-        file_okay=True,
         dir_okay=False,
     ),
 ) -> None:
-    """Validate a configuration file."""
-    try:
-        settings = load_settings(config)
-        errors = validate_settings(settings)
-        is_valid = not errors
+    """Validate a configuration file strictly.
 
-        if is_json_mode():
-            emit(
-                {
-                    "valid": is_valid,
-                    "config_path": str(config),
-                    "server_name": settings.server.name,
-                    "log_level": settings.logging.level,
-                    "usd_cache_enabled": settings.usd.cache_enabled,
-                    "max_file_size_mb": settings.usd.max_file_size_mb,
-                    "viewport_max_size": settings.viewport.max_size,
-                    "errors": errors,
-                }
-            )
-            if not is_valid:
-                raise typer.Exit(1)
-            return
+    Errors (exit 1): YAML that does not parse, a key no setting reads (with the
+    setting it most likely meant), a value the settings refuse, from the file
+    or from the environment, and an unknown SECURITY__ variable. Warnings:
+    retired keys and other unknown SECTION__ variables. A file that does not
+    exist exits 2 with ConfigError.
+    """
+    report = inspect_config_file(config)
+    if not report.path.is_file():
+        config_error_exit(ConfigError(report.errors[0], [{"source": str(report.path), "reason": "no such file"}]))
+    settings = report.settings
 
-        console.print(f"[cyan]Validating configuration file: {config}[/cyan]")
-        if is_valid:
-            console.print("[green]Configuration file is valid[/green]")
-        else:
-            console.print("[red]Configuration file is invalid[/red]")
+    if is_json_mode():
+        emit(
+            {
+                "success": report.valid,
+                "valid": report.valid,
+                "config_path": str(config),
+                "errors": report.errors,
+                "warnings": report.warnings,
+                "server_name": settings.server.name if settings else None,
+                "log_level": settings.logging.level if settings else None,
+                "usd_cache_enabled": settings.usd.cache_enabled if settings else None,
+                "max_file_size_mb": settings.usd.max_file_size_mb if settings else None,
+                "viewport_max_size": settings.viewport.max_size if settings else None,
+                "allow_script_execution": settings.security.allow_script_execution if settings else None,
+            }
+        )
+        if not report.valid:
+            raise typer.Exit(1)
+        return
 
+    console.print(f"[cyan]Validating configuration file: {escape(str(config))}[/cyan]")
+    if report.valid:
+        console.print("[green]Configuration file is valid[/green]")
+    else:
+        console.print("[red]Configuration file is invalid[/red]")
+
+    if settings is not None:
         settings_table = Table(title="Configuration Summary")
         settings_table.add_column("Setting", style="cyan")
         settings_table.add_column("Value")
@@ -1002,21 +1134,19 @@ def validate_config(
         settings_table.add_row("USD Cache Enabled", str(settings.usd.cache_enabled))
         settings_table.add_row("Max File Size (MB)", str(settings.usd.max_file_size_mb))
         settings_table.add_row("Viewport Max Size", str(settings.viewport.max_size))
+        settings_table.add_row("Script Execution", str(settings.security.allow_script_execution))
         console.print(settings_table)
-        if errors:
-            error_table = Table(title="Validation Errors")
-            error_table.add_column("Error", style="red")
-            for error in errors:
-                error_table.add_row(error)
-            console.print(error_table)
-            raise typer.Exit(1)
-
-    except typer.Exit:
-        raise
-    except Exception as e:
-        if is_json_mode():
-            emit_error(str(e), "ValidationError")
-        console.print(f"[red]Configuration validation failed: {e}[/red]")
+    for title, entries, style in (
+        ("Validation Errors", report.errors, "red"),
+        ("Warnings", report.warnings, "yellow"),
+    ):
+        if entries:
+            table = Table(title=title)
+            table.add_column(title[:-1] if title.endswith("s") else title, style=style)
+            for entry in entries:
+                table.add_row(escape(entry))
+            console.print(table)
+    if not report.valid:
         raise typer.Exit(1)
 
 

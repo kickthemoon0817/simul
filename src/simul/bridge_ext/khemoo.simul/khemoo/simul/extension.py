@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
 import threading
@@ -10,7 +11,7 @@ import traceback
 from typing import Any, Callable
 
 from .executor import ScriptExecutor
-from .lifecycle import BridgeServerLifecycle
+from .lifecycle import DEFAULT_SOCKET_MODE, BridgeServerLifecycle
 from .protocol import DEFAULT_REQUEST_TIMEOUT_SECONDS, BridgeRequest, BridgeResponse
 from .service import BridgeCommandService, LOCK_FREE_ACTIONS
 from .ui_builder import BridgeUIBuilder
@@ -67,6 +68,84 @@ def resolve_python_socket_port(get_setting: Callable[[str], Any]) -> int:
     return DEFAULT_PYTHON_SOCKET_PORT
 
 
+# Carb settings keys (not filesystem paths) that govern bridge authentication.
+# The bridge follows Isaac Sim 6.0's python_server: when that socket requires
+# a token the bridge requires the same one, so `simul isaac launch
+# --generate-auth-token` protects both code-execution ports with the one
+# token the MCP server already reads from the discovery directory.
+BRIDGE_REQUIRE_AUTH_SETTING = "/exts/khemoo.simul/require_auth"
+BRIDGE_AUTH_TOKEN_SETTING = "/exts/khemoo.simul/auth_token"
+PYTHON_SERVER_REQUIRE_AUTH_SETTING = "/exts/isaacsim.code_editor.python_server/require_auth"
+PYTHON_SERVER_AUTH_TOKEN_SETTING = "/exts/isaacsim.code_editor.python_server/auth_token"
+BRIDGE_SOCKET_MODE_SETTING = "/exts/khemoo.simul/socket_mode"
+
+
+def _setting_str(get_setting: Callable[[str], Any], key: str) -> str:
+    """Read a string setting; Kit may hand an all-digit argv value over as an int."""
+    value = get_setting(key)
+    if value is None or isinstance(value, bool):
+        return ""
+    return str(value).strip()
+
+
+def bridge_auth_required(get_setting: Callable[[str], Any]) -> bool:
+    """Return whether the bridge must reject requests without a valid token.
+
+    Required when the bridge's own ``require_auth`` is set, when it has its
+    own ``auth_token``, or when the 6.0 python_server requires auth: a token
+    on 8226 is pointless while 8229 runs the same Python for anyone.
+    """
+    return (
+        bool(get_setting(BRIDGE_REQUIRE_AUTH_SETTING))
+        or bool(_setting_str(get_setting, BRIDGE_AUTH_TOKEN_SETTING))
+        or bool(get_setting(PYTHON_SERVER_REQUIRE_AUTH_SETTING))
+    )
+
+
+def resolve_bridge_auth_token(get_setting: Callable[[str], Any]) -> str:
+    """Return the token the bridge accepts, or "" when none is configured.
+
+    The bridge's own ``auth_token`` wins; otherwise the python_server's,
+    which that extension generates at startup when ``require_auth`` is on and
+    no token was given. Read per request, so a token python_server generates
+    after the bridge started is picked up.
+    """
+    return _setting_str(get_setting, BRIDGE_AUTH_TOKEN_SETTING) or _setting_str(
+        get_setting, PYTHON_SERVER_AUTH_TOKEN_SETTING
+    )
+
+
+def check_bridge_auth_token(get_setting: Callable[[str], Any], presented: str) -> bool:
+    """Return whether ``presented`` may use the bridge under the current settings.
+
+    Fails closed: with auth required and no token configured anywhere every
+    request is rejected, rather than the bridge silently running open.
+    """
+    if not bridge_auth_required(get_setting):
+        return True
+    expected = resolve_bridge_auth_token(get_setting)
+    if not expected or not presented:
+        return False
+    return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
+
+
+def parse_socket_mode(value: Any) -> int:
+    """Parse the ``socket_mode`` setting as octal permission bits.
+
+    Kit hands an argv value such as ``0666`` over as the int 666 or the
+    string "0666"; both read as octal. Anything unparsable falls back to the
+    owner-only default.
+    """
+    default = int(DEFAULT_SOCKET_MODE)
+    if value is None or value == "":
+        return default
+    try:
+        return int(str(value).strip(), 8) & 0o777
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r; using %04o", BRIDGE_SOCKET_MODE_SETTING, value, default)
+        return default
+
+
 class IsaacMCPServerExtension(_extension_base()):
     """Typed bridge transport for Simul running inside Isaac Sim."""
 
@@ -87,6 +166,7 @@ class IsaacMCPServerExtension(_extension_base()):
         self._max_port_retries = 10
         self._discovery_dir = "/tmp/simul"
         self._socket_path = ""
+        self._socket_mode = DEFAULT_SOCKET_MODE
         self._loop_thread_ident: int | None = None
         self._ui_builder: BridgeUIBuilder | None = None
 
@@ -129,6 +209,7 @@ class IsaacMCPServerExtension(_extension_base()):
             "max_request_bytes": self._max_request_bytes,
             "max_response_bytes": self._max_response_bytes,
             "running": self._server is not None,
+            "auth_required": self._auth_required(),
         }
 
     def apply_runtime_settings(
@@ -177,7 +258,16 @@ class IsaacMCPServerExtension(_extension_base()):
         if self._executor is None:
             return {"status": "error", "output": "Executor not initialized."}
         if not self._allow_unsafe_execution:
-            return {"status": "error", "output": "Script execution is disabled (allow_unsafe_execution=false)."}
+            # Named like the framed path's refusal so a client can tell "not
+            # run" from "ran and failed" and fall back to the stock socket.
+            message = "Script execution is disabled (allow_unsafe_execution=false)."
+            return {
+                "status": "error",
+                "output": message,
+                "ename": "UnsafeExecutionDisabled",
+                "evalue": message,
+                "traceback": [],
+            }
         try:
             output, exception, trace = await self._executor.execute(code)
             if exception is not None:
@@ -254,6 +344,25 @@ class IsaacMCPServerExtension(_extension_base()):
         self._socket_path = str(
             settings.get("/exts/khemoo.simul/socket_path") or ""
         )
+        self._socket_mode = parse_socket_mode(settings.get(BRIDGE_SOCKET_MODE_SETTING))
+
+    @staticmethod
+    def _auth_required() -> bool:
+        """Return whether the bridge currently requires a token."""
+        if carb is None:
+            return False
+        return bridge_auth_required(carb.settings.get_settings().get)
+
+    @staticmethod
+    def _check_auth_token(presented: str) -> bool:
+        """Authenticate one request against the live Carb settings.
+
+        Read per request rather than cached at start: python_server generates
+        its token during its own startup, which may run after the bridge's.
+        """
+        if carb is None:
+            return False
+        return check_bridge_auth_token(carb.settings.get_settings().get, presented)
 
     def _schedule_task(self, coro: asyncio.Future) -> None:
         """Schedule a bridge lifecycle task on Kit's event loop."""
@@ -340,7 +449,9 @@ class IsaacMCPServerExtension(_extension_base()):
             max_port_retries=self._max_port_retries,
             vscode_handler=self._handle_vscode_script,
             socket_path=self._socket_path or None,
+            socket_mode=self._socket_mode,
             request_timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            authenticate=self._check_auth_token,
         )
         await self._server.start()
         # Write actual bound port back to Carb settings
@@ -375,7 +486,16 @@ class IsaacMCPServerExtension(_extension_base()):
                 "continuing on TCP only. Check the path exists inside the "
                 "container and is on the shared volume."
             )
-        carb.log_info(f"Simul bridge serving at {self._server.address}")
+        if self._auth_required():
+            carb.log_info(f"Simul bridge serving at {self._server.address} (auth token required)")
+        else:
+            # The same exposure as 5.x's VS Code socket, but said out loud:
+            # any local process can run Python through this port.
+            carb.log_warn(
+                f"Simul bridge serving at {self._server.address} without authentication; "
+                "any local process can run Python through it. Start Isaac Sim 6.0+ with "
+                "`simul isaac launch --generate-auth-token` to require a token."
+            )
         self._refresh_ui()
 
     async def _stop_bridge_async(self) -> None:
