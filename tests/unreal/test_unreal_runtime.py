@@ -996,16 +996,33 @@ class TestUnrealRuntimeSessionPhase3:
     # -- set_actor_property --
 
     def test_set_actor_property_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_actor_property checks the target, writes the property and reads it back."""
+        """set_actor_property checks the target, reads the previous value, then writes and reads back in a batch."""
         session = self._make_session(monkeypatch)
-        accesses = []
+        steps = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
+            if path == "/remote/batch":
+                parts = json["Requests"]
+                steps.append(["batch"] + [p["Body"].get("access", "call") for p in parts])
+                answers = [
+                    python_json_response({"transaction": 0, "emptied": False})._json_data,
+                    {},
+                    python_json_response({"finished": True})._json_data,
+                    {"Mobility": "Movable"},
+                ]
+                return FakeResponse({"Responses": [
+                    {"RequestId": p["RequestId"], "ResponseCode": 200, "ResponseBody": a}
+                    for p, a in zip(parts, answers)
+                ]})
             if (json or {}).get("functionName") == "ExecutePythonCommandEx":
-                return python_json_response({"target_class": "StaticMeshComponent", "container": None, "length": None})
+                code = json["parameters"]["PythonCommand"]
+                steps.append("preflight" if "property_target(" in code else "close")
+                if "property_target(" in code:
+                    return python_json_response({"target_class": "StaticMeshComponent", "container": None})
+                return python_json_response({"closed": "ended", "restored": False})
             if path == "/remote/object/property":
-                accesses.append(json["access"])
-                return FakeResponse({"Mobility": "Movable"} if json["access"] == "READ_ACCESS" else {})
+                steps.append(json["access"])
+                return FakeResponse({"Mobility": "Static"})
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
@@ -1020,10 +1037,15 @@ class TestUnrealRuntimeSessionPhase3:
             "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Cube_0",
             "property_name": "Mobility",
             "target_class": "StaticMeshComponent",
+            "previous_value": "Static",
             "value": "Movable",
             "applied": True,
         }
-        assert accesses == ["WRITE_TRANSACTION_ACCESS", "READ_ACCESS"]
+        assert steps == [
+            "preflight", "READ_ACCESS",
+            ["batch", "call", "WRITE_ACCESS", "call", "READ_ACCESS"],
+            "close", "close",
+        ]
 
     # -- call_actor_function --
 

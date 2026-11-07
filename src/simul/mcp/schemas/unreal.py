@@ -668,7 +668,14 @@ class UnrealSetActorPropertyResponse(BaseModel):
     property_name: str = Field(..., description="Property that was set")
     target_class: Optional[str] = Field(None, description="Class of the object written")
     value: Optional[Any] = Field(
-        None, description="The property read back after the write, as Remote Control reads it"
+        None,
+        description=(
+            "The property read back once Unreal finished the write (its PostEditChangeProperty ran), "
+            "as Remote Control reads it"
+        ),
+    )
+    previous_value: Optional[Any] = Field(
+        None, description="The property before the write, as Remote Control read it"
     )
     applied: Optional[bool] = Field(
         None,

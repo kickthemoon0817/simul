@@ -772,13 +772,16 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="set_unreal_actor_property",
         description=(
-            "Set a property of an actor, or of one of its components, in the open editor world by "
-            "Unreal's property name (Tags, bHidden) and a JSON value, then read it back. An array, "
-            "set or map is replaced whole ([] empties it). The reply has value (read back) and "
-            "applied; a value that reads back different fails with PropertyNotApplied. Only loaded "
-            "actors and components of the editor world are edited: assets, engine objects, Play "
-            "In Editor actors and paths into maps that are not open are refused (NotFoundError or "
-            "ValidationError) before anything is written."
+            "Set a property of an actor, or of one of its components, in the level open in the "
+            "editor by Unreal's property name (Tags, bHidden) and a JSON value. An array, set or map "
+            "is replaced whole ([] empties it), struct arrays and setters included; the write is one "
+            "undo step and is read back once Unreal has finished it. The reply has value, "
+            "previous_value and applied. A value Unreal does not keep (a mesh path that loads "
+            "nothing, more materials than slots, an unknown enum name) fails with "
+            "PropertyNotApplied, details.expected and details.actual, and the previous value is put "
+            "back (restored), leaving no undo step. An actor that is gone, of another map or of "
+            "Play In Editor is NotFoundError; an asset, class default object or component template "
+            "is ValidationError (details.code); nothing is written."
         ),
         response=UnrealSetActorPropertyResponse,
         read_only=False,

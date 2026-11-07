@@ -376,6 +376,29 @@ async def test_an_editor_that_drops_the_connection_may_have_crashed() -> None:
     assert "may have crashed" in str(raised.value)
 
 
+@pytest.mark.asyncio
+async def test_a_mutation_whose_answer_is_lost_is_sent_once() -> None:
+    """aiohttp re-sent a PUT when the connection dropped, running the mutation twice."""
+    received: List[str] = []
+
+    async def handler(request: web.Request) -> web.Response:
+        received.append(request.path)
+        request.transport.close()
+        raise ConnectionResetError
+
+    async with editor(handler, max_retries=3) as session:
+        with pytest.raises(UnrealConnectionError):
+            await session._http_put("/remote/object/property", WRITE_TAGS)
+        writes = list(received)
+        received.clear()
+        with pytest.raises(UnrealConnectionError):
+            await session._http_get("/remote/info")
+
+    assert writes == ["/remote/object/property"]
+    # A read is retried, by the session's own policy: once plus max_retries.
+    assert received == ["/remote/info"] * 4
+
+
 # -- U1-07: a tool script's SimulNotFound is NotFoundError ---------------------
 
 

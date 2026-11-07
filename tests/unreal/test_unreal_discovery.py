@@ -721,10 +721,12 @@ def test_ping_and_health_both_name_a_timeout() -> None:
     health = asyncio.run(session.health_check())
 
     assert ping["error"] == f"No answer within {session.ping_timeout}s"
+    # Both probe /remote/info with ping_timeout, so a busy editor is reported
+    # in seconds, not after the 30 s request timeout.
     assert health == {
         "reachable": False,
         "connected": False,
-        "error": f"No answer within {session.timeout}s",
+        "error": f"No answer within {session.ping_timeout}s",
     }
 
 

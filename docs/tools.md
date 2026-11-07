@@ -466,27 +466,41 @@ Behaviour worth knowing:
   class that is not a component and a name already used inside the actor are
   refused first. Unreal adds its usual helpers too, such as a light's editor
   icon (a BillboardComponent).
-- `set_unreal_actor_property` edits an actor in the open editor world, or one
-  of its components, by Unreal's property name (`Tags`, `bHidden`), and reads
-  the property back. The target is looked up among loaded objects and never
-  loaded. Anything else is refused before a write: an asset, a class, an
-  engine object, a Play In Editor actor, or a path into a map that is not open
-  (`NotFoundError` or `ValidationError`). That rule applies with script
-  execution disabled too.
-
-  An array, set or map is replaced whole, so `[]` empties it. Remote Control's
-  own write only ever grows a container, so a container of strings, numbers
-  or booleans (`Tags`) is written through the editor's Python API. Any other
-  value goes through Remote Control, which converts structs, enums by name and
-  objects by path. An array it wrote is then cut to the new length, and undo
-  reverts that cut as a second step.
-
-  The reply has `value`, read back as Remote Control reads it, and `applied`.
-  A value that reads back different fails with `PropertyNotApplied`, for
-  example an enum name Unreal does not have. `applied` is `null`, with a
-  `warning`, when Unreal will not read the property back, or when the two
-  values cannot be compared (an enum written as a number). A struct written in
-  part is compared on the fields given.
+- `set_unreal_actor_property` edits an actor in the level open in the editor,
+  or one of its components, by Unreal's property name (`Tags`, `bHidden`).
+  - **Target.** The target is resolved as the other actor tools resolve it,
+    among loaded objects only, and nothing is written for a refusal:
+    - an actor that is gone, of another map, loaded or not, or of the running
+      Play In Editor world is `NotFoundError`, as above;
+    - an asset, class default object or component template is
+      `ValidationError`, with `details.code` `not_an_actor_or_component`,
+      `class_default_object` or `component_template`.
+  - **Containers.** An array, set or map is replaced whole, so `[]` empties
+    it. That includes struct arrays and properties Remote Control writes
+    through a setter, such as a MaterialBillboard's `Elements`. Remote
+    Control's own write only adds to a container: by index, or appended for a
+    setter. So the editor's Python API empties the container first, and a
+    container Python cannot replace is refused (`container_not_replaceable`).
+  - **The write.** Remote Control does the write, converting structs, enums by
+    name and objects by path. It is one undo step, with the transaction kept
+    open until the read-back is compared. The write and the read-back go in
+    one Remote Control batch, so no editor tick runs between them, and a
+    function call sits between the two. That call is what makes Remote
+    Control finish the write: Unreal's `PostEditChangeProperty` runs only on
+    the next call. So `value` is what Unreal kept, for example materials
+    trimmed to the mesh's slots.
+  - **A value that does not stick.** A value Unreal does not keep fails with
+    `PropertyNotApplied`, with `details.expected` and `details.actual`.
+    Examples are an object path that loads nothing (written as None), more
+    materials than slots, or an enum name Unreal does not have. The previous
+    value is then put back in the same transaction, which is cancelled, so the
+    level is as it was and the call leaves no undo step; `restored` says
+    whether it held. A write Remote Control refuses (an `EditConst` or
+    protected property) also gets its container's previous contents back.
+  - **The reply.** It has `value`, `previous_value` and `applied`. `applied`
+    is `null`, with a `warning`, when Unreal will not read the property back,
+    or when the two values cannot be compared (an enum written as a number). A
+    struct written in part is compared on the fields given.
 - `describe_unreal_object` reads every property's current `value` in one more
   request. `readable` is false, and `value` null, for the properties Remote
   Control does not read: delegates, and protected properties without a getter.
@@ -509,9 +523,11 @@ Behaviour worth knowing:
   An editor that accepts the connection but does not answer in time is
   running a script, loading or compiling. It is reported with `busy: true` and
   `error_type: InstanceBusy`, still `reachable: false`, and
-  `list_unreal_instances` lists it with that reason. `unreal_health_check`
-  reports a busy editor after its first attempt; it retries only a refused
-  connection, from an editor still starting up.
+  `list_unreal_instances` lists it with that reason. Both probe Remote Control
+  with `UNREAL__PING_TIMEOUT` (3 s by default), so a busy editor is reported
+  within that time; `unreal_health_check` retries only a refused connection,
+  from an editor still starting up, and gives its metadata script the full
+  `UNREAL__TIMEOUT`.
 - `call_unreal_actor_function` returns `return_value` as JSON (the function's
   `ReturnValue`) and `outputs`, everything Remote Control returned, out
   parameters included.

@@ -926,20 +926,28 @@ def test_generate_and_analyze_a_procedural_scene():
 # Editor-side counts of outliner folder objects (World Partition levels file
 # folders as ActorFolder objects; others have none, and count 0) and of the
 # actors carrying a tag prefix.
+# Inside a function: a loop variable left at the top level kept the last object
+# the iterator yielded, the level's Package, alive in the editor's shared
+# console dict, and the next map change aborted the editor ("World Memory
+# Leaks"). Simul's per-call namespaces (#336) drop such names too.
 _LEVEL_STATE = """
 import json, unreal
-folders = 0
-for obj in unreal.ObjectIterator(unreal.Object):
-    try:
-        full = unreal.Object.get_full_name(obj)
-    except Exception:
-        continue
-    if full.startswith("ActorFolder ") and "Default__" not in full:
-        folders += 1
-actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors()
-tagged = [a for a in actors if any(str(t).startswith(args["prefix"]) for t in a.tags)]
-print(json.dumps({"folders": folders, "tagged": len(tagged),
-                  "in_folder": sorted({str(a.get_folder_path()) for a in tagged})}))
+
+def level_state(prefix):
+    folders = 0
+    for obj in unreal.ObjectIterator(unreal.Object):
+        try:
+            full = unreal.Object.get_full_name(obj)
+        except Exception:
+            continue
+        if full.startswith("ActorFolder ") and "Default__" not in full:
+            folders += 1
+    actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors()
+    tagged = [a for a in actors if any(str(t).startswith(prefix) for t in a.tags)]
+    return {"folders": folders, "tagged": len(tagged),
+            "in_folder": sorted({str(a.get_folder_path()) for a in tagged})}
+
+print(json.dumps(level_state(args["prefix"])))
 """
 
 
