@@ -460,7 +460,7 @@
     "capture_blender_viewport": {
       "name": "capture_blender_viewport",
       "title": "Capture Blender Viewport",
-      "description": "Capture Blender as a JPEG. In attached mode the default (method='auto') is the 3D View the user sees: view angle, shading, overlays, Edit Mode and unsaved edits, with no camera needed, keeping the view's aspect ratio within width x height (capture_method viewport; an external engine's Rendered view, such as Cycles, is read from the screen as viewport_screen and includes overlapping UI). Embedded (headless bpy) mode has no 3D View, so 'auto' renders. method='render' renders through the scene camera, or through a temporary camera removed afterwards: aligned to the 3D View when attached, framing the visible objects when embedded or when the window shows no 3D View (render_temp_camera_view / render_temp_camera_framing). The image arrives as an MCP image content block, followed by a JSON block with success, width, height, engine, capture_method, format and image_attached=true. In attached mode, briefly show an agent eye badge and border pulse after success. Agent annotations are excluded from the captured image.",
+      "description": "Capture Blender as a JPEG. In attached mode the default (method='auto') is the 3D View the user sees: view angle, shading, overlays, Edit Mode and unsaved edits, with no camera needed, keeping the view's aspect ratio within width x height (capture_method viewport; an external engine's Rendered view, such as Cycles, is read from the screen as viewport_screen and includes overlapping UI). Embedded (headless bpy) mode has no 3D View, so 'auto' renders. method='render' renders through the scene camera, or through a temporary camera removed afterwards: aligned to the 3D View when attached, framing the visible objects when embedded or when the window shows no 3D View (render_temp_camera_view / render_temp_camera_framing). camera_name captures through that camera without changing the scene camera or the view: a render renders through it, a viewport capture draws the 3D View's shading from it (viewport_camera). The image arrives as an MCP image content block, followed by a JSON block with success, width, height, engine, capture_method, camera_name, format and image_attached=true. In attached mode, briefly show an agent eye badge and border pulse after success. Agent annotations are excluded from the captured image.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -491,6 +491,11 @@
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": null,
             "description": "Visible capture feedback label in attached mode; ignored in embedded mode."
+          },
+          "camera_name": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Capture through this camera instead of the scene camera or the 3D View's angle; the scene camera and the view are left as they were. A render renders through it; a viewport capture draws the 3D View's shading from it (capture_method viewport_camera), keeping the render's aspect ratio inside width x height."
           }
         }
       },
@@ -572,7 +577,7 @@
     "get_blender_viewport_info": {
       "name": "get_blender_viewport_info",
       "title": "Get Blender Viewport Info",
-      "description": "Get active viewport and render settings.",
+      "description": "Get the render settings (engine, resolution, film, active camera) and, in attached mode, view3d: the 3D View captures use, with its view_matrix, eye_location, perspective, lens, clip range and shading. view3d is null without an editor window (embedded bpy, blender -b) or 3D View, and view3d_unavailable_reason says which.",
       "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}},
       "annotations": {"readOnlyHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
@@ -580,13 +585,16 @@
     "capture_blender_viewport_sequence": {
       "name": "capture_blender_viewport_sequence",
       "title": "Capture Blender Viewport Sequence",
-      "description": "Capture a frame range as base64-encoded JPEGs, each made like capture_blender_viewport with the same method (the 3D View when attached, a camera render in embedded mode). In attached mode, briefly show an agent eye badge and border pulse after success. Agent annotations are excluded from the captured images.",
+      "description": "Capture a frame range as JPEG files, each made like capture_blender_viewport with the same method and camera_name (the 3D View when attached, a camera render in embedded mode), and return their paths: frames [{frame, file_path}], output_dir (default a new folder in the sandbox's capture directory), width and height. end_frame must not be before start_frame. One call captures at most max_frames (default 50, at most 100) and starts no frame after 10 s, since Blender is busy meanwhile; then complete is false and next_start_frame says where to continue. In attached mode, briefly show an agent eye badge and border pulse after success. Agent annotations are excluded from the captured images.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "start_frame": {"description": "First frame to capture.", "type": "integer"},
-          "end_frame": {"description": "Last frame to capture (inclusive).", "type": "integer"},
+          "end_frame": {
+            "description": "Last frame to capture (inclusive); not before start_frame.",
+            "type": "integer"
+          },
           "step": {"default": 1, "description": "Frame step between captures.", "type": "integer"},
           "width": {
             "default": 512,
@@ -609,6 +617,21 @@
             "description": "\"viewport\", \"render\" or \"auto\" (default), as for capture_blender_viewport.",
             "enum": ["auto", "viewport", "render"],
             "type": "string"
+          },
+          "camera_name": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Capture through this camera, as for capture_blender_viewport."
+          },
+          "output_dir": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": null,
+            "description": "Folder for the frame files, inside the sandbox; created when missing, and existing frame files of the same numbers are replaced. Default: a new sequence-<time>-<id> folder in the capture directory."
+          },
+          "max_frames": {
+            "default": 50,
+            "description": "Most frames captured by this call, 1 to 100.",
+            "type": "integer"
           }
         },
         "required": ["start_frame", "end_frame"]
@@ -946,7 +969,7 @@
     "import_blender_file": {
       "name": "import_blender_file",
       "title": "Import Blender File",
-      "description": "Import an OBJ, FBX, glTF, USD, STL or PLY file into the Blender scene, optionally scaled about the world origin (scale).",
+      "description": "Import an OBJ, FBX, glTF, USD, STL or PLY file into the Blender scene, optionally scaled about the world origin (scale). The textures, buffers, MTL libraries and USD layers it would read must be inside the sandbox too, or it is refused with SandboxError; within the sandbox the FBX importer does not search folders for textures.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
