@@ -122,6 +122,38 @@ one agent holds a live claim, mutating Isaac tools from other agents fail
 with `InstanceClaimed` until the claim is released or expires after 120 s
 without activity. The default keeps claims advisory.
 
+Claims are stored in `~/.simul/sessions/<port>.json`, one file per instance
+port, shared by every simul server on the machine. Each change holds a
+cross-process lock (`<port>.lock`) and replaces the file atomically, so
+concurrent claims from several servers are all kept, and a claim check never
+sees a half-written file.
+
+- **A claim that cannot be saved fails.** `claim_isaac_instance` and
+  `set_active_isaac_instance` return `ClaimStoreError` when the session
+  directory cannot be written; they never report a claim that was not saved.
+- **Enforcement fails closed.** With claims enforced, records that cannot be
+  read refuse mutating Isaac tools with `ClaimStoreError`. A record file that
+  does not parse is repaired, with a warning in the server log: the first
+  complete set of claims it holds is kept, or the file is moved aside to
+  `<port>.json.corrupt-<ms>`. For the next 120 s mutating tools are refused
+  with `InstanceClaimed` for every agent that cannot show a claim of its own,
+  because a lost claim may still be live; an agent whose session holds a
+  claim on the instance re-asserts it on its next call. Read-only tools are
+  never blocked.
+- **Reclaiming after a reconnect or a restart.** A claim is bound to the MCP
+  session that made it. When that session ends, or the server process that
+  wrote the claim exits, the claim is *orphaned*: it still blocks other agents
+  until it expires, so the agent that is reconnecting keeps its instance, but
+  `claim_isaac_instance` with the same `agent_id` takes it over at once, and
+  `release_isaac_instance` with that `agent_id` releases it. `InstanceClaimed`
+  says so (`details.holder_orphaned`), and `list_isaac_instances` marks such
+  records `orphaned`. Use an explicit `agent_id` if you want to reclaim: the
+  default label is derived from the session and changes with it.
+- **Operator view.** `simul isaac claims` lists the live claims (`--port`,
+  `--agent` filter them), and `simul isaac claims --clear` removes them, for
+  example a claim left by a server that crashed. It reports a damaged or
+  unreadable record file too.
+
 A claim, an instance switch and a rate-limit budget belong to an MCP
 session. Over stdio the server has one client. Over `--transport http`, a
 client that connects with the initialize handshake (MCP protocol 2025-11-25
@@ -134,6 +166,16 @@ default Isaac instance and finds every live claim held by someone else.
 clients share one rate-limit budget. Connect agents that need their own
 instance or claim with the handshake (for example `fastmcp.Client(url,
 mode="legacy")`) or over stdio.
+
+When a handshake session ends, the server drops what it kept for it (its
+instance switch, bindings and rate-limit buckets) and marks its claims
+orphaned. Rate-limit buckets of identities whose end the server cannot see
+(stdio's single client, authenticated sessionless users) are swept once they
+have refilled, which never changes a verdict.
+
+Usage records (`get_tool_usage_stats`, `simul stats`) name the agent by its
+claim's `agent_id` when its session holds one, as `list_isaac_instances`
+shows it, and by the session's default label otherwise.
 
 ## Usage statistics
 
