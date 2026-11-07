@@ -56,6 +56,9 @@ def scene_file(tmp_path: Path) -> Path:
     stage.OverridePrim("/World/FromSublayer").CreateAttribute(
         "custom:note", Sdf.ValueTypeNames.String
     ).Set("override")
+    mover = UsdGeom.Xform.Define(stage, "/World/Mover").AddTranslateOp()
+    mover.Set((0.0, 0.0, 0.0), 0)
+    mover.Set((10.0, 0.0, 0.0), 24)
     stage.GetRootLayer().Save()
     return tmp_path / "scene.usda"
 
@@ -181,3 +184,43 @@ def test_refusals_are_recorded_as_failed_calls(driver: _Driver, loaded: Dict[str
     record = next(r for r in recent if r["tool"] == "delete_prim")
     assert record["success"] is False
     assert record["params"]["allow_root_delete"] is False
+
+
+def test_transform_op_gets_its_type_through_mcp(driver: _Driver, loaded: Dict[str, Any]) -> None:
+    payload = driver.call(
+        "update_prim_attributes",
+        {
+            "stage_id": loaded["id"],
+            "prim_path": "/World/Box",
+            "attributes": {"xformOp:translate": [1, 2, 3]},
+        },
+    )
+
+    assert payload["success"] is True
+    assert payload["created_attributes"] == {"xformOp:translate": "double3"}
+    box = UsdGeom.Xformable(loaded["stage"].GetPrimAtPath("/World/Box"))
+    assert box.GetLocalTransformation().ExtractTranslation() == (1.0, 2.0, 3.0)
+
+
+def test_animated_attribute_takes_a_time_code_through_mcp(
+    driver: _Driver, loaded: Dict[str, Any]
+) -> None:
+    arguments = {
+        "stage_id": loaded["id"],
+        "prim_path": "/World/Mover",
+        "attributes": {"xformOp:translate": [7, 7, 7]},
+    }
+
+    refused = driver.call("update_prim_attributes", arguments)
+
+    assert refused["error_type"] == "InvalidAttribute"
+    assert "pass time_code" in refused["error"]
+    assert _unchanged(loaded)
+
+    written = driver.call("update_prim_attributes", {**arguments, "time_code": 12})
+
+    assert written["success"] is True
+    assert written["time_code"] == 12
+    assert "at time 12" in written["message"]
+    attr = loaded["stage"].GetPrimAtPath("/World/Mover").GetAttribute("xformOp:translate")
+    assert attr.GetTimeSamples() == [0.0, 12.0, 24.0]

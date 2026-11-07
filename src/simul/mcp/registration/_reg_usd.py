@@ -54,6 +54,12 @@ def _edit_error(tool_name: str, exc: "USDEditError") -> Dict[str, Any]:
     ).model_dump()
 
 
+def _at(result: Dict[str, Any]) -> str:
+    """Name the time code a write targeted, for the confirmation message."""
+    time_code = result.get("time_code")
+    return "" if time_code is None else f" at time {time_code:g}"
+
+
 def register_usd_tools(server: "SimulMCPServer") -> None:
     """Register USD-related tools."""
     from ...usd.editing import USDEditError
@@ -253,8 +259,12 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "Refuses a path that already holds a prim unless redefine_existing=true, which "
             "changes that prim's type and keeps its children, properties and composition "
             "arcs. All or nothing: if the type, the path or any attribute is invalid, "
-            "nothing is created and the error names each rejected attribute and why. The "
-            "attribute keys active, instanceable and kind set prim metadata."
+            "nothing is created and the error names each rejected attribute and why. "
+            "Values take the type of the schema attribute (JSON numbers widen, vectors "
+            "are lists, quaternions [w, x, y, z], matrices lists of rows, assets path "
+            "strings); xformOp:<type> entries create transform ops and add them to "
+            "xformOpOrder; attribute_types names the type of a new custom attribute. "
+            "The attribute keys active, instanceable and kind set prim metadata."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=False, open_world=False, destructive=True
@@ -268,6 +278,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         prim_type: str,
         attributes: Optional[Dict[str, Any]] = None,
         redefine_existing: bool = False,
+        attribute_types: Optional[Dict[str, str]] = None,
+        time_code: Optional[float] = None,
     ) -> ToolResult:
         """
         Create a prim in a USD stage.
@@ -283,6 +295,12 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 (bool) and kind (registered kind name) set prim metadata
             redefine_existing: Allow prim_path to name an existing prim, whose type
                 is changed to prim_type
+            attribute_types: USD value type name per new attribute, e.g.
+                {"custom:offset": "double3", "custom:rot": "quatf"}, or the precision
+                of a new transform op ({"xformOp:translate": "float3"}); without it a
+                new custom attribute's type is inferred from its value
+            time_code: Write the attribute values as time samples at this time code
+                instead of as default values
 
         Returns:
             Action confirmation or error
@@ -296,6 +314,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 prim_type=prim_type,
                 attributes=attributes or {},
                 redefine_existing=redefine_existing,
+                attribute_types=attribute_types or {},
+                time_code=time_code,
             )
             if isinstance(input_data, dict):
                 return input_data
@@ -307,6 +327,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                     input_data.prim_type,
                     input_data.attributes,
                     redefine_existing=input_data.redefine_existing,
+                    attribute_types=input_data.attribute_types,
+                    time_code=input_data.time_code,
                 )
             except USDEditError as exc:
                 return _edit_error("create_prim", exc)
@@ -315,8 +337,10 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 success=True,
                 stage_id=input_data.stage_id,
                 prim_path=result["prim_path"],
-                message=f"{verb} {result['prim_type']} prim {result['prim_path']}",
+                message=f"{verb} {result['prim_type']} prim {result['prim_path']}{_at(result)}",
                 changed=result["changed"],
+                created_attributes=result["created_attributes"] or None,
+                time_code=result["time_code"],
             ).model_dump()
 
         return await server._exec_backend(
@@ -330,6 +354,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 "prim_path": prim_path,
                 "prim_type": prim_type,
                 "redefine_existing": redefine_existing,
+                "time_code": time_code,
             },
         )
 
@@ -339,8 +364,12 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "Set attribute values on an existing prim, plus relationship targets and the "
             "active / instanceable / kind prim metadata. All or nothing: every entry is "
             "checked first (name, type, allowed tokens), and if any is invalid nothing is "
-            "changed and the error lists each rejected key with its reason. Refuses "
-            "instance proxies (prims inside an instanceable prim)."
+            "changed and the error lists each rejected key with its reason. Values take "
+            "the attribute's type (JSON numbers widen, vectors are lists, quaternions "
+            "[w, x, y, z], matrices lists of rows, assets path strings); a new "
+            "xformOp:<type> creates the transform op and adds it to xformOpOrder. An "
+            "animated attribute needs time_code, since a default value is hidden by its "
+            "time samples. Refuses instance proxies (prims inside an instanceable prim)."
         ),
         annotations=server._tool_annotations(
             read_only=False, idempotent=True, open_world=False, destructive=True
@@ -352,6 +381,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
         stage_id: str,
         prim_path: str,
         attributes: Dict[str, Any],
+        attribute_types: Optional[Dict[str, str]] = None,
+        time_code: Optional[float] = None,
     ) -> ToolResult:
         """
         Update attributes on a USD prim.
@@ -362,6 +393,12 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             attributes: Values by attribute name; an existing relationship takes a
                 target path or list of paths, and active (bool), instanceable (bool)
                 and kind (registered kind name) set prim metadata
+            attribute_types: USD value type name per new attribute, e.g.
+                {"custom:offset": "double3"}, or the precision of a new transform op;
+                an existing attribute keeps its type
+            time_code: Write the values as time samples at this time code; required
+                for attributes that already have time samples, refused for uniform
+                attributes, relationships and metadata
 
         Returns:
             Action confirmation or error
@@ -373,13 +410,19 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 stage_id=stage_id,
                 prim_path=prim_path,
                 attributes=attributes,
+                attribute_types=attribute_types or {},
+                time_code=time_code,
             )
             if isinstance(input_data, dict):
                 return input_data
 
             try:
                 result = session.update_prim_attributes(
-                    input_data.stage_id, input_data.prim_path, input_data.attributes
+                    input_data.stage_id,
+                    input_data.prim_path,
+                    input_data.attributes,
+                    attribute_types=input_data.attribute_types,
+                    time_code=input_data.time_code,
                 )
             except USDEditError as exc:
                 return _edit_error("update_prim_attributes", exc)
@@ -387,8 +430,10 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 success=True,
                 stage_id=input_data.stage_id,
                 prim_path=result["prim_path"],
-                message=f"Updated prim {result['prim_path']}",
+                message=f"Updated prim {result['prim_path']}{_at(result)}",
                 changed=result["changed"],
+                created_attributes=result["created_attributes"] or None,
+                time_code=result["time_code"],
             ).model_dump()
 
         return await server._exec_backend(
@@ -401,6 +446,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 "stage_id": stage_id,
                 "prim_path": prim_path,
                 "attributes": sorted(attributes),
+                "time_code": time_code,
             },
         )
 

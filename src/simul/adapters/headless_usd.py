@@ -270,6 +270,8 @@ class HeadlessUSDSession(LoggerMixin):
         prim_type: str,
         attributes: Optional[Mapping[str, Any]] = None,
         redefine_existing: bool = False,
+        attribute_types: Optional[Mapping[str, str]] = None,
+        time_code: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Define a prim and set its initial attributes, all or nothing.
@@ -281,6 +283,8 @@ class HeadlessUSDSession(LoggerMixin):
             attributes: Initial attribute values, relationship targets and
                 the active / instanceable / kind metadata
             redefine_existing: Allow re-typing a prim that already exists
+            attribute_types: USD value type per new attribute name
+            time_code: Write the attribute values as samples at this time
 
         Returns:
             Summary of the change (see ``editing.create_prim``)
@@ -291,7 +295,13 @@ class HeadlessUSDSession(LoggerMixin):
         stage = self.require_stage(stage_id)
         try:
             return editing.create_prim(
-                stage, prim_path, prim_type, attributes, redefine_existing=redefine_existing
+                stage,
+                prim_path,
+                prim_type,
+                attributes,
+                redefine_existing=redefine_existing,
+                attribute_types=attribute_types,
+                time_code=time_code,
             )
         finally:
             self._invalidate_bbox_cache(stage_id)
@@ -301,6 +311,8 @@ class HeadlessUSDSession(LoggerMixin):
         stage_id: str,
         prim_path: str,
         attributes: Mapping[str, Any],
+        attribute_types: Optional[Mapping[str, str]] = None,
+        time_code: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Set attributes, relationship targets and metadata on a prim, all or nothing.
@@ -309,6 +321,9 @@ class HeadlessUSDSession(LoggerMixin):
             stage_id: Stage identifier
             prim_path: Absolute path of an existing prim
             attributes: Name to JSON value
+            attribute_types: USD value type per new attribute name
+            time_code: Write the attribute values as samples at this time;
+                without it, animated attributes are refused
 
         Returns:
             Summary of the change (see ``editing.update_prim``)
@@ -318,7 +333,13 @@ class HeadlessUSDSession(LoggerMixin):
         """
         stage = self.require_stage(stage_id)
         try:
-            return editing.update_prim(stage, prim_path, attributes)
+            return editing.update_prim(
+                stage,
+                prim_path,
+                attributes,
+                attribute_types=attribute_types,
+                time_code=time_code,
+            )
         finally:
             self._invalidate_bbox_cache(stage_id)
 
