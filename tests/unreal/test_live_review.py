@@ -175,6 +175,8 @@ def test_physics_edits_are_undoable_saved_and_simulate():
         client = session()
         level = "/Game/SimulReview_Physics_" + uuid.uuid4().hex[:8]
         try:
+            # A session another test (or run) left going would make start a resume and refuse new_level.
+            assert (await client.control_simulation("stop"))["state"] == "stopped"
             made = await client._execute_json_script(f"""
 import unreal, json
 les = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
@@ -268,6 +270,7 @@ def test_forces_act_on_the_running_simulation_and_the_reads_follow_it():
         client = session()
         level = "/Game/SimulReview_Forces_" + uuid.uuid4().hex[:8]
         try:
+            assert (await client.control_simulation("stop"))["state"] == "stopped"
             made = await client._execute_json_script(f"""
 import unreal, json
 print(json.dumps({{'new': bool(unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).new_level({level!r}))}}))
