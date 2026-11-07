@@ -197,6 +197,8 @@ class TestTransports:
         assert instance.mcp.run_calls == [
             {
                 "transport": "http",
+                # FastMCP's banner checks PyPI on every start; simul prints its own.
+                "show_banner": False,
                 "host": instance.settings.server.host,
                 "port": instance.settings.server.port,
                 # The DNS-rebinding guard is on by default (tests/mcp/test_http_security.py).
@@ -211,7 +213,7 @@ class TestTransports:
 
         asyncio.run(instance.run("stdio"))
 
-        assert instance.mcp.run_calls == [{"transport": "stdio"}]
+        assert instance.mcp.run_calls == [{"transport": "stdio", "show_banner": False}]
 
     def test_unknown_transport_is_refused_before_serving(self, fake_fastmcp: Any) -> None:
         instance = server_module.SimulMCPServer(settings=Settings(), backends={"isaac"})
