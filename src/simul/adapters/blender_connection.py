@@ -484,6 +484,7 @@ class BlenderAttachments:
             "blender_bridge/agent_cursor.py": "blender_bridge/agent_cursor.py",
             "blender_bridge/protocol.py": "blender_bridge/protocol.py",
             "adapters/blender_runtime.py": "adapters/blender_runtime.py",
+            "adapters/simready_usd.py": "adapters/simready_usd.py",
             "utils/errors.py": "utils/errors.py",
             "utils/paths.py": "utils/paths.py",
             "utils/private_files.py": "utils/private_files.py",

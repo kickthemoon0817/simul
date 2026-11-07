@@ -269,9 +269,8 @@ class Editor:
         return actor.get_path_name()
 
     # EditorActorSubsystem
-    def set_actor_selection_state(self, actor: Actor, should_be_selected: bool) -> None:
-        if should_be_selected and actor not in self.selection:
-            self.selection.append(actor)
+    def set_selected_level_actors(self, actors: List[Actor]) -> None:
+        self.selection = list(actors)
 
     def get_selected_level_actors(self) -> List[Actor]:
         return [] if self.pie else list(self.selection)
@@ -805,6 +804,21 @@ def test_distance_0_on_an_actor_without_bounds_keeps_500_cm_and_says_so(
     assert result["fit_warning"] == unreal_runtime.FOCUS_NO_BOUNDS_WARNING
     assert "no bounds" in result["fit_warning"] and "500 cm" in result["fit_warning"]
     assert result["selected"] is True and "warning" not in result
+
+
+def test_focus_makes_the_actor_the_whole_selection(
+    editor: Editor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Focus added the actor to the selection: three focuses left three actors selected."""
+    paths = [
+        editor.add(Actor(name, (x, 0.0, 0.0), (x, 0.0, 50.0), (50.0, 50.0, 50.0)))
+        for name, x in (("First", 0.0), ("Second", 500.0), ("Third", 1000.0))
+    ]
+
+    results = [_focus(editor, monkeypatch, path) for path in paths]
+
+    assert [r["selected"] for r in results] == [True, True, True]
+    assert [actor.get_path_name() for actor in editor.selection] == [paths[-1]]
 
 
 def test_an_explicit_distance_places_the_camera_as_before(

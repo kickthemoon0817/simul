@@ -56,8 +56,26 @@ class _FakeBlenderSession:
         }
 
     def capture_viewport_sequence(self, start: int, end: int, step: int, *args: Any, **kwargs: Any) -> Dict[str, Any]:
-        frames = [{"frame": f, "image_base64": JPEG_B64} for f in range(start, end + 1, step)]
-        return {"frames": frames, "frame_count": len(frames), "capture_method": "gpu_offscreen"}
+        # What the add-on returns: the frames are files, so only their paths travel.
+        folder = "/private/tmp/simul-work/captures/sequence-20261108-120000-a1b2c3/" + "x" * 60
+        frames = [
+            {"frame": f, "file_path": f"{folder}/frame_{f:06d}.jpg"}
+            for f in range(start, end + 1, step)
+        ]
+        return {
+            "frames": frames,
+            "frame_count": len(frames),
+            "requested_frame_count": len(frames),
+            "complete": True,
+            "next_start_frame": None,
+            "stopped_by": None,
+            "output_dir": folder,
+            "width": 512,
+            "height": 288,
+            "format": "jpeg",
+            "camera_name": None,
+            "capture_method": "viewport",
+        }
 
 
 class _FakeUnrealSession:
@@ -165,15 +183,30 @@ def test_blender_capture_description_names_the_image_block() -> None:
     assert "base64" not in description
 
 
-def test_blender_sequence_keeps_frames_inline_as_its_schema_says() -> None:
+def test_blender_sequence_returns_frame_files_as_its_schema_says() -> None:
     images, record = _blocks(
         _call("capture_blender_viewport_sequence", {"start_frame": 1, "end_frame": 3})
     )
 
     assert images == []
     assert record["frame_count"] == 3
-    assert all(frame["image_base64"] == JPEG_B64 for frame in record["frames"])
+    assert all(frame["file_path"].endswith(".jpg") for frame in record["frames"])
     _assert_matches_schema(record, BlenderCaptureSequenceResponse)
+
+
+def test_the_most_frames_one_sequence_call_returns_fit_the_result_budget() -> None:
+    """Inline JPEGs of five 512 px frames were cut to one by the 40 KB budget."""
+    from simul.mcp.schemas.blender import SEQUENCE_FRAMES_MAX
+
+    _images, record = _blocks(
+        _call(
+            "capture_blender_viewport_sequence",
+            {"start_frame": 1, "end_frame": SEQUENCE_FRAMES_MAX, "max_frames": SEQUENCE_FRAMES_MAX},
+        )
+    )
+
+    assert "truncated" not in record and "oversized_bytes" not in record
+    assert len(record["frames"]) == SEQUENCE_FRAMES_MAX
 
 
 def test_unreal_inline_capture_matches_its_schema() -> None:
