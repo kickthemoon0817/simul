@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from fastmcp.tools import ToolResult
 
-from ..schemas.common import BoundingBox, ErrorResponse, Transform
+from ..schemas.common import ErrorResponse
 from ..schemas.usd import (
     BBoxRequest,
     BBoxResponse,
@@ -193,20 +193,48 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="get_prim_info",
-        description="Get information about a USD prim.",
+        description=(
+            "Get one USD prim: state, applied API schemas, world bounding box, local "
+            "transform, children, material bindings, attributes, relationships "
+            "(joint bodies, material bindings, collision filters) and metadata "
+            "(specifier, instanceable, references/payloads/inherits/specializes "
+            "with whether each resolved, variant sets and selections, other "
+            "authored metadata). Each attribute is {type, value, authored}; "
+            "authored false means the value is the schema fallback. Values are "
+            "JSON: vectors are lists, quaternions [w, x, y, z], matrices lists of "
+            "rows, and a non-finite float the string \"Infinity\", "
+            "\"-Infinity\" or \"NaN\". An array attribute carries its length "
+            "and its first array_preview elements, so a large mesh stays small; "
+            "use get_mesh_info for geometry statistics."
+        ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
         output_schema=None,
     )
     @with_param_descriptions()
-    async def get_prim_info(stage_id: str, prim_path: str) -> ToolResult:
+    async def get_prim_info(
+        stage_id: str,
+        prim_path: str,
+        time_code: Optional[float] = None,
+        include_purposes: Optional[List[Purpose]] = None,
+        array_preview: int = 16,
+        attribute_filter: Optional[List[str]] = None,
+    ) -> ToolResult:
         """
         Get information about a USD prim.
 
         Args:
             stage_id: Stage identifier
-            prim_path: Path to the prim
+            prim_path: Absolute path to the prim, e.g. /World/Robot
+            time_code: Time code to read animated values, the transform and the
+                bounding box at; None for the default (unanimated) value
+            include_purposes: Purposes the bounding box counts, any of
+                default, render, proxy, guide; None for default and render
+            array_preview: Leading elements of each array attribute to include,
+                0 to 10000; longer arrays report length and truncated
+            attribute_filter: Glob patterns such as physics:* or xformOp:*;
+                only matching attributes are listed. None lists them all
 
         Returns:
             Prim information or error
@@ -214,44 +242,30 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
         def _prim_info(session: "HeadlessUSDSession") -> Dict[str, Any]:
             input_data = server._validate_input(
-                PrimInfoRequest, stage_id=stage_id, prim_path=prim_path
+                PrimInfoRequest,
+                stage_id=stage_id,
+                prim_path=prim_path,
+                time_code=time_code,
+                include_purposes=include_purposes,
+                array_preview=array_preview,
+                attribute_filter=attribute_filter,
             )
             if isinstance(input_data, dict):
                 return input_data
 
-            prim_info = session.get_prim_info(input_data.stage_id, input_data.prim_path)
-            if not prim_info:
-                return ErrorResponse(
-                    error=f"Prim not found: {input_data.prim_path}",
-                    error_type="NotFoundError",
-                ).model_dump()
+            from ...usd.lookup import lookup_prim
+            from ...usd.reader import describe_prim
 
-            bbox_dict = session.get_prim_bbox(input_data.stage_id, input_data.prim_path)
-            transform_dict = session.get_prim_transform(
-                input_data.stage_id, input_data.prim_path
-            )
+            stage = _loaded_stage(session, input_data.stage_id)
+            prim = lookup_prim(stage, input_data.prim_path)
             return PrimInfo(
-                path=prim_info.path,
-                name=prim_info.name,
-                type=prim_info.type_name,
-                is_active=prim_info.is_active,
-                is_loaded=prim_info.is_loaded,
-                is_defined=prim_info.is_defined,
-                is_instance=prim_info.is_instance,
-                purpose=prim_info.purpose,
-                visibility=prim_info.visibility,
-                kind=prim_info.kind,
-                bbox=BoundingBox(**bbox_dict) if bbox_dict else None,
-                transform=Transform(**transform_dict) if transform_dict else None,
-                children_count=len(prim_info.children),
-                children_types=session.get_children_type_counts(
-                    input_data.stage_id, input_data.prim_path
-                ),
-                material_bindings=session.get_material_bindings(
-                    input_data.stage_id, input_data.prim_path
-                ),
-                attributes=prim_info.attributes,
-                metadata=prim_info.metadata,
+                **describe_prim(
+                    prim,
+                    time_code=input_data.time_code,
+                    purposes=input_data.include_purposes,
+                    array_preview=input_data.array_preview,
+                    attribute_filter=input_data.attribute_filter,
+                )
             ).model_dump()
 
         return await server._exec_backend(
@@ -260,7 +274,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "USD",
             PrimInfo,
             _prim_info,
-            params={"stage_id": stage_id, "prim_path": prim_path},
+            params={"stage_id": stage_id, "prim_path": prim_path, "time_code": time_code},
         )
 
     @server.mcp.tool(

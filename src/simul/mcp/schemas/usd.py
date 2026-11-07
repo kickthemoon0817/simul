@@ -6,6 +6,14 @@ from pydantic import BaseModel, Field, field_validator
 
 from .common import BoundingBox, Transform
 
+Purpose = Literal["default", "render", "proxy", "guide"]
+
+DEFAULT_BBOX_PURPOSES: List[Purpose] = ["default", "render"]
+
+# Mirrors simul.usd.values; kept here so the schema module imports no pxr.
+DEFAULT_ARRAY_PREVIEW = 16
+MAX_ARRAY_PREVIEW = 10_000
+
 
 class USDFileInfo(BaseModel):
     """USD file information."""
@@ -48,7 +56,12 @@ class StageInfo(BaseModel):
 
 
 class PrimInfo(BaseModel):
-    """USD prim information."""
+    """USD prim information.
+
+    Values are plain JSON: vectors are lists, quaternions ``[w, x, y, z]``
+    lists, matrices lists of rows, and a non-finite float the string
+    ``"Infinity"``, ``"-Infinity"`` or ``"NaN"``.
+    """
 
     path: str = Field(..., description="Prim path")
     name: str = Field(..., description="Prim name")
@@ -57,16 +70,63 @@ class PrimInfo(BaseModel):
     is_loaded: bool = Field(..., description="Whether prim is loaded")
     is_defined: bool = Field(..., description="Whether prim is defined")
     is_instance: bool = Field(..., description="Whether prim is an instance")
-    purpose: Optional[str] = Field(None, description="Prim purpose")
+    is_instance_proxy: bool = Field(
+        False, description="Whether prim lies under an instance (read-only proxy)"
+    )
+    prototype: Optional[str] = Field(None, description="Prototype path of an instance")
+    prim_in_prototype: Optional[str] = Field(
+        None, description="Prototype prim an instance proxy stands for"
+    )
+    purpose: Optional[str] = Field(None, description="Authored or fallback purpose")
+    computed_purpose: Optional[str] = Field(
+        None, description="Purpose after inheritance from ancestors"
+    )
     visibility: Optional[str] = Field(None, description="Prim visibility")
+    computed_visibility: Optional[str] = Field(
+        None, description="Visibility after inheritance (invisible if an ancestor is)"
+    )
     kind: Optional[str] = Field(None, description="Prim kind")
-    bbox: Optional[BoundingBox] = Field(None, description="Bounding box")
+    api_schemas: List[str] = Field(
+        default_factory=list, description="Applied API schemas, e.g. PhysicsRigidBodyAPI"
+    )
+    bbox: Optional[BoundingBox] = Field(
+        None, description="World bounding box; None when nothing is boundable"
+    )
+    bbox_purposes: List[str] = Field(
+        default_factory=list, description="Purposes the bounding box counts"
+    )
     transform: Optional[Transform] = Field(None, description="Local transformation")
-    children_count: int = Field(..., description="Number of child prims")
-    children_types: Dict[str, int] = Field(..., description="Child prim type counts")
+    children_count: int = Field(
+        ..., description="Number of child prims, instance proxies included"
+    )
+    children_types: Dict[str, int] = Field(
+        ..., description="Child prim type counts; '(typeless)' for prims without a type"
+    )
     material_bindings: List[str] = Field(..., description="Bound material paths")
-    attributes: Dict[str, Any] = Field(..., description="Important attributes")
-    metadata: Dict[str, Any] = Field(..., description="Prim metadata")
+    attribute_count: int = Field(
+        0, description="Attributes on the prim, before attribute_filter"
+    )
+    attributes: Dict[str, Any] = Field(
+        ...,
+        description=(
+            "Attribute name to {type, value, authored}; arrays add length and "
+            "truncated, animated attributes time_samples, connected ones connections"
+        ),
+    )
+    relationships: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Relationship name to {targets, authored}",
+    )
+    metadata: Dict[str, Any] = Field(
+        ...,
+        description=(
+            "specifier, instanceable, composition arcs, variant_sets, "
+            "opinion_layers and other authored metadata"
+        ),
+    )
+    time_code: Optional[float] = Field(
+        None, description="Time code evaluated; None for the default time"
+    )
 
 
 class PrimInfoRequest(BaseModel):
@@ -74,6 +134,19 @@ class PrimInfoRequest(BaseModel):
 
     stage_id: str = Field(..., description="Stage identifier", min_length=1)
     prim_path: str = Field(..., description="Prim path", min_length=1)
+    time_code: Optional[float] = Field(None, description="Time code to evaluate at")
+    include_purposes: Optional[List[Purpose]] = Field(
+        None, description="Purposes the bounding box counts"
+    )
+    array_preview: int = Field(
+        DEFAULT_ARRAY_PREVIEW,
+        ge=0,
+        le=MAX_ARRAY_PREVIEW,
+        description="Leading elements of each array attribute to include",
+    )
+    attribute_filter: Optional[List[str]] = Field(
+        None, description="Glob patterns selecting the attributes to list"
+    )
 
 
 class MeshInfoRequest(BaseModel):
@@ -218,11 +291,6 @@ class PrimSearchResponse(BaseModel):
     results: List[str] = Field(..., description="List of matching prim paths")
     count: int = Field(..., description="Number of results")
     error: Optional[str] = Field(None, description="Error message if failed")
-
-
-Purpose = Literal["default", "render", "proxy", "guide"]
-
-DEFAULT_BBOX_PURPOSES: List[Purpose] = ["default", "render"]
 
 
 class BBoxRequest(BaseModel):
