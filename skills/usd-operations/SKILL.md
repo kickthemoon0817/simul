@@ -120,9 +120,9 @@ mcp__simul__get_bounding_box
   world_space: true
 ```
 
-Returns: `{ "min": [x, y, z], "max": [x, y, z], "center": [x, y, z], "size": [w, h, d] }`
+Returns: `{ "bbox": { "min": [x, y, z], "max": [x, y, z], "center": [x, y, z], "size": [w, h, d], "volume": v }, "has_geometry": true, "included_purposes": ["default", "render"] }`
 
-Set `world_space: false` to get local (object-space) extents.
+Set `world_space: false` to get local (object-space) extents. Only geometry whose purpose is in `include_purposes` counts (default: `default` and `render`); add `"guide"` to bound collision shapes authored as guides. A prim with no such geometry returns `has_geometry: false` with `bbox: null`, and `excluded_purposes_with_geometry` says which purposes would find some. Pass `time_code` to bound an animated prim at a given time.
 
 ### 7. Summarize the Scene
 
