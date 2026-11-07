@@ -1134,14 +1134,36 @@ Behaviour worth knowing:
     a reader should accept both). A Blender
     whose bundled USD has no UsdSemantics module gets Isaac Sim's
     older `SemanticsAPI:Semantics_<taxonomy>` attributes instead;
-    `semantics.labels_schema` in the result says which.
+    `semantics.labels_schema` in the result says which;
+  - each rigid body constraint between two exported objects
+    (`add_blender_rigid_body_constraint`): a UsdPhysics joint under
+    `<asset root>/Joints`. FIXED becomes a `FixedJoint`, POINT a
+    `SphericalJoint`, HINGE a `RevoluteJoint` about the constraint's local Z,
+    SLIDER a `PrismaticJoint` along its local X, and PISTON, GENERIC and
+    GENERIC_SPRING a D6 `PhysicsJoint` with a `LimitAPI` per locked or limited
+    axis (an axis Blender leaves unlimited stays free). `body0` is object1's
+    rigid body (its own, the nearest exported one above it, or the object as a
+    static body) and `body1` object2's; `localPos`/`localRot` place the
+    constraint empty's frame in each body, `collisionEnabled` is the opposite
+    of `disable_collisions` and `jointEnabled` follows `enabled`. Limits are
+    written as UsdPhysics reads them, body1 relative to body0, in degrees:
+    Blender measures a HINGE's and a GENERIC's angular limits the other way
+    round (object1 relative to object2, measured on 5.0.1), so their range is
+    negated; linear limits and a PISTON's angle keep their sign. The
+    constraint empty itself is not written as a prim, so it neither adds a
+    stray Xform nor forces a wrapper root. A MOTOR has no UsdPhysics joint
+    (Blender's motor is a free joint whose drive is capped by an impulse per
+    step), and springs and breaking thresholds have no exact equivalent: each
+    is reported in `issues` and `warnings`, and `physics.joints` lists the
+    joints written.
 
   `collider_type` and the friction values also apply to the meshes of
   descendants that set none of their own, so metadata on an asset root makes
   all its meshes collide; rigid body and mass stay on the object that sets
   them. The result's `warnings` name a rigid body without a collider, nested
-  rigid bodies, a triangle-mesh collider on a dynamic body, and stored values
-  that are not valid numbers, which are left out. The asset root is the default
+  rigid bodies with no joint between them, a triangle-mesh collider on a
+  dynamic body, and stored values that are not valid numbers, which are left
+  out. The asset root is the default
   prim (kind `component`): the one top-level object, or an Xform named after
   the file when several objects share the top level. Blender's `/root`
   container goes, and the render materials move to `<asset root>/Looks`.
@@ -1192,19 +1214,26 @@ Behaviour worth knowing:
   are lost when the file is reopened. Their refusals, and those of the other
   SimReady tools, are `ValidationError`s whose `details.code` names the reason
   (`InvalidMetadata`, `ObjectModeRequired`, `LinkedData`, `RootExists`,
-  `RootNotInvertible`, `EmptyObjectList` and so on).
+  `RootNotInvertible`, `EmptyObjectList` and so on); an unknown object is a
+  `NotFoundError` with `details.code` `ObjectNotFound` and the missing names in
+  `details.objects`, in every SimReady tool.
 - `setup_simready_hierarchy` keeps every object where it is: it parents the
   listed objects that have no listed ancestor to the root, and a listed object
   under another listed object keeps its parent, which may be an unlisted
   object between them (`reparented` and `kept_parent` in the result). It keeps
-  the object's matrix before constraints, so constraints act as before, and it
-  computes it from the former parent's world matrix and the parent inverse
-  matrix: an object Blender does not evaluate (in an excluded collection, or a
-  collection or object disabled in viewports) has a stale `matrix_world`, which
-  moved such objects to the origin. The transform moves into the object's own
-  location, rotation and scale; where the former parent's non-uniform scale
-  skews it, which those cannot express, the skew stays in its parent inverse
-  matrix and `warnings` says so. A bone or vertex parent becomes an object
+  the object's matrix before constraints, and it computes it from the former
+  parent's world matrix and the parent inverse matrix: an object Blender does
+  not evaluate (in an excluded collection, or a collection or object disabled
+  in viewports) has a stale `matrix_world`, which moved such objects to the
+  origin. The transform moves into the object's own location, rotation and
+  scale; where the former parent's non-uniform scale skews it, which those
+  cannot express, the skew stays in its parent inverse matrix and `warnings`
+  says so. An object that object constraints act on keeps its location,
+  rotation and scale, and its former parent space goes into the parent inverse
+  matrix instead: Blender's local space for a constraint is relative to parent
+  world × parent inverse, so a local-space Limit Location (which moved such a
+  part 1.5 m) sees the same values and gives the same pose. A post-check still
+  warns if an evaluated pose moved. A bone or vertex parent becomes an object
   parent in place (one with constraints is refused). It checks every name, the
   root and the semantic labels before changing anything, and a failure
   part-way puts the parents back and removes the root it created. An existing
@@ -1227,11 +1256,11 @@ Behaviour worth knowing:
   |---|---|---|
   | naming | | an object, material, light or camera name that is not a USD identifier (camelCase is fine); a mesh data name likewise; two siblings that become one prim name |
   | scale | | a largest real-world size (world-space size × Unit Scale) above 100 m or below 1 mm; a Unit Scale other than 1 [UN.007] |
-  | transforms | the asset root, the prim that becomes the default prim, not the identity [VG.025]; a skewed rigid body [RB.009] | a scaled, mirrored or skewed part |
+  | transforms | the asset root, the prim that becomes the default prim, not the identity [VG.025]; a rigid body whose world transform is skewed, as a rotated part under a non-uniformly scaled group is [RB.009] | a scaled or mirrored part; a part skewed relative to its parent |
   | materials | no material | an empty slot that faces use |
   | hierarchy | | a mesh without a parent, or a root that is not an empty |
   | metadata | no semantic label of any taxonomy on the mesh or an exported object above it [SL.001]; a stored value that breaks the rules | no collider_type on the mesh or an exported object above it |
-  | physics | a rigid body without mass or density [RB.007], without a collider, or nested in another rigid body with no joint [RB.012] | a triangle-mesh collider on a dynamic body; no rigid body at all [RB.001] |
+  | physics | a rigid body without mass or density [RB.007], without a collider, or nested in another rigid body with no joint the export writes between them [RB.012]; a rigid body constraint between exported objects that the export would drop: a MOTOR, or two objects that are parts of one rigid body | a triangle-mesh collider on a dynamic body; no rigid body at all [RB.001]; a constraint to an object the export leaves out, or between two static objects; springs, a breaking threshold, or several rotation axes limited to ranges (Blender reads them as Euler angles, PhysX as twist and swing) |
   | geometry | degenerate (zero-area) faces [VG.014] | no UV map; n-gons |
 
   Labels, colliders and physics count only from exported objects: an

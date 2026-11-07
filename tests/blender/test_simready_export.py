@@ -18,8 +18,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional
 
+import numpy as np
 import pytest
-from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 from simul.adapters import blender_runtime
 from simul.utils.paths import PathPolicy
@@ -222,6 +223,10 @@ class FakeBlender:
                     UsdGeom.Xform.Define(stage, path_of(ancestor))
                 ancestor = ancestor.parent
             xform = UsdGeom.Xform.Define(stage, path_of(obj)).GetPrim()
+            local = _local_matrix(obj)
+            if not np.allclose(local, np.eye(4)):
+                # The transform relative to the parent prim, row vectors as USD's.
+                UsdGeom.Xformable(xform).AddTransformOp().Set(Gf.Matrix4d(local.T.tolist()))
             if names:
                 xform.CreateAttribute(
                     "userProperties:blender:object_name", Sdf.ValueTypeNames.String
@@ -265,6 +270,14 @@ class FakeBlender:
             layer.defaultPrim = base.name
         layer.Export(kwargs["filepath"])
         return {"FINISHED"}
+
+
+def _local_matrix(obj: FakeObject) -> np.ndarray:
+    """The object's matrix relative to its parent's world matrix, as Blender's exporter writes it."""
+    world = np.asarray(obj.matrix_world.rows)
+    if obj.parent is None:
+        return world
+    return np.linalg.inv(np.asarray(obj.parent.matrix_world.rows)) @ world
 
 
 def _robot() -> List[FakeObject]:
@@ -784,3 +797,175 @@ def test_a_failed_export_removes_the_folder_it_created(scene: Any) -> None:
         scene.session.export_simready_usd(str(folder / "robot.usda"), object_names=["robot"])
 
     assert not folder.exists()
+
+
+# ---------------------------------------------------------------------------
+# Joints: Blender rigid body constraints become UsdPhysics joints
+# ---------------------------------------------------------------------------
+
+_LINK = {"is_rigid_body": True, "mass_kg": 1.0, "collider_type": "convexHull"}
+
+
+def _articulated(scene: Any) -> None:
+    """base_link at (0, 0, 0.1) and arm_link (nested under it) at (0, 0, 0.35), rigid bodies."""
+    scene.obj("base_link").matrix_world = FakeMatrix.Translation((0.0, 0.0, 0.1))
+    scene.obj("arm_link").matrix_world = FakeMatrix.Translation((0.0, 0.0, 0.35))
+    for name in ("base_link", "arm_link"):
+        scene.session.apply_simready_metadata(name, {"physics": dict(_LINK)})
+
+
+def _hinge_frame() -> FakeMatrix:
+    """At (0, 0, 0.2), its local Z along world +Y (add_rigid_body_constraint's axis=[0, 1, 0])."""
+    return FakeMatrix([(1, 0, 0, 0), (0, 0, 1, 0), (0, -1, 0, 0.2), (0, 0, 0, 1)])
+
+
+def _carrier(scene: Any, kind: str, frame: Optional[FakeMatrix] = None, **settings: Any) -> FakeObject:
+    """A constraint empty between base_link and arm_link, top level, as Blender adds one."""
+    carrier = FakeObject("RBC_base_link_arm_link", "EMPTY")
+    carrier.matrix_world = frame or _hinge_frame()
+    carrier.rigid_body_constraint = SimpleNamespace(
+        type=kind,
+        object1=scene.obj("base_link"),
+        object2=scene.obj("arm_link"),
+        enabled=True,
+        disable_collisions=True,
+        use_breaking=False,
+        **settings,
+    )
+    scene.fake.objects.append(carrier)
+    scene.fake.layer_objects.append(carrier)
+    return carrier
+
+
+def _joints(stage: Any) -> Dict[str, Any]:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        parsed = UsdPhysics.LoadUsdPhysicsFromRange(stage, ["/"])
+    return {
+        str(path): desc
+        for kind, (paths, descs) in parsed.items()
+        if "Joint" in str(kind)
+        for path, desc in zip(paths, descs)
+    }
+
+
+def test_a_hinge_between_nested_links_exports_as_a_revolute_joint(scene: Any) -> None:
+    _articulated(scene)
+    _carrier(scene, "HINGE", use_limit_ang_z=True, limit_ang_z_lower=0.0, limit_ang_z_upper=0.5)
+    path = scene.out / "robot.usda"
+
+    result = scene.session.export_simready_usd(str(path), object_names=["robot"])
+
+    assert result["validation_passed"] is True, result["issues"]
+    assert result["physics"]["joint_count"] == 1
+    joint_path = "/robot/Joints/RBC_base_link_arm_link"
+    assert result["physics"]["joints"] == [joint_path]
+    stage = Usd.Stage.Open(str(path))
+    joint = UsdPhysics.RevoluteJoint(stage.GetPrimAtPath(joint_path))
+    assert joint.GetBody0Rel().GetTargets() == [Sdf.Path("/robot/base_link")]
+    assert joint.GetBody1Rel().GetTargets() == [Sdf.Path("/robot/base_link/arm_link")]
+    assert joint.GetAxisAttr().Get() == "Z"
+    # Blender limits object1 relative to object2 on a hinge; UsdPhysics body1 to body0.
+    assert (joint.GetLowerLimitAttr().Get(), joint.GetUpperLimitAttr().Get()) == pytest.approx(
+        (-28.6479, 0.0), abs=1e-3
+    )
+    assert not stage.GetPrimAtPath("/robot/RBC_base_link_arm_link")
+    desc = _joints(stage)[joint_path]
+    cache = UsdGeom.XformCache()
+    for body, position in ((desc.body0, desc.localPose0Position), (desc.body1, desc.localPose1Position)):
+        world = cache.GetLocalToWorldTransform(stage.GetPrimAtPath(body))
+        assert list(world.Transform(Gf.Vec3d(position))) == pytest.approx([0.0, 0.0, 0.2], abs=1e-6)
+
+
+def test_a_constraint_empty_is_not_a_prim_and_forces_no_wrapper_root(scene: Any) -> None:
+    _articulated(scene)
+    _carrier(scene, "FIXED")
+    path = scene.out / "scene.usda"
+
+    result = scene.session.export_simready_usd(str(path))
+
+    assert result["default_prim"] == "/robot"
+    assert {"object_name": "RBC_base_link_arm_link",
+            "reason": "a rigid body constraint: exported as a UsdPhysics joint between its two "
+                      "objects, not as a prim"} in result["skipped_objects"]
+    stage = Usd.Stage.Open(str(path))
+    assert stage.GetPrimAtPath("/robot/Joints/RBC_base_link_arm_link").GetTypeName() == "PhysicsFixedJoint"
+
+
+_LOCKED = [1.0, -1.0]
+
+
+@pytest.mark.parametrize(
+    ("kind", "settings", "type_name", "expected"),
+    [
+        ("SLIDER", {"use_limit_lin_x": True, "limit_lin_x_lower": 0.0, "limit_lin_x_upper": 0.3},
+         "PhysicsPrismaticJoint", {"axis": "X", "limit": [0.0, 0.3]}),
+        ("HINGE", {}, "PhysicsRevoluteJoint", {"axis": "Z", "limit": None}),
+        ("POINT", {}, "PhysicsSphericalJoint", {}),
+        ("PISTON",
+         {"use_limit_lin_x": True, "limit_lin_x_lower": -0.1, "limit_lin_x_upper": 0.2,
+          "use_limit_ang_x": True, "limit_ang_x_lower": -0.5, "limit_ang_x_upper": 0.25},
+         "PhysicsJoint",
+         {"limits": {"transX": [-0.1, 0.2], "rotX": [-28.6479, 14.3239], "transY": _LOCKED,
+                     "transZ": _LOCKED, "rotY": _LOCKED, "rotZ": _LOCKED}}),
+        ("GENERIC",
+         {"use_limit_lin_x": True, "limit_lin_x_lower": 0.0, "limit_lin_x_upper": 0.0,
+          "use_limit_lin_z": True, "limit_lin_z_lower": -0.05, "limit_lin_z_upper": 0.1,
+          "use_limit_ang_y": True, "limit_ang_y_lower": -0.2, "limit_ang_y_upper": 0.4},
+         "PhysicsJoint",
+         {"limits": {"transX": _LOCKED, "transZ": [-0.05, 0.1], "rotY": [-22.9183, 11.4592]}}),
+    ],
+)
+def test_each_constraint_type_maps_to_its_joint_and_limits(
+    scene: Any, kind: str, settings: Dict[str, Any], type_name: str, expected: Dict[str, Any]
+) -> None:
+    _articulated(scene)
+    _carrier(scene, kind, **settings)
+    path = scene.out / f"{kind.lower()}.usda"
+
+    result = scene.session.export_simready_usd(str(path), object_names=["robot"])
+
+    assert result["validation_passed"] is True, result["issues"]
+    stage = Usd.Stage.Open(str(path))
+    prim = stage.GetPrimAtPath("/robot/Joints/RBC_base_link_arm_link")
+    assert prim.GetTypeName() == type_name
+    if "axis" in expected:
+        assert prim.GetAttribute("physics:axis").Get() == expected["axis"]
+        limit = expected["limit"]
+        lower = prim.GetAttribute("physics:lowerLimit")
+        if limit is None:
+            assert not lower.HasAuthoredValue()  # free: Blender leaves an unlimited axis free
+        else:
+            assert [lower.Get(), prim.GetAttribute("physics:upperLimit").Get()] == pytest.approx(limit)
+    limits = {
+        schema.split(":", 1)[1]: [
+            prim.GetAttribute(f"limit:{schema.split(':', 1)[1]}:physics:low").Get(),
+            prim.GetAttribute(f"limit:{schema.split(':', 1)[1]}:physics:high").Get(),
+        ]
+        for schema in prim.GetAppliedSchemas()
+        if schema.startswith("PhysicsLimitAPI:")
+    }
+    wanted = expected.get("limits", {})
+    assert sorted(limits) == sorted(wanted)
+    for dof, bounds in wanted.items():
+        assert limits[dof] == pytest.approx(bounds, abs=1e-3), dof
+
+
+def test_a_motor_refuses_the_export_and_a_forced_export_names_the_lost_joint(scene: Any) -> None:
+    _articulated(scene)
+    _carrier(scene, "MOTOR", use_motor_ang=True)
+    path = scene.out / "motor.usda"
+
+    refused = scene.session.export_simready_usd(str(path), object_names=["robot"])
+
+    assert refused["success"] is False and not path.exists()
+    errors = [i["message"] for i in refused["details"]["issues"] if i["severity"] == "error"]
+    assert any("MOTOR constraint RBC_base_link_arm_link" in m for m in errors)
+    # Without a joint, the nested arm is an error too.
+    assert any("nested in the rigid body base_link" in m for m in errors)
+
+    forced = scene.session.export_simready_usd(str(path), object_names=["robot"], force=True)
+
+    assert forced["physics"]["joint_count"] == 0
+    assert any("MOTOR constraint RBC_base_link_arm_link" in w for w in forced["warnings"])
+    assert not Usd.Stage.Open(str(path)).GetPrimAtPath("/robot/Joints")

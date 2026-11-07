@@ -21,6 +21,7 @@ from simul.adapters import blender_runtime
 from simul.config import Settings
 from simul.mcp import server as server_module
 from simul.mcp.schemas import simready as schemas
+from simul.utils.paths import PathPolicy
 
 
 class Obj:
@@ -379,3 +380,29 @@ def test_refusals_carry_a_code(box: Any, metadata: Any, clear: Any, code: str) -
     with pytest.raises(blender_runtime.ValidationError) as excinfo:
         box.session.apply_simready_metadata("box", metadata, clear=clear)
     assert excinfo.value.details["code"] == code
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s, _: s.apply_simready_metadata("ghost", {"physics": {"mass_kg": 1.0}}),
+        lambda s, _: s.get_simready_metadata("ghost"),
+        lambda s, _: s.validate_simready_compliance(["box", "ghost"]),
+        lambda s, out: s.export_simready_usd(str(out / "ghost.usda"), object_names=["ghost"]),
+        lambda s, _: s.setup_simready_hierarchy("asset", ["ghost"]),
+    ],
+    ids=["apply", "get", "validate", "export", "setup"],
+)
+def test_every_simready_tool_reports_an_unknown_object_as_not_found(
+    box: Any, tmp_path: Path, call: Any
+) -> None:
+    box.fake.context.view_layer = SimpleNamespace(objects=box.fake.data.objects)
+    policy = PathPolicy(enabled=True, allowed_paths=[str(tmp_path)], project_root=tmp_path)
+    session = blender_runtime.BlenderRuntimeSession(path_policy=policy)
+
+    with pytest.raises(blender_runtime.NotFoundError) as excinfo:
+        call(session, tmp_path)
+
+    assert excinfo.value.details == {"code": "ObjectNotFound", "objects": ["ghost"]}
+    assert "Object not found: ghost" in str(excinfo.value)
+    assert box.obj.props == {}

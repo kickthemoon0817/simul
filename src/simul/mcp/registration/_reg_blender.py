@@ -1492,11 +1492,13 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         description=(
             "Validate the Blender objects export_simready_usd would export against the SimReady "
             "Robotics-Prop rules and Isaac Sim's asset checks; any error makes them non-compliant. Errors: an "
-            "asset root that is not the identity, a skewed rigid body, no material, no semantic "
-            "label on a mesh or an exported object above it, invalid stored values, a rigid body "
-            "without mass, without a collider or nested in another, degenerate faces. Warnings: "
+            "asset root that is not the identity, a rigid body skewed in the world, no material, no "
+            "semantic label on a mesh or an exported object above it, invalid stored values, a "
+            "rigid body without mass, without a collider or nested in another with no joint, a "
+            "constraint the export cannot write as a joint (MOTOR), degenerate faces. Warnings: "
             "names, sizes and units, scaled parts, an empty slot faces use, missing colliders, "
-            "UVs, n-gons. Filter by severity and page with offset/limit (next_offset)."
+            "what a joint leaves out, UVs, n-gons. Filter by severity and page with offset/limit "
+            "(next_offset)."
         ),
         hints=READ_ONLY,
         operation="validate_simready_compliance",
@@ -1509,7 +1511,9 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
         description=(
             "Export Blender objects as a SimReady USD asset a simulator reads: from the simready_ "
             "metadata it authors UsdPhysics rigid bodies, mass, mesh colliders and physics materials, "
-            "and UsdSemantics labels. The asset root is the default prim and holds its materials; "
+            "and UsdSemantics labels; rigid body constraints between exported objects become "
+            "UsdPhysics joints (fixed, revolute, prismatic, spherical, D6 with limits). The asset "
+            "root is the default prim and holds its materials and joints; "
             "metersPerUnit follows the scene's Unit Scale. Listed objects export with their "
             "descendants, hidden ones too; lights, cameras and the World are left out by default. "
             "Refuses when validation finds errors; skip_checks leaves a check out, force=true "

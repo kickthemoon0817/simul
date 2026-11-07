@@ -408,6 +408,18 @@ class ValidationError(ValueError):
         self.details: Dict[str, Any] = {"code": code, **details}
 
 
+class NotFoundError(ValidationError):
+    """A SimReady request naming an object that does not exist (``details.code`` ObjectNotFound)."""
+
+    def __init__(self, names: Sequence[str]) -> None:
+        super().__init__(
+            f"Object{'s' if len(names) > 1 else ''} not found: {', '.join(names)}; "
+            "nothing was changed",
+            "ObjectNotFound",
+            objects=list(names),
+        )
+
+
 # 4x4 matrices as row lists of floats. The SimReady tools compose and invert
 # world matrices themselves: Blender stores no fresh matrix_world for an object
 # its depsgraph leaves out, and mathutils is not importable outside Blender.
@@ -7349,7 +7361,7 @@ class BlenderRuntimeSession:
             Dict with object_name, applied_properties and cleared_properties.
 
         Raises:
-            ValueError: For an unknown object.
+            NotFoundError: For an unknown object (``details.code`` ObjectNotFound).
             ValidationError: For an unknown group, field or clear name, an
                 invalid value, an additional label named after a semantic
                 field's taxonomy (class, hierarchy, wikidata_qcode, qcode) that
@@ -7357,7 +7369,7 @@ class BlenderRuntimeSession:
                 that neither stores nor clears anything, Edit Mode, or a linked
                 object; ``details.code`` names which.
         """
-        obj = self._get_object_or_raise(object_name)
+        obj = self._simready_object(object_name)
         self._simready_editable([obj], "apply_simready_metadata")
         writes = self._simready_writes(metadata or {})
         removals = self._simready_clear_keys(obj, clear or [])
@@ -7492,8 +7504,11 @@ class BlenderRuntimeSession:
         Returns:
             Dict with object_name, metadata (null when nothing valid is
             stored), has_simready_data and invalid_values.
+
+        Raises:
+            NotFoundError: For an unknown object (``details.code`` ObjectNotFound).
         """
-        obj = self._get_object_or_raise(object_name)
+        obj = self._simready_object(object_name)
         stored = self._read_simready_properties(obj)
         valid, invalid = self._simready_checked(stored)
         return {
@@ -7526,6 +7541,41 @@ class BlenderRuntimeSession:
     # express the transform.
     _SIMREADY_SHEAR = 1e-5
     _SIMREADY_TRIANGLE_MESH = frozenset({"none", "mesh"})
+    #: Rigid body constraint type -> the UsdPhysics joint the export writes for it.
+    #: MOTOR has none: Blender's motor is a free joint whose drive is capped by an
+    #: impulse per simulation step, which no UsdPhysics drive expresses.
+    _SIMREADY_JOINT_TYPES = {
+        "FIXED": "fixed",
+        "POINT": "spherical",
+        "HINGE": "revolute",
+        "SLIDER": "prismatic",
+        "PISTON": "d6",
+        "GENERIC": "d6",
+        "GENERIC_SPRING": "d6",
+    }
+    #: A Blender limit axis -> the UsdPhysics D6 degree of freedom (LimitAPI instance).
+    _SIMREADY_D6_AXES = {
+        "lin_x": "transX",
+        "lin_y": "transY",
+        "lin_z": "transZ",
+        "ang_x": "rotX",
+        "ang_y": "rotY",
+        "ang_z": "rotZ",
+    }
+    #: The degrees of freedom a PISTON frees: it slides along and turns about local X.
+    _SIMREADY_PISTON_AXES = frozenset({"lin_x", "ang_x"})
+    #: The limits Blender measures as object1 relative to object2, the reverse of
+    #: UsdPhysics (body1 relative to body0, body0 being object1), so their range is
+    #: negated. Measured on Blender 5.0.1, gravity against a one-sided limit: a
+    #: HINGE's ang_z and a GENERIC's ang_x/y/z; linear limits and a PISTON's
+    #: ang_x read object2 relative to object1.
+    _SIMREADY_REVERSED_LIMITS = frozenset({("HINGE", "ang_z")}) | frozenset(
+        (kind, axis)
+        for kind in ("GENERIC", "GENERIC_SPRING")
+        for axis in ("ang_x", "ang_y", "ang_z")
+    )
+    #: A D6 degree of freedom with its low limit above its high one is locked.
+    _SIMREADY_LOCKED = [1.0, -1.0]
 
     def validate_simready_compliance(
         self,
@@ -7553,17 +7603,25 @@ class BlenderRuntimeSession:
         brackets):
 
         - errors: the asset root (the prim that becomes the default prim) not
-          at the origin, unrotated and unscaled [VG.025]; a skewed rigid body
-          [RB.009]; no material; a material slot faces use left empty; no
-          semantic label on a mesh or an exported object above it [SL.001];
-          a stored value that breaks the metadata rules; a rigid body without
-          mass or density [RB.007], without a collider, or nested in another
-          rigid body with no joint [RB.012]; degenerate faces [VG.014];
+          at the origin, unrotated and unscaled [VG.025]; a rigid body whose
+          world transform is skewed [RB.009]; no material; no semantic label
+          on a mesh or an exported object above it [SL.001]; a stored value
+          that breaks the metadata rules; a rigid body without mass or density
+          [RB.007], without a collider, or nested in another rigid body with
+          no joint the export writes between them [RB.012]; a rigid body
+          constraint between exported objects the export cannot write as a
+          joint (MOTOR, or both objects parts of one rigid body); degenerate
+          faces [VG.014];
         - warnings: names that are not USD identifiers (camelCase is fine),
           mesh data names likewise; sizes over 100 m or under 1 mm in the
           scene's units and a Unit Scale other than 1 [UN.007]; scaled or
-          mirrored parts; no collider on a mesh; a triangle-mesh collider on a
-          dynamic body; no rigid body at all [RB.001]; no UV map; n-gons.
+          mirrored parts, and a part skewed relative to its parent; a
+          material slot faces use left empty; no collider on a mesh; a
+          triangle-mesh collider on a dynamic body; no rigid body at all
+          [RB.001]; a constraint to an object the export leaves out or between
+          two static objects (not exported), and what a joint cannot carry
+          (springs, a breaking threshold, several rotation axes limited to
+          ranges); no UV map; n-gons.
 
         Transforms are read from the world matrices, as the exporter writes
         them (also for objects Blender does not evaluate, such as ones in an
@@ -7579,7 +7637,8 @@ class BlenderRuntimeSession:
             check_materials: Validate material slots.
             check_hierarchy: Validate hierarchy structure.
             check_metadata: Validate semantic labels, colliders and stored values.
-            check_physics: Validate rigid bodies: mass, colliders, nesting.
+            check_physics: Validate rigid bodies (mass, colliders, nesting) and
+                the joints their constraints become.
             check_geometry: Validate UVs, n-gons and degenerate faces.
             include_children: Also check the descendants of the listed objects.
             severity: Return all issues, or only error or warning issues.
@@ -7594,7 +7653,7 @@ class BlenderRuntimeSession:
             the export leaves them out) and meters_per_unit.
 
         Raises:
-            ValueError: For an unknown object.
+            NotFoundError: For an unknown object (``details.code`` ObjectNotFound).
             ValidationError: For an empty object list, a listed object outside
                 the view layer, or a bad severity, offset or limit.
         """
@@ -7732,6 +7791,10 @@ class BlenderRuntimeSession:
             )
             if body is not None
         }
+        joints, joint_issues = (
+            self._simready_joint_plan(targets, worlds) if checks["physics"] else ([], [])
+        )
+        jointed = {frozenset((j["body0"], j["body1"])) for j in joints}
         if checks["transforms"] and root is not None:
             self._simready_root_transform_issues(root, worlds, add)
         for obj in targets:
@@ -7770,9 +7833,13 @@ class BlenderRuntimeSession:
                         "not collide in a simulator",
                         "Set physics.collider_type (e.g. convexHull) with apply_simready_metadata")
             if checks["physics"]:
-                self._simready_body_issues(obj, add, field, nearest, rigid, body_of, chain, collided)
+                self._simready_body_issues(
+                    obj, add, field, nearest, rigid, body_of, chain, collided, jointed
+                )
             if checks["geometry"] and is_mesh:
                 self._simready_geometry_issues(obj, stats, add)
+        for name, severity, message, suggestion in joint_issues:
+            add(name, "physics", severity, message, suggestion)
         if checks["physics"] and targets and not any(rigid(o) for o in targets):
             add(root or targets[0], "physics", "warning",
                 "No rigid body: the asset is static in a simulator",
@@ -7801,8 +7868,13 @@ class BlenderRuntimeSession:
         body_of: Callable[[Any], Optional[Any]],
         chain: Callable[[Any], Iterator[Any]],
         collided: set,
+        jointed: set,
     ) -> None:
-        """A rigid body's mass, colliders and nesting; a triangle-mesh collider on a body."""
+        """A rigid body's mass, colliders and nesting; a triangle-mesh collider on a body.
+
+        ``jointed`` holds the body pairs (frozensets of names) an exported joint
+        joins: a rigid body nested in another is valid with one [RB.012].
+        """
         if obj.type == "MESH":
             source = nearest(obj, "physics", "collider_type")
             body = body_of(obj)
@@ -7822,16 +7894,208 @@ class BlenderRuntimeSession:
                 "Rigid body without mass_kg or density",
                 "Set physics.mass_kg (or density) with apply_simready_metadata")
         parent = next((a for a in chain(obj) if a is not obj and rigid(a)), None)
-        if parent is not None:
+        if parent is not None and frozenset((obj.name, parent.name)) not in jointed:
             add(obj, "physics", "error",
-                f"Rigid body nested in the rigid body {parent.name} with no joint between them; "
-                "the export writes no joints",
-                "Keep one rigid body per asset, or make the parts separate rigid bodies that "
-                "are not parented to each other")
+                f"Rigid body nested in the rigid body {parent.name} with no joint between them "
+                "that the export writes, so a simulator cannot tell how they move together",
+                f"Join {obj.name} to {parent.name} with add_blender_rigid_body_constraint (the "
+                "export writes it as a UsdPhysics joint), or keep one rigid body")
         if obj.name not in collided:
             add(obj, "physics", "error",
                 "Rigid body without a collider: no mesh of it has a collider_type",
                 "Set physics.collider_type on the body or its meshes")
+
+    @staticmethod
+    def _simready_constraint_empty(obj: Any) -> bool:
+        """An empty that only carries a rigid body constraint: a joint, not a part."""
+        return (
+            getattr(obj, "type", None) == "EMPTY"
+            and getattr(obj, "rigid_body_constraint", None) is not None
+            and not getattr(obj, "children", None)
+        )
+
+    def _simready_joint_plan(
+        self, targets: Sequence[Any], worlds: "_WorldResolver"
+    ) -> Tuple[List[Dict[str, Any]], List[Tuple[str, str, str, str]]]:
+        """The UsdPhysics joints for the rigid body constraints between exported objects.
+
+        A constraint joins the rigid bodies of its two objects: each object's
+        own, else the nearest exported rigid body above it, else the object
+        itself as a static body. Its frame is the constraint object's world
+        matrix without scale, as Blender's rigid body world reads it; body0 is
+        object1 and body1 object2.
+
+        Returns:
+            The joints export_simready_usd writes (simready_usd's plan entries),
+            and issues ``(constraint name, severity, message, suggestion)`` for
+            the constraints it cannot write, or writes without some setting.
+        """
+        blender_module: Any = bpy
+        exported = {obj.name: obj for obj in targets}
+        rigid_names = {
+            name
+            for name, obj in exported.items()
+            if self._simready_checked(self._read_simready_properties(obj))[0]
+            .get("physics", {})
+            .get("is_rigid_body")
+            is True
+        }
+
+        def body_of(obj: Any) -> Optional[Any]:
+            if obj.name in rigid_names:
+                return obj
+            return next((a for a in self._ancestors(obj) if a.name in rigid_names), None)
+
+        joints: List[Dict[str, Any]] = []
+        issues: List[Tuple[str, str, str, str]] = []
+        carriers = sorted(
+            (
+                o
+                for o in blender_module.context.scene.objects
+                if o is not None and getattr(o, "rigid_body_constraint", None) is not None
+            ),
+            key=lambda o: o.name,
+        )
+        for carrier in carriers:
+            rbc = carrier.rigid_body_constraint
+            first, second = rbc.object1, rbc.object2
+            if first is None or second is None or first.name == second.name:
+                continue  # Blender simulates nothing for it either
+            kind, name = str(rbc.type), carrier.name
+            inside = [o for o in (first, second) if o.name in exported]
+            if not inside:
+                continue
+            if len(inside) == 1:
+                outside = second if inside[0] is first else first
+                issues.append((
+                    name, "warning",
+                    f"The {kind} constraint {name} joins {inside[0].name} to {outside.name}, "
+                    "which the export leaves out, so the joint is not exported",
+                    "Export both objects, or remove the constraint",
+                ))
+                continue
+            joint_type = self._SIMREADY_JOINT_TYPES.get(kind)
+            if joint_type is None:
+                issues.append((
+                    name, "error",
+                    f"The {kind} constraint {name} between {first.name} and {second.name} has "
+                    "no UsdPhysics joint: Blender's motor is a free joint whose drive is capped "
+                    "by an impulse per simulation step, which no UsdPhysics drive expresses, so "
+                    "the export would drop it",
+                    "Join them with a HINGE or SLIDER constraint and set up its drive in the "
+                    "simulator, or remove the constraint",
+                ))
+                continue
+            body0, body1 = body_of(first), body_of(second)
+            if body0 is None and body1 is None:
+                issues.append((
+                    name, "warning",
+                    f"The {kind} constraint {name} joins {first.name} and {second.name}, neither "
+                    "of which is a rigid body or part of one, so it does nothing in a simulator "
+                    "and is not exported",
+                    "Set physics.is_rigid_body on the part that moves",
+                ))
+                continue
+            if body0 is not None and body1 is not None and body0.name == body1.name:
+                issues.append((
+                    name, "error",
+                    f"The {kind} constraint {name} joins {first.name} and {second.name}, which "
+                    f"are parts of the same rigid body {body0.name}; a joint needs two bodies, "
+                    "so the export would drop it",
+                    f"Make {first.name} and {second.name} rigid bodies of their own",
+                ))
+                continue
+            body0, body1 = body0 or first, body1 or second
+            joints.append({
+                "name": name,
+                "constraint_type": kind,
+                "type": joint_type,
+                "body0": body0.name,
+                "body1": body1.name,
+                "frame": worlds.world(carrier),
+                "body0_world": worlds.world(body0),
+                "body1_world": worlds.world(body1),
+                "enabled": bool(getattr(rbc, "enabled", True)),
+                "collision_enabled": not bool(getattr(rbc, "disable_collisions", True)),
+                **self._simready_joint_limits(rbc, kind, joint_type),
+            })
+            issues.extend(
+                (name, "warning", message, suggestion)
+                for message, suggestion in self._simready_joint_losses(rbc, kind, name)
+            )
+        return joints, issues
+
+    def _simready_joint_limits(self, rbc: Any, kind: str, joint_type: str) -> Dict[str, Any]:
+        """A joint's axis and limits as UsdPhysics reads them: degrees, body1 relative to body0."""
+
+        def bounds(axis: str) -> Optional[List[float]]:
+            if not getattr(rbc, f"use_limit_{axis}", False):
+                return None  # Blender leaves an unlimited axis free
+            lower = float(getattr(rbc, f"limit_{axis}_lower"))
+            upper = float(getattr(rbc, f"limit_{axis}_upper"))
+            if axis.startswith("ang_"):
+                lower, upper = math.degrees(lower), math.degrees(upper)
+            if (kind, axis) in self._SIMREADY_REVERSED_LIMITS:
+                lower, upper = -upper, -lower
+            return [lower + 0.0, upper + 0.0]
+
+        if joint_type == "revolute":
+            return {"axis": "Z", "limit": bounds("ang_z")}
+        if joint_type == "prismatic":
+            return {"axis": "X", "limit": bounds("lin_x")}
+        if joint_type != "d6":
+            return {}
+        limits: Dict[str, List[float]] = {}
+        for axis, dof in self._SIMREADY_D6_AXES.items():
+            if kind == "PISTON" and axis not in self._SIMREADY_PISTON_AXES:
+                limits[dof] = list(self._SIMREADY_LOCKED)
+                continue
+            value = bounds(axis)
+            if value is None:
+                continue
+            if abs(value[0]) < 1e-9 and abs(value[1]) < 1e-9:
+                value = list(self._SIMREADY_LOCKED)
+            limits[dof] = value
+        return {"limits": limits}
+
+    def _simready_joint_losses(self, rbc: Any, kind: str, name: str) -> List[Tuple[str, str]]:
+        """What of a constraint its UsdPhysics joint leaves out: (message, suggestion) pairs."""
+        losses: List[Tuple[str, str]] = []
+        if kind == "GENERIC_SPRING" and any(
+            getattr(rbc, f"use_spring_{axis}", False) for axis in self._SPRING_AXES
+        ):
+            losses.append((
+                f"The springs of the GENERIC_SPRING constraint {name} are not exported: "
+                "Blender's spring damping has no exact UsdPhysics drive equivalent, so the "
+                "joint is exported with its limits only",
+                "Add drives with stiffness and damping to the joint in the simulator",
+            ))
+        if getattr(rbc, "use_breaking", False):
+            losses.append((
+                f"The breaking threshold of the {kind} constraint {name} is not exported: "
+                "Blender's threshold is an impulse per simulation step, which UsdPhysics' "
+                "break force and torque do not express, so the joint does not break",
+                "Set physics:breakForce and physics:breakTorque on the joint in the simulator",
+            ))
+        if kind in ("GENERIC", "GENERIC_SPRING"):
+            ranged = [
+                axis
+                for axis in ("ang_x", "ang_y", "ang_z")
+                if getattr(rbc, f"use_limit_{axis}", False)
+                and abs(
+                    float(getattr(rbc, f"limit_{axis}_upper"))
+                    - float(getattr(rbc, f"limit_{axis}_lower"))
+                )
+                > 1e-9
+            ]
+            if len(ranged) > 1:
+                losses.append((
+                    f"The {kind} constraint {name} limits {', '.join(ranged)} to ranges: "
+                    "Blender reads them as Euler angles, PhysX as twist and swing, so away "
+                    "from the rest pose the limits differ",
+                    "Limit one rotation axis per joint, or check the limits in the simulator",
+                ))
+        return losses
 
     def _simready_root_transform_issues(
         self, root: Any, worlds: "_WorldResolver", add: Callable[..., None]
@@ -7862,8 +8126,20 @@ class BlenderRuntimeSession:
     def _simready_part_transform_issues(
         self, obj: Any, is_rigid: bool, worlds: "_WorldResolver", add: Callable[..., None]
     ) -> None:
-        """A part's transform relative to its parent, as the exporter writes it."""
+        """A part's transform: a rigid body's in the world [RB.009], any part's relative to its parent."""
         world = worlds.world(obj)
+        fix = (
+            "Apply the parent's non-uniform scale (Ctrl+A > Scale on the parent) before "
+            "rotating its children"
+        )
+        world_shear = _m4_shape(world)[2]
+        if is_rigid and world_shear > self._SIMREADY_SHEAR:
+            # A simulator moves the body rigidly: a skew its parents' scale and its
+            # rotation build up is not a shape it can keep.
+            add(obj, "transforms", "error",
+                f"The rigid body's world transform is skewed (two of its axes meet "
+                f"{math.degrees(math.acos(min(1.0, world_shear))):.1f} degrees apart, not 90); "
+                "a rigid body's transform must not skew", fix)
         if obj.parent is None:
             local = world
         else:
@@ -7875,12 +8151,10 @@ class BlenderRuntimeSession:
                 return
             local = _m4_mul(inverse, world)
         _, lengths, shear, mirrored = _m4_shape(local)
-        if shear > self._SIMREADY_SHEAR:
-            add(obj, "transforms", "error" if is_rigid else "warning",
-                "The transform is skewed (its axes are not perpendicular)"
-                + ("; a rigid body's transform must not skew" if is_rigid else ""),
-                "Apply the parent's non-uniform scale (Ctrl+A > Scale on the parent) before "
-                "rotating its children")
+        if shear > self._SIMREADY_SHEAR and not (is_rigid and world_shear > self._SIMREADY_SHEAR):
+            add(obj, "transforms", "warning",
+                "The transform relative to its parent is skewed (its axes are not "
+                "perpendicular)", fix)
         if any(abs(n - 1.0) > 1e-6 for n in lengths) or mirrored:
             add(obj, "transforms", "warning",
                 f"The object is scaled {tuple(round(n, 6) for n in lengths)}"
@@ -8124,9 +8398,19 @@ class BlenderRuntimeSession:
         with a MeshCollisionAPI approximation on the meshes, a physics material
         bound with the physics purpose, and UsdSemantics LabelsAPI labels (Isaac
         Sim's SemanticsAPI convention where Blender's USD has no UsdSemantics).
-        The asset root is the default prim and holds the materials (Looks,
-        PhysicsMaterials); metersPerUnit is the scene's Unit Scale. The file is
-        written only when everything succeeded. As export_file does, the export
+        Each rigid body constraint between two exported objects becomes a
+        UsdPhysics joint under <asset root>/Joints: FIXED a FixedJoint, POINT a
+        SphericalJoint, HINGE a RevoluteJoint (about the constraint's local Z),
+        SLIDER a PrismaticJoint (along local X), PISTON, GENERIC and
+        GENERIC_SPRING a D6 joint with a LimitAPI per locked or limited axis;
+        body0 is object1's rigid body, body1 object2's, the limits are in
+        degrees and read as UsdPhysics reads them (body1 relative to body0),
+        and the constraint empty is not written as a prim. A MOTOR has no
+        UsdPhysics joint; springs and breaking thresholds are not exported
+        (each is reported). The asset root is the default prim and holds the
+        materials (Looks, PhysicsMaterials) and the joints; metersPerUnit is
+        the scene's Unit Scale. The file is written only when everything
+        succeeded. As export_file does, the export
         applies modifiers, leaves Edit, Pose and paint modes for the export (so
         unsaved mesh edits are included) and enters them again, and restores the
         selection; a SimReady asset is static, so animation is left out.
@@ -8156,13 +8440,15 @@ class BlenderRuntimeSession:
             Dict with file_path (written exactly there; a missing folder is
             created), files_written, object_count (objects written), prims (object
             name and USD path), default_prim, meters_per_unit, up_axis, physics
-            and semantics summaries, skipped_objects, validation_passed, issues
-            and warnings. When validation found errors and force is false, an
-            error result with the issues instead, and no file is written.
+            (with joint_count and joints) and semantics summaries,
+            skipped_objects, validation_passed, issues and warnings (what the
+            joints leave out among them, validated or not). When validation
+            found errors and force is false, an error result with the issues
+            instead, and no file is written.
 
         Raises:
             PermissionError: If the path is outside the sandbox policy.
-            ValueError: For an unknown object.
+            NotFoundError: For an unknown object (``details.code`` ObjectNotFound).
             ValidationError: For an unsupported extension (UnsupportedExtension),
                 an empty object_names (EmptyObjectList), an unknown check
                 (UnknownCheck), a listed object that cannot be exported
@@ -8228,8 +8514,10 @@ class BlenderRuntimeSession:
                 f"{obj.name}: stored {i['property']}={i['value']!r} {i['problem']}; not exported"
                 for i in invalid
             )
+        joints, joint_issues = self._simready_joint_plan(targets, self._simready_world_resolver())
         plan = {
             "objects": objects,
+            "joints": joints,
             "asset_name": usd_identifier(os.path.splitext(os.path.basename(file_path))[0]),
             "meters_per_unit": self._scene_unit_scale(),
             "embed_metadata": embed_metadata,
@@ -8306,7 +8594,12 @@ class BlenderRuntimeSession:
 
         prims = sorted(report["prims"].items(), key=lambda item: item[1])
         limit = self._SIMREADY_RESULT_ITEMS
-        warnings = report["warnings"] + ([export_warning] if export_warning else [])
+        # What the joints left out holds with or without validation.
+        warnings = (
+            [message for _, _, message, _ in joint_issues]
+            + report["warnings"]
+            + ([export_warning] if export_warning else [])
+        )
         return {
             "file_path": file_path,
             "files_written": self._written_files(main_file.parent, before, file_path),
@@ -8321,9 +8614,11 @@ class BlenderRuntimeSession:
                 "collider_count": len(report["colliders"]),
                 "mass_count": len(report["mass_prims"]),
                 "physics_material_count": len(report["physics_materials"]),
+                "joint_count": len(report["joints"]),
                 "rigid_bodies": report["rigid_bodies"][:limit],
                 "colliders": report["colliders"][:limit],
                 "physics_materials": report["physics_materials"][:limit],
+                "joints": report["joints"][:limit],
             },
             "semantics": {
                 "labels_schema": report["semantics_schema"],
@@ -8392,7 +8687,7 @@ class BlenderRuntimeSession:
         if object_names is None:
             candidates = [o for o in blender_module.context.scene.objects if o is not None]
         else:
-            listed = [self._get_object_or_raise(name) for name in object_names]
+            listed = self._simready_objects(object_names)
             outside = sorted(o.name for o in listed if layer_objects.get(o.name) is None)
             if outside:
                 raise ValidationError(
@@ -8418,6 +8713,11 @@ class BlenderRuntimeSession:
             reason = None
             if obj.type in self._SIMREADY_SCENE_TYPES and not include_lights_and_cameras:
                 reason = "lights and cameras are left out; pass include_lights_and_cameras"
+            elif self._simready_constraint_empty(obj):
+                reason = (
+                    "a rigid body constraint: exported as a UsdPhysics joint between its two "
+                    "objects, not as a prim"
+                )
             elif obj.name not in listed_names:
                 if layer_objects.get(obj.name) is None:
                     reason = "not in the active view layer"
@@ -8507,15 +8807,18 @@ class BlenderRuntimeSession:
         Each listed object without a listed ancestor is parented to the root;
         a listed object under another listed object keeps its parent, so an
         existing nesting stays. The object's matrix before constraints is
-        kept, so constraints act as before: from its former parent's world
-        matrix (composed from the parent chain for an object Blender does not
-        evaluate, such as one in an excluded collection). The transform moves
-        into the object's own location, rotation and scale, or, when its
-        former parent's non-uniform scale skews it, which those cannot
-        express, into its parent inverse matrix. A bone or vertex parent
-        becomes an object parent. Everything is checked before anything
-        changes, and a failure part-way restores the parents and removes a
-        root this call created.
+        kept: from its former parent's world matrix (composed from the parent
+        chain for an object Blender does not evaluate, such as one in an
+        excluded collection). The transform moves into the object's own
+        location, rotation and scale, or into its parent inverse matrix when
+        its former parent's non-uniform scale skews it, which those cannot
+        express, or when object constraints act on it: then its location,
+        rotation and scale stay as they are, and so does the space a
+        constraint works in, local or parent space included, so the
+        constraints give the same pose. A bone or vertex parent becomes an
+        object parent. Everything is checked before anything changes, and a
+        failure part-way restores the parents and removes a root this call
+        created.
 
         Args:
             root_name: Name for the root empty: a USD identifier (letters,
@@ -8533,11 +8836,13 @@ class BlenderRuntimeSession:
             and warnings.
 
         Raises:
+            NotFoundError: For unknown objects (``details.code`` ObjectNotFound,
+                ``details.objects`` the missing names). Nothing is changed.
             ValidationError: Nothing is changed. ``details.code`` names the
-                reason: InvalidRootName, NoChildren, ObjectNotFound, RootIsChild,
-                RootExists, RootNotEmpty, RootNotInScene, RootCycle,
-                RootNotInvertible, UnsupportedParent, ObjectModeRequired,
-                LinkedData, or InvalidMetadata for the semantic labels.
+                reason: InvalidRootName, NoChildren, RootIsChild, RootExists,
+                RootNotEmpty, RootNotInScene, RootCycle, RootNotInvertible,
+                UnsupportedParent, ObjectModeRequired, LinkedData, or
+                InvalidMetadata for the semantic labels.
         """
         blender_module: Any = bpy
         if not self._SIMREADY_NAME_RE.match(root_name):
@@ -8550,19 +8855,7 @@ class BlenderRuntimeSession:
             raise ValidationError(
                 "child_names is empty; list the objects to put under the root", "NoChildren"
             )
-        missing = []
-        children: List[Any] = []
-        for name in dict.fromkeys(child_names):
-            try:
-                children.append(self._get_object_or_raise(name))
-            except ValueError:
-                missing.append(name)
-        if missing:
-            raise ValidationError(
-                f"Objects not found: {', '.join(missing)}; nothing was changed",
-                "ObjectNotFound",
-                objects=missing,
-            )
+        children = self._simready_objects(list(dict.fromkeys(child_names)))
         if any(child.name == root_name for child in children):
             raise ValidationError(f"'{root_name}' cannot be put under itself", "RootIsChild")
         root = blender_module.data.objects.get(root_name)
@@ -8641,17 +8934,22 @@ class BlenderRuntimeSession:
                     child.parent_type = "OBJECT"
                     child.parent_bone = ""
                 basis = _m4_mul(space, _m4(child.matrix_basis))
-                if _m4_shape(basis)[2] <= self._SIMREADY_SHEAR:
+                skewed = _m4_shape(basis)[2] > self._SIMREADY_SHEAR
+                if not skewed and not self._simready_constrained(child):
                     # root @ inverse(root) @ basis: the transform is the object's own.
                     child.matrix_parent_inverse = self._matrix(root_inverse)
                     child.matrix_basis = self._matrix(basis)
                 else:
+                    # The former parent space goes into the parent inverse and the
+                    # basis stays, so parent world @ parent inverse is what it was:
+                    # a constraint sees the same local and parent space as before.
                     child.matrix_parent_inverse = self._matrix(_m4_mul(root_inverse, space))
-                    warnings.append(
-                        f"{child.name}: its former parent's non-uniform scale skews it, which "
-                        "location, rotation and scale cannot express, so the skew is kept in its "
-                        "parent inverse matrix; validation reports the skew"
-                    )
+                    if skewed:
+                        warnings.append(
+                            f"{child.name}: its former parent's non-uniform scale skews it, "
+                            "which location, rotation and scale cannot express, so the skew is "
+                            "kept in its parent inverse matrix; validation reports the skew"
+                        )
                 reparented.append(child.name)
             for key, value in semantic_writes:
                 root[key] = value
@@ -8679,7 +8977,7 @@ class BlenderRuntimeSession:
                 if moved > 1e-4:
                     warnings.append(
                         f"{child.name}: its evaluated transform changed by up to {moved:.4g} "
-                        "after re-parenting, through a constraint that works in local space; "
+                        "after re-parenting (a constraint or driver that reads its parent); "
                         "check its pose"
                     )
 
@@ -8732,11 +9030,12 @@ class BlenderRuntimeSession:
             return [list(row) for row in _IDENTITY4]
         if getattr(child, "parent_type", "OBJECT") == "OBJECT":
             return _m4_mul(worlds.world(parent), _m4(child.matrix_parent_inverse))
-        constrained = any(
-            not getattr(c, "mute", False) for c in getattr(child, "constraints", ()) or ()
-        )
         basis_inverse = _m4_inverse(_m4(child.matrix_basis))
-        if constrained or not worlds.evaluated(child) or basis_inverse is None:
+        if (
+            self._simready_constrained(child)
+            or not worlds.evaluated(child)
+            or basis_inverse is None
+        ):
             raise ValidationError(
                 f"{child.name} has a {str(child.parent_type).lower()} parent whose matrix cannot "
                 "be read (it has constraints, is not evaluated, or has zero scale); parent it to "
@@ -8745,6 +9044,14 @@ class BlenderRuntimeSession:
                 objects=[child.name],
             )
         return _m4_mul(worlds.world(child), basis_inverse)
+
+    @staticmethod
+    def _simready_constrained(obj: Any) -> bool:
+        """Whether an object constraint acts on the object (not muted, with influence)."""
+        return any(
+            not getattr(c, "mute", False) and float(getattr(c, "influence", 1.0)) > 0.0
+            for c in getattr(obj, "constraints", ()) or ()
+        )
 
     @staticmethod
     def _simready_parenting(obj: Any) -> Dict[str, Any]:
@@ -8787,6 +9094,23 @@ class BlenderRuntimeSession:
     def cleanup(self) -> None:
         """Clean up resources for the Blender session."""
         self.logger.debug("Blender runtime session cleaned up")
+
+    def _simready_object(self, object_name: str) -> Any:
+        """The named object, or NotFoundError (code ObjectNotFound) for the SimReady tools."""
+        return self._simready_objects([object_name])[0]
+
+    def _simready_objects(self, object_names: Sequence[str]) -> List[Any]:
+        """The named objects in order; NotFoundError naming every missing one."""
+        found: List[Any] = []
+        missing: List[str] = []
+        for name in object_names:
+            try:
+                found.append(self._get_object_or_raise(name))
+            except ValueError:
+                missing.append(name)
+        if missing:
+            raise NotFoundError(missing)
+        return found
 
     def _get_object_or_raise(self, object_name: str) -> Any:
         """

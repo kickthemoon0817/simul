@@ -486,10 +486,16 @@ class SimReadyExportPhysics(BaseModel):
     physics_material_count: int = Field(
         0, description="Physics materials (UsdPhysics.MaterialAPI)"
     )
+    joint_count: int = Field(
+        0, description="UsdPhysics joints written for rigid body constraints"
+    )
     rigid_bodies: List[str] = Field(default_factory=list, description="Rigid body prims")
     colliders: List[str] = Field(default_factory=list, description="Collider meshes")
     physics_materials: List[str] = Field(
         default_factory=list, description="Physics material prims"
+    )
+    joints: List[str] = Field(
+        default_factory=list, description="Joint prims, under <asset root>/Joints"
     )
 
 

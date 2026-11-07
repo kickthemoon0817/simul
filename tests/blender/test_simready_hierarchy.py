@@ -231,6 +231,32 @@ def test_a_bone_parent_becomes_an_object_parent_in_place(scene: Any) -> None:
     assert np.allclose(_rows(bolt.composed_world()), before)
 
 
+@pytest.mark.parametrize("muted", [False, True])
+def test_a_constrained_object_keeps_its_basis_and_parent_space(scene: Any, muted: bool) -> None:
+    """A Limit Location in local space sees the same values after re-parenting.
+
+    Blender's local space for an object constraint is relative to parent world @
+    parent inverse: kept, with the basis untouched, the constraint gives the same pose.
+    """
+    arm = scene.get("arm_link")
+    arm.constraints = [SimpleNamespace(mute=muted, influence=1.0)]
+    basis = _rows(arm.matrix_basis)
+    space = _rows(arm.parent.matrix_world) @ _rows(arm.matrix_parent_inverse)
+
+    scene.session.setup_simready_hierarchy("asset", ["arm_link"])
+
+    assert arm.parent is scene.get("asset")
+    assert _world(arm) == [1.0, 0.0, 1.0]
+    if muted:  # nothing acts on it: the transform moves into its own basis
+        assert _rows(arm.matrix_basis) == pytest.approx(space @ basis)
+        assert _rows(arm.matrix_parent_inverse) == pytest.approx(np.eye(4))
+    else:
+        assert _rows(arm.matrix_basis) == pytest.approx(basis)
+        assert _rows(arm.parent.matrix_world) @ _rows(arm.matrix_parent_inverse) == pytest.approx(
+            space
+        )
+
+
 def test_a_constrained_bone_child_is_refused(scene: Any) -> None:
     rig = scene.add(Obj("armature", "ARMATURE"))
     bolt = scene.add(Obj("bolt", parent=rig))
@@ -247,10 +273,13 @@ def test_a_constrained_bone_child_is_refused(scene: Any) -> None:
 def test_a_missing_child_changes_nothing(scene: Any) -> None:
     names = [o.name for o in scene.objects]
 
-    with pytest.raises(ValueError, match="Objects not found: does_not_exist; nothing was changed") as excinfo:
+    with pytest.raises(
+        blender_runtime.NotFoundError, match="Object not found: does_not_exist; nothing was changed"
+    ) as excinfo:
         scene.session.setup_simready_hierarchy("crate_asset", ["Cube", "does_not_exist"])
 
     assert _code(excinfo) == "ObjectNotFound"
+    assert excinfo.value.details["objects"] == ["does_not_exist"]
     assert [o.name for o in scene.objects] == names
     assert scene.get("Cube").parent is None
     # A retry after fixing the list gets the requested name, not crate_asset.001.

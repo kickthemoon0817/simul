@@ -245,6 +245,28 @@ def test_a_skewed_rigid_body_is_an_error_and_a_skewed_part_a_warning(scene: Any)
     assert lid[0]["severity"] == "error"
 
 
+@pytest.mark.parametrize("rigid", [True, False])
+def test_rb009_reads_a_rigid_bodys_world_skew_not_its_local_one(scene: Any, rigid: bool) -> None:
+    """A rotated part under a non-uniformly scaled group: its own transform is clean."""
+    crate = scene.get("crate")
+    stretch = scene.add(Obj("stretch", "EMPTY", parent=crate, world=_scaled(1.0, 3.0, 1.0)))
+    tilt = scene.add(Obj("tilt_part", parent=stretch, world=_scaled(1.0, 3.0, 1.0) @ _rotated_z(45.0)))
+    if rigid:
+        crate.props.pop("simready_is_rigid_body")
+        tilt.props.update({"simready_is_rigid_body": 1, "simready_mass_kg": 2.0})
+
+    result = scene.session.validate_simready_compliance()
+
+    skewed = [i for i in result["issues"] if i["object_name"] == "tilt_part" and "skewed" in i["message"]]
+    if rigid:
+        [issue] = skewed
+        assert issue["severity"] == "error" and "world transform" in issue["message"]
+        assert "36.9 degrees" in issue["message"]  # axes at cos 0.8, not perpendicular
+        assert result["compliant"] is False
+    else:
+        assert skewed == []  # a static part keeps its shape in the file
+
+
 def test_a_rotated_part_is_fine(scene: Any) -> None:
     scene.get("body").matrix_world = _rotated_z(30.0, at=(0.0, 0.0, 0.5))
 
@@ -359,6 +381,152 @@ def test_nested_rigid_bodies_are_an_error(scene: Any) -> None:
 
     [issue] = [i for i in result["issues"] if i["object_name"] == "lid" and i["check"] == "physics"]
     assert issue["severity"] == "error" and "nested in the rigid body crate" in issue["message"]
+    assert "no joint between them that the export writes" in issue["message"]
+
+
+# ---------------------------------------------------------------------------
+# Joints: rigid body constraints between exported objects [RB.012]
+# ---------------------------------------------------------------------------
+
+_BODY = {"simready_is_rigid_body": 1, "simready_mass_kg": 1.0, "simready_collider_type": "convexHull"}
+
+
+def _links(scene: Any, nested: bool = True, rigid: bool = True) -> SimpleNamespace:
+    """robot (empty, class) > base_link > arm_link (or both under robot), rigid bodies."""
+    robot = scene.add(Obj("robot", "EMPTY"))
+    robot.props["simready_semantic_class"] = "robot"
+    base = scene.add(Obj("base_link", parent=robot, world=FakeMatrix.Translation((0.0, 0.0, 0.1))))
+    arm = scene.add(
+        Obj("arm_link", parent=base if nested else robot, world=FakeMatrix.Translation((0.0, 0.0, 0.35)))
+    )
+    if rigid:
+        base.props.update(_BODY)
+        arm.props.update(_BODY)
+    return SimpleNamespace(robot=robot, base=base, arm=arm)
+
+
+def _constraint(scene: Any, kind: str, first: Obj, second: Obj, **settings: Any) -> Obj:
+    """A constraint empty, as add_rigid_body_constraint makes one: top level, at the pivot."""
+    carrier = scene.add(
+        Obj(f"RBC_{first.name}_{second.name}", "EMPTY", world=FakeMatrix.Translation((0.0, 0.0, 0.2)))
+    )
+    carrier.rigid_body_constraint = SimpleNamespace(
+        type=kind,
+        object1=first,
+        object2=second,
+        enabled=True,
+        disable_collisions=True,
+        use_breaking=False,
+        **settings,
+    )
+    return carrier
+
+
+def _physics(result: Dict[str, Any]) -> List[tuple]:
+    return [
+        (i["object_name"], i["severity"], i["message"])
+        for i in result["issues"]
+        if i["check"] == "physics"
+    ]
+
+
+def test_nested_rigid_bodies_joined_by_a_constraint_are_valid(scene: Any) -> None:
+    links = _links(scene)
+    _constraint(scene, "HINGE", links.base, links.arm, use_limit_ang_z=True,
+                limit_ang_z_lower=-1.5, limit_ang_z_upper=1.5)
+
+    result = scene.session.validate_simready_compliance(["robot"])
+
+    assert _physics(result) == []
+    assert result["compliant"] is True, result["issues"]
+
+
+def test_a_motor_constraint_is_an_error_naming_the_joint_it_would_lose(scene: Any) -> None:
+    links = _links(scene, nested=False)
+    _constraint(scene, "MOTOR", links.base, links.arm, use_motor_ang=True)
+
+    result = scene.session.validate_simready_compliance(["robot"])
+
+    [(name, severity, message)] = _physics(result)
+    assert (name, severity) == ("RBC_base_link_arm_link", "error")
+    assert "MOTOR constraint RBC_base_link_arm_link" in message and "drop it" in message
+
+
+def test_a_motor_does_not_join_nested_bodies(scene: Any) -> None:
+    links = _links(scene)
+    _constraint(scene, "MOTOR", links.base, links.arm)
+
+    result = scene.session.validate_simready_compliance(["robot"])
+
+    errors = {(name, message.split(" ")[0]) for name, severity, message in _physics(result)
+              if severity == "error"}
+    assert ("arm_link", "Rigid") in errors and ("RBC_base_link_arm_link", "The") in errors
+
+
+def test_a_constraint_to_an_object_left_out_is_a_warning(scene: Any) -> None:
+    links = _links(scene, nested=False)
+    outsider = scene.add(Obj("outsider", world=FakeMatrix.Translation((5.0, 0.0, 0.0))))
+    _constraint(scene, "HINGE", links.arm, outsider)
+
+    result = scene.session.validate_simready_compliance(["robot"])
+
+    [(name, severity, message)] = _physics(result)
+    assert (name, severity) == ("RBC_arm_link_outsider", "warning")
+    assert "joins arm_link to outsider, which the export leaves out" in message
+
+
+def test_a_constraint_inside_one_rigid_body_is_an_error(scene: Any) -> None:
+    links = _links(scene, rigid=False)
+    links.robot.props.update(_BODY)
+    _constraint(scene, "FIXED", links.base, links.arm)
+
+    result = scene.session.validate_simready_compliance(["robot"])
+
+    [(name, severity, message)] = _physics(result)
+    assert severity == "error" and "parts of the same rigid body robot" in message
+
+
+def test_a_constraint_between_static_objects_is_a_warning(scene: Any) -> None:
+    links = _links(scene, nested=False, rigid=False)
+    _constraint(scene, "FIXED", links.base, links.arm)
+
+    result = scene.session.validate_simready_compliance(["robot"])
+
+    messages = [message for _, _, message in _physics(result)]
+    assert any("neither of which is a rigid body" in m for m in messages)
+
+
+def test_what_a_joint_leaves_out_is_a_warning(scene: Any) -> None:
+    links = _links(scene, nested=False)
+    _constraint(
+        scene, "GENERIC_SPRING", links.base, links.arm,
+        use_spring_ang_x=True,
+        use_limit_ang_x=True, limit_ang_x_lower=-0.1, limit_ang_x_upper=0.1,
+        use_limit_ang_z=True, limit_ang_z_lower=-0.3, limit_ang_z_upper=0.3,
+    )
+    links_carrier = scene.get("RBC_base_link_arm_link")
+    links_carrier.rigid_body_constraint.use_breaking = True
+
+    result = scene.session.validate_simready_compliance(["robot"])
+
+    messages = [message for _, severity, message in _physics(result) if severity == "warning"]
+    assert any("springs of the GENERIC_SPRING constraint" in m for m in messages)
+    assert any("breaking threshold" in m for m in messages)
+    assert any("limits ang_x, ang_z to ranges" in m for m in messages)
+    assert result["compliant"] is True
+
+
+def test_constraint_empties_are_joints_not_exported_objects(scene: Any) -> None:
+    links = _links(scene, nested=False)
+    carrier = _constraint(scene, "FIXED", links.base, links.arm)
+    carrier.parent = links.robot  # under the asset: still a joint, not a part
+    links.robot.children.append(carrier)
+
+    result = scene.session.validate_simready_compliance(["robot"])
+
+    assert result["object_count"] == 3  # robot, base_link, arm_link
+    [skipped] = result["skipped_objects"]
+    assert skipped["object_name"] == carrier.name and "joint" in skipped["reason"]
 
 
 def test_a_triangle_mesh_collider_on_a_dynamic_body_is_a_warning(scene: Any) -> None:
