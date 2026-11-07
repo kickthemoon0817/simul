@@ -101,6 +101,10 @@ your data. Each refusal is a structured `RefusedOperation` error:
 - `save_isaac_stage` needs `overwrite=true` to replace an existing file.
 - `new_isaac_stage` and `open_isaac_stage` need `discard_unsaved=true` when
   the current stage has unsaved edits.
+- `delete_prim` (headless USD) refuses `/`, and refuses the stage's default
+  prim unless `allow_root_delete=true`.
+- `create_prim` (headless USD) refuses a path that already holds a prim
+  unless `redefine_existing=true`.
 
 ### Rate limiting
 

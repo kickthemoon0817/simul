@@ -8,17 +8,18 @@ processing without GUI or simulation capabilities.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Union
 from contextlib import contextmanager
 
-from ..usd._pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
+from ..usd._pxr import Gf, Usd, UsdGeom, UsdShade
 
 from ..logging import get_logger, LoggerMixin
-from ..utils.timing import Timer, monitor_performance
+from ..utils.timing import monitor_performance
 from ..config import Settings, get_settings
 from ..usd import USDReader, BBoxCache, MeshOperations, SceneSummarizer
+from ..usd import editing
+from ..usd.editing import USDEditError
 from ..usd.reader import USDStageInfo, USDPrimInfo
 from ..usd.summarize import SceneSummary
 
@@ -28,15 +29,15 @@ logger = get_logger(__name__)
 class HeadlessUSDSession(LoggerMixin):
     """
     A headless USD session for file operations without Isaac Sim runtime.
-    
+
     Provides USD file loading, analysis, and manipulation capabilities
     using only the pxr library.
     """
-    
+
     def __init__(self, settings: Optional[Settings] = None):
         """
         Initialize headless USD session.
-        
+
         Args:
             settings: Configuration settings
         """
@@ -44,32 +45,32 @@ class HeadlessUSDSession(LoggerMixin):
         self.usd_reader = USDReader(enable_caching=self.settings.usd.cache_enabled)
         self.mesh_ops = MeshOperations()
         self.summarizer = SceneSummarizer()
-        
+
         self._active_stages: Dict[str, Usd.Stage] = {}
         self._bbox_caches: Dict[str, BBoxCache] = {}
         # Resolved file path each stage was opened from, so unload can evict
         # the matching USDReader cache entry.
         self._stage_paths: Dict[str, str] = {}
-        
+
         self.logger.info("Headless USD session initialized")
-    
+
     @monitor_performance("headless_session.load_stage")
     def load_stage(self, file_path: Union[str, Path]) -> Optional[str]:
         """
         Load a USD stage from file.
-        
+
         Args:
             file_path: Path to USD file
-            
+
         Returns:
             Stage identifier or None if failed
         """
         file_path = str(Path(file_path).resolve())
-        
+
         # Validate file
         if not self._validate_usd_file(file_path):
             return None
-        
+
         try:
             stage = self.usd_reader.open_stage(file_path)
             if stage:
@@ -77,24 +78,24 @@ class HeadlessUSDSession(LoggerMixin):
                 self._active_stages[stage_id] = stage
                 self._bbox_caches[stage_id] = BBoxCache(stage)
                 self._stage_paths[stage_id] = file_path
-                
+
                 self.logger.info(f"Loaded USD stage: {file_path} -> {stage_id}")
                 return stage_id
             else:
                 self.logger.error(f"Failed to load USD stage: {file_path}")
                 return None
-                
+
         except Exception as e:
             self.logger.error(f"Error loading USD stage {file_path}: {e}")
             return None
-    
+
     def unload_stage(self, stage_id: str) -> bool:
         """
         Unload a USD stage.
-        
+
         Args:
             stage_id: Stage identifier
-            
+
         Returns:
             True if successfully unloaded
         """
@@ -109,46 +110,69 @@ class HeadlessUSDSession(LoggerMixin):
                 file_path = self._stage_paths.pop(stage_id, None)
                 if file_path is not None:
                     self.usd_reader.close_stage(file_path)
-                
+
                 self.logger.info(f"Unloaded USD stage: {stage_id}")
                 return True
             else:
                 self.logger.warning(f"Stage not found: {stage_id}")
                 return False
-                
+
         except Exception as e:
             self.logger.error(f"Error unloading stage {stage_id}: {e}")
             return False
-    
+
     def get_stage(self, stage_id: str) -> Optional[Usd.Stage]:
         """
         Get a loaded USD stage.
-        
+
         Args:
             stage_id: Stage identifier
-            
+
         Returns:
             USD Stage or None if not found
         """
         return self._active_stages.get(stage_id)
-    
+
+    def require_stage(self, stage_id: str) -> Usd.Stage:
+        """
+        Get a loaded USD stage, or raise the NotFoundError an edit reports.
+
+        Args:
+            stage_id: Stage identifier
+
+        Returns:
+            The USD Stage
+
+        Raises:
+            USDEditError: No stage is loaded under ``stage_id``.
+        """
+        stage = self.get_stage(stage_id)
+        if stage is None:
+            raise USDEditError(
+                editing.NOT_FOUND,
+                f"No loaded stage {stage_id!r}. Load the file with load_usd_file and pass the "
+                "stage_id it returns.",
+                stage_id=stage_id,
+            )
+        return stage
+
     def list_stages(self) -> List[str]:
         """
         List all loaded stages.
-        
+
         Returns:
             List of stage identifiers
         """
         return list(self._active_stages.keys())
-    
+
     @monitor_performance("headless_session.get_stage_info")
     def get_stage_info(self, stage_id: str) -> Optional[USDStageInfo]:
         """
         Get information about a loaded stage.
-        
+
         Args:
             stage_id: Stage identifier
-            
+
         Returns:
             USDStageInfo or None if stage not found
         """
@@ -156,16 +180,16 @@ class HeadlessUSDSession(LoggerMixin):
         if stage:
             return self.usd_reader.get_stage_info(stage)
         return None
-    
+
     @monitor_performance("headless_session.get_prim_info")
     def get_prim_info(self, stage_id: str, prim_path: str) -> Optional[USDPrimInfo]:
         """
         Get information about a prim in a stage.
-        
+
         Args:
             stage_id: Stage identifier
             prim_path: Path to the prim
-            
+
         Returns:
             USDPrimInfo or None if not found
         """
@@ -192,11 +216,12 @@ class HeadlessUSDSession(LoggerMixin):
 
         translation = transform.GetTranslation()
         rotation = transform.GetRotation().GetQuat()
+        imaginary = rotation.GetImaginary()
         scale = transform.GetScale()
 
         return {
             "translation": [translation[0], translation[1], translation[2]],
-            "rotation": [rotation.GetReal(), rotation.GetImaginary()[0], rotation.GetImaginary()[1], rotation.GetImaginary()[2]],
+            "rotation": [rotation.GetReal(), imaginary[0], imaginary[1], imaginary[2]],
             "scale": [scale[0], scale[1], scale[2]],
         }
 
@@ -232,52 +257,6 @@ class HeadlessUSDSession(LoggerMixin):
             return [str(material.GetPath())]
         return []
 
-    def _infer_value_type(self, value: Any):
-        if isinstance(value, bool):
-            return Sdf.ValueTypeNames.Bool
-        if isinstance(value, int) and not isinstance(value, bool):
-            return Sdf.ValueTypeNames.Int
-        if isinstance(value, float):
-            return Sdf.ValueTypeNames.Float
-        if isinstance(value, str):
-            return Sdf.ValueTypeNames.String
-        if isinstance(value, (list, tuple)):
-            if not value:
-                return Sdf.ValueTypeNames.StringArray
-            if all(isinstance(v, bool) for v in value):
-                return Sdf.ValueTypeNames.BoolArray
-            if all(isinstance(v, int) and not isinstance(v, bool) for v in value):
-                return Sdf.ValueTypeNames.IntArray
-            if all(isinstance(v, (int, float)) for v in value):
-                if len(value) == 2:
-                    return Sdf.ValueTypeNames.Float2
-                if len(value) == 3:
-                    return Sdf.ValueTypeNames.Float3
-                if len(value) == 4:
-                    return Sdf.ValueTypeNames.Float4
-                return Sdf.ValueTypeNames.FloatArray
-            if all(isinstance(v, str) for v in value):
-                return Sdf.ValueTypeNames.StringArray
-        return None
-
-    def _set_attribute(self, prim: Usd.Prim, name: str, value: Any) -> bool:
-        attr = prim.GetAttribute(name)
-        if not attr:
-            value_type = self._infer_value_type(value)
-            if not value_type:
-                return False
-            attr = prim.CreateAttribute(name, value_type)
-        # JSON input arrives as lists; pxr only accepts a tuple for fixed-size
-        # vector types (GfVec2/3/4) while array types take lists as they are.
-        if isinstance(value, list) and not attr.GetTypeName().isArray:
-            value = tuple(value)
-        try:
-            attr.Set(value)
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to set attribute {name} on {prim.GetPath()}: {e}")
-            return False
-
     def _invalidate_bbox_cache(self, stage_id: str) -> None:
         """Drop cached bounds for a stage after its scene description changed."""
         bbox_cache = self._bbox_caches.get(stage_id)
@@ -289,24 +268,31 @@ class HeadlessUSDSession(LoggerMixin):
         stage_id: str,
         prim_path: str,
         prim_type: str,
-        attributes: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        stage = self.get_stage(stage_id)
-        if not stage:
-            return False
-        if not prim_path or not prim_type:
-            return False
+        attributes: Optional[Mapping[str, Any]] = None,
+        redefine_existing: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Define a prim and set its initial attributes, all or nothing.
 
+        Args:
+            stage_id: Stage identifier
+            prim_path: Absolute path of the new prim
+            prim_type: A concrete prim type the USD schema registry knows
+            attributes: Initial attribute values, relationship targets and
+                the active / instanceable / kind metadata
+            redefine_existing: Allow re-typing a prim that already exists
+
+        Returns:
+            Summary of the change (see ``editing.create_prim``)
+
+        Raises:
+            USDEditError: The edit was refused or failed; nothing changed.
+        """
+        stage = self.require_stage(stage_id)
         try:
-            prim = stage.DefinePrim(prim_path, prim_type)
-            if not prim or not prim.IsValid():
-                return False
-
-            if attributes:
-                for name, value in attributes.items():
-                    if not self._set_attribute(prim, name, value):
-                        return False
-            return True
+            return editing.create_prim(
+                stage, prim_path, prim_type, attributes, redefine_existing=redefine_existing
+            )
         finally:
             self._invalidate_bbox_cache(stage_id)
 
@@ -314,48 +300,60 @@ class HeadlessUSDSession(LoggerMixin):
         self,
         stage_id: str,
         prim_path: str,
-        attributes: Dict[str, Any],
-    ) -> bool:
-        stage = self.get_stage(stage_id)
-        if not stage:
-            return False
-        prim = stage.GetPrimAtPath(prim_path)
-        if not prim or not prim.IsValid():
-            return False
-        if not attributes:
-            return True
+        attributes: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Set attributes, relationship targets and metadata on a prim, all or nothing.
+
+        Args:
+            stage_id: Stage identifier
+            prim_path: Absolute path of an existing prim
+            attributes: Name to JSON value
+
+        Returns:
+            Summary of the change (see ``editing.update_prim``)
+
+        Raises:
+            USDEditError: The edit was refused or failed; nothing changed.
+        """
+        stage = self.require_stage(stage_id)
         try:
-            for name, value in attributes.items():
-                if not self._set_attribute(prim, name, value):
-                    return False
-            return True
+            return editing.update_prim(stage, prim_path, attributes)
         finally:
             self._invalidate_bbox_cache(stage_id)
 
-    def delete_prim(self, stage_id: str, prim_path: str) -> bool:
-        stage = self.get_stage(stage_id)
-        if not stage:
-            return False
-        if not prim_path:
-            return False
+    def delete_prim(
+        self, stage_id: str, prim_path: str, allow_root_delete: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Delete a prim and its subtree from the stage's edit target.
+
+        Args:
+            stage_id: Stage identifier
+            prim_path: Absolute path of an existing prim
+            allow_root_delete: Permit deleting the stage's default prim
+
+        Returns:
+            Summary of the change (see ``editing.delete_prim``)
+
+        Raises:
+            USDEditError: The delete was refused or failed; nothing changed.
+        """
+        stage = self.require_stage(stage_id)
         try:
-            stage.RemovePrim(prim_path)
+            return editing.delete_prim(stage, prim_path, allow_root_delete=allow_root_delete)
         finally:
             self._invalidate_bbox_cache(stage_id)
-        prim = stage.GetPrimAtPath(prim_path)
-        return not prim or not prim.IsValid()
- 
+
     @monitor_performance("headless_session.summarize_stage")
-
-
     def summarize_stage(self, stage_id: str, include_meshes: bool = True) -> Optional[SceneSummary]:
         """
         Generate a summary of a loaded stage.
-        
+
         Args:
             stage_id: Stage identifier
             include_meshes: Include detailed mesh information
-            
+
         Returns:
             SceneSummary or None if stage not found
         """
@@ -366,22 +364,22 @@ class HeadlessUSDSession(LoggerMixin):
             if stage_id in self._active_stages:
                 root_layer = stage.GetRootLayer()
                 file_path = root_layer.identifier
-            
+
             return self.summarizer.summarize_stage(
-                stage, 
+                stage,
                 file_path=file_path,
                 include_meshes=include_meshes
             )
         return None
-    
+
     def find_prims_by_type(self, stage_id: str, prim_type: str) -> List[str]:
         """
         Find prims of a specific type in a stage.
-        
+
         Args:
             stage_id: Stage identifier
             prim_type: Prim type to search for
-            
+
         Returns:
             List of prim paths
         """
@@ -390,16 +388,16 @@ class HeadlessUSDSession(LoggerMixin):
             prims = self.usd_reader.find_prims_by_type(stage, prim_type)
             return [str(prim.GetPath()) for prim in prims]
         return []
-    
+
     def find_prims_by_name(self, stage_id: str, name_pattern: str, exact_match: bool = False) -> List[str]:
         """
         Find prims by name pattern in a stage.
-        
+
         Args:
             stage_id: Stage identifier
             name_pattern: Name pattern to search for
             exact_match: Use exact matching
-            
+
         Returns:
             List of prim paths
         """
@@ -408,22 +406,24 @@ class HeadlessUSDSession(LoggerMixin):
             prims = self.usd_reader.find_prims_by_name(stage, name_pattern, exact_match)
             return [str(prim.GetPath()) for prim in prims]
         return []
-    
-    def get_prim_bbox(self, stage_id: str, prim_path: str, world_space: bool = True) -> Optional[Dict[str, List[float]]]:
+
+    def get_prim_bbox(
+        self, stage_id: str, prim_path: str, world_space: bool = True
+    ) -> Optional[Dict[str, List[float]]]:
         """
         Get bounding box for a prim.
-        
+
         Args:
             stage_id: Stage identifier
             prim_path: Path to the prim
             world_space: Return world-space bbox
-            
+
         Returns:
             Bounding box dictionary or None
         """
         stage = self.get_stage(stage_id)
         bbox_cache = self._bbox_caches.get(stage_id)
-        
+
         if stage and bbox_cache:
             prim = stage.GetPrimAtPath(prim_path)
             if prim and prim.IsValid():
@@ -431,20 +431,20 @@ class HeadlessUSDSession(LoggerMixin):
                     bbox = bbox_cache.compute_world_bbox(prim)
                 else:
                     bbox = bbox_cache.compute_local_bbox(prim)
-                
+
                 if bbox:
                     from ..usd.bbox import bbox_to_dict
                     return bbox_to_dict(bbox)
-        
+
         return None
-    
+
     def get_stage_bbox(self, stage_id: str) -> Optional[Dict[str, List[float]]]:
         """
         Get bounding box for entire stage.
-        
+
         Args:
             stage_id: Stage identifier
-            
+
         Returns:
             Bounding box dictionary or None
         """
@@ -455,15 +455,15 @@ class HeadlessUSDSession(LoggerMixin):
                 from ..usd.bbox import bbox_to_dict
                 return bbox_to_dict(bbox)
         return None
-    
+
     def get_mesh_info(self, stage_id: str, prim_path: str) -> Optional[Dict[str, Any]]:
         """
         Get mesh information for a mesh prim.
-        
+
         Args:
             stage_id: Stage identifier
             prim_path: Path to mesh prim
-            
+
         Returns:
             Mesh information dictionary or None
         """
@@ -497,36 +497,36 @@ class HeadlessUSDSession(LoggerMixin):
                 except Exception as e:
                     self.logger.error(f"Error getting mesh info for {prim_path}: {e}")
         return None
-    
+
     def _validate_usd_file(self, file_path: str) -> bool:
         """Validate USD file before loading."""
         path = Path(file_path)
-        
+
         # Check if file exists
         if not path.exists():
             self.logger.error(f"USD file not found: {file_path}")
             return False
-        
+
         # Check file extension
         if not any(file_path.lower().endswith(ext) for ext in self.settings.usd.allowed_extensions):
             self.logger.error(f"Invalid USD file extension: {file_path}")
             return False
-        
+
         # Check file size
         file_size_mb = path.stat().st_size / (1024 * 1024)
         if file_size_mb > self.settings.usd.max_file_size_mb:
             self.logger.error(f"USD file too large: {file_size_mb:.1f}MB > {self.settings.usd.max_file_size_mb}MB")
             return False
-        
+
         return True
-    
+
     def _generate_stage_id(self, file_path: str) -> str:
         """Generate a unique stage identifier."""
         import hashlib
         path_hash = hashlib.md5(file_path.encode()).hexdigest()[:8]
         filename = Path(file_path).stem
         return f"{filename}_{path_hash}"
-    
+
     def cleanup(self) -> None:
         """Clean up all resources."""
         try:
@@ -580,29 +580,29 @@ class HeadlessUSDAdapter(LoggerMixin):
     def is_available(self) -> bool:
         """
         Check if headless USD operations are available.
-        
+
         Returns:
             True when the adapter module is importable
         """
         return True
-    
+
     def get_capabilities(self) -> List[str]:
         """
         Get list of supported capabilities.
-        
+
         Returns:
             List of capability names
         """
         capabilities = [
             "load_usd_files",
-            "analyze_scene_structure", 
+            "analyze_scene_structure",
             "extract_mesh_data",
             "compute_bounding_boxes",
             "generate_scene_summaries",
             "search_prims",
             "validate_topology"
         ]
-        
+
         return capabilities
 
 
@@ -610,10 +610,10 @@ class HeadlessUSDAdapter(LoggerMixin):
 def create_headless_session(settings: Optional[Settings] = None) -> HeadlessUSDSession:
     """
     Create a headless USD session.
-    
+
     Args:
         settings: Configuration settings
-        
+
     Returns:
         HeadlessUSDSession instance
     """

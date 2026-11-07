@@ -23,6 +23,39 @@ No running application needed. File arguments must be inside the sandbox
 | Query | `get_prim_info`, `search_prims`, `summarize_scene`, `get_mesh_info`, `get_bounding_box` |
 | Edit | `create_prim`, `delete_prim`, `update_prim_attributes` |
 
+### Editing
+
+Edits go to the stage's edit target, its root layer, and are all or nothing:
+each call checks the whole request first, then writes, and if a write still
+fails it restores the specs it touched. A call that reports failure has
+changed nothing.
+
+- **Paths** must be absolute prim paths (`/World/Box`). A relative path, a
+  property path (`/World/Box.size`), a trailing `/` or an invalid prim name
+  fails with `InvalidPrimPath`, which names the bad element and suggests the
+  fix. A missing prim is `NotFoundError`, naming the nearest prim that exists.
+- **`create_prim`** takes only concrete types registered with USD (`Xform`,
+  `Scope`, `Mesh`, `Cube`, `PhysicsRevoluteJoint`, ...). An unknown, abstract
+  or API schema name fails with `UnknownPrimType` and close matches. A path
+  that already holds a prim is refused unless `redefine_existing=true`, which
+  changes its type and keeps its children, properties and composition arcs.
+- **Attributes** are checked against the prim's existing property or its
+  schema definition: the value must fit the attribute's type, and a token
+  must be one of its `allowedTokens`. A new attribute is created as a custom
+  attribute with a type inferred from the value. An existing relationship
+  takes a target path or a list of them. The keys `active`, `instanceable`
+  and `kind` set prim metadata through USD's API; other metadata keys are
+  refused rather than written as attributes. One `InvalidAttribute` error
+  lists every rejected key with its reason.
+- **`delete_prim`** refuses `/`, and the stage's default prim unless
+  `allow_root_delete=true`. It also refuses a prim the delete cannot remove
+  because opinions outside the root layer keep it alive: a sublayer defines
+  it, or it comes from a reference or payload on an ancestor. Deactivate such
+  a prim instead with `update_prim_attributes {"active": false}`.
+- Prims inside an instanceable prim (instance proxies) cannot be authored;
+  edits to them fail with `UnsupportedOperation`. Set `instanceable` to
+  `false` on the instance first.
+
 ## Isaac Sim
 
 Requires a running Isaac Sim 5.1.0, 6.0.0 or 6.0.1 reachable over the bridge
