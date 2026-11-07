@@ -4362,10 +4362,21 @@ class BlenderRuntimeSession:
         # the 3D View. The new object is found by what the operator added:
         # context.active_object is None in the GUI when the active collection
         # is disabled in viewports, though the field was created.
+        view_layer = blender_module.context.view_layer
+        active_collection = view_layer.active_layer_collection
+        target, warning = self._physics_collection(view_layer, "force field")
         existing = {obj.as_pointer() for obj in blender_module.data.objects}
-        blender_module.ops.object.effector_add(
-            type=field_type, align="WORLD", location=loc, rotation=rotation
-        )
+        # bpy gives a new wrapper on every access; == compares what it wraps.
+        switch = target != active_collection
+        try:
+            if switch:
+                view_layer.active_layer_collection = target
+            blender_module.ops.object.effector_add(
+                type=field_type, align="WORLD", location=loc, rotation=rotation
+            )
+        finally:
+            if switch:
+                view_layer.active_layer_collection = active_collection
         created = [
             obj
             for obj in blender_module.data.objects
@@ -4400,7 +4411,11 @@ class BlenderRuntimeSession:
             blender_module.data.objects.remove(field_obj, do_unlink=True)
             raise
 
-        return {"name": field_obj.name, **self._field_report(field_obj)}
+        return {
+            "name": field_obj.name,
+            **self._field_report(field_obj),
+            "warning": warning,
+        }
 
     def get_force_field_info(self, object_name: str) -> Dict[str, Any]:
         """
@@ -4536,7 +4551,10 @@ class BlenderRuntimeSession:
         # A new empty, not empty_add: that operator follows the user's
         # "Align: View" preference and selects the empty.
         view_layer = blender_module.context.view_layer
-        collection = self._constraint_collection(scene, view_layer)
+        layer, collection_warning = self._physics_collection(
+            view_layer, "constraint empty"
+        )
+        collection = layer.collection
         empty = blender_module.data.objects.new(
             f"RBC_{object1_name}_{object2_name}", None
         )
@@ -4575,7 +4593,7 @@ class BlenderRuntimeSession:
         finally:
             view_layer.objects.active = previous_active
 
-        warnings: List[str] = []
+        warnings: List[str] = [collection_warning] if collection_warning else []
         if constraint_type == "MOTOR" and (
             motor_angular_velocity is None and motor_linear_velocity is None
         ):
@@ -5690,27 +5708,34 @@ class BlenderRuntimeSession:
         size = math.sqrt(sum(v * v for v in values)) or 1.0
         return [v / size for v in values]
 
-    @staticmethod
-    def _constraint_collection(scene: Any, view_layer: Any) -> Any:
-        """Where a constraint empty goes: the active collection, or the scene's own.
+    def _physics_collection(self, view_layer: Any, what: str) -> Tuple[Any, Optional[str]]:
+        """The layer collection a new force field or constraint empty goes in.
 
-        The active collection is used when the empty can live there and the
-        view layer shows it: not linked from a library (Blender refuses to
-        link into it), not excluded, and not disabled in viewports
-        (constraint_add then finds no active object). Otherwise the empty goes
-        into the scene's collection; it simulates from either, since the rigid
-        body world reads its constraints collection.
+        Where create_object puts objects (_creation_collection): the active
+        collection, or the scene's own when the active one, or one holding it,
+        is excluded, hidden or disabled in viewports. Also the scene's own when
+        the active one is linked from a library, which Blender refuses to link
+        into. Either simulates: the rigid body world reads its constraints
+        collection.
+
+        Returns:
+            The layer collection, and a warning naming why it is not the
+            active one, or None.
         """
-        layer = view_layer.active_layer_collection
+        layer, warning = self._creation_collection(view_layer)
         collection = layer.collection
-        usable = (
-            getattr(collection, "library", None) is None
-            and getattr(collection, "is_editable", True)
-            and not getattr(layer, "exclude", False)
-            and not getattr(layer, "hide_viewport", False)
-            and not getattr(collection, "hide_viewport", False)
-        )
-        return collection if usable else scene.collection
+        if getattr(collection, "library", None) is not None or not getattr(
+            collection, "is_editable", True
+        ):
+            root = view_layer.layer_collection
+            return root, (
+                f"The active collection '{collection.name}' is linked from a library, so "
+                f"the {what} was created in the scene collection '{root.collection.name}' "
+                "instead"
+            )
+        if warning is not None:
+            warning = warning.replace("so the object was", f"so the {what} was")
+        return layer, warning
 
     @staticmethod
     def _rigid_body_snapshot(rb: Any) -> Optional[Dict[str, Any]]:

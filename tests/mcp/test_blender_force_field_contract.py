@@ -53,7 +53,19 @@ class _Matrix:
 def fake_bpy(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """A bpy whose effector_add records its arguments and makes the field active."""
     calls: List[Dict[str, Any]] = []
-    context = SimpleNamespace(active_object=None, evaluated_depsgraph_get=lambda: None)
+    root = SimpleNamespace(
+        collection=SimpleNamespace(
+            name="Scene Collection", library=None, is_editable=True, hide_viewport=False
+        ),
+        children=[],
+        exclude=False,
+        hide_viewport=False,
+    )
+    context = SimpleNamespace(
+        active_object=None,
+        evaluated_depsgraph_get=lambda: None,
+        view_layer=SimpleNamespace(layer_collection=root, active_layer_collection=root),
+    )
     objects: List[Any] = []
 
     def effector_add(**kwargs: Any) -> set:

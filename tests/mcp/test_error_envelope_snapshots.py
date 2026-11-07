@@ -413,6 +413,23 @@ class _Objects(dict):
         return iter(list(self.values()))
 
 
+def _view_layer() -> SimpleNamespace:
+    """A view layer whose only collection is the scene's own, active and visible."""
+    root = SimpleNamespace(
+        collection=SimpleNamespace(
+            name="Scene Collection", library=None, is_editable=True, hide_viewport=False
+        ),
+        children=[],
+        exclude=False,
+        hide_viewport=False,
+    )
+    return SimpleNamespace(
+        objects=SimpleNamespace(active=None),
+        layer_collection=root,
+        active_layer_collection=root,
+    )
+
+
 def _stand_in_bpy() -> SimpleNamespace:
     """Just enough of bpy for the physics tools, with operators that fail like Blender 5.0's."""
     cube = SimpleNamespace(
@@ -428,7 +445,7 @@ def _stand_in_bpy() -> SimpleNamespace:
         data=SimpleNamespace(objects=_Objects(Cube=cube)),
         context=SimpleNamespace(
             scene=scene,
-            view_layer=SimpleNamespace(objects=SimpleNamespace(active=None)),
+            view_layer=_view_layer(),
             temp_override=lambda **members: contextlib.nullcontext(),
         ),
         ops=SimpleNamespace(

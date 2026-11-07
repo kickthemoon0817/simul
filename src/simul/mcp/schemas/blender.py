@@ -2161,6 +2161,13 @@ class BlenderAddForceFieldResponse(BaseModel):
         None, description="Maximum distance, or null for no limit"
     )
     noise: Optional[float] = Field(None, description="Noise")
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Set when the field went into the scene collection because the active "
+            "collection is hidden, disabled in viewports or linked"
+        ),
+    )
 
 
 class BlenderGetForceFieldInfoRequest(BaseModel):

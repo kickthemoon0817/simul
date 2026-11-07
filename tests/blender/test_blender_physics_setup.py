@@ -229,11 +229,16 @@ class FakeBlender:
         self.effector_objects = 1
         self._overrides: List[Dict[str, Any]] = []
         self.scene_collection = FakeCollection("Scene Collection", self)
+        root = SimpleNamespace(
+            collection=self.scene_collection,
+            children=[],
+            exclude=False,
+            hide_viewport=False,
+        )
         self.view_layer = SimpleNamespace(
             objects=SimpleNamespace(active=None),
-            active_layer_collection=SimpleNamespace(
-                collection=self.scene_collection, exclude=False, hide_viewport=False
-            ),
+            layer_collection=root,
+            active_layer_collection=root,
         )
         self.scene = SimpleNamespace(
             name="Scene",
@@ -475,6 +480,16 @@ def blender(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     session._get_object_or_raise = lookup  # type: ignore[method-assign]
     return fake, session
+
+
+def activate(fake: FakeBlender, collection: Any) -> SimpleNamespace:
+    """Add ``collection`` under the scene's as a layer collection and make it active."""
+    layer = SimpleNamespace(
+        collection=collection, children=[], exclude=False, hide_viewport=False
+    )
+    fake.view_layer.layer_collection.children.append(layer)
+    fake.view_layer.active_layer_collection = layer
+    return layer
 
 
 def names(fake: FakeBlender) -> List[str]:
@@ -1081,8 +1096,7 @@ def test_a_constraint_with_a_linked_active_collection_goes_to_the_scene_collecti
     fake, session = blender
     fake.body("A")
     fake.body("B", location=(2.0, 0.0, 0.0))
-    linked = FakeCollection("LibCol", fake, library="lib.blend")
-    fake.view_layer.active_layer_collection.collection = linked
+    activate(fake, FakeCollection("LibCol", fake, library="lib.blend"))
 
     result = session.add_rigid_body_constraint("FIXED", "A", "B")
 
@@ -1098,9 +1112,7 @@ def test_a_constraint_skips_an_active_collection_the_view_layer_hides(
     fake, session = blender
     fake.body("A")
     fake.body("B", location=(2.0, 0.0, 0.0))
-    hidden = FakeCollection("Hidden", fake)
-    layer = fake.view_layer.active_layer_collection
-    layer.collection = hidden
+    layer = activate(fake, FakeCollection("Hidden", fake))
     setattr(layer, setting, True)
 
     result = session.add_rigid_body_constraint("FIXED", "A", "B")
@@ -1115,10 +1127,42 @@ def test_a_failed_link_leaves_no_orphan_empty(blender: Any) -> None:
     fake.body("A")
     fake.body("B", location=(2.0, 0.0, 0.0))
     fake.scene_collection.library = "lib.blend"  # nothing to link into
-    fake.view_layer.active_layer_collection.collection = fake.scene_collection
 
     with pytest.raises(RuntimeError, match="is linked"):
         session.add_rigid_body_constraint("FIXED", "A", "B")
 
     assert fake.orphans == {}
     assert names(fake) == ["A", "B"]
+
+
+@pytest.mark.parametrize("setting", ["exclude", "hide_viewport"])
+def test_a_force_field_goes_where_create_object_puts_objects(
+    blender: Any, setting: str
+) -> None:
+    """Into the scene collection when the active one is hidden, with a warning, as #315."""
+    fake, session = blender
+    layer = activate(fake, FakeCollection("Hidden", fake))
+    setattr(layer, setting, True)
+
+    result = session.add_force_field("WIND", name="Gust")
+
+    (field,) = fake.objects.values()
+    assert field.users_collection == [fake.scene_collection]
+    assert "so the force field was created in the scene collection" in result["warning"]
+    assert fake.view_layer.active_layer_collection is layer
+    BlenderAddForceFieldResponse(success=True, **result)
+
+
+def test_a_constraint_in_a_hidden_collection_says_where_its_empty_went(
+    blender: Any,
+) -> None:
+    fake, session = blender
+    fake.body("A")
+    fake.body("B", location=(2.0, 0.0, 0.0))
+    activate(fake, FakeCollection("Hidden", fake)).exclude = True
+
+    result = session.add_rigid_body_constraint("FIXED", "A", "B")
+
+    assert any(
+        "constraint empty was created in the scene" in w for w in result["warnings"]
+    )

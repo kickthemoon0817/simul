@@ -1165,8 +1165,10 @@ Behaviour worth knowing:
   the negative way along the axis (on Blender 5.0.1, -1.91 rad in 23 frames at
   +2 rad/s, and -0.91 m at +1 m/s); swap the objects or the sign to reverse it.
   A MOTOR without a velocity drives nothing, and the reply warns about it. The
-  empty goes into the active collection, or into the scene's collection when
-  the active one is linked from a library, excluded or disabled in viewports. The reply and `get_blender_constraint_info`
+  empty, like a force field, goes where `create_blender_object` puts objects:
+  the active collection, or the scene's collection when the active one (or one
+  holding it) is excluded, hidden or disabled in viewports, or is linked from a
+  library; `warnings` (`warning` for a field) then says so. The reply and `get_blender_constraint_info`
   report `pivot`, `axis`, `local_axes` (the directions the limits refer to) and
   the settings.
 - `add_blender_force_field` adds the field with `align: WORLD` and an explicit

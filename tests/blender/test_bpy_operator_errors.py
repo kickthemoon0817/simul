@@ -34,6 +34,23 @@ class _Objects(dict):
         return iter(list(self.values()))
 
 
+def _view_layer() -> SimpleNamespace:
+    """A view layer whose only collection is the scene's own, active and visible."""
+    root = SimpleNamespace(
+        collection=SimpleNamespace(
+            name="Scene Collection", library=None, is_editable=True, hide_viewport=False
+        ),
+        children=[],
+        exclude=False,
+        hide_viewport=False,
+    )
+    return SimpleNamespace(
+        objects=SimpleNamespace(active=None),
+        layer_collection=root,
+        active_layer_collection=root,
+    )
+
+
 def _raising(exc: BaseException) -> Any:
     def operator(*args: Any, **kwargs: Any) -> Any:
         raise exc
@@ -72,7 +89,7 @@ def _session(
         context=SimpleNamespace(
             scene=scene,
             screen=SimpleNamespace(is_animation_playing=True),
-            view_layer=SimpleNamespace(objects=SimpleNamespace(active=None)),
+            view_layer=_view_layer(),
             temp_override=lambda **kwargs: _NullContext(),
         ),
         ops=SimpleNamespace(
