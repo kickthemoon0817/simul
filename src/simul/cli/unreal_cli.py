@@ -1005,7 +1005,7 @@ def setup(
             "bEnforcePassphraseForRemoteClients=True. To let simul "
             "itself talk to the resulting editor, set the matching "
             "plaintext (or MD5 hex) on the client side via the "
-            "UNREAL__PASSPHRASE env var or .env — simul will "
+            "UNREAL__PASSPHRASE env var (or the SIMUL_ENV_FILE file) — simul will "
             "then attach 'Passphrase: <md5>' to every request. Requires "
             "--bind <non-loopback> --allow-public; it hardens a public bind "
             "on top of the IP allowlist."
@@ -1296,7 +1296,8 @@ def setup(
             "earlier Remote Control settings until it restarts."
             if passphrase is not None
             else "The editor is up and enforces a Remote Control passphrase. Set UNREAL__PASSPHRASE "
-            "(the plaintext or its MD5 hex, in the environment or .env) and re-run with --no-launch."
+            "(the plaintext or its MD5 hex, in the environment or the SIMUL_ENV_FILE file) "
+            "and re-run with --no-launch."
         )
         console.print(f"[red]AuthenticationError: {rich_escape(str(health.get('error')))}.[/red] {hint}")
         raise typer.Exit(1)
