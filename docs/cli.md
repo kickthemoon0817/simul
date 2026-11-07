@@ -201,7 +201,7 @@ Headless commands; no application needs to be running.
 | Command | Purpose |
 |---|---|
 | `info FILE` | Stage metadata, prim counts and mesh statistics |
-| `validate FILE` | Validate a USD file without fully loading it |
+| `validate FILE` | Open the file with pxr and list its issues; exits 1 when it is invalid (see [tools.md](tools.md#headless-usd)) |
 | `summary FILE [--format text\|json]` | Scene summary |
 
 The CLI reads any path you give it. The equivalent MCP tools only accept

@@ -52,6 +52,8 @@ used by `simul isaac launch` and `install-bridge`; the YAML default for
 | `UNREAL__PASSPHRASE` | unset | Plaintext or MD5 hex for an editor set up with `--passphrase` |
 | `BLENDER__MODE` | `embedded` | `attached` uses the window chosen by `simul blender attach` |
 | `VIEWPORT__MAX_SIZE` | `2048` | Largest capture dimension |
+| `USD__ALLOWED_EXTENSIONS` | `[".usd",".usda",".usdc",".usdz"]` | Extensions the headless USD tools and `simul usd` commands open; load and validate share the list |
+| `USD__MAX_FILE_SIZE_MB` | `500` | Largest file they open; a bigger one fails with `FileTooLarge` |
 
 `simul logs paths` prints the log locations the current settings resolve
 to, and `simul logs tail --follow` streams them.
