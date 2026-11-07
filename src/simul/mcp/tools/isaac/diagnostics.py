@@ -229,10 +229,12 @@ class DiagnosticsMixin:
         """
         Stop the script the bridge is currently running.
 
-        Only the bridge has an interrupt path; the stock python_server socket
-        enforces its per-request timeout but cannot be told to stop early.
-        The request skips the client's request lock and circuit breaker so it
-        reaches the bridge while a runaway call still holds both.
+        Only the bridge has an interrupt path. The stock python_server socket
+        honours a per-request timeout only by replying with a TimeoutError;
+        the script itself keeps running inside Kit, and nothing can stop it
+        early. The request skips the client's request lock and circuit
+        breaker so it reaches the bridge while a runaway call still holds
+        both.
 
         Returns:
             Dict with ``interrupted``, ``was_busy``, ``phase``,
@@ -245,8 +247,10 @@ class DiagnosticsMixin:
                 error=(
                     "interrupt needs the simul bridge extension; this instance "
                     "is configured for the stock Python socket only, which "
-                    "cannot stop a running script. Scripts sent to it still "
-                    f"carry a {client.script_timeout_seconds}s execution timeout."
+                    "cannot stop a running script. Scripts sent to it carry a "
+                    f"{client.script_timeout_seconds}s timeout, but on 6.0 that "
+                    "only makes python_server reply early (the 5.x socket has "
+                    "none): an overrunning script keeps running inside Kit."
                 ),
                 error_type="BridgeUnavailable",
             ).model_dump()

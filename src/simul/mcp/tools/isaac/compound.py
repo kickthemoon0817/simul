@@ -12,6 +12,7 @@ from ._shared import (
     DEFINE_PRIM_CORE,
     SET_MASS_PROPERTIES_CORE,
     SET_PRIM_TRANSFORM_CORE,
+    XFORM_READ_CORE,
     FloatList,
     _compose_script,
     _pyval,
@@ -81,10 +82,12 @@ class CompoundMixin:
             scale: Scale as [x, y, z].
             rigid_body: Apply RigidBodyAPI so the prim is simulated.
             kinematic: With rigid_body, make the body kinematic.
-            collision: Collision approximation to apply: "none" for a plain
-                CollisionAPI, or one of convexHull, convexDecomposition,
-                meshSimplification, boundingSphere, boundingCube. Omit to add
-                no collider.
+            collision: Add a collider, with this approximation for a Mesh:
+                "none" (the triangle mesh), convexHull, convexDecomposition,
+                meshSimplification, boundingSphere or boundingCube. Implicit
+                shapes (Cube, Sphere, ...) collide with their exact shape
+                whatever the value; an Xform has no geometry and fails the
+                step. Omit to add no collider.
             mass: Mass in kg; applies MassAPI.
             material_path: Material to bind. Reused when it exists, created as
                 a UsdPreviewSurface material when it does not. Defaults to
@@ -150,6 +153,7 @@ class CompoundMixin:
             from pxr import Usd, UsdGeom, UsdPhysics, UsdShade, Sdf, Gf
             """,
             DEFINE_PRIM_CORE,
+            XFORM_READ_CORE,
             SET_PRIM_TRANSFORM_CORE,
             APPLY_RIGID_BODY_CORE,
             APPLY_COLLISION_CORE,
