@@ -745,3 +745,78 @@ def test_bulk_setup_checks_its_arguments_first(monkeypatch: pytest.MonkeyPatch) 
         and "No actor matched" in nothing["error"]
     )
     assert editor.transactions == []
+
+
+def _state(actor: Any) -> Any:
+    component = actor.root_component
+    return (component.mobility.name, component.preset, component.collision, dict(component.body),
+            getattr(component, "use_default_collision", None))
+
+
+def test_bulk_setup_puts_every_actor_back_when_one_does_not_take_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #334: a body that did not take the setup after the write left the
+    actors before it changed, and itself with the new preset and mass, while the
+    reply said it was put back."""
+    editor = Editor()
+    props = _props(editor, 3)
+    props[0].root_component._mobility = props[0].root_component._mobility.__class__("STATIC")
+    props[1].root_component.refuses_simulation = True
+    before = [_state(prop) for prop in props]
+    session = physics_session(monkeypatch, editor)
+
+    result = run(session.setup_physics_bulk(tag="simul_room_5", collision_preset="PhysicsActor", mass=2.0))
+
+    assert result["success"] is False and result["error_type"] == "PhysicsNotApplied"
+    assert "nothing was changed" in result["error"]
+    assert result["details"]["code"] == "NOT_APPLIED"
+    assert result["details"]["expected"] == {
+        "physics_mode": "simulated", "collision_preset": "PhysicsActor", "mass": 2.0
+    }
+    assert result["details"]["actual"][props[1].get_path_name()]["simulate_physics"] is False
+    assert [_state(prop) for prop in props] == before  # all three, the first's mobility included
+    assert editor.transactions[-1]["cancelled"] is True
+
+
+def test_bulk_setup_with_skip_failures_puts_the_failed_actor_back_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    editor = Editor()
+    props = _props(editor, 3)
+    props[1].root_component.refuses_simulation = True
+    failed_before = _state(props[1])
+    session = physics_session(monkeypatch, editor)
+
+    result = run(
+        session.setup_physics_bulk(tag="simul_room_5", collision_preset="PhysicsActor", mass=2.0, skip_failures=True)
+    )
+
+    assert (result["configured_count"], result["failed_count"]) == (2, 1)
+    assert "put back as it was" in result["failed"][0]["error"]
+    assert _state(props[1]) == failed_before  # not left with PhysicsActor and 2 kg
+    assert props[0].root_component.preset == props[2].root_component.preset == "PhysicsActor"
+
+
+def test_bulk_setup_that_sets_up_nothing_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #334: skip_failures returned success with 0 actors configured."""
+    editor = Editor()
+    empty = editor.cube("Room_Box_Empty", mobility="MOVABLE", no_mesh=True)
+    empty.tags.append("simul_room_5")
+    session = physics_session(monkeypatch, editor)
+
+    result = run(session.setup_physics_bulk(tag="simul_room_5", skip_failures=True))
+
+    assert result["success"] is False and result["error_type"] == INCOMPATIBLE_BODY
+    assert result["details"]["code"] == "NOTHING_SET_UP"
+    assert result["failed_count"] == 1
+
+
+def test_editor_side_refusals_carry_a_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    editor = Editor()
+    props = _props(editor, 1)
+    session = physics_session(monkeypatch, editor)
+
+    preset = run(session.set_collision(props[0].get_path_name(), "Bogus"))
+    bulk_preset = run(session.setup_physics_bulk(tag="simul_room_5", collision_preset="Bogus"))
+    nothing = run(session.setup_physics_bulk(tag="no_such_tag"))
+
+    assert (preset["details"]["code"], bulk_preset["details"]["code"], nothing["details"]["code"]) == (
+        "UNKNOWN_PRESET", "UNKNOWN_PRESET", "NO_MATCH"
+    )

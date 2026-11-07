@@ -718,9 +718,10 @@ Behaviour worth knowing:
     detached in the same transaction, so Undo reattaches it, and the reply
     names the parent in `detached_from`.
   - `set_unreal_physics_params` takes a mass from 0.001 kg (Unreal's least)
-    to 1e9 kg and damping from 0 to 1e6, and reads every value back
-    (`applied`, `params_set`; `PhysicsParamsNotApplied` names one that reads
-    back different). A Static body keeps the values but has no mass
+    to 1e9 kg and damping from 0 to 1e6 (else a `ValidationError` with
+    `details.code: OUT_OF_RANGE`), and reads every value back (`applied`,
+    `params_set`; `PhysicsParamsNotApplied` names one that reads back
+    different, with `details.expected` and `details.actual`). A Static body keeps the values but has no mass
     (`mass_kg` 0) and never simulates until it is Movable; the `warning`
     says so. With no parameter it only reads the body.
   - `set_unreal_collision` checks a preset before writing (an unknown one
@@ -740,8 +741,18 @@ Behaviour worth knowing:
     is checked first, the preset's collision standing in for its own: one
     that cannot be set up refuses the call with nothing changed
     (`IncompatibleBody`, the actors and reasons in `details.failed`), unless
-    `skip_failures` sets up the rest. The reply counts the actors matched,
-    set up and failed and lists the first 50 of each. A procedural scene's
+    `skip_failures` sets up the rest. An actor can still not take the setup
+    once it is written (it reads back not simulating); the call then puts
+    every actor it wrote back as it was, mobility, preset, collision and body
+    values included, cancels the transaction and fails with
+    `PhysicsNotApplied` (`details.expected` the setup asked for,
+    `details.actual` what each such actor read back). With `skip_failures`
+    only that actor is put back. A call that sets up no actor fails
+    (`IncompatibleBody`, `details.code: NOTHING_SET_UP`), as do one that
+    matches none (`NO_MATCH`), more than 1000 (`TOO_MANY_ACTORS`) and an
+    unknown preset (`UNKNOWN_PRESET`, as from `set_unreal_collision`). The
+    reply counts the actors matched, set up and failed and lists the first 50
+    of each. A procedural scene's
     tag also selects its floor and walls; add `actor_filter: "_Box_"` for its
     props. Setting up props one call at a time ran into the rate limit (126
     bodies took 116 s); one call set up 200 in under 2 s.
@@ -833,6 +844,16 @@ Behaviour worth knowing:
   slab pitched 14° is a floor, and one turned upside down is still one. A
   landscape section counts whole, hills included. Sizes are along each box's
   own axes. The thresholds come back as `criteria`.
+  - An instanced static mesh component (ISM, HISM, a foliage type) is
+    measured one instance at a time, each by its mesh's box in that
+    instance's transform, so a floor of instanced tiles is one surface a
+    tile and each instanced box on a shelf a graspable object; such an entry
+    adds `component_path` and `instance_index`, and `mass_kg` is null, since
+    instances share their component's body. A component with more than 1000
+    instances is one entry by its world-axis bounds, with the count in
+    `instances`. Such a component used to be measured as one mesh at the
+    component's own transform, where no instance need be drawn, so a floor
+    of instanced tiles read as a single tile.
   - The two lists are paged together: surfaces largest first, graspable
     objects by path, each cut to `max_results` (default 50, at most 500) from
     `offset`. `totals` counts every match, `returned` this page's, and
@@ -841,6 +862,16 @@ Behaviour worth knowing:
     number for both, so it stays within the response budget. A 5,000-actor
     level used to return 494,853 bytes, which the server cut to no surfaces
     and every graspable object; its first page is now 22 KB.
+  - The first page (`offset` 0) scans the level, and the pages after it read
+    that scan, so paging through a large level measures it once instead of
+    once a page; the scan is kept up to 10 minutes, and the reply gives
+    `scanned_at` (Unix time on the editor host) and `snapshot_age_s`. A
+    later page whose scan has expired, or that was never made, scans again.
+    Ask for `offset` 0 to see changes made since.
+  - `analysis_types` names other than `traversability`, `graspability` and
+    `collision_complexity`, and an `offset` or `max_results` out of range,
+    are a `ValidationError` with a `details.code` (`UNKNOWN_ANALYSIS`,
+    `OUT_OF_RANGE`).
 - `generate_unreal_procedural_scene` builds a room, corridor, warehouse or
   outdoor scene from Engine basic shapes inside the bounds. The layout is
   planned before anything is spawned, so one that does not fit fails without
@@ -866,17 +897,25 @@ Behaviour worth knowing:
 - `set_unreal_light_params` writes a point, spot, rect or directional light,
   or a SkyLight's intensity, color and shadows, in one undoable transaction,
   and reads every value back into `applied` and `current`; with no parameter
-  it only reads the light, and an actor that is not there is an error. Values
-  are checked before anything is written: intensity 0 or more, temperature
-  1000 to 15000 K (the range Unreal's blackbody color covers; it clamps
-  others), attenuation radius above 0, and a value the light's class lacks
-  (a directional light's attenuation radius, a SkyLight's temperature) fails
-  with `ValidationError`, nothing written. A value Unreal still stores
-  differently is put back and fails the call (`LightParamsNotApplied`).
-  Intensity is in the light's unit, returned as `intensity_unit`: `lux` for a
-  directional light, the light's Intensity Units for a point, spot or rect
-  light (`candelas` by default, or `lumens`, `ev`, `unitless`), and `scale`
-  (a multiplier) for a SkyLight. `color` is sRGB, each channel 0 to 1 as the
+  it only reads the light, and an actor that is not there is a
+  `NotFoundError`. Values are checked before anything is written, each a
+  `ValidationError` with a `details.code`: intensity from 0 to 1e9
+  (`OUT_OF_RANGE`; 1e30 lux was stored, and 1e39 overflowed Unreal's 32-bit
+  float), temperature 1000 to 15000 K (the range Unreal's blackbody color
+  covers; it clamps others), attenuation radius above 0, a color that is
+  not three channels (`NOT_A_COLOR`), a value the light's class lacks (a
+  directional light's attenuation radius, a SkyLight's temperature;
+  `PROPERTY_NOT_ON_LIGHT`), and an actor with no light component, or
+  several and none at its root (`NOT_A_LIGHT`; it used to fail with a
+  Python traceback). A value Unreal still stores differently fails the call
+  (`LightParamsNotApplied`, `details.expected` and `details.actual`) and
+  puts every value of the call back, the ones it took too, and cancels the
+  transaction, so a failed call changes nothing (`applied` empty,
+  `params_set` 0). Intensity is in the light's unit, returned as
+  `intensity_unit`: `lux` for a directional light, the light's Intensity
+  Units for a point, spot or rect light (`candelas` by default, or
+  `lumens`, `ev`, `nits`, `unitless`), and `scale` (a multiplier) for a
+  SkyLight. `color` is sRGB, each channel 0 to 1 as the
   color picker shows it, stored as the 8-bit color Unreal keeps
   (channel × 255, rounded).
 - `get_unreal_material_info` reads a Material or Material Instance through

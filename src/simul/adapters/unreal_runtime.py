@@ -122,6 +122,15 @@ ROBOTICS_MAX_RESULTS = 500
 #: gave 494,853 bytes and lost every surface), with room for the envelope.
 ROBOTICS_PAGE_BYTES = 32_000
 
+#: Most instances of one instanced static mesh component the robotics analysis
+#: measures one by one; a component with more counts whole, by its world bounds.
+ROBOTICS_MAX_INSTANCES = 1000
+
+#: Seconds the robotics analysis keeps a scan for the pages after the first;
+#: offset 0 always scans. A 5,011-actor level took 13 to 99 s a page on a loaded
+#: machine when every page scanned the level again.
+ROBOTICS_SNAPSHOT_SECONDS = 600.0
+
 #: ``set_physics_params`` mass range, in kg. Unreal clamps a lighter override
 #: to 0.001 kg (FBodyInstance::MassInKgOverride's ClampMin); a body heavier than
 #: the maximum swamps the solver against kg-scale bodies, and 1e40 kg overflowed
@@ -163,6 +172,11 @@ PHYSICS_BULK_LISTED = 50
 #: so 100 K and 1e9 K, which it stored, rendered as these ends.
 LIGHT_MIN_TEMPERATURE_K = 1000.0
 LIGHT_MAX_TEMPERATURE_K = 15000.0
+
+#: Most light intensity ``set_light_params`` takes, in the light's unit. The
+#: sun is about 120,000 lux and a stadium floodlight about 1e6 lumens; 1e30 lux
+#: was stored, and 1e39 overflowed Unreal's 32-bit float.
+LIGHT_MAX_INTENSITY = 1e9
 
 #: ``control_simulation`` actions and start modes, as the tool's enums list them.
 SIMULATION_ACTIONS: Tuple[str, ...] = ("start", "stop", "pause", "resume", "step")
@@ -3630,19 +3644,21 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
         Intensity is in the light's own unit, returned as ``intensity_unit``:
         lux for a directional light, the light's Intensity Units for a point,
-        spot or rect light (candelas by default, or lumens, EV or unitless),
-        and a plain multiplier for a SkyLight. The color is sRGB: each channel
+        spot or rect light (candelas by default, or lumens, EV, nits or
+        unitless), and a plain multiplier for a SkyLight. When Unreal stores a
+        value differently, every value is put back, so a failed call changes
+        nothing. The color is sRGB: each channel
         0-1, gamma-encoded as the color picker shows it, stored as the 8-bit
         FColor Unreal keeps (channel x 255, rounded).
 
         Args:
             actor_path: Light actor path.
-            intensity: Light intensity, 0 or more, in the light's unit.
+            intensity: Light intensity, 0 to 1e9, in the light's unit.
             color: Light color as sRGB [r, g, b], each channel 0-1; None keeps
                 the current color.
-            temperature: Color temperature in Kelvin, LIGHT_MIN_TEMPERATURE_K
-                to LIGHT_MAX_TEMPERATURE_K, the range Unreal's blackbody color
-                covers (it clamps others); applies with use_temperature.
+            temperature: Color temperature in Kelvin, 1000 to 15000, the
+                range Unreal's blackbody color covers (it clamps others);
+                applies with use_temperature.
             use_temperature: Use color temperature instead of direct color.
             attenuation_radius: Light attenuation radius in cm, more than 0
                 (point, spot and rect lights only).
@@ -3652,41 +3668,54 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             Dictionary with actor_path, component_path, light_class,
             intensity_unit, params_set, ``applied`` (the values given, read
             back), ``current`` (every light value read back) and warning; or
-            a ValidationError envelope for a value the light class lacks (a
-            directional light's attenuation radius, a SkyLight's temperature;
-            nothing written), a LightParamsNotApplied envelope for a value
-            Unreal stored differently (put back as it was), or a
-            ``ScriptError`` envelope when the actor is not found or has no
-            light component.
+            a ValidationError envelope for an actor without a light
+            (details.code NOT_A_LIGHT) or a value the light class lacks
+            (PROPERTY_NOT_ON_LIGHT: a directional light's attenuation radius,
+            a SkyLight's temperature; nothing written), a
+            LightParamsNotApplied envelope for a value Unreal stored
+            differently (details.expected and details.actual; every value put
+            back), or a NotFoundError envelope when no actor is at the path.
 
         Raises:
-            ValueError: ``color`` is not three numbers between 0 and 1, or
-                another value is not finite or out of its range.
+            ArgumentError: ``color`` is not three numbers between 0 and 1, or
+                another value is not finite or out of its range (a
+                ValidationError with ``details.code``).
         """
         # Python editor-property names on ULightComponentBase and subclasses.
         values: Dict[str, Any] = {}
         if intensity is not None:
-            if not (math.isfinite(intensity) and intensity >= 0):
-                raise ValueError(f"intensity must be a finite number, 0 or more, got {intensity!r}")
-            values["intensity"] = float(intensity)
+            values["intensity"] = _check_range("intensity", intensity, 0.0, LIGHT_MAX_INTENSITY)
         if color is not None:
-            rgb = _vector3("color", color, "r, g, b")
+            try:
+                rgb = _vector3("color", color, "r, g, b")
+            except ValueError as exc:
+                raise ArgumentError(str(exc), "NOT_A_COLOR", parameter="color", value=str(list(color))) from None
             if not all(0.0 <= channel <= 1.0 for channel in rgb):
-                raise ValueError(f"color channels must be between 0 and 1, got {list(color)!r}")
+                raise ArgumentError(
+                    f"color channels must be between 0 and 1, got {list(color)!r}",
+                    "OUT_OF_RANGE",
+                    parameter="color",
+                    value=list(rgb),
+                    minimum=0.0,
+                    maximum=1.0,
+                )
             # LightColor is an FColor: 0-255 channels.
             values["light_color"] = [round(channel * 255) for channel in rgb] + [255]
         if temperature is not None:
-            if not (math.isfinite(temperature) and LIGHT_MIN_TEMPERATURE_K <= temperature <= LIGHT_MAX_TEMPERATURE_K):
-                raise ValueError(
-                    f"temperature must be from {LIGHT_MIN_TEMPERATURE_K:g} to {LIGHT_MAX_TEMPERATURE_K:g} K, "
-                    f"got {temperature!r}"
-                )
-            values["temperature"] = float(temperature)
+            values["temperature"] = _check_range(
+                "temperature", temperature, LIGHT_MIN_TEMPERATURE_K, LIGHT_MAX_TEMPERATURE_K, " K"
+            )
         if use_temperature is not None:
             values["use_temperature"] = use_temperature
         if attenuation_radius is not None:
             if not (math.isfinite(attenuation_radius) and attenuation_radius > 0):
-                raise ValueError(f"attenuation_radius must be a finite number above 0, got {attenuation_radius!r}")
+                raise ArgumentError(
+                    f"attenuation_radius must be a finite number above 0, got {attenuation_radius!r}",
+                    "OUT_OF_RANGE",
+                    parameter="attenuation_radius",
+                    value=attenuation_radius if math.isfinite(attenuation_radius) else str(attenuation_radius),
+                    minimum=0.0,
+                )
             values["attenuation_radius"] = float(attenuation_radius)
         if cast_shadows is not None:
             values["cast_shadows"] = cast_shadows
@@ -3694,7 +3723,7 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         args = {"actor_path": actor_path, "values": values}
         result = await self._execute_json_script(
             f"args = {args!r}\n" + SET_LIGHT_PARAMS,
-            expected_errors=("ValidationError", "LightParamsNotApplied"),
+            expected_errors=("ValidationError", "LightParamsNotApplied", "NotFoundError"),
         )
         return {"actor_path": actor_path, **result}
 
@@ -4876,8 +4905,12 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         measured by the oriented box of its physics-collision components (a
         single component's box rotated and scaled with it; several components'
         boxes in the actor's frame), so a rotated plank or slab keeps its real
-        size. The thresholds are ``ROBOTICS_CRITERIA``, returned as
-        ``criteria``:
+        size. An instanced static mesh component (ISM, HISM, foliage) draws its
+        mesh once per instance, so each instance is measured and classified by
+        itself, with its ``instance_index`` and ``component_path``, up to 1000
+        instances per component; a component with more counts whole by its
+        world bounds (``instances``). The thresholds are
+        ``ROBOTICS_CRITERIA``, returned as ``criteria``:
 
         * traversability: floor-like surfaces a robot can stand on. Physics
           collision, at least 1 m^2 of top face, no thicker than a quarter of
@@ -4899,10 +4932,14 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
 
         The two lists are paged together: surfaces largest first, graspable
         objects by path, each cut to ``max_results`` from ``offset``, and
-        ``totals`` counts every match. A page whose JSON would exceed
-        ROBOTICS_PAGE_BYTES holds fewer per category, the same number for
-        both, so it fits the response budget; ``next_offset`` is where the next
-        page starts, and ``hint`` says how to get it.
+        ``totals`` counts every match. A page whose JSON would exceed 32,000
+        characters holds fewer per category, the same number for both, so it
+        fits the response budget; ``next_offset`` is where the next page
+        starts, and ``hint`` says how to get it. Offset 0 scans the level and
+        keeps the scan in the editor for ten minutes: a later offset with the
+        same filter and analyses reads it instead of scanning again
+        (``snapshot_age_s``), so every page of a large level comes from one
+        snapshot and costs no scan.
 
         Args:
             analysis_types: Any of traversability, graspability and
@@ -4910,18 +4947,21 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             actor_filter: Only analyze actors whose label or object path
                 contains this text, ignoring case; None or empty analyzes
                 every actor.
-            max_results: Most entries per category on this page, 1 to
-                ROBOTICS_MAX_RESULTS.
+            max_results: Most entries per category on this page, 1 to 500.
             offset: Entries of each category to skip (the previous page's
                 next_offset).
 
         Returns:
             Dict with traversable_surfaces and graspable_objects (each entry
             name, path, class_name and size [x, y, z] in cm along its box's
-            own axes; surfaces add top_z, area_m2, tilt_degrees and normal, the
-            top face's upward unit normal), totals (matches per category),
-            returned (entries per category on this page), offset, max_results,
-            next_offset (null on the last page), hint, collision_summary
+            own axes, plus component_path and instance_index for an instance
+            of an instanced mesh, or component_path and instances for one
+            counted whole; surfaces add top_z, area_m2, tilt_degrees and
+            normal, the top face's upward unit normal), totals (matches per
+            category), returned (entries per category on this page), offset,
+            max_results, next_offset (null on the last page), hint,
+            scanned_at and snapshot_age_s (the scan this page was cut from),
+            collision_summary
             (empty unless collision_complexity ran), total_actors_analyzed,
             analysis_types (those that ran), criteria and pie_active (while
             Play In Editor runs, the editor world is read, as in
@@ -4933,20 +4973,22 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             script failed.
 
         Raises:
-            ValueError: An analysis type is not one of the three, or
-                max_results or offset is out of range.
+            ArgumentError: An analysis type is not one of the three, or
+                max_results or offset is out of range (a ValidationError with
+                ``details.code``).
         """
         requested = [name.strip().lower() for name in analysis_types or [] if name.strip()]
         unknown = [name for name in requested if name not in ROBOTICS_ANALYSES]
         if unknown:
-            raise ValueError(
+            raise ArgumentError(
                 f"analysis_types: unknown {', '.join(map(repr, unknown))}; use "
-                f"{', '.join(ROBOTICS_ANALYSES)}"
+                f"{', '.join(ROBOTICS_ANALYSES)}",
+                "UNKNOWN_ANALYSIS",
+                parameter="analysis_types",
+                value=unknown,
+                allowed=list(ROBOTICS_ANALYSES),
             )
-        if not 1 <= max_results <= ROBOTICS_MAX_RESULTS:
-            raise ValueError(f"max_results must be from 1 to {ROBOTICS_MAX_RESULTS}, got {max_results}")
-        if offset < 0:
-            raise ValueError(f"offset must be 0 or more, got {offset}")
+        _check_page_args(offset, max_results, ROBOTICS_MAX_RESULTS)
         analyses = [name for name in ROBOTICS_ANALYSES if name in requested or not requested]
         args = {
             "analyses": analyses,
@@ -4955,6 +4997,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             "listed_limit": ROBOTICS_LISTED_LIMIT,
             "offset": offset,
             "max_results": max_results,
+            "max_instances": ROBOTICS_MAX_INSTANCES,
+            "snapshot_seconds": ROBOTICS_SNAPSHOT_SECONDS,
         }
         result = await self._execute_json_script(f"args = {args!r}\n" + ROBOTICS_SCENE_ANALYSIS)
         if result.get("error"):

@@ -1190,7 +1190,7 @@ class TestUnrealRuntimeSessionPhase4:
         assert result["params_set"] == 3  # Intensity + LightColor + CastShadows
         assert result["component_path"] == component
         # LightComponentBase, so a SkyLight (not a LightComponent) is found too.
-        assert 'actor_component(actor_at(args["actor_path"]), unreal.LightComponentBase)' in scripts[0]
+        assert "actor.get_components_by_class(unreal.LightComponentBase)" in scripts[0]
         # LightColor is an FColor: 0-255 channels.
         assert (
             "'values': {'intensity': 5000.0, 'light_color': [255, 230, 204, 255], 'cast_shadows': True}"
@@ -1268,6 +1268,8 @@ class TestUnrealRuntimeSessionPhase4:
             ({"intensity": float("inf")}, "intensity"),
             ({"temperature": 100.0}, "temperature must be from 1000"),
             ({"temperature": 1e9}, "temperature must be from 1000"),
+            ({"intensity": 1e30}, "intensity must be from 0 to 1e"),
+            ({"intensity": 1e39}, "intensity must be from 0 to 1e"),
             ({"attenuation_radius": 0.0}, "attenuation_radius"),
         ],
     )

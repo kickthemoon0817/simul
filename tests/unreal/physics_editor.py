@@ -171,13 +171,30 @@ class World:
 
 
 class Body:
-    """What ``get_editor_property("body_instance")`` returns: a copy of the body's settings."""
+    """What ``get_editor_property("body_instance")`` returns. As on UE 5.7.4 it
+    refers to the component's own struct, so a later write shows through it;
+    ``copy()`` takes the struct as it is now (collision preset and mode
+    included)."""
 
-    def __init__(self, values: Dict[str, Any]) -> None:
-        self.values = dict(values)
+    def __init__(self, component: Optional["PrimitiveComponent"] = None,
+                 values: Optional[Dict[str, Any]] = None) -> None:
+        self._component = component
+        self._values = None if values is None else dict(values)
+
+    @property
+    def values(self) -> Dict[str, Any]:
+        if self._values is not None:
+            return dict(self._values)
+        component = self._component
+        assert component is not None
+        return dict(component.body, collision_profile_name=component.preset,
+                    collision_enabled=Enum(component.collision))
 
     def get_editor_property(self, name: str) -> Any:
         return self.values[name]
+
+    def copy(self) -> "Body":
+        return Body(values=self.values)
 
 
 class ActorComponent:
@@ -422,13 +439,19 @@ class PrimitiveComponent(SceneComponent):
     # -- properties ---------------------------------------------------------------
     def get_editor_property(self, name: str) -> Any:
         if name == "body_instance":
-            return Body(self.body)
+            return Body(self)
         raise AttributeError(f"{type(self).__name__} has no property {name!r}")
 
     def set_editor_property(self, name: str, value: Any) -> None:
         # set_editor_property runs PreEditChange, which modifies the object.
         self.modify()
         self._write(name)
+        if name == "body_instance":
+            values = dict(value.values)
+            self.preset = values.pop("collision_profile_name")
+            self.collision = values.pop("collision_enabled").name
+            self.body = values
+            return
         raise AttributeError(f"{type(self).__name__} has no property {name!r}")
 
 

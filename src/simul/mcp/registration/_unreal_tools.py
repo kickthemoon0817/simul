@@ -1136,9 +1136,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "undoable editor transaction and read them back; a parameter left out keeps its current "
             "value, and with none the light is only read. Works on point, spot, rect and directional "
             "lights and a SkyLight's intensity, color and shadows. Intensity is in the light's unit, "
-            "returned as intensity_unit: lux for a directional light, candelas (or the light's "
-            "Intensity Units) for a point, spot or rect light, a multiplier for a SkyLight. Values "
-            "are range-checked before anything is written."
+            "returned as intensity_unit: lux for a directional light, the light's Intensity Units "
+            "(candelas by default, or lumens, ev, nits, unitless) for a point, spot or rect light, a "
+            "multiplier for a SkyLight. Values are range-checked before anything is written, and when "
+            "Unreal stores one differently every value is put back, so a failed call changes nothing."
         ),
         response=UnrealSetLightParamsResponse,
         read_only=False,
@@ -1367,9 +1368,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "that is given), at most 1000. Each is "
             "made simulated, kinematic or not physical as enable_unreal_physics does, after an optional "
             "collision preset (PhysicsActor makes props physics-ready) and with optional mass, damping "
-            "and gravity. Every actor is checked first; one that cannot be set up refuses the call with "
-            "nothing changed, unless skip_failures sets up the rest. Use it instead of one call per "
-            "actor, which runs into the rate limit."
+            "and gravity. Every actor is checked first, and one that cannot be set up, or does not take "
+            "the setup once written, refuses the call with every actor put back as it was, unless "
+            "skip_failures sets up the rest (a call that sets up none fails). Use it instead of one "
+            "call per actor, which runs into the rate limit."
         ),
         response=UnrealSetupPhysicsBulkResponse,
         read_only=False,
@@ -1714,9 +1716,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "robot can stand on, small Movable objects it can grasp, and collision counts and "
             "problems (static meshes with physics collision but no simple shapes). Measures each "
             "actor by the oriented box of its physics-collision components, so rotated pieces keep "
-            "their size and tilt; the thresholds come back as criteria. Both lists are paged together "
-            "(max_results each from offset; totals counts every match, next_offset starts the next "
-            "page)."
+            "their size and tilt, and each instance of an instanced mesh (ISM, HISM, foliage) by "
+            "itself; the thresholds come back as criteria. Both lists are paged together (max_results "
+            "each from offset; totals counts every match, next_offset starts the next page), and the "
+            "pages after the first read the first page's scan, so a large level is scanned once."
         ),
         response=UnrealAnalyzeSceneForRoboticsResponse,
         read_only=True,

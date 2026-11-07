@@ -1485,15 +1485,25 @@ class UnrealAnalyzeSceneForRoboticsResponse(BaseModel):
         description=(
             "Floor-like surfaces a robot can stand on, largest first: name, path, class_name, "
             "size [x, y, z] cm along the box's own axes, top_z cm, area_m2 (of the top face), "
-            "tilt_degrees, normal (the top face's upward unit normal)"
+            "tilt_degrees, normal (the top face's upward unit normal); an instance of an instanced "
+            "mesh adds component_path and instance_index, and a component with too many instances "
+            "to measure one by one component_path and instances"
         ),
     )
     graspable_objects: List[Dict[str, Any]] = Field(
         default_factory=list,
         description=(
             "Movable actors with physics collision small enough to grasp, by path: name, "
-            "path, class_name, size [x, y, z] cm along the box's own axes, simulate_physics, mass_kg"
+            "path, class_name, size [x, y, z] cm along the box's own axes, simulate_physics, mass_kg "
+            "(null for an instance); instances add component_path and instance_index"
         ),
+    )
+    scanned_at: Optional[float] = Field(
+        None, description="When the scan this page was cut from ran, as Unix time on the editor host"
+    )
+    snapshot_age_s: Optional[float] = Field(
+        None,
+        description="Seconds since that scan; pages after the first read the first page's scan",
     )
     totals: Dict[str, int] = Field(
         default_factory=dict, description="Matches per category, every page included"

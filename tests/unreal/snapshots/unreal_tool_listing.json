@@ -1388,7 +1388,7 @@
   {
    "name": "set_unreal_light_params",
    "title": "Set Unreal Light Params",
-   "description": "Set a light's parameters (intensity, sRGB color, temperature, attenuation, shadows) in one undoable editor transaction and read them back; a parameter left out keeps its current value, and with none the light is only read. Works on point, spot, rect and directional lights and a SkyLight's intensity, color and shadows. Intensity is in the light's unit, returned as intensity_unit: lux for a directional light, candelas (or the light's Intensity Units) for a point, spot or rect light, a multiplier for a SkyLight. Values are range-checked before anything is written.",
+   "description": "Set a light's parameters (intensity, sRGB color, temperature, attenuation, shadows) in one undoable editor transaction and read them back; a parameter left out keeps its current value, and with none the light is only read. Works on point, spot, rect and directional lights and a SkyLight's intensity, color and shadows. Intensity is in the light's unit, returned as intensity_unit: lux for a directional light, the light's Intensity Units (candelas by default, or lumens, ev, nits, unitless) for a point, spot or rect light, a multiplier for a SkyLight. Values are range-checked before anything is written, and when Unreal stores one differently every value is put back, so a failed call changes nothing.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1407,7 +1407,7 @@
        }
       ],
       "default": null,
-      "description": "Light intensity, 0 or more, in the light's unit."
+      "description": "Light intensity, 0 to 1e9, in the light's unit."
      },
      "color": {
       "anyOf": [
@@ -1438,7 +1438,7 @@
        }
       ],
       "default": null,
-      "description": "Color temperature in Kelvin, LIGHT_MIN_TEMPERATURE_K to LIGHT_MAX_TEMPERATURE_K, the range Unreal's blackbody color covers (it clamps others); applies with use_temperature."
+      "description": "Color temperature in Kelvin, 1000 to 15000, the range Unreal's blackbody color covers (it clamps others); applies with use_temperature."
      },
      "use_temperature": {
       "anyOf": [
@@ -1899,7 +1899,7 @@
   {
    "name": "setup_unreal_physics_bulk",
    "title": "Setup Unreal Physics Bulk",
-   "description": "Set up physics on many editor actors in one call and one undoable transaction: the actor_paths plus every actor with tag, in the outliner folder and matching actor_filter (each that is given), at most 1000. Each is made simulated, kinematic or not physical as enable_unreal_physics does, after an optional collision preset (PhysicsActor makes props physics-ready) and with optional mass, damping and gravity. Every actor is checked first; one that cannot be set up refuses the call with nothing changed, unless skip_failures sets up the rest. Use it instead of one call per actor, which runs into the rate limit.",
+   "description": "Set up physics on many editor actors in one call and one undoable transaction: the actor_paths plus every actor with tag, in the outliner folder and matching actor_filter (each that is given), at most 1000. Each is made simulated, kinematic or not physical as enable_unreal_physics does, after an optional collision preset (PhysicsActor makes props physics-ready) and with optional mass, damping and gravity. Every actor is checked first, and one that cannot be set up, or does not take the setup once written, refuses the call with every actor put back as it was, unless skip_failures sets up the rest (a call that sets up none fails). Use it instead of one call per actor, which runs into the rate limit.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2471,7 +2471,7 @@
   {
    "name": "analyze_unreal_scene_for_robotics",
    "title": "Analyze Unreal Scene For Robotics",
-   "description": "Classify level actors for robotics from their collision setup: floor-like surfaces a robot can stand on, small Movable objects it can grasp, and collision counts and problems (static meshes with physics collision but no simple shapes). Measures each actor by the oriented box of its physics-collision components, so rotated pieces keep their size and tilt; the thresholds come back as criteria. Both lists are paged together (max_results each from offset; totals counts every match, next_offset starts the next page).",
+   "description": "Classify level actors for robotics from their collision setup: floor-like surfaces a robot can stand on, small Movable objects it can grasp, and collision counts and problems (static meshes with physics collision but no simple shapes). Measures each actor by the oriented box of its physics-collision components, so rotated pieces keep their size and tilt, and each instance of an instanced mesh (ISM, HISM, foliage) by itself; the thresholds come back as criteria. Both lists are paged together (max_results each from offset; totals counts every match, next_offset starts the next page), and the pages after the first read the first page's scan, so a large level is scanned once.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,

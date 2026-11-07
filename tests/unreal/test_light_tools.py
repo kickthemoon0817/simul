@@ -101,6 +101,12 @@ class Actor:
     def get_components_by_class(self, cls: type) -> List[Any]:
         return [self.root_component] if isinstance(self.root_component, cls) else []
 
+    def get_actor_label(self) -> str:
+        return self.name
+
+    def get_class(self) -> SimpleNamespace:
+        return SimpleNamespace(get_name=lambda: type(self.root_component).__name__.replace("Component", ""))
+
     def get_world(self) -> Any:
         return self.editor.world
 
@@ -109,6 +115,7 @@ class Editor:
     def __init__(self) -> None:
         self.actors: Dict[str, Actor] = {}
         self.open: Optional[str] = None
+        self.cancelled: List[str] = []
         self.pie = False
         package = SimpleNamespace(get_name=lambda: "/Game/Maps/Lab")
         self.world = SimpleNamespace(get_outermost=lambda: package, get_path_name=lambda: "/Game/Maps/Lab.Lab")
@@ -132,6 +139,10 @@ class Editor:
 
             def __exit__(self, *exc_info: Any) -> None:
                 editor.open = None
+
+            def cancel(self) -> None:
+                assert editor.open == self.description, "cancel inside the transaction"
+                editor.cancelled.append(self.description)
 
         return SimpleNamespace(
             Actor=Actor,
@@ -294,11 +305,43 @@ def test_a_value_unreal_stores_differently_is_put_back(
     assert result["success"] is False
     assert result["error_type"] == "LightParamsNotApplied"
     assert (
-        "intensity (it stored 5.0)" in result["error"] and "put back" in result["error"]
+        "intensity (it stored 5.0)" in result["error"] and "nothing was changed" in result["error"]
     )
+    assert result["details"] == {
+        "code": "NOT_APPLIED", "expected": {"intensity": 7.0}, "actual": {"intensity": 5.0}
+    }
+    # Review of #334: the other values stayed written. Now the call changes nothing.
     assert light.root_component.values["intensity"] == 3.14
-    assert result["applied"] == {"cast_shadows": False} and result["params_set"] == 1
+    assert light.root_component.values["cast_shadows"] is True
+    assert result["applied"] == {} and result["params_set"] == 0
     assert result["current"]["intensity"] == 3.14
+    assert editor.cancelled == ["simul: set light params"]
+
+
+def test_an_actor_without_a_light_is_a_coded_validation_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #334: a non-light actor came back as a traceback."""
+    editor = Editor()
+    cube = editor.light("Cube_0", type("StaticMeshComponent", (), {"__init__": lambda self, owner: None}))
+    session = _session(monkeypatch, editor)
+
+    result = run(session.set_light_params(cube.get_path_name(), intensity=1.0))
+
+    assert (result["error_type"], result["details"]["code"]) == ("ValidationError", "NOT_A_LIGHT")
+    assert "Traceback" not in result["error"]
+
+
+def test_a_property_the_light_lacks_is_coded(monkeypatch: pytest.MonkeyPatch) -> None:
+    editor = Editor()
+    sun = editor.light("DirectionalLight_0", DirectionalLightComponent)
+    session = _session(monkeypatch, editor)
+
+    result = run(session.set_light_params(sun.get_path_name(), attenuation_radius=500.0))
+
+    assert result["details"] == {
+        "code": "PROPERTY_NOT_ON_LIGHT",
+        "parameters": ["attenuation_radius"],
+        "light_class": "DirectionalLightComponent",
+    }
 
 
 def test_an_edit_during_pie_warns(monkeypatch: pytest.MonkeyPatch) -> None:

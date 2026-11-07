@@ -35,6 +35,7 @@ from fastmcp import Client
 from simul.adapters import _unreal_procedural as procedural
 from simul.adapters import unreal_runtime
 from simul.adapters._unreal_procedural import CUBE, CYLINDER, SPHERE, plan_scene
+from simul.adapters._unreal_scripts import ROBOTICS_SCAN_MODULE
 from simul.config import Settings
 from simul.mcp import server as server_module
 from simul.mcp.usage_tracker import ToolUsageTracker
@@ -104,6 +105,7 @@ class PrimitiveComponent:
         self.mass = mass
         self.simulate = simulate
         # Placed by its actor: world center, size along its own axes, rotation.
+        self.owner_path = ""
         self.center: Tuple[float, float, float] = (0.0, 0.0, 0.0)
         self.size: Tuple[float, float, float] = (0.0, 0.0, 0.0)
         self.rotation: Tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -116,6 +118,9 @@ class PrimitiveComponent:
 
     def get_class(self) -> _Named:
         return _Named(self.class_name)
+
+    def get_path_name(self) -> str:
+        return self.owner_path + "." + self.class_name + "0"
 
     def get_mass(self) -> float:
         return self.mass
@@ -155,6 +160,56 @@ class StaticMeshComponent(PrimitiveComponent):
         super().__init__("StaticMeshComponent", mesh=mesh, **kwargs)
 
 
+def _quat(pitch: float, yaw: float, roll: float) -> SimpleNamespace:
+    """FRotator's quaternion (FRotator::Quaternion, UE 5.7)."""
+    sp, cp = math.sin(math.radians(pitch) / 2), math.cos(math.radians(pitch) / 2)
+    sy, cy = math.sin(math.radians(yaw) / 2), math.cos(math.radians(yaw) / 2)
+    sr, cr = math.sin(math.radians(roll) / 2), math.cos(math.radians(roll) / 2)
+    return SimpleNamespace(
+        x=cr * sp * sy - sr * cp * cy,
+        y=-cr * sp * cy - sr * cp * sy,
+        z=cr * cp * sy - sr * sp * cy,
+        w=cr * cp * cy + sr * sp * sy,
+    )
+
+
+class InstancedStaticMeshComponent(StaticMeshComponent):
+    """Instances of the mesh, each (center, size, (pitch, yaw, roll)) in world space.
+
+    The component itself sits wherever its actor puts it, where no instance need
+    be; ``get_instance_transform(i, True)`` returns each instance's world
+    transform, and the component's bounds cover them all, as Unreal reports.
+    """
+
+    def __init__(self, mesh: _Mesh, instances: List[Tuple[Any, Any, Any]], **kwargs: Any) -> None:
+        super().__init__(mesh, **kwargs)
+        self.class_name = "InstancedStaticMeshComponent"
+        self.instances = instances
+
+    def get_instance_count(self) -> int:
+        return len(self.instances)
+
+    def get_instance_transform(self, index: int, world_space: bool = False) -> Optional[SimpleNamespace]:
+        assert world_space, "the analysis reads instances in world space"
+        if not 0 <= index < len(self.instances):
+            return None
+        center, size, rotation = self.instances[index]
+        return SimpleNamespace(
+            translation=_vector(*center), rotation=_quat(*rotation), scale3d=_vector(*(side / 100.0 for side in size))
+        )
+
+    def world_bounds(self) -> Tuple[SimpleNamespace, SimpleNamespace, float]:
+        low, high = [math.inf] * 3, [-math.inf] * 3
+        for center, size, rotation in self.instances:
+            axes = _axes(*rotation)
+            extent = [sum(abs(axes[i][k]) * size[i] / 2 for i in range(3)) for k in range(3)]
+            for k in range(3):
+                low[k], high[k] = min(low[k], center[k] - extent[k]), max(high[k], center[k] + extent[k])
+        origin = [(lo + hi) / 2 for lo, hi in zip(low, high)]
+        extent = [(hi - lo) / 2 for lo, hi in zip(low, high)]
+        return _vector(*origin), _vector(*extent), math.hypot(*extent)
+
+
 class FakeActor:
     def __init__(
         self,
@@ -177,6 +232,7 @@ class FakeActor:
         self.class_name = class_name
         for component in components:
             component.center, component.size, component.rotation = center, size, self.rotation
+            component.owner_path = LEVEL + label
 
     def get_actor_label(self) -> str:
         return self.label
@@ -422,6 +478,7 @@ class FakeEditor:
             get_editor_subsystem=subsystems.__getitem__,
             PrimitiveComponent=PrimitiveComponent,
             StaticMeshComponent=StaticMeshComponent,
+            InstancedStaticMeshComponent=InstancedStaticMeshComponent,
             BoxComponent=type("BoxComponent", (PrimitiveComponent,), {}),
             SphereComponent=type("SphereComponent", (PrimitiveComponent,), {}),
             CapsuleComponent=type("CapsuleComponent", (PrimitiveComponent,), {}),
@@ -440,6 +497,8 @@ class FakeEditor:
 def _session(monkeypatch: pytest.MonkeyPatch, editor: FakeEditor) -> unreal_runtime.UnrealRuntimeSession:
     """A session whose editor Python runs here against ``editor``, as Remote Control would run it."""
     monkeypatch.setitem(sys.modules, "unreal", editor.module())
+    # The analysis keeps its scans in an editor-side module: each test has its own editor.
+    monkeypatch.delitem(sys.modules, ROBOTICS_SCAN_MODULE, raising=False)
     session = unreal_runtime.UnrealRuntimeSession(Settings())
     session.scripts = []  # type: ignore[attr-defined]
 
@@ -703,9 +762,112 @@ def test_a_page_that_would_exceed_the_budget_holds_fewer_of_each(monkeypatch: py
 def test_paging_arguments_are_checked(monkeypatch: pytest.MonkeyPatch, kwargs: Dict[str, int], message: str) -> None:
     session = _session(monkeypatch, FakeEditor(_scene()))
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(unreal_runtime.ArgumentError, match=message) as raised:
         asyncio.run(session.analyze_scene_for_robotics(**kwargs))
     assert session.scripts == []  # type: ignore[attr-defined]
+    assert (raised.value.error_type, raised.value.details["code"]) == ("ValidationError", "OUT_OF_RANGE")
+
+
+def _tiles(count: int = 10) -> List[Tuple[Any, Any, Any]]:
+    """Floor tiles, 2 m x 2 m x 10 cm, every 10 m along x."""
+    return [((1000.0 * (n + 1), 0.0, 5.0), (200.0, 200.0, 10.0), (0.0, 0.0, 0.0)) for n in range(count)]
+
+
+def test_instanced_floor_tiles_are_each_a_surface(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #334: an instanced component was measured as one mesh at its own
+    origin, where no instance is, so 10 floor tiles of an ISM gave no surface."""
+    tiles = InstancedStaticMeshComponent(CUBE_MESH, _tiles())
+    actor = FakeActor("TileFloor", [tiles], center=(0, 0, 0), size=(100, 100, 100))
+
+    result = _analyze(monkeypatch, FakeEditor([actor]), analysis_types=["traversability"])
+
+    surfaces = result["traversable_surfaces"]
+    assert [entry["instance_index"] for entry in surfaces] == list(range(10))
+    assert all(entry["path"] == LEVEL + "TileFloor" for entry in surfaces)
+    assert all(entry["component_path"] == LEVEL + "TileFloor.InstancedStaticMeshComponent0" for entry in surfaces)
+    assert all(entry["size"] == pytest.approx([200, 200, 10]) for entry in surfaces)
+    assert all(entry["area_m2"] == pytest.approx(4.0) and entry["top_z"] == pytest.approx(10) for entry in surfaces)
+
+
+def test_a_rotated_instance_keeps_its_own_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    planks = InstancedStaticMeshComponent(
+        CUBE_MESH, [((0.0, 0.0, 5.0), (2000.0, 50.0, 10.0), (0.0, 45.0, 0.0)),
+                    ((0.0, 5000.0, 5.0), (1000.0, 1000.0, 10.0), (14.0, 0.0, 0.0))]
+    )
+    actor = FakeActor("Planks", [planks])
+
+    surfaces = _analyze(monkeypatch, FakeEditor([actor]), analysis_types=["traversability"])["traversable_surfaces"]
+
+    by_index = {entry["instance_index"]: entry for entry in surfaces}
+    assert by_index[0]["size"] == pytest.approx([2000, 50, 10]) and by_index[0]["area_m2"] == pytest.approx(10.0)
+    assert by_index[1]["tilt_degrees"] == pytest.approx(14.0)
+
+
+def test_an_instanced_component_with_too_many_instances_counts_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(unreal_runtime, "ROBOTICS_MAX_INSTANCES", 3)
+    tiles = InstancedStaticMeshComponent(CUBE_MESH, _tiles())
+    actor = FakeActor("TileFloor", [tiles])
+
+    surfaces = _analyze(monkeypatch, FakeEditor([actor]), analysis_types=["traversability"])["traversable_surfaces"]
+
+    assert len(surfaces) == 1
+    assert surfaces[0]["instances"] == 10 and "instance_index" not in surfaces[0]
+    assert surfaces[0]["size"] == pytest.approx([9200, 200, 10])  # the bounds of every tile
+
+
+def test_later_pages_read_the_first_page_s_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #334: every page scanned the whole level again, 13 to 99 s a page
+    on 5,011 actors on a loaded machine."""
+    editor = FakeEditor(_many(400))
+    session = _session(monkeypatch, editor)
+    scanned: List[int] = []
+    level_actors = editor.module
+
+    def counting_module() -> SimpleNamespace:
+        module = level_actors()
+        listing = module.get_editor_subsystem("EditorActorSubsystem").get_all_level_actors
+
+        def counted() -> List[FakeActor]:
+            scanned.append(1)
+            return listing()
+
+        subsystems = {name: module.get_editor_subsystem(name) for name in (
+            "EditorActorSubsystem", "LevelEditorSubsystem", "UnrealEditorSubsystem", "LayersSubsystem",
+            "StaticMeshEditorSubsystem")}
+        subsystems["EditorActorSubsystem"] = SimpleNamespace(get_all_level_actors=counted)
+        module.get_editor_subsystem = subsystems.__getitem__
+        return module
+
+    monkeypatch.setitem(sys.modules, "unreal", counting_module())
+
+    first = asyncio.run(session.analyze_scene_for_robotics(max_results=50))
+    editor.actors.append(FakeActor("Late", [StaticMeshComponent(CUBE_MESH)], (500, 500, 10)))
+    second = asyncio.run(session.analyze_scene_for_robotics(max_results=50, offset=50))
+    again = asyncio.run(session.analyze_scene_for_robotics(max_results=50))
+
+    assert len(scanned) == 2  # offset 0 scanned, offset 50 read the scan, offset 0 scanned again
+    assert second["totals"] == first["totals"]  # the snapshot the first page took
+    assert again["totals"]["traversable_surfaces"] == first["totals"]["traversable_surfaces"] + 1
+    assert second["snapshot_age_s"] >= 0 and second["scanned_at"] == first["scanned_at"]
+    assert {e["path"] for e in first["graspable_objects"]}.isdisjoint(e["path"] for e in second["graspable_objects"])
+
+
+def test_the_analysis_leaves_no_unreal_object_in_the_console_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #334: the script bound actor, physical, root and component at module
+    scope, which in the editor's persistent console namespace keep them alive."""
+    editor = FakeEditor(_scene())
+    monkeypatch.setitem(sys.modules, "unreal", editor.module())
+    monkeypatch.delitem(sys.modules, ROBOTICS_SCAN_MODULE, raising=False)
+    args = {"analyses": list(unreal_runtime.ROBOTICS_ANALYSES), "actor_filter": None,
+            "criteria": unreal_runtime.ROBOTICS_CRITERIA, "listed_limit": 50, "offset": 0, "max_results": 50,
+            "max_instances": 1000, "snapshot_seconds": 600.0}
+    namespace: Dict[str, Any] = {}
+
+    with redirect_stdout(io.StringIO()):
+        exec(f"args = {args!r}\n" + unreal_runtime.ROBOTICS_SCENE_ANALYSIS, namespace)
+
+    leaked = {name for name, value in namespace.items() if isinstance(value, (FakeActor, PrimitiveComponent, _Mesh))}
+    assert leaked == set()
 
 
 # ---------------------------------------------------------------------------
