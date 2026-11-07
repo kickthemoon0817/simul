@@ -6919,6 +6919,79 @@ class TestFileIOTools:
         with pytest.raises(ValueError, match="Not a .blend file"):
             session.open_blend_file(str(txt_file))
 
+    @pytest.mark.parametrize(
+        ("open_file", "where", "save"),
+        [
+            ("/work/scene.blend", "'/work/scene.blend'", "save_blender_file and open"),
+            ("", "(never saved)", "save_blender_file with a file_path"),
+        ],
+    )
+    def test_open_blend_file_refuses_to_discard_unsaved_changes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        open_file: str,
+        where: str,
+        save: str,
+    ) -> None:
+        """B1-08: opening a file silently discarded the open file's unsaved work."""
+        blend_file = tmp_path / "other.blend"
+        blend_file.write_bytes(b"fake")
+        fake_bpy = self._make_fake_bpy_with_file_io(filepath=open_file, is_dirty=True)
+        fake_bpy.app.background = False
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = self._session_allowing(tmp_path)
+        with pytest.raises(blender_runtime.UnsavedChangesError) as refused:
+            session.open_blend_file(str(blend_file))
+
+        message = str(refused.value)
+        assert f"The open file {where} has unsaved changes" in message
+        assert save in message
+        assert "discard_unsaved=true" in message
+        assert refused.value.details == {
+            "blend_file_path": open_file or None,
+            "is_dirty": True,
+        }
+        assert fake_bpy._ops_calls == []
+
+    def test_open_blend_file_discards_unsaved_changes_when_asked(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        blend_file = tmp_path / "other.blend"
+        blend_file.write_bytes(b"fake")
+        fake_bpy = self._make_fake_bpy_with_file_io(is_dirty=True)
+        fake_bpy.app.background = False
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = self._session_allowing(tmp_path)
+        result = session.open_blend_file(str(blend_file), discard_unsaved=True)
+
+        assert result["file_path"] == str(blend_file)
+        assert fake_bpy._ops_calls == [
+            {"op": "wm.open_mainfile", "filepath": str(blend_file)}
+        ]
+
+    def test_open_blend_file_skips_the_check_in_headless_blender(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Headless Blender reports a fresh session as modified (verified on 5.0.1).
+
+        It also reports edits after a load as unmodified, so the flag means
+        nothing there and a first open must not be refused.
+        """
+        blend_file = tmp_path / "other.blend"
+        blend_file.write_bytes(b"fake")
+        fake_bpy = self._make_fake_bpy_with_file_io(is_dirty=True)
+        fake_bpy.app.background = True
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = self._session_allowing(tmp_path)
+        assert session.open_blend_file(str(blend_file))["file_path"] == str(blend_file)
+
     # -- save_blend_file -----------------------------------------------------
 
     def test_save_blend_file_as(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -7499,6 +7572,45 @@ class TestExecuteScript:
         result = session.execute_script("x = 1 / 0", timeout=5.0)
 
         assert "ZeroDivisionError" in result["error"]
+        assert "timed_out" not in result
+
+    @pytest.mark.parametrize("timeout", [None, 5.0])
+    @pytest.mark.parametrize(
+        ("ending", "error"),
+        [
+            ("sys.exit(0)", "SystemExit: 0. The script called sys.exit()"),
+            ("sys.exit()", "SystemExit. The script called sys.exit()"),
+            ("exit(3)", "SystemExit: 3. The script called sys.exit()"),
+            ("raise KeyboardInterrupt", "KeyboardInterrupt. The script was interrupted"),
+        ],
+    )
+    def test_execute_script_reports_an_exit_as_the_scripts_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        timeout: Optional[float],
+        ending: str,
+        error: str,
+    ) -> None:
+        """B1-10: sys.exit(0) in a script ended the user's attached Blender.
+
+        SystemExit escaped ``except Exception`` and Blender's timer printed it
+        with PyErr_Print, which exits the process. It is the script's error,
+        reported with what the script printed before it.
+        """
+        fake_bpy = self._make_fake_bpy_for_script()
+        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
+        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
+
+        session = blender_runtime.BlenderRuntimeSession()
+        result = session.execute_script(
+            f"import sys\nprint('finishing batch job')\n{ending}\nprint('after')",
+            timeout=timeout,
+        )
+
+        assert result["error"].startswith(error)
+        assert "Blender keeps running" in result["error"] or "interrupted" in result["error"]
+        assert result["output"] == "finishing batch job\n"
+        assert result["return_value"] is None
         assert "timed_out" not in result
 
     def test_execute_script_returns_6000_chars_whole(
