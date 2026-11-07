@@ -966,7 +966,9 @@
      "method": "focus_on_actor",
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
-      "distance": 0.0
+      "distance": 0.0,
+      "fov": 90.0,
+      "aspect_ratio": 1.7777777777777777
      }
     }
    ],
@@ -988,7 +990,9 @@
    "case": "every argument",
    "arguments": {
     "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
-    "distance": 250.0
+    "distance": 250.0,
+    "fov": 60.0,
+    "aspect_ratio": 2.0
    },
    "envelope": [
     {
@@ -1003,7 +1007,9 @@
      "method": "focus_on_actor",
      "arguments": {
       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
-      "distance": 250.0
+      "distance": 250.0,
+      "fov": 60.0,
+      "aspect_ratio": 2.0
      }
     }
    ],
@@ -4260,6 +4266,45 @@
     {
      "success": false,
      "error": "Give all three rotation components or none"
+    }
+   ]
+  },
+  {
+   "tool": "focus_unreal_on_actor",
+   "case": "invalid",
+   "arguments": {
+    "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+    "fov": 180.0
+   },
+   "envelope": [
+    {
+     "tool": "focus_unreal_on_actor",
+     "label": "Unreal",
+     "response_model": "UnrealFocusActorResponse",
+     "params": null
+    }
+   ],
+   "session": [],
+   "result": {
+    "is_error": false,
+    "payload": {
+     "success": false,
+     "error": "fov must be at least 0.001 and less than 180 degrees, not 180.0",
+     "error_type": "ValidationError",
+     "details": {
+      "input": {
+       "actor_path": "/Game/Maps/Test.Test:PersistentLevel.Chair_0",
+       "distance": 0.0,
+       "fov": 180.0,
+       "aspect_ratio": 1.7777777777777777
+      }
+     }
+    }
+   },
+   "usage": [
+    {
+     "success": false,
+     "error": "fov must be at least 0.001 and less than 180 degrees, not 180.0"
     }
    ]
   },

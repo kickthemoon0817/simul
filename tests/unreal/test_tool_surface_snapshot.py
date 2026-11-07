@@ -112,7 +112,7 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "rotation_yaw": 90.0,
         "rotation_roll": 0.5,
     },
-    "focus_unreal_on_actor": {"actor_path": ACTOR, "distance": 250.0},
+    "focus_unreal_on_actor": {"actor_path": ACTOR, "distance": 250.0, "fov": 60.0, "aspect_ratio": 2.0},
     "spawn_unreal_actor": {
         "asset_path": MESH,
         "location_x": 1.5,
@@ -283,6 +283,7 @@ ERROR_CASES: Tuple[Tuple[str, Dict[str, Any]], ...] = (
     ("execute_unreal_script", {"code": "print(1)", "mode": "Bogus"}),
     ("set_unreal_camera_view", {"location_x": 1.0, "location_y": 2.0}),
     ("set_unreal_camera_view", {"location_x": 1.0, "location_y": 2.0, "location_z": 3.0, "rotation_roll": 4.0}),
+    ("focus_unreal_on_actor", {"actor_path": ACTOR, "fov": 180.0}),
     ("control_unreal_ui", {"agent_control": "bogus"}),
     ("control_unreal_ui", {"agent_control": "set_property", "property_name": "color", "value": [1.0, 2.0, 3.0]}),
     ("set_unreal_material_params", {"material_path": MATERIAL, "scalar_params_json": "{bad"}),
