@@ -1,5 +1,6 @@
 """Tests for Blender runtime adapter functionality."""
 
+import base64
 import json
 import math
 from pathlib import Path
@@ -1545,7 +1546,7 @@ class TestVisualObservationTools:
                 for frame, camera in enumerate(marker_cameras, start=frame_current)
             ],
         )
-        scene.frame_set = lambda f: setattr(scene, "frame_current", f)
+        scene.frame_set = lambda f, subframe=0.0: setattr(scene, "frame_current", f)
 
         class MaterialStore:
             def get(self, name: str) -> Optional[Any]:
@@ -6236,16 +6237,23 @@ class TestVisualObservationTools:
 
     # -- capture_viewport_sequence -----------------------------------------
 
+    @staticmethod
+    def _sequence_session(tmp_path: Path) -> "blender_runtime.BlenderRuntimeSession":
+        """A session whose sandbox, and so whose capture directory, is the pytest tmp dir."""
+        return blender_runtime.BlenderRuntimeSession(
+            settings=Settings(security=SecurityConfig(allowed_paths=[str(tmp_path)]))
+        )
+
     def test_capture_viewport_sequence_basic(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """capture_viewport_sequence captures frames and restores frame."""
+        """Frames are written to files, their paths returned, and the frame restored."""
         cam = self._make_camera_object()
         fake_bpy = self._make_fake_bpy_with_camera(objects=[cam], frame_current=10)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
 
-        session = blender_runtime.BlenderRuntimeSession()
+        session = self._sequence_session(tmp_path)
 
         call_count = 0
 
@@ -6253,8 +6261,10 @@ class TestVisualObservationTools:
             nonlocal call_count
             call_count += 1
             return {
-                "image_base64": f"FRAME_{call_count}",
-                "capture_method": "gpu_offscreen",
+                "image_base64": base64.b64encode(f"FRAME_{call_count}".encode()).decode(),
+                "capture_method": "viewport",
+                "width": 64,
+                "height": 32,
             }
 
         monkeypatch.setattr(session, "capture_viewport", _mock_capture)
@@ -6262,18 +6272,22 @@ class TestVisualObservationTools:
         result = session.capture_viewport_sequence(start_frame=1, end_frame=3, step=1)
 
         assert result["frame_count"] == 3
-        assert len(result["frames"]) == 3
-        assert result["frames"][0]["frame"] == 1
-        assert result["frames"][1]["frame"] == 2
-        assert result["frames"][2]["frame"] == 3
-        assert result["frames"][0]["image_base64"] == "FRAME_1"
-        assert result["capture_method"] == "gpu_offscreen"
+        assert [f["frame"] for f in result["frames"]] == [1, 2, 3]
+        first = Path(result["frames"][0]["file_path"])
+        assert first.read_bytes() == b"FRAME_1"
+        assert first.name == "frame_000001.jpg"
+        assert first.parent == Path(result["output_dir"])
+        assert first.parent.parent == (tmp_path / "captures").resolve()
+        assert "image_base64" not in result["frames"][0]
+        assert (result["width"], result["height"]) == (64, 32)
+        assert result["capture_method"] == "viewport"
+        assert result["complete"] is True and result["next_start_frame"] is None
         # Original frame restored
         scene = fake_bpy.context.scene
         assert scene.frame_current == 10
 
     def test_capture_viewport_sequence_step(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """capture_viewport_sequence respects step parameter."""
         cam = self._make_camera_object()
@@ -6281,19 +6295,19 @@ class TestVisualObservationTools:
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
 
-        session = blender_runtime.BlenderRuntimeSession()
+        session = self._sequence_session(tmp_path)
 
         monkeypatch.setattr(
             session,
             "capture_viewport",
-            lambda **kw: {"image_base64": "X", "capture_method": "render_fallback"},
+            lambda **kw: {"image_base64": "WA==", "capture_method": "render"},
         )
 
         result = session.capture_viewport_sequence(start_frame=1, end_frame=10, step=3)
 
         captured_frames = [f["frame"] for f in result["frames"]]
         assert captured_frames == [1, 4, 7, 10]
-        assert result["frame_count"] == 4
+        assert result["frame_count"] == result["requested_frame_count"] == 4
 
 
 # ---------------------------------------------------------------------------
@@ -7134,7 +7148,9 @@ class TestFileIOTools:
         assert "LegacyMesh" in result["imported_objects"]
         assert fake_bpy._ops_calls[0]["op"] == "import_scene.obj"
 
-    def test_import_fbx(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_import_fbx(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fbx_parser: Any
+    ) -> None:
         """FBX import uses import_scene.fbx (same for v3.6 and v4)."""
         fbx_file = tmp_path / "model.fbx"
         fbx_file.write_bytes(b"\x00")
@@ -7146,6 +7162,9 @@ class TestFileIOTools:
             fake_bpy._ops_calls.append({"op": "import_scene.fbx", **kwargs})
             objs["FBXObj"] = FakeObject("FBXObj", "MESH", True)
 
+        fake_fbx_import.get_rna_type = lambda: SimpleNamespace(  # type: ignore[attr-defined]
+            properties={"filepath": None, "use_image_search": None}
+        )
         fake_bpy.ops.import_scene.fbx = fake_fbx_import
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -7155,6 +7174,8 @@ class TestFileIOTools:
 
         assert result["file_format"] == "FBX"
         assert "FBXObj" in result["imported_objects"]
+        # The sandbox keeps the importer from searching folders for textures.
+        assert fake_bpy._ops_calls[0]["use_image_search"] is False
 
     def test_import_unsupported_format(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Importing an unsupported format raises ValueError."""

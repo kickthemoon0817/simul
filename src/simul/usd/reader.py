@@ -102,6 +102,44 @@ class USDStageInfo:
     prim_count: int
     root_prims: List[str]
     stage_variables: Dict[str, Any] = field(default_factory=dict)
+    has_animation: bool = False
+    authored_time_range: bool = False
+    time_sample_range: Optional[List[float]] = None
+
+
+def animation_range(stage: Usd.Stage) -> Dict[str, Any]:
+    """Say whether a stage animates, from its time range and its time samples.
+
+    A stage can animate without authoring ``startTimeCode``/``endTimeCode``:
+    the time samples on its attributes are the animation. Every layer the
+    stage uses is asked for its sample times (``Sdf.Layer.ListAllTimeSamples``,
+    in that layer's own time codes, so a layer offset on a reference is not
+    applied).
+
+    Returns:
+        ``has_animation`` (an authored range or samples spanning more than one
+        time), ``authored_time_range`` (the root layer sets a start/end) and
+        ``time_sample_range`` (``[first, last]`` sample time, or None when
+        nothing is sampled).
+    """
+    authored = bool(stage.HasAuthoredTimeCodeRange())
+    first: Optional[float] = None
+    last: Optional[float] = None
+    for layer in stage.GetUsedLayers():
+        times = layer.ListAllTimeSamples()
+        if times:
+            low, high = min(times), max(times)
+            first = low if first is None else min(first, low)
+            last = high if last is None else max(last, high)
+    sampled = [float(first), float(last)] if first is not None else None
+    ranged = authored and stage.GetEndTimeCode() > stage.GetStartTimeCode()
+    # Samples at a single time are a pose, not motion: they need a span.
+    moving = sampled is not None and sampled[1] > sampled[0]
+    return {
+        "has_animation": ranged or moving,
+        "authored_time_range": authored,
+        "time_sample_range": sampled,
+    }
 
 
 _SPECIFIERS = {
@@ -405,9 +443,11 @@ class USDReader(LoggerMixin):
             session_layer = stage.GetSessionLayer()
             session_layer_path = session_layer.identifier if session_layer else None
 
-            # Layer stack, strongest first
+            # The file's layer stack, strongest first: the root layer and its
+            # sublayers. The session layer is the reader's scratch space, not
+            # part of the file, so it is not counted.
             layers = []
-            for layer in stage.GetLayerStack():
+            for layer in stage.GetLayerStack(includeSessionLayers=False):
                 layer_info = USDLayerInfo(
                     identifier=layer.identifier,
                     display_name=layer.GetDisplayName(),
@@ -450,7 +490,8 @@ class USDReader(LoggerMixin):
                 frame_rate=stage.GetFramesPerSecond(),
                 prim_count=prim_count,
                 root_prims=root_prims,
-                stage_variables=stage_variables
+                stage_variables=stage_variables,
+                **animation_range(stage),
             )
 
             self.logger.debug(f"Extracted stage info: {prim_count} prims, {len(layers)} layers")

@@ -71,11 +71,47 @@ No running application needed. File arguments must be inside the sandbox
   depth-first (path, type, depth, child count, API schemas), paged with
   `max_results`/`offset`. `include_properties` adds each prim's authored
   attributes and relationship targets, so a whole robot reads in one call.
+- **Meshes.** `get_mesh_info` is computed with numpy over whole arrays (a
+  million-vertex mesh in about 0.3 s). It reports normals from
+  `primvars:normals` or `normals` (`normals_source`), `uv_sets`, and the
+  materials `UsdShade.MaterialBindingAPI` resolves: the mesh's, then each
+  `materialBind` subset's (also on the subset entry), plus a
+  `physics_material` that carries `PhysicsMaterialAPI`. `surface_area`, `volume` and
+  `bbox` are in the mesh's own space; `volume` is null unless the mesh is
+  closed, `surface_area` null for invalid topology, and `bbox` null without
+  points. Face areas use Newell's method, exact for planar faces, concave
+  ones included. Faces listed in `holeIndices` add no area and leave their
+  edges open. `time_code` reads a deforming mesh, and `points_time_samples`
+  says whether it deforms. A mesh whose points or topology exist only as
+  time samples has nothing to measure at the default time: it comes back
+  `measured: false`, with null topology and geometry (not invalid), its
+  `sampled_time_range` and a `note`. Subset indices are summarised
+  (`index_count` plus the first 16).
+- **Summaries.** `summarize_scene` reports:
+  - `scene_size_meters` next to `scene_size`;
+  - `has_animation` from an authored time range or time samples spanning
+    more than one time (`time_sample_range`), with `duration_seconds` (time
+    codes divided by `timeCodesPerSecond`);
+  - `warnings` for layers whose authored `upAxis` or `metersPerUnit` differs
+    from the stage's (USD rescales and reorients nothing), one entry per
+    mismatch and value with `layer_count` and up to 5 example `layers`;
+    at most 10 groups, then a `MoreUnitMismatches` count;
+  - `materials`, `root_prims` and their counts;
+  - `(typeless)` as the type key of untyped prims.
+
+  Instanced meshes count once per instance and are measured once. Mesh
+  `total_surface_area` and `total_volume` sum each mesh in its own space,
+  before transforms. A deforming mesh with time-sampled points is measured
+  at its first sample and counted in `meshes_measured_at_first_sample`.
+  `layer_count` (here and in `load_usd_file`) counts the file's layer stack,
+  not the session layer, and `load_usd_file`'s `has_animation` follows the
+  same rule as the summary.
 - **JSON values.** Vectors are lists, quaternions `[w, x, y, z]`, matrices
   lists of rows, asset paths their authored string.
 - **Lookups.** A `stage_id` that is not loaded, or a prim path with no prim,
   is a `NotFoundError`; a relative, malformed or property path is a
-  `ValidationError`.
+  `ValidationError` with `details.code` `InvalidPrimPath`, as the edit tools
+  report it.
 
 `validate_usd_file` opens the file with pxr, as `load_usd_file` does, and
 keeps no stage. `can_read` says whether pxr opened it (so whether
@@ -874,7 +910,34 @@ Behaviour worth knowing:
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
   View, so its captures are renders. The per-mode table is in
-  [blender-attachment.md](blender-attachment.md#capture-feedback).
+  [blender-attachment.md](blender-attachment.md#capture-feedback). `camera_name`
+  captures through another camera without changing the scene camera or the
+  view. `capture_blender_viewport_sequence` writes JPEG files and returns their
+  paths, at most `max_frames` (50, at most 100) per call and no new frame after
+  10 s, with `next_start_frame` to continue.
+- `get_blender_viewport_info` reports, besides the render settings, `view3d`:
+  the attached window's largest 3D View (the one captures use) with its
+  `view_matrix` (world to view), `eye_location`, `view_perspective`, `lens`,
+  `clip_start`/`clip_end`, `shading_type` and, for a camera view,
+  `view_camera`. Without an editor window (embedded `bpy`, `blender -b`) or a 3D
+  View it is `null`, and `view3d_unavailable_reason` says which.
+- `import_blender_file` checks the files an import would read besides the one
+  named against `security.allowed_paths`, where Blender's importer looks for
+  them: a glTF's buffers and images (also in a GLB's JSON), an OBJ's MTL
+  libraries and their texture maps, an FBX's textures, and a USD file's
+  sublayers, references, payloads and asset paths such as textures, following
+  the layers inside the sandbox. An existing file outside the sandbox is refused
+  with `SandboxError` before anything is imported; `details.references_outside`
+  lists those files and `details.referenced_by` the imported file. A reference to
+  a missing file reads nothing and passes. The check follows the importers'
+  fallbacks: an FBX texture's case-insensitive match (Blender's
+  `resolve_ncase`) and its name when it stores no path, an MTL texture's base
+  name beside the MTL, and USD's resolver search paths. The FBX importer's
+  recursive image search (`use_image_search`), which walked the texture's
+  folder and found a same-named image outside the sandbox, is switched off
+  while the sandbox is on, so an FBX texture must be at the path it stores or
+  beside the FBX. USD files are read through pxr, which Blender bundles; without
+  pxr a binary USD file, or a text one that composes other layers, is refused.
 - `set_blender_camera_view` and `get_blender_camera_info` work in world space:
   `location` and an XYZ Euler `rotation_euler` in radians, whatever the
   camera's parent and rotation mode (glTF imports store quaternions).
@@ -1268,6 +1331,59 @@ Behaviour worth knowing:
   rigid body world is refused rather than marked baked with no frames. The bake
   runs on Blender's main thread, stepping every frame, and the scene returns to
   its current frame afterwards.
+- `setup_blender_rigid_body` checks every argument before it changes anything:
+  Blender's body types and collision shapes (COMPOUND included), and its ranges
+  (mass at least 0.001, friction 0 or more, restitution and damping 0-1).
+  Blender itself stored a mass of -5, and the body fell through the ground. It
+  needs a mesh object, where Blender's operator only said `poll() failed`. A
+  failure removes the rigid body or world it added, or restores an existing
+  body's settings, and the user's selection never changes: the operator runs
+  under a context override. `kinematic: true` makes an animated body that
+  follows its keys and pushes simulated ones. `collision_margin`,
+  `collision_collections`, `use_deactivation` and `start_deactivated` change
+  only when given.
+- `add_blender_rigid_body_constraint` needs two different rigid bodies and
+  checks the type and its settings first; a failure leaves no empty behind. The
+  constraint empty is made directly rather than with `empty_add`, which follows
+  the editor's "Align: View" preference and selects the empty. It sits at
+  `location`, midway between the two objects' origins by default. Its local axes
+  are the constraint's: a HINGE turns about local Z, a SLIDER or PISTON moves
+  along local X, a MOTOR drives along and about local X, and GENERIC limits apply
+  per local axis. `axis` turns the empty so that axis points along a world
+  direction. Without it the empty is unrotated, so a HINGE turns about world Z,
+  like a door; a pendulum swinging in the XZ plane needs `axis: [0, 1, 0]`.
+  `limits`, `springs` (GENERIC_SPRING), the `motor_*` settings (MOTOR) and
+  `breaking_threshold` configure it. A MOTOR drives object1 relative to
+  object2: with object1 the anchor, a positive velocity turns or moves object2
+  the negative way along the axis (on Blender 5.0.1, -1.91 rad in 23 frames at
+  +2 rad/s, and -0.91 m at +1 m/s); swap the objects or the sign to reverse it.
+  A MOTOR without a velocity drives nothing, and the reply warns about it. The
+  empty, like a force field, goes where `create_blender_object` puts objects:
+  the active collection, or the scene's collection when the active one (or one
+  holding it) is excluded, hidden or disabled in viewports, or is linked from a
+  library; `warnings` (`warning` for a field) then says so. The reply and `get_blender_constraint_info`
+  report `pivot`, `axis`, `local_axes` (the directions the limits refer to) and
+  the settings.
+- `add_blender_force_field` adds the field with `align: WORLD` and an explicit
+  rotation, so the editor's Align preference no longer turns it toward the 3D
+  View. `direction` points the field's local +Z (where WIND blows, the axis
+  VORTEX turns about, a PLANE's normal), and the reply reports it with
+  `rotation_euler`. The types are Blender's: MAGNET (MAGNETIC is accepted for
+  it), TEXTURE, GUIDE, BOID and FLUID (which Blender then reports as FLUID_FLOW)
+  included. Shape, flow, falloff, maximum distance and noise can be set too.
+  `get_blender_force_field_info` refuses an object whose field type is NONE,
+  such as a collider, whose collision settings live in the same place.
+- `bake_blender_simulation` refuses more than 20 000 frames or 400 000
+  body-frames (frames x simulated objects) unless `allow_long_bake: true`. That
+  is up to about 16 s on Blender 5.0.1, where 1000 bodies x 1000 frames took
+  29.4 s and 401 cubes x 900 frames 14.8 s headless (1000 frames took 8.7 s in
+  the GUI).
+  A bake runs on Blender's main thread and cannot be stopped once it starts.
+  Past the attached-mode client timeout (`BLENDER__CONNECTION_TIMEOUT`, 30 s by
+  default), the call reports a timeout while Blender keeps baking, and the next
+  calls wait behind it and can time out too. Raise the timeout before allowing
+  a long bake; `get_blender_rigid_body_world` shows when it has finished
+  (`rigid_body_cache.is_baked`).
 - `get_blender_physics_state` steps an unbaked simulation from the cache start
   to the current frame before reading the pose (`step_simulation`, default
   true, at most 400 000 frames x bodies), as playback would: an unbaked
