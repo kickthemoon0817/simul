@@ -256,7 +256,8 @@ outside the sandbox fails the call with `SandboxError`;
 other non-layer file), and `layer` when the post-composition check caught
 it. Only layers that pass are opened, so a refused file is never read.
 After composition, the layers the stage uses by then are checked again as a
-backstop. That check cannot see value clips: when a clip set authors a
+backstop, judged afresh so a file swapped on disk between the two passes is
+caught. That check cannot see value clips: when a clip set authors a
 `manifestAssetPath`, pxr opens its clip layers only on the first read of a
 time-varying value, after the load. Clips therefore rely on the first pass,
 which checks every clip and manifest path before anything opens. Each load
