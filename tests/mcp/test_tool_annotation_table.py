@@ -173,7 +173,7 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "get_unreal_material_info": (RO, True, True),
     "get_unreal_simulation_status": (RO, True, True),
     "get_unreal_viewport_info": (RO, True, True),
-    "import_unreal_usd": (RW, False, True),
+    "import_unreal_usd": (DESTRUCTIVE, False, True),  # replace_existing replaces assets and actors
     "list_unreal_actors": (RO, True, True),
     "list_unreal_instances": (RO, True, True),
     "ping_unreal": (RO, True, True),

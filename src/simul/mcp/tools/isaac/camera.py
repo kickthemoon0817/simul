@@ -24,8 +24,10 @@ class CameraMixin:
     @tool_meta(
         name="get_isaac_camera_info",
         description=(
-            "Get camera properties (focal length, clipping range, resolution) for the "
-            "active or specified camera."
+            "Get camera properties (pose, focal length, apertures, clipping range, "
+            "projection) for the active or specified camera. resolution is the active "
+            "viewport's when that viewport looks through this camera, else null: a USD "
+            "camera has no resolution of its own."
         ),
         read_only=True,
         idempotent=True,
@@ -40,7 +42,9 @@ class CameraMixin:
             camera_path: USD path to a camera prim. None uses active viewport camera.
 
         Returns:
-            Dict with camera position, target, focal length, clipping range, etc.
+            Dict with camera position, rotation, focal length, apertures,
+            clipping range, projection, and ``resolution`` (the active
+            viewport's when it looks through this camera, else None).
         """
         _cam_path = _pyval(camera_path or "")
         script = _compose_script(
@@ -85,6 +89,17 @@ class CameraMixin:
                     # Scale factored out first: ExtractRotation() on a camera
                     # under a scaled parent reads the wrong orientation.
                     world_pose = _decompose_matrix(world_xform)
+                    # A USD camera has no resolution of its own: it renders at
+                    # the resolution of whatever viewport or render product
+                    # uses it. The active viewport's is the one known here.
+                    resolution = None
+                    try:
+                        import omni.kit.viewport.utility as vp_util
+                        active = vp_util.get_active_viewport()
+                        if active and str(active.camera_path) == str(cam_path):
+                            resolution = [int(v) for v in active.resolution]
+                    except Exception:
+                        pass
                     print(json.dumps({{
                         "camera_path": str(cam_path),
                         "position": list(pos),
@@ -94,12 +109,16 @@ class CameraMixin:
                         "vertical_aperture": float(cam.GetVerticalApertureAttr().Get()),
                         "clipping_range": [float(x) for x in cam.GetClippingRangeAttr().Get()],
                         "projection": str(cam.GetProjectionAttr().Get()),
+                        "resolution": resolution,
+                        "resolution_source": "active_viewport" if resolution else None,
                     }}))
                 elif not cam_path:
                     print(json.dumps({{"error": "No camera found in scene"}}))
             """,
         )
-        return await self._execute_json_script(script)
+        # A camera mounted on a simulated robot moves with it; USD stops
+        # following under GPU physics.
+        return await self._execute_json_script(script, annotations=("usd_readback",))
 
     @tool_meta(
         name="list_isaac_cameras",

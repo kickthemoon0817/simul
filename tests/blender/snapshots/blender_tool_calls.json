@@ -1111,6 +1111,72 @@
         }
       }
     },
+    "apply_blender_modifier": {
+      "minimal": {
+        "arguments": {"object_name": "Cube", "modifier_name": "Decimate"},
+        "session_calls": [
+          {
+            "method": "apply_modifier",
+            "arguments": {"object_name": "'Cube'", "modifier_name": "'Decimate'"}
+          }
+        ],
+        "response": {"checked_against": "BlenderApplyModifierResponse"},
+        "usage": [{"tool": "apply_blender_modifier", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}, "modifier_name": "Decimate"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "object_name: Input should be a valid string",
+          "error_type": "ValidationError",
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type",
+                "input": {"bogus": 1}
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}, "modifier_name": "Decimate"}
+          }
+        }
+      }
+    },
+    "remove_blender_modifier": {
+      "minimal": {
+        "arguments": {"object_name": "Cube", "modifier_name": "Decimate"},
+        "session_calls": [
+          {
+            "method": "remove_modifier",
+            "arguments": {"object_name": "'Cube'", "modifier_name": "'Decimate'"}
+          }
+        ],
+        "response": {"checked_against": "BlenderRemoveModifierResponse"},
+        "usage": [{"tool": "remove_blender_modifier", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}, "modifier_name": "Decimate"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "object_name: Input should be a valid string",
+          "error_type": "ValidationError",
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type",
+                "input": {"bogus": 1}
+              }
+            ],
+            "input": {"object_name": {"bogus": 1}, "modifier_name": "Decimate"}
+          }
+        }
+      }
+    },
     "set_blender_light_params": {
       "minimal": {
         "arguments": {"light_name": "Light"},
@@ -1956,7 +2022,23 @@
     "get_blender_physics_state": {
       "minimal": {
         "arguments": {"object_name": "Cube"},
-        "session_calls": [{"method": "get_physics_state", "arguments": {"object_name": "'Cube'"}}],
+        "session_calls": [
+          {
+            "method": "get_physics_state",
+            "arguments": {"object_name": "'Cube'", "step_simulation": "True"}
+          }
+        ],
+        "response": {"checked_against": "BlenderGetPhysicsStateResponse"},
+        "usage": [{"tool": "get_blender_physics_state", "success": false}]
+      },
+      "full": {
+        "arguments": {"object_name": "Cube", "step_simulation": false},
+        "session_calls": [
+          {
+            "method": "get_physics_state",
+            "arguments": {"object_name": "'Cube'", "step_simulation": "False"}
+          }
+        ],
         "response": {"checked_against": "BlenderGetPhysicsStateResponse"},
         "usage": [{"tool": "get_blender_physics_state", "success": false}]
       },
@@ -1976,7 +2058,7 @@
                 "input": {"bogus": 1}
               }
             ],
-            "input": {"object_name": {"bogus": 1}}
+            "input": {"object_name": {"bogus": 1}, "step_simulation": true}
           }
         }
       }
@@ -2028,7 +2110,23 @@
     "bake_blender_simulation": {
       "minimal": {
         "arguments": {"frame_start": 1, "frame_end": 50},
-        "session_calls": [{"method": "bake_simulation", "arguments": {"frame_start": "1", "frame_end": "50"}}],
+        "session_calls": [
+          {
+            "method": "bake_simulation",
+            "arguments": {"frame_start": "1", "frame_end": "50", "scope": "'rigid_body'"}
+          }
+        ],
+        "response": {"checked_against": "BlenderBakeSimulationResponse"},
+        "usage": [{"tool": "bake_blender_simulation", "success": false}]
+      },
+      "full": {
+        "arguments": {"frame_start": 1, "frame_end": 50, "scope": "all"},
+        "session_calls": [
+          {
+            "method": "bake_simulation",
+            "arguments": {"frame_start": "1", "frame_end": "50", "scope": "'all'"}
+          }
+        ],
         "response": {"checked_against": "BlenderBakeSimulationResponse"},
         "usage": [{"tool": "bake_blender_simulation", "success": false}]
       },
@@ -2048,7 +2146,7 @@
                 "input": {"bogus": 1}
               }
             ],
-            "input": {"frame_start": {"bogus": 1}, "frame_end": 50}
+            "input": {"frame_start": {"bogus": 1}, "frame_end": 50, "scope": "rigid_body"}
           }
         }
       }
@@ -2056,9 +2154,128 @@
     "free_blender_bake": {
       "minimal": {
         "arguments": {},
-        "session_calls": [{"method": "free_bake", "arguments": {}}],
-        "response": {"success": true, "error": null},
-        "usage": [{"tool": "free_blender_bake", "success": true}]
+        "session_calls": [{"method": "free_bake", "arguments": {"scope": "'rigid_body'"}}],
+        "response": {"checked_against": "BlenderFreeBakeResponse"},
+        "usage": [{"tool": "free_blender_bake", "success": false}]
+      },
+      "full": {
+        "arguments": {"scope": "all"},
+        "session_calls": [{"method": "free_bake", "arguments": {"scope": "'all'"}}],
+        "response": {"checked_against": "BlenderFreeBakeResponse"},
+        "usage": [{"tool": "free_blender_bake", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"scope": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "scope: Input should be 'rigid_body' or 'all'",
+          "error_type": "ValidationError",
+          "details": {
+            "errors": [
+              {
+                "field": "scope",
+                "message": "Input should be 'rigid_body' or 'all'",
+                "type": "literal_error",
+                "constraint": {"expected": "'rigid_body' or 'all'"},
+                "input": {"bogus": 1}
+              }
+            ],
+            "input": {"scope": {"bogus": 1}}
+          }
+        }
+      }
+    },
+    "get_blender_rigid_body_world": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [{"method": "get_rigid_body_world", "arguments": {}}],
+        "response": {"checked_against": "BlenderRigidBodyWorldResponse"},
+        "usage": [{"tool": "get_blender_rigid_body_world", "success": false}]
+      }
+    },
+    "set_blender_rigid_body_world": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [
+          {
+            "method": "set_rigid_body_world",
+            "arguments": {
+              "enabled": "None",
+              "gravity": "None",
+              "use_gravity": "None",
+              "substeps_per_frame": "None",
+              "solver_iterations": "None",
+              "time_scale": "None",
+              "use_split_impulse": "None",
+              "cache_frame_start": "None",
+              "cache_frame_end": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderRigidBodyWorldResponse"},
+        "usage": [{"tool": "set_blender_rigid_body_world", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "enabled": false,
+          "gravity": [0, 0, -1.62],
+          "use_gravity": false,
+          "substeps_per_frame": 20,
+          "solver_iterations": 30,
+          "time_scale": 0.5,
+          "use_split_impulse": true,
+          "cache_frame_start": 10,
+          "cache_frame_end": 400
+        },
+        "session_calls": [
+          {
+            "method": "set_rigid_body_world",
+            "arguments": {
+              "enabled": "False",
+              "gravity": "[0.0, 0.0, -1.62]",
+              "use_gravity": "False",
+              "substeps_per_frame": "20",
+              "solver_iterations": "30",
+              "time_scale": "0.5",
+              "use_split_impulse": "True",
+              "cache_frame_start": "10",
+              "cache_frame_end": "400"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderRigidBodyWorldResponse"},
+        "usage": [{"tool": "set_blender_rigid_body_world", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"enabled": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "enabled: Input should be a valid boolean",
+          "error_type": "ValidationError",
+          "details": {
+            "errors": [
+              {
+                "field": "enabled",
+                "message": "Input should be a valid boolean",
+                "type": "bool_type",
+                "input": {"bogus": 1}
+              }
+            ],
+            "input": {
+              "enabled": {"bogus": 1},
+              "gravity": null,
+              "use_gravity": null,
+              "substeps_per_frame": null,
+              "solver_iterations": null,
+              "time_scale": null,
+              "use_split_impulse": null,
+              "cache_frame_start": null,
+              "cache_frame_end": null
+            }
+          }
+        }
       }
     },
     "execute_blender_script": {
@@ -2172,6 +2389,70 @@
               "faces": [],
               "location": null,
               "collection_name": null
+            }
+          }
+        }
+      }
+    },
+    "clean_blender_mesh": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [
+          {
+            "method": "clean_mesh",
+            "arguments": {
+              "object_name": "'Cube'",
+              "merge_distance": "None",
+              "dissolve_degenerate_distance": "None",
+              "recalculate_normals": "False"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderCleanMeshResponse"},
+        "usage": [{"tool": "clean_blender_mesh", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_name": "Cube",
+          "merge_distance": 0.001,
+          "dissolve_degenerate_distance": 0.0001,
+          "recalculate_normals": true
+        },
+        "session_calls": [
+          {
+            "method": "clean_mesh",
+            "arguments": {
+              "object_name": "'Cube'",
+              "merge_distance": "0.001",
+              "dissolve_degenerate_distance": "0.0001",
+              "recalculate_normals": "True"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderCleanMeshResponse"},
+        "usage": [{"tool": "clean_blender_mesh", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "object_name: Input should be a valid string",
+          "error_type": "ValidationError",
+          "details": {
+            "errors": [
+              {
+                "field": "object_name",
+                "message": "Input should be a valid string",
+                "type": "string_type",
+                "input": {"bogus": 1}
+              }
+            ],
+            "input": {
+              "object_name": {"bogus": 1},
+              "merge_distance": null,
+              "dissolve_degenerate_distance": null,
+              "recalculate_normals": false
             }
           }
         }
@@ -2344,7 +2625,10 @@
               "file_path": "'/tmp/asset.usd'",
               "object_names": "None",
               "embed_metadata": "True",
-              "validate_before_export": "True"
+              "validate_before_export": "True",
+              "include_children": "True",
+              "include_lights_and_cameras": "False",
+              "force": "False"
             }
           }
         ],
@@ -2356,7 +2640,10 @@
           "file_path": "/tmp/asset.usd",
           "object_names": ["Cube"],
           "embed_metadata": false,
-          "validate_before_export": false
+          "validate_before_export": false,
+          "include_children": false,
+          "include_lights_and_cameras": true,
+          "force": true
         },
         "session_calls": [
           {
@@ -2365,7 +2652,10 @@
               "file_path": "'/tmp/asset.usd'",
               "object_names": "['Cube']",
               "embed_metadata": "False",
-              "validate_before_export": "False"
+              "validate_before_export": "False",
+              "include_children": "False",
+              "include_lights_and_cameras": "True",
+              "force": "True"
             }
           }
         ],
@@ -2392,7 +2682,10 @@
               "file_path": {"bogus": 1},
               "object_names": null,
               "embed_metadata": true,
-              "validate_before_export": true
+              "validate_before_export": true,
+              "include_children": true,
+              "include_lights_and_cameras": false,
+              "force": false
             }
           }
         }
