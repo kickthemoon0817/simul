@@ -71,6 +71,32 @@ No running application needed. File arguments must be inside the sandbox
   depth-first (path, type, depth, child count, API schemas), paged with
   `max_results`/`offset`. `include_properties` adds each prim's authored
   attributes and relationship targets, so a whole robot reads in one call.
+- **Meshes.** `get_mesh_info` is computed with numpy over whole arrays (a
+  million-vertex mesh in about 0.3 s). It reports normals from
+  `primvars:normals` or `normals` (`normals_source`), `uv_sets`, and the
+  materials `UsdShade.MaterialBindingAPI` resolves: the mesh's, then each
+  `materialBind` subset's (also on the subset entry), plus a
+  `physics_material` that carries `PhysicsMaterialAPI`. `surface_area`, `volume` and
+  `bbox` are in the mesh's own space; `volume` is null unless the mesh is
+  closed, `surface_area` null for invalid topology, and `bbox` null without
+  points. `time_code` reads a deforming mesh, and `points_time_samples` says
+  whether it deforms. Subset indices are summarised (`index_count` plus the
+  first 16).
+- **Summaries.** `summarize_scene` reports:
+  - `scene_size_meters` next to `scene_size`;
+  - `has_animation` from an authored time range or any time samples
+    (`time_sample_range`), with `duration_seconds` (time codes divided by
+    `timeCodesPerSecond`);
+  - a `warnings` entry for each layer whose authored `upAxis` or
+    `metersPerUnit` differs from the stage's (USD rescales and reorients
+    nothing);
+  - `materials`, `root_prims` and their counts;
+  - `(typeless)` as the type key of untyped prims.
+
+  Instanced meshes count once per instance and are measured once.
+  `layer_count` (here and in `load_usd_file`) counts the file's layer stack,
+  not the session layer, and `load_usd_file`'s `has_animation` follows the
+  same rule as the summary.
 - **JSON values.** Vectors are lists, quaternions `[w, x, y, z]`, matrices
   lists of rows, asset paths their authored string.
 - **Lookups.** A `stage_id` that is not loaded, or a prim path with no prim,

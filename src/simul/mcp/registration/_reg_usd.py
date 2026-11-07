@@ -118,7 +118,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 frame_rate=stage_info.frame_rate,
                 total_prims=stage_info.prim_count,
                 root_prims=stage_info.root_prims,
-                has_animation=stage_info.start_time_code != stage_info.end_time_code,
+                has_animation=stage_info.has_animation,
                 layer_count=len(stage_info.layers),
                 default_prim=stage_info.default_prim_path,
             ).model_dump()
@@ -451,20 +451,34 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="get_mesh_info",
-        description="Get mesh information for a mesh prim.",
+        description=(
+            "Get statistics for a Mesh prim: vertex, face and face-vertex counts; "
+            "normals (primvars:normals or normals), UV sets, colours, tangents; "
+            "topology validity, watertightness, surface area and (closed meshes "
+            "only) volume, and the points' bounds, all in the mesh's own "
+            "space; the materials UsdShade resolves for the mesh and for each "
+            "materialBind geometry subset, and its physics material. Computed with "
+            "numpy, so a million-vertex mesh takes well under a second. time_code "
+            "reads a deforming mesh's points; points_time_samples says whether it "
+            "deforms."
+        ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
         output_schema=None,
     )
     @with_param_descriptions()
-    async def get_mesh_info(stage_id: str, prim_path: str) -> ToolResult:
+    async def get_mesh_info(
+        stage_id: str, prim_path: str, time_code: Optional[float] = None
+    ) -> ToolResult:
         """
         Get mesh information for a mesh prim.
 
         Args:
             stage_id: Stage identifier
-            prim_path: Path to the mesh prim
+            prim_path: Absolute path to the Mesh prim
+            time_code: Time code to read points and topology at; None for the
+                default (unanimated) value
 
         Returns:
             Mesh statistics or error
@@ -472,18 +486,27 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
         def _mesh_info(session: "HeadlessUSDSession") -> Dict[str, Any]:
             input_data = server._validate_input(
-                MeshInfoRequest, stage_id=stage_id, prim_path=prim_path
+                MeshInfoRequest, stage_id=stage_id, prim_path=prim_path, time_code=time_code
             )
             if isinstance(input_data, dict):
                 return input_data
 
-            mesh_info = session.get_mesh_info(input_data.stage_id, input_data.prim_path)
-            if not mesh_info:
+            from ...usd._pxr import UsdGeom
+            from ...usd.lookup import lookup_prim
+            from ...usd.mesh_ops import MeshOperations, mesh_info_to_dict
+
+            stage = _loaded_stage(session, input_data.stage_id)
+            prim = lookup_prim(stage, input_data.prim_path)
+            if not prim.IsA(UsdGeom.Mesh):
                 return ErrorResponse(
-                    error=f"Mesh not found: {input_data.prim_path}",
+                    error=(
+                        f"Mesh not found: {input_data.prim_path} is a "
+                        f"{prim.GetTypeName() or 'typeless prim'}, not a Mesh"
+                    ),
                     error_type="NotFoundError",
                 ).model_dump()
-            return MeshInfo(**mesh_info).model_dump()
+            info = MeshOperations().get_mesh_statistics(prim, input_data.time_code)
+            return MeshInfo(**mesh_info_to_dict(info)).model_dump()
 
         return await server._exec_backend(
             "get_mesh_info",
@@ -491,7 +514,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "USD",
             MeshInfo,
             _mesh_info,
-            params={"stage_id": stage_id, "prim_path": prim_path},
+            params={"stage_id": stage_id, "prim_path": prim_path, "time_code": time_code},
         )
 
     @server.mcp.tool(
@@ -821,7 +844,17 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="summarize_scene",
-        description="Generate a summary of a USD scene.",
+        description=(
+            "Summarise a USD stage in one call: prim counts by type (instance "
+            "proxies included; '(typeless)' for prims without a type), the scene "
+            "bounds and size in stage units and in metres, mesh totals (vertices, "
+            "faces, normals, UVs, closed meshes, surface area, volume; instanced "
+            "meshes counted per instance), materials, root prims, and animation: "
+            "detected from time samples even without an authored time range, with "
+            "its duration in seconds. warnings flags layers whose upAxis or "
+            "metersPerUnit differs from the stage's (USD does not rescale them). "
+            "format text adds a short digest."
+        ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
@@ -879,9 +912,15 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                     "scene_bbox": summary.scene_bbox,
                     "scene_center": summary.scene_center,
                     "scene_size": summary.scene_size,
+                    "scene_size_meters": summary.scene_size_meters,
                     "mesh_statistics": summary.mesh_statistics,
                     "hierarchy_depth": summary.hierarchy_depth,
                     "animation_info": summary.animation_info,
+                    "root_prim_count": summary.root_prim_count,
+                    "root_prims": summary.root_prim_paths,
+                    "material_count": len(summary.materials),
+                    "materials": [material.path for material in summary.materials[:50]],
+                    "warnings": summary.warnings,
                 },
                 digest=digest,
             ).model_dump()

@@ -129,7 +129,11 @@ mcp__simul__get_mesh_info
   prim_path: "/World/Robot/base_link/visuals/mesh"
 ```
 
-Returns: `{ "vertex_count": 2048, "face_count": 1024, "has_normals": true, "uv_sets": ["st"], "extent": [...] }`
+Returns: `{ "vertex_count": 2048, "face_count": 1024, "has_normals": true, "normals_source": "primvars:normals", "uv_sets": ["st"], "is_closed": true, "surface_area": ..., "volume": ..., "bbox": {...}, "materials": [...], "physics_material": ..., "subsets": [...] }`
+
+- `materials` lists the material bound to the mesh, then those bound to its `materialBind` geometry subsets; each such subset also carries its `material`.
+- `volume` is null unless the mesh is closed. Area, volume and bounds are in the mesh's own space, before transforms.
+- Pass `time_code` for a deforming mesh: `points_time_samples > 0` means its points are animated, and at the default time it may have none.
 
 Use this to assess mesh complexity before simulation (high-poly meshes should use convex decomposition for collision).
 
@@ -161,7 +165,11 @@ mcp__simul__summarize_scene
 
 Use `format: "json"` for structured output when parsing programmatically. Use `format: "text"` for human-readable summaries.
 
-`include_meshes: true` adds per-mesh vertex/face counts to the summary. Set to `false` for faster results on large scenes.
+`include_meshes: true` adds mesh totals (vertices, faces, normals, UVs, closed meshes, area, volume) to the summary; it is fast even on large scenes.
+
+- `scene_size_meters` converts the bounds with the stage's `metersPerUnit`.
+- `animation_info.duration_seconds` is the animated span in seconds. Animation is detected from time samples too, when no time range is authored.
+- `warnings` flags referenced or sublayered files whose `upAxis` or `metersPerUnit` differs from the stage's: such an asset shows up scaled or rotated, because USD does not convert it.
 
 ### 8. Modify the USD File
 
