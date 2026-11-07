@@ -57,7 +57,7 @@ from ..utils.timing import RateLimiter
 from .backends import ALL_BACKEND_NAMES, BACKENDS, NOT_SELECTED, backend_skip_reason
 from .registration import register_stats_tools
 from .registration._helpers import apply_success_from_error
-from .result_budget import encode_result_budget
+from .result_budget import encode_result_budget, tool_result
 from .schemas.common import ErrorResponse
 from .session_manager import (
     CLAIM_TTL_SECONDS,
@@ -1336,7 +1336,9 @@ class SimulMCPServer(LoggerMixin):
                     payload.get("success") is not False and not error,
                     str(error) if error else None,
                 )
-            return self._as_text_result(payload)
+            # The budget pages a paged tool's result by its declaration.
+            with tool_result(tool_name):
+                return self._as_text_result(payload)
         finally:
             # One place for every way a call can end before it starts. A
             # cancelled wait for the instance lock raises CancelledError out

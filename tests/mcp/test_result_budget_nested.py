@@ -1,12 +1,10 @@
-"""The result budget reaches nested fields, keeps paging truthful and emits valid JSON.
+"""The result budget reaches nested fields and emits valid JSON.
 
-Three ways a result used to slip past the budget:
+Two ways a result used to slip past the budget (paging is in
+``test_result_budget_paging.py``):
 
 - the hard limit only replaced top-level strings, so a prim's million-point
   attribute (nested under ``attributes``) crossed the wire whole, 51 MB;
-- trimming a page left ``next_offset`` and ``count`` describing the page that
-  was sent, so a client following ``next_offset`` skipped every item the trim
-  dropped (630 of 1000 on one Isaac listing);
 - ``json.dumps`` writes ``inf`` as the bare token ``Infinity``, which strict
   JSON parsers reject (``physics:breakForce`` defaults to it).
 """
@@ -160,89 +158,3 @@ def test_finite_payload_encoding_is_unchanged() -> None:
     payload = {"success": True, "values": [1.5, -2.0, 0.0], "name": "ok"}
 
     assert encode_result_budget(payload) == json.dumps(payload, default=str)
-
-
-# ---------------------------------------------------------------------------
-# Paging stays truthful when the budget trims a page
-# ---------------------------------------------------------------------------
-
-
-def _page(entries: List[Dict[str, Any]], offset: int, limit: int) -> Dict[str, Any]:
-    """An Isaac-style paged listing (count, total, offset, next_offset)."""
-    page = entries[offset:offset + limit]
-    truncated = offset + len(page) < len(entries)
-    return {
-        "count": len(page),
-        "total": len(entries),
-        "offset": offset,
-        "applied_limit": limit,
-        "truncated": truncated,
-        "next_offset": offset + len(page) if truncated else None,
-        "prims": page,
-    }
-
-
-def test_trimmed_page_points_next_offset_past_the_items_kept() -> None:
-    """A 1000-item page cut to fit used to keep next_offset 1000 (Isaac audit F13)."""
-    page = apply_result_budget(_page(_prims(3000), offset=1000, limit=1000))
-
-    kept = len(page["prims"])
-    assert 0 < kept < 1000
-    assert page["next_offset"] == 1000 + kept
-    assert page["count"] == kept
-    assert page["total"] == 3000
-    assert page["truncated"] is True
-
-
-def test_following_next_offset_through_trimmed_pages_reaches_every_item() -> None:
-    entries = _prims(2500)
-    seen: List[str] = []
-    offset: Any = 0
-    while offset is not None:
-        page = apply_result_budget(_page(entries, offset=offset, limit=1000))
-        seen.extend(prim["path"] for prim in page["prims"])
-        offset = page["next_offset"]
-
-    assert seen == [prim["path"] for prim in entries]
-
-
-def test_last_page_cut_by_the_budget_gains_a_next_offset() -> None:
-    """The final page said next_offset None; once cut, the rest must be reachable."""
-    page = apply_result_budget(_page(_prims(1000), offset=0, limit=1000))
-
-    assert page["next_offset"] == len(page["prims"]) < 1000
-
-
-def test_grand_total_count_is_not_rewritten() -> None:
-    """``count`` that is not the page's length (a match total) stays as sent."""
-    payload = {"count": 9000, "offset": 0, "next_offset": 5000, "results": _prims(5000)}
-
-    page = apply_result_budget(payload)
-
-    assert page["count"] == 9000
-    assert page["next_offset"] == len(page["results"])
-
-
-def test_parallel_page_lists_resume_after_the_cut() -> None:
-    """list_isaac_physics_objects pages three lists with one offset."""
-    payload = {
-        "offset": 0,
-        "applied_limit": 1000,
-        "truncated": True,
-        "next_offset": 1000,
-        "rigid_bodies": _prims(20),
-        "colliders": _prims(1000),
-        "joints": [],
-    }
-
-    page = apply_result_budget(payload)
-
-    assert page["truncation"]["field"] == "colliders"
-    assert page["next_offset"] == len(page["colliders"]) < 1000
-
-
-def test_unpaged_payload_gains_no_paging_fields() -> None:
-    page = apply_result_budget({"success": True, "prims": _prims(5000)})
-
-    assert "next_offset" not in page
-    assert "count" not in page

@@ -13,14 +13,29 @@ error type such as `NotRunning`, `RefusedOperation` or
 `UnsupportedOperation`.
 
 Results are strict JSON: a non-finite float is sent as the string
-`"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token. Each result
-is held to a 40 KB budget by trimming its largest top-level list, with
-`truncated` and a `truncation` notice. When that list is a page, its
-`next_offset` (and a `count` or `returned` that counted the page) are
-rewritten to match the items kept, so following `next_offset` skips
-nothing. Above a 400 KB hard limit the field carrying the excess is cut at
-any depth: a string becomes a `truncated_field` marker, and a list or
-mapping keeps its prefix and is named in `truncated_fields`.
+`"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token.
+
+Each result is held to a 40 KB budget, and a cut is always reported (`truncated`
+plus a notice).
+
+- **Paged tools.** A paged tool (one that takes an `offset` and returns
+  `next_offset`) has its page cut as a page. Every list the offset pages is
+  cut to the same number of entries, never fewer than one. Its `next_offset`
+  (and a `count` or `returned` that counted the page) is rewritten to continue
+  right after what was kept, and the `truncation` notice names the tool's own
+  offset and page-size parameters. Following `next_offset` therefore reaches
+  every entry once and always moves forward.
+- **Oversized entries.** An entry too large on its own is sent compacted to its
+  identifying and small fields (`truncated_item`, `dropped_keys`), so the next
+  page starts after it.
+- **Other lists.** Any other list cut to fit is listed in `truncated_fields` (or
+  in `truncation` when the tool does not page), with `next_offset: "unchanged"`
+  whenever the result is paged: its dropped entries will not come back on a
+  later page. The paged lists of each tool are declared in
+  `simul.mcp.paged_results`.
+- **Hard limit.** Above 400 KB, the field carrying the excess is cut at any
+  depth. A string becomes a `truncated_field` marker, and a list or mapping
+  keeps its prefix and is named in `truncated_fields`.
 
 ## Headless USD
 
