@@ -334,25 +334,40 @@
   {
    "name": "list_unreal_actors",
    "title": "List Unreal Actors",
-   "description": "List actors in the current Unreal Engine level with optional class and tag filters.",
+   "description": "List the current level's actors, one page at a time, with world transforms, tags and attachment (parent, children). Filter by class (optionally with subclasses), tag and label. total counts every match; a page stops at max_results or the response budget, and next_offset is where the next one starts.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "class_filter": {
       "default": "",
-      "description": "Filter by UClass name (empty string = no filter).",
+      "description": "Keep actors whose class has this name (StaticMeshActor, BP_Door_C) or path (/Script/Engine.StaticMeshActor); empty keeps every class.",
       "type": "string"
      },
      "tag_filter": {
       "default": "",
-      "description": "Filter by actor tag (empty string = no filter).",
+      "description": "Keep actors with this actor tag, ignoring case (empty string = no filter).",
       "type": "string"
      },
      "max_results": {
       "default": 200,
-      "description": "Maximum number of actors to return.",
+      "description": "Most actors in the page, 1 to 5000.",
       "type": "integer"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Matching actors to skip: the previous page's next_offset.",
+      "type": "integer"
+     },
+     "label_filter": {
+      "default": "",
+      "description": "Keep actors whose label contains this text, ignoring case (empty = no filter).",
+      "type": "string"
+     },
+     "include_subclasses": {
+      "default": false,
+      "description": "Also keep actors whose class derives from class_filter's: Light keeps PointLight, SpotLight and Blueprints derived from them.",
+      "type": "boolean"
      }
     }
    },
@@ -375,7 +390,7 @@
   {
    "name": "get_unreal_actor_info",
    "title": "Get Unreal Actor Info",
-   "description": "Get detailed information about a specific actor including transform, components, and tags. The path must name a live actor of the level open in the editor; a deleted actor, or one of a map that is not open, is not found, and no map is loaded to look for it.",
+   "description": "Get detailed information about a specific actor including transform, components, tags and attachment (parent and children). The path must name a live actor of the level open in the editor; a deleted actor, or one of a map that is not open, is not found, and no map is loaded to look for it.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -383,6 +398,54 @@
      "actor_path": {
       "description": "Full object path of the actor.",
       "type": "string"
+     }
+    },
+    "required": [
+     "actor_path"
+    ]
+   },
+   "execution": null,
+   "outputSchema": null,
+   "icons": null,
+   "annotations": {
+    "title": null,
+    "readOnlyHint": true,
+    "destructiveHint": null,
+    "idempotentHint": true,
+    "openWorldHint": null
+   },
+   "_meta": {
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "list_unreal_actor_components",
+   "title": "List Unreal Actor Components",
+   "description": "List an actor's components, one page at a time: class, root and editor-only flags, and for scene components the component they are attached to, world location, mobility and visibility; primitive components add world bounds (center, half-size, sphere radius).",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "actor_path": {
+      "description": "Full object path of the actor.",
+      "type": "string"
+     },
+     "class_filter": {
+      "default": "",
+      "description": "Keep components whose class has this name or path or derives from it (PrimitiveComponent keeps meshes, shapes and sprites); empty keeps all.",
+      "type": "string"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Components to skip: the previous page's next_offset.",
+      "type": "integer"
+     },
+     "max_results": {
+      "default": 200,
+      "description": "Most components in the page, 1 to 5000.",
+      "type": "integer"
      }
     },
     "required": [
@@ -692,7 +755,7 @@
   {
    "name": "set_unreal_camera_view",
    "title": "Set Unreal Camera View",
-   "description": "Set the editor viewport camera position and rotation.",
+   "description": "Set the editor viewport camera position and rotation and return the camera read back. Each axis of location within 4398046511104 cm (2^42) of the origin and pitch from -90 to 90 degrees, the furthest Unreal takes; a group left out keeps its value.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -790,7 +853,7 @@
   {
    "name": "focus_unreal_on_actor",
    "title": "Focus Unreal On Actor",
-   "description": "Focus the editor viewport camera on a specific actor and select it. With distance 0 the camera looks at the center of the actor's bounds and backs off until they fit a view fov degrees across and aspect_ratio wide per unit of height: by default UE's default 90-degree field of view on the 16:9 of the default capture. Editor Python cannot read the viewport's field of view, so pass fov when it was changed, and aspect_ratio for a capture of another shape. distance reports the distance used, and fit_warning says when an actor without bounds got the default 500 cm. selected reports whether Unreal selected it. While PIE runs, Unreal's editor selects nothing, so the camera moves but selected is false, with pie_active true and a warning.",
+   "description": "Focus the editor viewport camera on a specific actor and make it the whole selection. With distance 0 the camera looks at the center of the actor's bounds and backs off until they fit a view fov degrees across and aspect_ratio wide per unit of height: by default UE's default 90-degree field of view on the 16:9 of the default capture. Editor Python cannot read the viewport's field of view, so pass fov when it was changed, and aspect_ratio for a capture of another shape. distance reports the distance used, and fit_warning says when an actor without bounds got the default 500 cm. selected reports whether Unreal selected it. While PIE runs, Unreal's editor selects nothing, so the camera moves but selected is false, with pie_active true and a warning.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -838,7 +901,7 @@
   {
    "name": "spawn_unreal_actor",
    "title": "Spawn Unreal Actor",
-   "description": "Spawn an actor from a class or asset path.",
+   "description": "Spawn an actor from a class or asset path, with its label, in one undoable editor transaction; the label and transform are read back. Refused: a class Unreal does not let you place (the level's WorldSettings and other per-level singletons, game-framework classes such as GameModeBase or PlayerController, a bare Brush), an abstract class, a map or an actor in a level, and a label Unreal would not take (leading or trailing whitespace, over 1023 characters, 'None').",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -879,7 +942,7 @@
      },
      "label": {
       "default": "",
-      "description": "Optional actor label in the outliner.",
+      "description": "Optional actor label in the outliner: no leading or trailing whitespace, at most 1023 characters, not 'None'.",
       "type": "string"
      }
     },
@@ -906,13 +969,13 @@
   {
    "name": "delete_unreal_actor",
    "title": "Delete Unreal Actor",
-   "description": "Delete an actor from the level. DESTRUCTIVE operation.",
+   "description": "Delete an actor from the level, in one undoable editor transaction. DESTRUCTIVE operation. A path that names no actor of the level open in the editor (or a label) is NotFoundError; the level's WorldSettings, its builder brush and other actors the editor keeps out of the Outliner are refused.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
-      "description": "Full actor path to delete.",
+      "description": "Full actor path, as list_unreal_actors reports it.",
       "type": "string"
      }
     },
@@ -1071,7 +1134,7 @@
   {
    "name": "call_unreal_actor_function",
    "title": "Call Unreal Actor Function",
-   "description": "Call a BlueprintCallable UFUNCTION on an actor.",
+   "description": "Call a BlueprintCallable UFUNCTION on an actor of the level open in the editor, as one undo step that records the actor and its root component first.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1205,7 +1268,7 @@
   {
    "name": "set_unreal_actor_visibility",
    "title": "Set Unreal Actor Visibility",
-   "description": "Set actor visibility in the Unreal level.",
+   "description": "Show or hide an actor, in one undoable editor transaction, and read every flag back. scope 'editor' is the editor's hide (the Outliner's eye): the level viewport and captures honour it, and it lasts the editor session unless persistent also sets the hidden-at-editor-startup flag saved with the level. scope 'game' is hidden in game, saved with the level: Play In Editor and the packaged game honour it, the level viewport still draws the actor. 'all' (the default) sets both. propagate applies the same to every actor attached under it. actors lists each actor's hidden_in_editor, hidden_in_editor_at_startup and hidden_in_game read back.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1216,12 +1279,22 @@
      },
      "visible": {
       "default": true,
-      "description": "Whether the actor should be visible.",
+      "description": "Show the actor (true) or hide it (false).",
       "type": "boolean"
      },
      "propagate": {
       "default": true,
-      "description": "Propagate to child components/actors.",
+      "description": "Apply the same to every actor attached under it, children of children included; a hidden parent hides none of them.",
+      "type": "boolean"
+     },
+     "scope": {
+      "default": "all",
+      "description": "Which visibility to set: 'editor' (level viewport and captures), 'game' (Play In Editor and the packaged game) or 'all'.",
+      "type": "string"
+     },
+     "persistent": {
+      "default": false,
+      "description": "Editor scopes only: also set the hidden-at-editor-startup flag saved with the level, so the editor hiding outlasts a reload. Not while Play In Editor runs.",
       "type": "boolean"
      }
     },
@@ -2187,7 +2260,7 @@
   {
    "name": "query_unreal_scene_graph",
    "title": "Query Unreal Scene Graph",
-   "description": "Query the Unreal scene graph hierarchy.",
+   "description": "Read the level's attachment hierarchy as a tree: the level (or the root_path actor), the actors attached to it and theirs, max_depth levels down, optionally with each actor's components. One page of the root's children at a time; total_actors and total_depth cover the whole tree.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2202,16 +2275,16 @@
        }
       ],
       "default": null,
-      "description": "Root actor path (None for level root)."
+      "description": "Actor whose attached actors form the tree; null or empty starts at the level."
      },
      "max_depth": {
       "default": 10,
-      "description": "Maximum traversal depth.",
+      "description": "Levels below the root to include, 1 to 64 (the root's children are level 1).",
       "type": "integer"
      },
      "include_components": {
       "default": false,
-      "description": "Include component sub-trees.",
+      "description": "Give each actor its components: name, class, is_root, attach_parent.",
       "type": "boolean"
      },
      "class_filter": {
@@ -2224,7 +2297,22 @@
        }
       ],
       "default": null,
-      "description": "Filter actors by UClass name."
+      "description": "Keep actors whose class has this name or path, and the actors above them (matches_filter false); null keeps every actor."
+     },
+     "include_subclasses": {
+      "default": false,
+      "description": "Also keep actors whose class derives from class_filter's.",
+      "type": "boolean"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Root children to skip: the previous page's next_offset.",
+      "type": "integer"
+     },
+     "max_results": {
+      "default": 100,
+      "description": "Most root children in the page, 1 to 5000.",
+      "type": "integer"
      }
     }
    },
@@ -2338,7 +2426,7 @@
   {
    "name": "get_unreal_actor_by_semantic_label",
    "title": "Get Unreal Actor By Semantic Label",
-   "description": "Find level actors whose actor tags match a label: exact, contains or regex, ignoring case.",
+   "description": "Find level actors whose actor tags match a label: exact, contains or regex, ignoring case. One page at a time: total_matches counts every match, and next_offset is where the next page starts.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -2354,7 +2442,12 @@
      },
      "max_results": {
       "default": 100,
-      "description": "Maximum number of actors to return, 1 to 5000.",
+      "description": "Most actors in the page, 1 to 5000.",
+      "type": "integer"
+     },
+     "offset": {
+      "default": 0,
+      "description": "Matching actors to skip: the previous page's next_offset.",
       "type": "integer"
      }
     },
@@ -3044,6 +3137,7 @@
    "get_unreal_loaded_map",
    "list_unreal_actors",
    "get_unreal_actor_info",
+   "list_unreal_actor_components",
    "search_unreal_assets",
    "import_unreal_asset",
    "save_unreal_assets",
@@ -3107,6 +3201,7 @@
    "get_unreal_loaded_map",
    "list_unreal_actors",
    "get_unreal_actor_info",
+   "list_unreal_actor_components",
    "search_unreal_assets",
    "import_unreal_asset",
    "save_unreal_assets",
@@ -3169,6 +3264,7 @@
    "get_unreal_loaded_map",
    "list_unreal_actors",
    "get_unreal_actor_info",
+   "list_unreal_actor_components",
    "search_unreal_assets",
    "import_unreal_asset",
    "save_unreal_assets",
@@ -3229,6 +3325,7 @@
    "get_unreal_loaded_map",
    "list_unreal_actors",
    "get_unreal_actor_info",
+   "list_unreal_actor_components",
    "search_unreal_assets",
    "import_unreal_asset",
    "save_unreal_assets",

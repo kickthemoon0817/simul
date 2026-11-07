@@ -37,9 +37,230 @@ LOCK_FREE_ACTIONS = READ_ONLY_ACTIONS | frozenset({"interrupt"})
 __all__ = [
     "BULK_GEOMETRY_ATTRIBUTES",
     "LOCK_FREE_ACTIONS",
+    "POSE_ASPECTS",
     "READ_ONLY_ACTIONS",
     "BridgeCommandService",
+    "usd_readback_note",
 ]
+
+# Prim detail aspects whose values come from USD transforms or velocities.
+POSE_ASPECTS = frozenset({"info", "transform", "bounding_box", "rigid_body"})
+
+# Isaac Sim's SimulationManager switches PhysX to Fabric for GPU physics:
+# enable_fabric() enables omni.physx.fabric and sets /physics/updateToUsd and
+# /physics/updateVelocitiesToUsd to false (v5.1.0 simulation_manager.py,
+# v6.0.1 set_device). The simulation then stops writing poses and velocities
+# to USD, so a USD read returns the values from before play. Same wording as
+# simul's USD_READBACK_STALE_WARNING; this module cannot import simul.
+USD_READBACK_STALE_WARNING = (
+    "PhysX is writing simulation results to Fabric, not USD "
+    "(/physics/updateToUsd or /physics/updateVelocitiesToUsd is false, as Isaac "
+    "Sim's SimulationManager sets for GPU physics), so the poses and velocities "
+    "read from USD here are the values from before play, not the simulated state. "
+    "Read the simulated state through a physics view (omni.physics.tensors, or "
+    "isaacsim.core.experimental.prims on 6.0) with execute_isaac_script."
+)
+
+
+def usd_readback_note() -> Optional[dict[str, Any]]:
+    """Describe whether USD poses and velocities lag the simulation right now.
+
+    Returns:
+        None while the timeline is stopped (USD then holds the authored state,
+        which is the state) or when nothing points at Fabric; otherwise
+        ``update_to_usd``, ``update_velocities_to_usd``,
+        ``physx_fabric_enabled`` and ``stale_under_fabric``. Never raises.
+    """
+    try:
+        import carb.settings
+        import omni.timeline
+
+        if omni.timeline.get_timeline_interface().is_stopped():
+            return None
+        settings = carb.settings.get_settings()
+        update_to_usd = settings.get("/physics/updateToUsd")
+        update_velocities_to_usd = settings.get("/physics/updateVelocitiesToUsd")
+    except Exception:
+        return None
+    fabric_enabled: Optional[bool] = None
+    try:
+        import omni.kit.app
+
+        manager = omni.kit.app.get_app().get_extension_manager()
+        fabric_enabled = bool(manager.is_extension_enabled("omni.physx.fabric"))
+    except Exception:
+        pass
+    stale = update_to_usd is False or update_velocities_to_usd is False
+    if not stale and not fabric_enabled:
+        return None
+    return {
+        "update_to_usd": update_to_usd,
+        "update_velocities_to_usd": update_velocities_to_usd,
+        "physx_fabric_enabled": fabric_enabled,
+        "stale_under_fabric": stale,
+    }
+
+
+def _physics_scene_rate() -> tuple[Optional[str], Optional[float], Optional[str]]:
+    """Find the physics scene near the stage root and read its step rate.
+
+    Only the top two levels are searched (``/physicsScene``,
+    ``/World/physicsScene``), so a large stage is not walked on Kit's main
+    thread. Without PhysxSceneAPI PhysX steps at the schema fallback of 60 Hz,
+    which is also what Isaac Sim's SimulationManager reports then.
+
+    Returns:
+        ``(scene_path, steps_per_second, source)``; all None when no scene
+        is found.
+    """
+    import omni.usd
+    from pxr import PhysxSchema, Usd, UsdPhysics
+
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return None, None, None
+    prims = iter(Usd.PrimRange(stage.GetPseudoRoot()))
+    for prim in prims:
+        if prim.GetPath().pathElementCount >= 2:
+            prims.PruneChildren()
+        if not prim.IsA(UsdPhysics.Scene):
+            continue
+        if prim.HasAPI(PhysxSchema.PhysxSceneAPI):
+            rate = PhysxSchema.PhysxSceneAPI(prim).GetTimeStepsPerSecondAttr().Get()
+            return str(prim.GetPath()), rate, "physxScene:timeStepsPerSecond"
+        return str(prim.GetPath()), 60.0, "PhysxSceneAPI fallback"
+    return None, None, None
+
+
+def _physics_runtime_state() -> dict[str, Any]:
+    """Report the Carb settings and extension that decide where physics writes.
+
+    These are the keys Isaac Sim's own SimulationManager reads and sets
+    (/physics/cudaDevice, /physics/suppressReadback, /physics/updateToUsd,
+    /physics/updateVelocitiesToUsd, the omni.physx.fabric extension) plus
+    /physics/resetOnStop from the app's .kit file. The omni.physx interface
+    has no physics statistics to report: get_physics_stats and
+    is_cuda_lib_present are not on it in Kit 107 or 110.
+    """
+    import carb.settings
+
+    settings = carb.settings.get_settings()
+    state: dict[str, Any] = {
+        "cuda_device": settings.get("/physics/cudaDevice"),
+        "suppress_readback": settings.get("/physics/suppressReadback"),
+        "update_to_usd": settings.get("/physics/updateToUsd"),
+        "update_velocities_to_usd": settings.get("/physics/updateVelocitiesToUsd"),
+        "reset_on_stop": settings.get("/physics/resetOnStop"),
+        "physx_fabric_enabled": None,
+    }
+    try:
+        import omni.kit.app
+
+        manager = omni.kit.app.get_app().get_extension_manager()
+        state["physx_fabric_enabled"] = bool(manager.is_extension_enabled("omni.physx.fabric"))
+    except Exception:
+        pass
+    return state
+
+
+def _physics_scene_config() -> dict[str, Any]:
+    """Read the physics scene's own settings, the ones SimulationManager reads.
+
+    The previous keys (/physics/gpuDynamicsEnabled,
+    /persistent/simulation/defaultPhysicsDt, /persistent/physics/solverType)
+    appear nowhere in Isaac Sim and always read None. The rate, GPU dynamics,
+    solver and broadphase live on the scene's PhysxSceneAPI.
+    """
+    import omni.usd
+    from pxr import PhysxSchema, Usd, UsdPhysics
+
+    config: dict[str, Any] = {
+        "scene_path": None,
+        "time_steps_per_second": None,
+        "physics_dt": None,
+        "gpu_dynamics_enabled": None,
+        "solver_type": None,
+        "broadphase_type": None,
+    }
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return config
+    prims = iter(Usd.PrimRange(stage.GetPseudoRoot()))
+    for prim in prims:
+        if prim.GetPath().pathElementCount >= 2:
+            prims.PruneChildren()
+        if not prim.IsA(UsdPhysics.Scene):
+            continue
+        config["scene_path"] = str(prim.GetPath())
+        if prim.HasAPI(PhysxSchema.PhysxSceneAPI):
+            api = PhysxSchema.PhysxSceneAPI(prim)
+            rate = api.GetTimeStepsPerSecondAttr().Get()
+            config["time_steps_per_second"] = rate
+            config["physics_dt"] = 1.0 / rate if rate else None
+            config["gpu_dynamics_enabled"] = api.GetEnableGPUDynamicsAttr().Get()
+            solver = api.GetSolverTypeAttr().Get()
+            config["solver_type"] = str(solver) if solver is not None else None
+            broadphase = api.GetBroadphaseTypeAttr().Get()
+            config["broadphase_type"] = str(broadphase) if broadphase is not None else None
+        break
+    return config
+
+
+def _physics_rates(timeline: Any, frame_dt: Optional[float], time_delta: float) -> dict[str, Any]:
+    """Report the rates that decide how many physics steps a frame runs.
+
+    Every read is guarded: a missing piece leaves its field None rather than
+    failing the step that already happened.
+    """
+    rates: dict[str, Any] = {
+        "physics_scene": None,
+        "physics_steps_per_second": None,
+        "physics_dt": None,
+        "rate_source": None,
+        "timeline_time_codes_per_second": None,
+        "rate_limit_hz": None,
+        "physics_steps_per_frame": None,
+        "physics_steps_estimated": None,
+    }
+    try:
+        rates["timeline_time_codes_per_second"] = timeline.get_time_codes_per_seconds()
+    except Exception:
+        pass
+    try:
+        import carb.settings
+
+        settings = carb.settings.get_settings()
+        if settings.get("/app/runLoops/main/rateLimitEnabled"):
+            rates["rate_limit_hz"] = settings.get("/app/runLoops/main/rateLimitFrequency")
+    except Exception:
+        pass
+    try:
+        scene, rate, source = _physics_scene_rate()
+    except Exception:
+        scene, rate, source = None, None, None
+    rates["physics_scene"] = scene
+    rates["rate_source"] = source
+    if rate:
+        rate = float(rate)
+        rates["physics_steps_per_second"] = rate
+        rates["physics_dt"] = 1.0 / rate
+        if frame_dt:
+            rates["physics_steps_per_frame"] = round(frame_dt * rate, 3)
+        rates["physics_steps_estimated"] = int(round(time_delta * rate))
+    return rates
+
+
+def _annotate_usd_readback(payload: dict[str, Any]) -> None:
+    """Flag a pose or velocity payload read while USD lags the simulation."""
+    note = usd_readback_note()
+    if note is None:
+        return
+    payload.setdefault("usd_readback", note)
+    if note["stale_under_fabric"]:
+        payload.setdefault("stale_under_fabric", True)
+        warnings = payload.setdefault("warnings", [])
+        if isinstance(warnings, list):
+            warnings.append(USD_READBACK_STALE_WARNING)
 
 
 class BridgeCommandService:
@@ -311,6 +532,7 @@ class BridgeCommandService:
                 f"Invalid root path: {root_path}",
             )
 
+        include_proxies, include_inactive = self._traversal_flags(request.payload)
         root_depth = len(str(root.GetPath()).rstrip("/").split("/"))
         prims = []
         matched = 0
@@ -319,7 +541,9 @@ class BridgeCommandService:
         # depth limit bounded the response and not the work. Prune instead —
         # and the page-full break below is unreachable while we continue past
         # every deep prim on the stage.
-        prim_iter = iter(Usd.PrimRange(root))
+        prim_iter = iter(
+            Usd.PrimRange(root, self._traversal_predicate(include_proxies, include_inactive))
+        )
         for prim in prim_iter:
             path_str = str(prim.GetPath())
             depth = len(path_str.rstrip("/").split("/")) - root_depth
@@ -336,14 +560,15 @@ class BridgeCommandService:
             if len(prims) >= max_results:
                 truncated = True
                 break
-            prims.append(
-                {
-                    "path": path_str,
-                    "type": prim_type_name,
-                    "name": prim.GetName(),
-                    "active": prim.IsActive(),
-                }
-            )
+            entry: dict[str, Any] = {
+                "path": path_str,
+                "type": prim_type_name,
+                "name": prim.GetName(),
+                "active": prim.IsActive(),
+            }
+            if prim.IsInstanceProxy():
+                entry["instance_proxy"] = True
+            prims.append(entry)
 
         return BridgeResponse.success(
             request.request_id,
@@ -352,6 +577,9 @@ class BridgeCommandService:
                 "root_path": root_path,
                 "type_filter": prim_type,
                 "max_depth": max_depth,
+                # Echoed so the MCP side can tell this bridge honoured them.
+                "include_instance_proxies": include_proxies,
+                "include_inactive": include_inactive,
                 "count": len(prims),
                 "offset": offset,
                 "applied_limit": max_results,
@@ -385,6 +613,7 @@ class BridgeCommandService:
         payload = PrimDetailReader(stage).info(prim)
         payload["path"] = prim_path
         payload["transport"] = "simul_bridge"
+        _annotate_usd_readback(payload)
         return BridgeResponse.success(request.request_id, payload)
 
     def _handle_get_prim_transform(self, request: BridgeRequest) -> BridgeResponse:
@@ -418,6 +647,7 @@ class BridgeCommandService:
             )
         payload["prim_path"] = prim_path
         payload["transport"] = "simul_bridge"
+        _annotate_usd_readback(payload)
         return BridgeResponse.success(request.request_id, payload)
 
     def _handle_get_prim_detail(self, request: BridgeRequest) -> BridgeResponse:
@@ -473,6 +703,8 @@ class BridgeCommandService:
                 detail = {"error": str(exc), "error_type": type(exc).__name__}
             detail["success"] = "error" not in detail
             payload[aspect] = detail
+        if POSE_ASPECTS.intersection(aspects):
+            _annotate_usd_readback(payload)
         return BridgeResponse.success(request.request_id, payload)
 
     def _handle_search_prims(self, request: BridgeRequest) -> BridgeResponse:
@@ -513,10 +745,11 @@ class BridgeCommandService:
                 f"Invalid root path: {root_path}",
             )
 
+        include_proxies, include_inactive = self._traversal_flags(request.payload)
         matches = []
         matched = 0
         truncated = False
-        for prim in Usd.PrimRange(root):
+        for prim in Usd.PrimRange(root, self._traversal_predicate(include_proxies, include_inactive)):
             if search_type == "type":
                 match = prim.GetTypeName() == query
             else:
@@ -529,13 +762,16 @@ class BridgeCommandService:
             if len(matches) >= max_results:
                 truncated = True
                 break
-            matches.append(
-                {
-                    "path": str(prim.GetPath()),
-                    "type": prim.GetTypeName(),
-                    "name": prim.GetName(),
-                }
-            )
+            entry: dict[str, Any] = {
+                "path": str(prim.GetPath()),
+                "type": prim.GetTypeName(),
+                "name": prim.GetName(),
+            }
+            if prim.IsInstanceProxy():
+                entry["instance_proxy"] = True
+            if not prim.IsActive():
+                entry["active"] = False
+            matches.append(entry)
 
         return BridgeResponse.success(
             request.request_id,
@@ -544,6 +780,9 @@ class BridgeCommandService:
                 "search_type": search_type,
                 "query": query,
                 "root_path": root_path,
+                # Echoed so the MCP side can tell this bridge honoured them.
+                "include_instance_proxies": include_proxies,
+                "include_inactive": include_inactive,
                 "count": len(matches),
                 "offset": offset,
                 "applied_limit": max_results,
@@ -592,42 +831,12 @@ class BridgeCommandService:
             info["timeline_error"] = str(exc)
 
         try:
-            import omni.physx
-
-            physx = omni.physx.get_physx_interface()
-            # get_physics_stats and is_cuda_lib_present live on PhysXUnitTests,
-            # not on the PhysX object acquire_physx_interface returns, in both
-            # Kit 107 (Isaac Sim 5.1) and Kit 110 (6.0). Probe rather than call
-            # blind, and say so when neither is reachable — an empty dict alone
-            # reads like an empty physics scene.
-            physics: dict[str, Any] = {}
-            available = False
-            if hasattr(physx, "get_physics_stats"):
-                stats = physx.get_physics_stats()
-                if isinstance(stats, dict):
-                    physics.update(stats)
-                available = True
-            if hasattr(physx, "is_cuda_lib_present"):
-                physics["cuda_available"] = physx.is_cuda_lib_present()
-                available = True
-            if not available:
-                physics["stats_unavailable"] = (
-                    "omni.physx interface exposes no get_physics_stats or "
-                    "is_cuda_lib_present on this build"
-                )
-            info["physics"] = physics
+            info["physics"] = _physics_runtime_state()
         except Exception as exc:
             info["physics_error"] = str(exc)
 
         try:
-            import carb.settings
-
-            settings = carb.settings.get_settings()
-            info["physics_config"] = {
-                "gpu_dynamics_enabled": settings.get("/physics/gpuDynamicsEnabled"),
-                "physics_dt": settings.get("/persistent/simulation/defaultPhysicsDt"),
-                "solver_type": settings.get("/persistent/physics/solverType"),
-            }
+            info["physics_config"] = _physics_scene_config()
         except Exception as exc:
             info["physics_config_error"] = str(exc)
 
@@ -760,7 +969,19 @@ class BridgeCommandService:
             )
         if command == "step":
             num_steps = max(1, min(int(request.payload.get("num_steps", 1)), 1000))
-            result = await self._step_timeline(timeline, omni.kit.app.get_app(), num_steps)
+            budget: float | None = None
+            try:
+                budget = float(request.payload["timeout"]) if "timeout" in request.payload else None
+            except (TypeError, ValueError):
+                budget = None
+            ceiling = self._script_timeout_ceiling
+            if ceiling is not None and (budget is None or budget <= 0 or budget > ceiling):
+                # The lifecycle abandons the request at its own timeout; stop
+                # stepping first so the reply says how far it got.
+                budget = ceiling
+            result = await self._step_timeline(
+                timeline, omni.kit.app.get_app(), num_steps, budget_seconds=budget
+            )
             result["transport"] = "simul_bridge"
             # An incomplete step keeps its counts beside ``error``; the client
             # envelope turns that key into success=False.
@@ -772,7 +993,12 @@ class BridgeCommandService:
         )
 
     @staticmethod
-    async def _step_timeline(timeline: Any, app: Any, num_steps: int) -> dict[str, Any]:
+    async def _step_timeline(
+        timeline: Any,
+        app: Any,
+        num_steps: int,
+        budget_seconds: float | None = None,
+    ) -> dict[str, Any]:
         """Advance the timeline by exactly ``num_steps`` frames and leave it paused.
 
         A paused timeline does not move on app updates, and a stopped one
@@ -780,18 +1006,31 @@ class BridgeCommandService:
         advancing time. So the timeline is played and only updates that
         actually moved the current time are counted; once ``num_steps`` of
         them have run it is paused again. The update budget bounds the loop
-        when time cannot advance (end of a non-looping range).
+        when time cannot advance (end of a non-looping range), and
+        ``budget_seconds`` bounds it in wall-clock time: Isaac Sim's full app
+        is rate-limited (60 Hz by default), so a long step can outlast any
+        fixed timeout.
+
+        One frame is not one physics step: PhysX consumes the timeline's time
+        in steps of the physics scene's dt, so a frame runs
+        ``frame_dt / physics_dt`` of them (Isaac Sim's SimulationContext
+        derives its substeps the same way). Both rates are reported.
 
         Args:
             timeline: The ``omni.timeline`` interface.
             app: The Kit application, for ``next_update_async``.
             num_steps: Frames to advance, already clamped by the caller.
+            budget_seconds: Wall-clock limit; stepping stops and reports when
+                it runs out. None means no limit beyond the update budget.
 
         Returns:
             ``steps`` (frames advanced), ``steps_requested``, ``start_time``,
-            ``current_time``, ``time_delta``, ``app_updates`` and ``state``;
-            plus ``error`` when fewer frames advanced than requested.
+            ``current_time``, ``time_delta``, ``app_updates``, ``state``,
+            ``frame_dt``, ``physics`` (rates and estimated physics steps) and
+            ``elapsed_seconds``; plus ``error`` when fewer frames advanced
+            than requested.
         """
+        started = time.monotonic()
         start_time = timeline.get_current_time()
         if not timeline.is_playing():
             timeline.play()
@@ -802,8 +1041,12 @@ class BridgeCommandService:
         updates = 0
         last = start_time
         max_updates = num_steps + 60
+        out_of_time = False
         try:
             while advanced < num_steps and updates < max_updates:
+                if budget_seconds is not None and time.monotonic() - started >= budget_seconds:
+                    out_of_time = True
+                    break
                 await app.next_update_async()
                 updates += 1
                 now = timeline.get_current_time()
@@ -816,21 +1059,60 @@ class BridgeCommandService:
             if callable(commit):
                 commit()
         current_time = timeline.get_current_time()
+        time_delta = current_time - start_time
+        frame_dt = time_delta / advanced if advanced else None
+        elapsed = time.monotonic() - started
         result: dict[str, Any] = {
             "steps": advanced,
             "steps_requested": num_steps,
             "start_time": start_time,
             "current_time": current_time,
-            "time_delta": current_time - start_time,
+            "time_delta": time_delta,
             "app_updates": updates,
             "state": "paused",
+            "frame_dt": frame_dt,
+            "physics": _physics_rates(timeline, frame_dt, time_delta),
+            "elapsed_seconds": round(elapsed, 3),
         }
-        if advanced < num_steps:
+        if out_of_time:
+            result["error"] = (
+                f"Stepped {advanced} of {num_steps} frames before the {budget_seconds:g}s "
+                f"budget ran out ({advanced / elapsed if elapsed else 0:.1f} frames/s; the "
+                "app is rate-limited). Step fewer frames per call."
+            )
+        elif advanced < num_steps:
             result["error"] = (
                 f"Timeline advanced {advanced} of {num_steps} steps in {updates} "
                 "app updates; it may be at the end of a non-looping time range."
             )
         return result
+
+    @staticmethod
+    def _traversal_flags(payload: dict[str, Any]) -> tuple[bool, bool]:
+        """Read ``(include_instance_proxies, include_inactive)`` from a listing request.
+
+        Instance proxies default on: Isaac robot assets keep their meshes and
+        colliders under instanceable prims, where the default predicate stops.
+        """
+        return (
+            bool(payload.get("include_instance_proxies", True)),
+            bool(payload.get("include_inactive", False)),
+        )
+
+    @staticmethod
+    def _traversal_predicate(include_instance_proxies: bool, include_inactive: bool) -> Any:
+        """Return the ``Usd.PrimRange`` predicate a listing walks with.
+
+        Same as the MCP side's ``TRAVERSAL_PREDICATE_CORE``.
+        """
+        from pxr import Usd
+
+        if include_inactive:
+            # An inactive prim also reads as unloaded, so both flags go.
+            flags = Usd.PrimIsDefined & ~Usd.PrimIsAbstract
+        else:
+            flags = Usd.PrimIsActive & Usd.PrimIsDefined & Usd.PrimIsLoaded & ~Usd.PrimIsAbstract
+        return Usd.TraverseInstanceProxies(flags) if include_instance_proxies else flags
 
     @staticmethod
     def _page_bounds(payload: dict[str, Any], default_limit: int) -> tuple[int, int]:

@@ -34,6 +34,7 @@ import pytest
 from simul.adapters.isaac_socket_client import ScriptResult
 from simul.config import Settings
 from simul.mcp.tools.isaac_tools import IsaacTools
+from tests.isaac.fake_usd import PREDICATE
 
 
 def _capture_script(method: str, **kwargs: Any) -> str:
@@ -217,6 +218,9 @@ class _FakePrim:
     def IsActive(self) -> bool:
         return True
 
+    def IsInstanceProxy(self) -> bool:
+        return False
+
     def GetChildren(self) -> List[Any]:
         return []
 
@@ -224,7 +228,7 @@ class _FakePrim:
 class _RecordingPrimRange:
     """Yields a progressively deeper chain and records pruning."""
 
-    def __init__(self, root: Any) -> None:
+    def __init__(self, root: Any, predicate: Any = None) -> None:
         self.pruned = 0
         self.visited = 0
 
@@ -244,8 +248,8 @@ class _RecordingPrimRange:
 def test_depth_limited_listing_prunes_instead_of_skipping() -> None:
     ranges: List[_RecordingPrimRange] = []
 
-    def _make_range(root: Any) -> _RecordingPrimRange:
-        created = _RecordingPrimRange(root)
+    def _make_range(root: Any, predicate: Any = None) -> _RecordingPrimRange:
+        created = _RecordingPrimRange(root, predicate)
         ranges.append(created)
         return created
 
@@ -260,6 +264,11 @@ def test_depth_limited_listing_prunes_instead_of_skipping() -> None:
         Prim=object,
         PrimRange=_make_range,
         TimeCode=types.SimpleNamespace(Default=lambda: 0.0),
+        PrimIsActive=PREDICATE,
+        PrimIsDefined=PREDICATE,
+        PrimIsLoaded=PREDICATE,
+        PrimIsAbstract=PREDICATE,
+        TraverseInstanceProxies=lambda predicate=PREDICATE: predicate,
     )
 
     script = _capture_script(
