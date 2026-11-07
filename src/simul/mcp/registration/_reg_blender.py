@@ -243,6 +243,11 @@ class BlenderTool:
             ``security.allow_script_execution`` is on.
         build: Writes the tool's wrapper, for a tool whose call is more than
             forwarding its validated arguments to ``operation``.
+        added_params: Operation parameters that an add-on built before them
+            does not take. Each is forwarded only when the call sets it away
+            from its default, so an older add-on keeps answering the calls
+            that leave it alone (with its own behavior) instead of refusing
+            every call with an unexpected keyword argument.
     """
 
     name: str
@@ -256,6 +261,7 @@ class BlenderTool:
     call: Optional[SessionCall] = None
     script: bool = False
     build: Optional[Callable[["SimulMCPServer", "BlenderTool"], ToolWrapper]] = None
+    added_params: Tuple[str, ...] = ()
 
 
 def register_blender_tools(server: "SimulMCPServer", thin: bool = False) -> None:
@@ -384,8 +390,18 @@ def _forwarding_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolWrapper
     parameters = _advertised_parameters(spec, operation, server.settings)
     advertised = inspect.Signature(parameters, return_annotation=ToolResult)
     method = operation.__name__
+    added_defaults = {
+        parameter.name: parameter.default
+        for parameter in parameters
+        if parameter.name in spec.added_params
+    }
 
     def forward(session: Any, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        arguments = {
+            name: value
+            for name, value in arguments.items()
+            if name not in added_defaults or value != added_defaults[name]
+        }
         if spec.call is not None:
             return spec.call(session, **arguments)
         payload: Dict[str, Any] = getattr(session, method)(**arguments)
@@ -453,7 +469,8 @@ def _control_ui_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolWrapper
             area_id: Editor ID from inspect; required for editor actions with multiple matches.
                 Object selection/property writes do not require it. Re-inspect after workspace isolation.
             position: move_cursor only: agent overlay coordinates [x, y] in [0, 1], bottom-left origin; default center.
-            value: set_property only: three finite values for the active object; rotations in radians.
+            value: set_property only: three finite values for the active object; rotation_euler is
+                XYZ radians, written in the object's rotation mode (quaternion, axis-angle, other order).
             agent_id: Visible agent label, 1 to 64 printable characters; defaults to the MCP session identity.
                 Use distinct stable labels for named agents across connections.
                 clear_cursor removes only this agent's marker in the attached window; markers expire after 120 seconds.
@@ -684,7 +701,14 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     # -- Core observation ----------------------------------------------------
     BlenderTool(
         name="get_blender_object_info",
-        description="Get detailed information about a single Blender object.",
+        description=(
+            "Get detailed information about a single Blender object. location, rotation_euler "
+            "(XYZ radians) and scale are its own transform, relative to its parent as Blender's "
+            "Location, Rotation and Scale fields show them; world_location, "
+            "world_rotation_euler, world_rotation_quaternion, world_scale and matrix_world give "
+            "where it is in the scene. rotation_mode says how Blender stores the rotation "
+            "(rotation_in_mode); rotation_quaternion gives it as a quaternion."
+        ),
         hints=READ_ONLY,
         operation="get_object_info",
         request=BlenderObjectInfoRequest,
@@ -890,19 +914,32 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="set_blender_object_transform",
-        description="Set location, rotation, and/or scale on a Blender object.",
+        description=(
+            "Set location, rotation, and/or scale of a Blender object's own transform, relative "
+            "to its parent (Blender's Location, Rotation and Scale fields). rotation_euler is XYZ "
+            "Euler radians, or pass rotation_quaternion [w, x, y, z] instead; either is converted "
+            "to the object's rotation_mode (glTF imports store quaternions), which is kept. The "
+            "reply reports the result, rotation_mode and world_location."
+        ),
         hints=OVERWRITING,
         operation="set_object_transform",
         request=BlenderSetTransformRequest,
         response=BlenderSetTransformResponse,
+        added_params=("rotation_quaternion",),
     ),
     BlenderTool(
         name="set_blender_object_parent",
-        description="Parent one Blender object to another.",
+        description=(
+            "Parent one Blender object to another. By default the child keeps its world "
+            "transform, as Blender's Parent > Object (Keep Transform); keep_transform=false "
+            "makes its own values relative to the parent, so it moves. A parent that is the "
+            "child itself or one of its descendants is refused."
+        ),
         hints=OVERWRITING,
         operation="set_object_parent",
         request=BlenderSetParentRequest,
         response=BlenderSetParentResponse,
+        added_params=("keep_transform",),
     ),
     BlenderTool(
         name="clear_blender_object_parent",
@@ -1008,7 +1045,11 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="save_blender_file",
-        description="Save the current .blend file.",
+        description=(
+            "Save the current .blend file, in place or under a new .blend path, which then "
+            "becomes the open document. Other extensions are refused; use "
+            "export_blender_file for other formats."
+        ),
         hints=OVERWRITING,
         operation="save_blend_file",
         request=BlenderSaveFileRequest,
@@ -1016,7 +1057,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="import_blender_file",
-        description="Import a file into the Blender scene.",
+        description=(
+            "Import an OBJ, FBX, glTF, USD, STL or PLY file into the Blender scene, "
+            "optionally scaled about the world origin (scale)."
+        ),
         hints=ADDITIVE,
         operation="import_file",
         request=BlenderImportFileRequest,
@@ -1024,7 +1068,20 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="export_blender_file",
-        description="Export scene objects to a file.",
+        description=(
+            "Export the scene, the selection (selected_only), a list of objects "
+            "(object_names) or a collection (collection_name) to OBJ, FBX, glTF, USD, STL "
+            "or PLY. file_path must end in the format's extension and is written exactly: "
+            "for GLTF, .glb writes a GLB and .gltf a .gltf with its .bin and textures "
+            "(gltf_format to choose GLTF_EMBEDDED). Modifiers are applied and animation "
+            "included by default (apply_modifiers, export_animation, frame_start/frame_end; "
+            "USD animation is on here although Blender's exporter leaves it off). FBX, OBJ, "
+            "STL and PLY take axis_forward/axis_up and global_scale; USD takes usd_up_axis, "
+            "meters_per_unit and root_prim_path. Missing folders are created, Edit Mode is "
+            "entered again afterwards, an unrelated existing .bin/.mtl beside the file is "
+            "not replaced unless overwrite_companion_files, and files_written lists every "
+            "file written."
+        ),
         hints=DESTRUCTIVE,
         operation="export_file",
         request=BlenderExportFileRequest,

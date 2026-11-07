@@ -474,3 +474,73 @@ def test_get_blender_camera_info_relays_the_active_constraints_and_pose_source(
         else dict.fromkeys(_COMPOSED_POSE_REPORT)
     )
     assert {key: payload[key] for key in _COMPOSED_POSE_REPORT} == expected
+
+
+class _AddonBeforeTheTransformFixes:
+    """The session of an add-on built before set_object_parent's keep_transform
+    and set_object_transform's rotation_quaternion: it refuses either keyword,
+    as the add-on's dispatcher binds each call to its own signature."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def set_object_parent(self, child_name: str, parent_name: str) -> dict:
+        self.calls.append(("set_object_parent", child_name, parent_name))
+        return {"child_name": child_name, "parent_name": parent_name}
+
+    def set_object_transform(
+        self, object_name: str, location=None, rotation_euler=None, scale=None
+    ) -> dict:
+        self.calls.append(("set_object_transform", object_name, rotation_euler))
+        return {
+            "object_name": object_name,
+            "location": [0.0, 0.0, 0.0],
+            "rotation_euler": rotation_euler or [0.0, 0.0, 0.0],
+            "scale": [1.0, 1.0, 1.0],
+        }
+
+
+def _call(instance: server_module.SimulMCPServer, tool: str, arguments: dict) -> dict:
+    async def _run() -> dict:
+        async with Client(instance.mcp) as client:
+            result = await client.call_tool(tool, arguments, raise_on_error=False)
+            return json.loads(result.content[-1].text)
+
+    return asyncio.run(_run())
+
+
+def test_an_older_addon_still_answers_calls_that_leave_the_new_parameters_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parameter at its default is not sent, so the add-on's own default applies.
+
+    The add-on is installed separately and can be older than the server; sent
+    always, the new keywords made it refuse every parenting and transform call.
+    A call that does need the new parameter still fails, naming it.
+    """
+    session = _AddonBeforeTheTransformFixes()
+    instance = _strict_server(monkeypatch, session, "attached")  # type: ignore[arg-type]
+
+    parented = _call(
+        instance, "set_blender_object_parent", {"child_name": "C", "parent_name": "P"}
+    )
+    turned = _call(
+        instance,
+        "set_blender_object_transform",
+        {"object_name": "Cube", "rotation_euler": [0, 0, 1]},
+    )
+    unsupported = _call(
+        instance,
+        "set_blender_object_parent",
+        {"child_name": "C", "parent_name": "P", "keep_transform": False},
+    )
+
+    assert parented["success"] is True
+    assert parented["keep_transform"] is None and parented["world_location"] is None
+    assert turned["success"] is True and turned["rotation_mode"] is None
+    assert session.calls == [
+        ("set_object_parent", "C", "P"),
+        ("set_object_transform", "Cube", [0.0, 0.0, 1.0]),
+    ]
+    assert unsupported["success"] is False
+    assert "keep_transform" in unsupported["error"]
