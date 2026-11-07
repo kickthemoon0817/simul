@@ -342,8 +342,8 @@ class TestBones:
 
         with pytest.raises(
             ValueError,
-            match=r"The 32 targets' names and one sample of each take \d+ bytes of "
-            r"JSON, more than the 38500 a reply holds",
+            match=r"The 32 targets' names and one sample of each take at least \d+ "
+            r"bytes of JSON, more than the 38500 a reply holds",
         ) as refused:
             session.get_trajectories(targets, 1, 40)
 
@@ -351,17 +351,22 @@ class TestBones:
         details = getattr(refused.value, "details")
         fit = details["targets_that_fit"]
         assert (details["targets"], details["reply_bytes"]) == (32, 38500)
-        assert details["needed_bytes"] > 38500 and 0 < fit < 32
+        assert 0 < fit < 32
         assert f"split the targets over calls (the first {fit} fit in one)" in str(
             refused.value
         )
-        assert _reaches_the_client_whole(session.get_trajectories(targets[:fit], 1, 40))
+        # The advice holds on every page.
+        pages = _every_page(
+            lambda offset: session.get_trajectories(targets[:fit], 1, 40, offset=offset)
+        )
+        assert all(_reaches_the_client_whole(page) for page in pages)
+        assert sum(page["point_count"] for page in pages) == 40
 
     def test_pages_of_long_names_reach_the_client_whole(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
-        name = "é" * 100
-        bones = ["é" * 29 + f"{n:02d}" for n in range(32)]
+        name = "é" * 60
+        bones = ["é" * 20 + f"{n:02d}" for n in range(32)]
         session, _, _ = _session(monkeypatch, _armature(name, bones))
         targets = [{"object_name": name, "bone_name": bone} for bone in bones]
 
@@ -375,10 +380,12 @@ class TestBones:
             point["frame"] for page in pages for point in page["trajectories"][31]["points"]
         ] == [1, 2, 3, 4, 5, 6]
 
-    def test_refuses_a_first_sample_wider_than_the_walk_was_planned_for(
+    def test_refuses_a_first_sample_that_overflows_once_measured(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
-        """The check before the walk counts each sample as narrow as it can be."""
+        """Before the walk the names are checked with the narrowest samples, so
+        a request whose samples fit is served; a first sample that overflows is
+        refused once measured, with how many targets fit even the widest."""
         carts = [FakeTransformObject(f"Cart{n}") for n in range(32)]
 
         def animate(frame: int) -> None:
@@ -392,11 +399,11 @@ class TestBones:
             + len(', "points": []')
             for trajectory in session.get_trajectories(targets, 1, 1)["trajectories"]
         ]
-        narrow = blender_runtime.BlenderRuntimeSession._narrowest_point(
-            blender_runtime.TRAJECTORY_FIELDS
-        )
+        fields = blender_runtime.TRAJECTORY_FIELDS
+        narrow = len(json.dumps(blender_runtime.BlenderRuntimeSession._narrowest_point(fields)))
+        wide = len(json.dumps(blender_runtime.BlenderRuntimeSession._widest_point(fields)))
         # A reply that holds the names and 32 of the narrowest samples, and no more.
-        ceiling = sum(names) + 32 * (len(json.dumps(narrow)) + 2)
+        ceiling = sum(names) + 32 * (narrow + 2)
         monkeypatch.setattr(
             blender_runtime,
             "RESULT_BUDGET_BYTES",
@@ -404,11 +411,18 @@ class TestBones:
         )
         frames.clear()
 
-        with pytest.raises(ValueError, match=f"more than the {ceiling} a reply holds"):
+        with pytest.raises(
+            ValueError, match=rf"take \d+ bytes of JSON, more than the {ceiling} a reply"
+        ) as refused:
             session.get_trajectories(targets, 1, 40)
 
         # The frame is put back.
         assert frames[-1] == 7 and scene.frame_current == 7
+        # The most targets, in order, whose names and widest samples fit.
+        needs = [size + wide + 2 for size in names]
+        fit = max(n for n in range(33) if sum(needs[:n]) <= ceiling)
+        assert 0 < fit < 32
+        assert getattr(refused.value, "details")["targets_that_fit"] == fit
 
     def test_samples_a_bone_in_world_space(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any

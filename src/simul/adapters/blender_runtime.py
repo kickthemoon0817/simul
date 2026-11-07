@@ -7816,11 +7816,19 @@ class BlenderRuntimeSession:
         ]
         headers = sum(names)
         narrow = _json_size(self._narrowest_point(wanted)) + 2
-        # A page holds at least one sample, which the server must not cut: a
-        # cut reply drops targets, and its next_offset skips samples.
+        # Every page holds at least one sample of each target, which the server
+        # must not cut: a cut reply drops targets, and its next_offset skips
+        # samples. Targets whose names and one sample each overflow a reply
+        # are refused, with how many fit even the widest samples, so the
+        # advice holds on every page.
         ceiling = RESULT_BUDGET_BYTES - TRAJECTORY_OTHER_BYTES
+        wide = _json_size(self._widest_point(wanted)) + 2
         if headers + len(resolved) * narrow > ceiling:
-            raise self._targets_overflow([size + narrow for size in names], ceiling)
+            raise self._targets_overflow(
+                f"at least {headers + len(resolved) * narrow}",
+                [size + wide for size in names],
+                ceiling,
+            )
         room = RESULT_PAGE_BYTES - TRAJECTORY_OTHER_BYTES - headers
         most = max(1, room // (len(resolved) * narrow))
         count = min(total - offset, most if limit is None else min(limit, most))
@@ -7866,9 +7874,12 @@ class BlenderRuntimeSession:
                         if used + cost > room:
                             break
                     elif headers + cost > ceiling:
-                        # Wider than the narrowest sample the walk was planned for.
                         raise self._targets_overflow(
-                            [size + _json_size(point) + 2 for size, point in zip(names, row)],
+                            str(headers + cost),
+                            [
+                                size + max(wide, _json_size(point) + 2)
+                                for size, point in zip(names, row)
+                            ],
                             ceiling,
                         )
                     for number, point in enumerate(row):
@@ -7924,7 +7935,7 @@ class BlenderRuntimeSession:
         }
 
     @staticmethod
-    def _targets_overflow(needs: List[int], ceiling: int) -> ValueError:
+    def _targets_overflow(needed: str, needs: List[int], ceiling: int) -> ValueError:
         """The refusal of targets whose names and one sample each overflow a reply.
 
         The server writes each non-ASCII character as a 6-byte ``\\u`` escape,
@@ -7932,7 +7943,8 @@ class BlenderRuntimeSession:
         budget. ``details`` say how many of the targets, in order, fit.
 
         Args:
-            needs: Per target, the bytes of its header and one sample.
+            needed: The bytes the page would take, as the message states them.
+            needs: Per target, the bytes of its header and of its widest sample.
             ceiling: The bytes a reply's trajectories may take.
         """
         fit, used = 0, 0
@@ -7947,20 +7959,14 @@ class BlenderRuntimeSession:
             else "ask for fewer fields"
         )
         error = ValueError(
-            f"The {len(needs)} targets' names and one sample of each take "
-            f"{sum(needs)} bytes of JSON, more than the {ceiling} a reply holds (the "
-            "server writes each non-ASCII character of a name as a 6-byte escape); "
-            f"{advice}"
+            f"The {len(needs)} targets' names and one sample of each take {needed} "
+            f"bytes of JSON, more than the {ceiling} a reply holds (the server "
+            f"writes each non-ASCII character of a name as a 6-byte escape); {advice}"
         )
         setattr(
             error,
             "details",
-            {
-                "targets": len(needs),
-                "targets_that_fit": fit,
-                "needed_bytes": sum(needs),
-                "reply_bytes": ceiling,
-            },
+            {"targets": len(needs), "targets_that_fit": fit, "reply_bytes": ceiling},
         )
         return error
 
@@ -7974,6 +7980,28 @@ class BlenderRuntimeSession:
                 f"Unknown trajectory fields {unknown}; choose from {TRAJECTORY_FIELDS}"
             )
         return tuple(name for name in TRAJECTORY_FIELDS if name in fields)
+
+    @staticmethod
+    def _widest_point(fields: Tuple[str, ...]) -> Dict[str, Any]:
+        """A sample as wide as these fields make it with values below 1e14.
+
+        In its shortest form a float32 below 1e14 in magnitude takes at most
+        17 characters (-12345679000000.0), and a time, written to 12 digits,
+        at most 18.
+        """
+        value = -1.2345678901e-30
+        point: Dict[str, Any] = {"frame": -FRAME_LIMIT}
+        wide: Dict[str, Any] = {
+            "time": -1.23456789012e-30,
+            "location": [value] * 3,
+            "rotation_euler": [value] * 3,
+            "rotation_quaternion": [value] * 4,
+            "local_rotation": [value] * 4,
+            "velocity": [value] * 3,
+        }
+        for name in fields:
+            point[name] = wide[name]
+        return point
 
     @staticmethod
     def _narrowest_point(fields: Tuple[str, ...]) -> Dict[str, Any]:

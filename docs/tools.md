@@ -1533,11 +1533,14 @@ Behaviour worth knowing:
   1 000-frame trajectory came back as frames 1-199 before; it is now 9 pages of
   about 120 samples with every field, or 2 with `fields: ["location"]` (596 a
   page). 32 targets with every field fit 3 frames a page. A page holds at
-  least one sample of every target, so targets whose names and one sample each
-  are more than a reply holds are refused, with how many of them, in order,
-  fit (`details.targets_that_fit`): the server writes each non-ASCII character
-  as a 6-byte escape, and 32 bones of an armature named with 127 accented
-  letters made a page the server cut, dropping a target and skipping samples.
+  least one sample of every target, so targets whose names and one sample
+  each are more than a reply holds are refused: before any frame is set when
+  even the narrowest samples would not fit, else once the first sample is
+  measured. `details.targets_that_fit` counts how many of them, in order, fit
+  with samples as wide as the requested fields make them, so that many fit
+  every page. The server writes each non-ASCII character as a 6-byte escape:
+  32 bones of an armature named with 127 accented letters made a page the
+  server cut, dropping a target and skipping samples.
 - For an unbaked rigid-body world, frames its memory cache already holds are
   read, not simulated again: the walk jumps to the cache's last frame and steps
   on from there (`simulated_frames` counts the frames it stepped). What the
