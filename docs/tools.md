@@ -167,6 +167,46 @@ Behaviour worth knowing:
   values that did apply stay written, as with lights. `applied` holds the
   values read back (scalars and colors as the 32-bit floats Unreal stores)
   and `params_set` counts them. The instance is left unsaved.
+- `enable_unreal_physics`, `set_unreal_physics_params` and
+  `set_unreal_collision` edit the actor's primitive component (its root, else
+  its only one) the way the Details panel does: in one undoable editor
+  transaction that marks the map dirty, so Save All writes the edit and one
+  Undo reverts that call alone. Each reply is the body read back:
+  `physics_mode` (`simulated`, `kinematic`, `static` for a body that is not
+  Movable, `none` without physics collision), mobility, collision mode and
+  preset, `mass_kg` (the mass Unreal computes) and the mass override, gravity
+  and damping, the attach parent and a `warning`.
+  - `enable_unreal_physics` makes the body simulate (`enable` true), makes it
+    kinematic (`kinematic` true: physics collision on, so simulated bodies hit
+    it, but moved only by its transform) or turns physics off (`enable`
+    false; collision and mobility kept). Unreal accepts the simulate flag on
+    any body and reads it back as simulating even when the body never moves,
+    so the tool checks first and refuses, with nothing changed, a body that
+    cannot take the mode: `error_type: "IncompatibleBody"`, each reason in
+    `details.problems` (`NOT_MOVABLE`, `NO_PHYSICS_COLLISION` for NoCollision
+    or a query-only preset such as OverlapAll, `NO_GEOMETRY` for a
+    StaticMeshActor without a mesh, `NO_SIMPLE_COLLISION`,
+    `COMPLEX_AS_SIMPLE` for a simulated mesh that uses its render triangles
+    as simple collision, `ATTACHED`). A Static or Stationary body is made
+    Movable (`mobility_changed_from`) unless `make_movable` is false.
+  - Unreal detaches a body from its parent when it starts simulating, keeping
+    its world transform, and turning physics off does not reattach it. An
+    attached body is refused unless `allow_detach` is true; it is then
+    detached in the same transaction, so Undo reattaches it, and the reply
+    names the parent in `detached_from`.
+  - `set_unreal_physics_params` takes a mass from 0.001 kg (Unreal's least)
+    to 1e9 kg and damping from 0 to 1e6, and reads every value back
+    (`applied`, `params_set`; `PhysicsParamsNotApplied` names one that reads
+    back different). A Static body keeps the values but has no mass
+    (`mass_kg` 0) and never simulates until it is Movable; the `warning`
+    says so. With no parameter it only reads the body.
+  - `set_unreal_collision` checks a preset before writing (an unknown one
+    changes nothing) and, when it sets `collision_enabled` on a static mesh,
+    clears the mesh's Use Default Collision flag as a preset does; with the
+    flag left set, Unreal put the mesh's own collision back in the running
+    simulation and after the map reloaded.
+  - A path in a running simulation's world (`UEDPIE_<n>_<map>`) edits that
+    play copy, which is neither undoable nor saved (`world: "simulation"`).
 - USD import and export need the optional **USDImporter** plugin enabled when
   the editor starts. They use `AssetImportTask` and `LevelExporterUSD`;
   `get_unreal_interchange_info` reports whether the plugin is available.
@@ -288,7 +328,11 @@ Behaviour worth knowing:
     report mesh collision during PIE.
   - Editing actors already in the level by path (transform, lights, collision,
     physics settings, visibility, materials) keeps working and changes the
-    editor world.
+    editor world, which the running simulation does not see: it takes effect
+    the next time the simulation starts, and a physics or collision edit says
+    so in its `warning`. A physics or collision edit given the actor's path
+    in the simulation's world (`UEDPIE_<n>_<map>`) changes the running copy
+    instead, which is neither undoable nor saved.
   - `set_unreal_material_params` edits the material instance asset, which the
     running game uses too: an edit made during PIE shows in the game and stays
     after PIE stops.
