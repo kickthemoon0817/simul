@@ -101,12 +101,18 @@ class Actor:
     def get_components_by_class(self, cls: type) -> List[Any]:
         return [self.root_component] if isinstance(self.root_component, cls) else []
 
+    def get_world(self) -> Any:
+        return self.editor.world
+
 
 class Editor:
     def __init__(self) -> None:
         self.actors: Dict[str, Actor] = {}
         self.open: Optional[str] = None
         self.pie = False
+        package = SimpleNamespace(get_name=lambda: "/Game/Maps/Lab")
+        self.world = SimpleNamespace(get_outermost=lambda: package, get_path_name=lambda: "/Game/Maps/Lab.Lab")
+        self.play_world = SimpleNamespace(get_path_name=lambda: "/Game/Maps/UEDPIE_0_Lab.Lab")
 
     def light(self, name: str, component_class: type) -> Actor:
         actor = Actor(self, name, component_class)
@@ -136,10 +142,20 @@ class Editor:
             Color=Color,
             ScopedEditorTransaction=Transaction,
             LevelEditorSubsystem="LevelEditorSubsystem",
-            get_editor_subsystem=lambda name: SimpleNamespace(
-                is_in_play_in_editor=lambda: editor.pie
-            ),
+            UnrealEditorSubsystem="UnrealEditorSubsystem",
+            LayersSubsystem="LayersSubsystem",
+            SystemLibrary=SimpleNamespace(is_valid=lambda obj: obj is not None),
+            get_editor_subsystem={
+                "LevelEditorSubsystem": SimpleNamespace(is_in_play_in_editor=lambda: editor.pie),
+                # The editor world, as actor_at finds it in and out of PIE.
+                "UnrealEditorSubsystem": SimpleNamespace(
+                    get_editor_world=lambda: None if editor.pie else editor.world,
+                    get_game_world=lambda: editor.play_world if editor.pie else None,
+                ),
+                "LayersSubsystem": SimpleNamespace(get_world=lambda: editor.world),
+            }.__getitem__,
             load_object=lambda outer, path: editor.actors.get(path),
+            find_object=lambda outer, path: editor.actors.get(path),
         )
 
     def run_python(self, code: str) -> Dict[str, Any]:

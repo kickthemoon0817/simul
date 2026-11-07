@@ -965,7 +965,7 @@ print(json.dumps(info(**args)))
 # back, and puts back a value Unreal stored differently (it turned an intensity
 # of -5 into 0 while the reply said it was not applied), so a value reported
 # not applied is unchanged. With no values it only reads the light.
-SET_LIGHT_PARAMS = ACTOR_HELPERS + EDITOR_WORLD + """
+SET_LIGHT_PARAMS = ACTOR_HELPERS + """
 READ_BACK = ("intensity", "light_color", "temperature", "use_temperature", "attenuation_radius", "cast_shadows")
 
 def read(component, name):
@@ -1421,10 +1421,12 @@ def in_folder(actor, folder):
 def select():
     chosen, failed, seen = [], [], set()
     for path in args["paths"]:
-        actor = unreal.find_object(None, path)
-        if not isinstance(actor, unreal.Actor):
-            failed.append({"actor_path": path, "error": "Actor not found"})
-        elif in_simulation(actor):
+        try:
+            actor = actor_at(path, play_world=True)
+        except SimulNotFound as exc:
+            failed.append({"actor_path": path, "error": str(exc)})
+            continue
+        if in_simulation(actor):
             failed.append({"actor_path": path, "error": "is in the running simulation's world; bulk setup edits "
                                                         "the editor world, so pass the editor path"})
         elif actor.get_path_name() not in seen:
@@ -1454,6 +1456,8 @@ def setup():
             return {"success": False, "error_type": "ValidationError",
                     "error": "Unknown collision preset: " + preset + "; nothing was changed"}
     actors, failed = select()
+    # The paths that found no actor of the editor world count as matched, and failed.
+    matched = len(actors) + len(failed)
     if len(actors) > args["limit"]:
         return {"success": False, "error_type": "ValidationError",
                 "error": str(len(actors)) + " actors matched, more than the " + str(args["limit"])
@@ -1472,7 +1476,6 @@ def setup():
                            "error": "; ".join(p["message"] for p in problems)})
             continue
         plan.append((actor, component))
-    matched = len(actors) + sum(1 for entry in failed if entry["error"] == "Actor not found")
     if failed and not args["skip_failures"]:
         return {"success": False, "error_type": _INCOMPATIBLE_BODY,
                 "error": str(len(failed)) + " of the " + str(matched) + " actors cannot be set up, so none was "

@@ -647,10 +647,8 @@ def test_bulk_setup_with_skip_failures_sets_up_the_rest(
 
     assert (result["configured_count"], result["failed_count"]) == (3, 2)
     failures = {entry["actor_path"]: entry for entry in result["failed"]}
-    assert (
-        failures["/Game/Maps/Lab.Lab:PersistentLevel.Gone"]["error"]
-        == "Actor not found"
-    )
+    gone = failures["/Game/Maps/Lab.Lab:PersistentLevel.Gone"]["error"]
+    assert gone.startswith("Actor not found: /Game/Maps/Lab.Lab:PersistentLevel.Gone")
     assert failures[empty.get_path_name()]["problems"] == ["NO_GEOMETRY"]
     assert all(p.root_component.body["simulate_physics"] for p in props)
 
