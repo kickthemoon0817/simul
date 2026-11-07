@@ -64,6 +64,7 @@ from ..schemas.blender import (
     BlenderAssignMaterialResponse,
     BlenderAttachWindowRequest,
     BlenderAttachWindowResponse,
+    BlenderBakeScope,
     BlenderBakeSimulationRequest,
     BlenderBakeSimulationResponse,
     BlenderBoundingBoxRequest,
@@ -97,6 +98,7 @@ from ..schemas.blender import (
     BlenderFileInfoResponse,
     BlenderFocusOnObjectRequest,
     BlenderFocusOnObjectResponse,
+    BlenderFreeBakeRequest,
     BlenderFreeBakeResponse,
     BlenderGetConstraintInfoRequest,
     BlenderGetConstraintInfoResponse,
@@ -126,6 +128,7 @@ from ..schemas.blender import (
     BlenderPlayAnimationRequest,
     BlenderPlayAnimationResponse,
     BlenderRemoveModifierResponse,
+    BlenderRigidBodyWorldResponse,
     BlenderSaveFileRequest,
     BlenderSaveFileResponse,
     BlenderSceneObjectsRequest,
@@ -143,6 +146,7 @@ from ..schemas.blender import (
     BlenderSetLightParamsResponse,
     BlenderSetParentRequest,
     BlenderSetParentResponse,
+    BlenderSetRigidBodyWorldRequest,
     BlenderSetTransformRequest,
     BlenderSetTransformResponse,
     BlenderSetupRigidBodyRequest,
@@ -632,12 +636,6 @@ def _capture_sequence_tool(server: "SimulMCPServer", spec: BlenderTool) -> ToolW
     return capture_blender_viewport_sequence
 
 
-def _free_bake(session: Any) -> Dict[str, Any]:
-    """Free the bake; success is the absence of an exception, whatever the session returns."""
-    session.free_bake()
-    return {}
-
-
 # ---------------------------------------------------------------------------
 # The tools, in registration order
 # ---------------------------------------------------------------------------
@@ -1112,7 +1110,10 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="set_blender_frame_range",
-        description="Set the animation frame range.",
+        description=(
+            "Set the animation frame range. An unbaked rigid-body cache follows it; "
+            "a baked one keeps its range, with a warning."
+        ),
         hints=OVERWRITING,
         operation="set_frame_range",
         request=BlenderSetFrameRangeRequest,
@@ -1193,7 +1194,16 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_physics_state",
-        description="Get current physics state of an object.",
+        description=(
+            "Get an object's world pose and rigid-body state at the current frame. An "
+            "unbaked simulation advances one frame at a time, so after a frame jump a "
+            "body sits where it was last simulated: by default the scene first steps "
+            "from the cache start to the current frame, as playback would (up to "
+            "400 000 body-frames). pose_source and simulated_for_frame say whether the "
+            "pose is the simulation's for this frame; frames past the cache end hold "
+            "the bodies at its last frame (past_cache_end). rigid_body_cache reports "
+            "the cache range and bake state."
+        ),
         hints=READ_ONLY,
         operation="get_physics_state",
         request=BlenderGetPhysicsStateRequest,
@@ -1209,19 +1219,63 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="bake_blender_simulation",
-        description="Bake physics simulation for a frame range.",
-        hints=ADDITIVE,
+        description=(
+            "Bake the physics simulation for frame_start-frame_end (start before end), "
+            "replacing an earlier bake: the simulation restarts from frame_start with "
+            "the bodies' current transforms. scope 'rigid_body' (default) bakes only "
+            "the rigid-body world's cache; 'all' bakes every point cache (rigid "
+            "bodies, cloth, soft bodies, dynamic paint, particles). Refused for a "
+            "disabled rigid body world. The reply gives the range the cache holds "
+            "and warns about scene frames it leaves out, where bodies hold their "
+            "pose. Runs on Blender's main thread: a long bake can outlast the "
+            "client timeout."
+        ),
+        hints=OVERWRITING,
         operation="bake_simulation",
         request=BlenderBakeSimulationRequest,
         response=BlenderBakeSimulationResponse,
+        params={"scope": Param(BlenderBakeScope)},
     ),
     BlenderTool(
         name="free_blender_bake",
-        description="Free (delete) baked physics simulation data.",
+        description=(
+            "Free baked physics simulation data over the same scope as "
+            "bake_blender_simulation ('rigid_body' by default, or 'all'). A freed "
+            "cache gets the scene's frame range back, so the simulation is not cut "
+            "off at the last bake's end frame. freed lists the caches that were baked."
+        ),
         hints=OVERWRITING,
         operation="free_bake",
+        request=BlenderFreeBakeRequest,
         response=BlenderFreeBakeResponse,
-        call=_free_bake,
+        params={"scope": Param(BlenderBakeScope)},
+    ),
+    BlenderTool(
+        name="get_blender_rigid_body_world",
+        description=(
+            "Get the scene's rigid body world: enabled, scene gravity, substeps, "
+            "solver iterations, time scale, split impulse, body and constraint "
+            "counts, and the cache range and bake state (rigid_body_cache). Bodies "
+            "hold their pose past the cache end; warnings name a disabled world or a "
+            "cache that leaves out part of the scene range."
+        ),
+        hints=READ_ONLY,
+        operation="get_rigid_body_world",
+        response=BlenderRigidBodyWorldResponse,
+    ),
+    BlenderTool(
+        name="set_blender_rigid_body_world",
+        description=(
+            "Change the scene's rigid body world, adding one when there is none; only "
+            "the given settings change. gravity is the scene's, shared with cloth, "
+            "soft bodies and particles. A baked cache keeps playing its bake (changed "
+            "settings apply after free_blender_bake and a new bake), and its range "
+            "cannot change until freed. Replies like get_blender_rigid_body_world."
+        ),
+        hints=OVERWRITING,
+        operation="set_rigid_body_world",
+        request=BlenderSetRigidBodyWorldRequest,
+        response=BlenderRigidBodyWorldResponse,
     ),
     # -- Scripting and mesh from data ----------------------------------------
     BlenderTool(
@@ -1331,8 +1385,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="export_simready_usd",
         description=(
-            "Export a SimReady-compliant USD file from Blender. Validates objects before export, "
-            "selects the requested objects, and carries simready_ custom properties into USD attributes."
+            "Export Blender objects as a SimReady USD asset a simulator reads: from the simready_ "
+            "metadata it authors UsdPhysics rigid bodies, mass, mesh colliders and physics materials, "
+            "and UsdSemantics labels. The asset root is the default prim and holds its materials; "
+            "metersPerUnit follows the scene's Unit Scale. Listed objects export with their "
+            "descendants, hidden ones too; lights, cameras and the World are left out by default. "
+            "Refuses when validation finds errors unless force=true. Returns each object's prim path."
         ),
         hints=DESTRUCTIVE,
         operation="export_simready_usd",

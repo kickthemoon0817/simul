@@ -170,7 +170,12 @@ class SystemMixin:
                     "error": "Extension not found: " + ext_id,
                 }}))
         """)
-        return await self._execute_json_script(script)
+        # A large extension (and its dependency chain) can take longer to
+        # start than the default budget; an interrupt then lands inside some
+        # extension's startup code.
+        return await self._execute_json_script(
+            script, timeout_seconds=self._heavy_script_timeout()
+        )
 
     # ------------------------------------------------------------------
     # Carb settings
@@ -182,7 +187,8 @@ class SystemMixin:
             "Read one or more Carbonite (carb) settings by key path. Settings control RTX "
             "renderer options, fog, exposure, tone mapping, and other runtime parameters. "
             "Key paths look like /rtx/fog/enabled, /rtx/post/tonemap/op, "
-            "/rtx/raytracing/showLights. Returns the current value for each requested key."
+            "/rtx/raytracing/showLights. Returns the current value for each requested key; "
+            "transport auth tokens (any auth_token key) read back as ***."
         ),
         read_only=True,
         idempotent=True,
@@ -204,6 +210,16 @@ class SystemMixin:
 
             settings = carb.settings.get_settings()
             keys = {_keys}
+
+            # Transport tokens stay out of tool results (and so out of agent
+            # transcripts), whether asked for directly or inside a subtree.
+            def _redact(name, value):
+                if name == "auth_token":
+                    return "***" if value else value
+                if isinstance(value, dict):
+                    return {{k: _redact(k, v) for k, v in value.items()}}
+                return value
+
             result = {{}}
             for key in keys:
                 val = settings.get(key)
@@ -212,7 +228,7 @@ class SystemMixin:
                         val = list(val)
                 except Exception:
                     val = str(val)
-                result[key] = val
+                result[key] = _redact(key.rstrip("/").rsplit("/", 1)[-1], val)
             print(json.dumps({{"settings": result}}))
         """)
         return await self._execute_json_script(script)
@@ -278,4 +294,3 @@ class SystemMixin:
             print(json.dumps({{"applied": applied, "count": len(applied)}}))
         """)
         return await self._execute_json_script(script)
-

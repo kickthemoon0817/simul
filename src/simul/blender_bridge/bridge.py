@@ -24,7 +24,7 @@ from bpy.app.handlers import persistent
 
 from ..adapters.blender_runtime import BlenderRuntimeSession
 from ..utils.errors import exception_message
-from ..utils.paths import PathPolicy
+from ..utils.paths import PathPolicy, state_dir
 from .agent_control import reset_ui
 from .agent_cursor import cursors, hide_annotations, observations
 from .protocol import (
@@ -70,6 +70,7 @@ UNDO_STEPS: dict[str, str] = {
     "set_light_params": "set_blender_light_params",
     "set_object_parent": "set_blender_object_parent",
     "set_object_transform": "set_blender_object_transform",
+    "set_rigid_body_world": "set_blender_rigid_body_world",
     "setup_rigid_body": "setup_blender_rigid_body",
     "setup_simready_hierarchy": "setup_simready_hierarchy",
     # It writes UV coordinates; the Edit Mode round trip it makes records nothing.
@@ -98,6 +99,7 @@ NO_UNDO_STEP = frozenset(
         "get_object_info",
         "get_object_trajectory",
         "get_physics_state",
+        "get_rigid_body_world",
         "get_runtime_info",
         "get_simready_metadata",
         "get_viewport_info",
@@ -165,11 +167,12 @@ class BlenderBridge:
     """Identify a process, file-load generation, window, and scene before acting."""
 
     def __init__(self, discovery_dir: Path | None = None) -> None:
-        self.discovery_dir = (
-            discovery_dir
-            or Path(
-                os.environ.get("SIMUL_BLENDER_DISCOVERY_DIR", "~/.simul/blender")
-            ).expanduser()
+        # The server looks in blender.discovery_dir, which defaults to
+        # $SIMUL_HOME/blender: Blender has to see the same SIMUL_HOME.
+        self.discovery_dir = discovery_dir or (
+            Path(os.environ["SIMUL_BLENDER_DISCOVERY_DIR"]).expanduser()
+            if os.environ.get("SIMUL_BLENDER_DISCOVERY_DIR")
+            else state_dir() / "blender"
         )
         self.instance_id = uuid.uuid4().hex
         self.document_id = uuid.uuid4().hex

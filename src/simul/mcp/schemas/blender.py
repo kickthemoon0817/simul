@@ -1765,6 +1765,18 @@ class BlenderSetFrameRangeResponse(BaseModel):
     )
     frame_start: int = Field(..., description="Start frame that was set")
     frame_end: int = Field(..., description="End frame that was set")
+    # Defined with the physics schemas; resolved by model_rebuild() there.
+    rigid_body_cache: Optional["BlenderRigidBodyCache"] = Field(
+        None,
+        description=(
+            "The rigid-body cache after the change: an unbaked cache follows the new "
+            "range, a baked one keeps its own. Null without a rigid body world"
+        ),
+    )
+    warning: Optional[str] = Field(
+        None,
+        description="Set when a baked rigid-body cache leaves out part of the new range",
+    )
 
 
 class BlenderPlayAnimationRequest(BaseModel):
@@ -2047,10 +2059,83 @@ class BlenderGetConstraintInfoResponse(BaseModel):
     disable_collisions: bool = Field(..., description="Whether collisions are disabled")
 
 
+# Bounds of a Blender point cache's frame range (PointCache RNA, Blender
+# 4.2-5.0); BlenderRuntimeSession._CACHE_FRAME_MIN/_MAX repeat them.
+CACHE_FRAME_MIN = -1048574
+CACHE_FRAME_MAX = 1048574
+
+#: What bake_blender_simulation and free_blender_bake act on.
+BlenderBakeScope = Literal["rigid_body", "all"]
+
+#: Where get_blender_physics_state's pose comes from.
+BlenderPoseSource = Literal[
+    "evaluated",
+    "simulation",
+    "baked",
+    "before_cache",
+    "past_cache_end",
+    "world_disabled",
+    "unknown",
+]
+
+
+class BlenderRigidBodyCache(BaseModel):
+    """Range and bake state of the rigid-body world's point cache."""
+
+    frame_start: int = Field(..., description="First simulated frame")
+    frame_end: int = Field(
+        ...,
+        description="Last simulated frame: Blender holds the bodies at this frame's pose after it",
+    )
+    is_baked: bool = Field(..., description="Whether playback reads a bake")
+    is_outdated: bool = Field(
+        False,
+        description=(
+            "Blender's outdated flag: something changed since the cached frames were "
+            "simulated; they are dropped when the scene next steps from frame_start"
+        ),
+    )
+    info: str = Field(
+        "",
+        description="Blender's cache summary, such as '100 frames in memory (14 KiB).'",
+    )
+    covers_scene_range: bool = Field(
+        ..., description="Whether the cache spans the scene's whole frame range"
+    )
+
+
+class BlenderPointCacheEntry(BaseModel):
+    """One point cache in the scene."""
+
+    owner: str = Field(
+        ..., description="Object holding the cache, or the scene for the rigid body world"
+    )
+    kind: str = Field(
+        ...,
+        description="RIGID_BODY, CLOTH, SOFT_BODY, DYNAMIC_PAINT or PARTICLES",
+    )
+    name: str = Field(
+        ..., description="Modifier, canvas surface or particle system holding it"
+    )
+    frame_start: int = Field(..., description="First frame of the cache")
+    frame_end: int = Field(..., description="Last frame of the cache")
+    is_baked: bool = Field(..., description="Whether the cache is baked")
+
+
+BlenderSetFrameRangeResponse.model_rebuild()
+
+
 class BlenderGetPhysicsStateRequest(BaseModel):
     """Request to get physics state of an object."""
 
     object_name: str = Field(..., description="Name of the object")
+    step_simulation: bool = Field(
+        True,
+        description=(
+            "Step an unbaked rigid-body simulation from its cache start to the current "
+            "frame before reading the pose, at most 400 000 body-frames"
+        ),
+    )
 
 
 class BlenderGetPhysicsStateResponse(BaseModel):
@@ -2080,6 +2165,39 @@ class BlenderGetPhysicsStateResponse(BaseModel):
     mass: Optional[float] = Field(None, description="Mass if rigid body exists")
     collision_shape: Optional[str] = Field(
         None, description="Collision shape if rigid body exists"
+    )
+    # Null from an add-on built before the cache report.
+    frame: Optional[int] = Field(None, description="Frame the pose was read at")
+    pose_source: Optional[BlenderPoseSource] = Field(
+        None,
+        description=(
+            "evaluated: not a simulated body (no rigid body, passive, animated or "
+            "disabled), its transform and animation; simulation: the unbaked "
+            "simulation's pose for this frame; baked: read from the bake; "
+            "before_cache: before the cache start, the starting pose; past_cache_end: "
+            "held at the cache's last frame; world_disabled: the world does not "
+            "simulate; unknown: not stepped, so the pose is the simulation's only if "
+            "Blender already simulated this frame"
+        ),
+    )
+    simulated_for_frame: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether the pose is the rigid-body simulation's result for this frame; "
+            "null when nothing simulates the object or it is unknown"
+        ),
+    )
+    stepped_frames: Optional[int] = Field(
+        None, description="Frames stepped to reach the current frame (0 when none)"
+    )
+    world_enabled: Optional[bool] = Field(
+        None, description="Whether the rigid body world simulates; null without one"
+    )
+    rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
+        None, description="The rigid-body cache; null without a rigid body world"
+    )
+    warning: Optional[str] = Field(
+        None, description="Why the pose may not be the simulation's for this frame"
     )
 
 
@@ -2134,8 +2252,36 @@ class BlenderGetTrajectoryResponse(BaseModel):
 class BlenderBakeSimulationRequest(BaseModel):
     """Request to bake physics simulation."""
 
-    frame_start: int = Field(..., description="First frame to bake")
-    frame_end: int = Field(..., description="Last frame to bake")
+    frame_start: int = Field(
+        ...,
+        description="First frame to bake",
+        ge=CACHE_FRAME_MIN,
+        le=CACHE_FRAME_MAX,
+    )
+    frame_end: int = Field(
+        ...,
+        description="Last frame to bake; after frame_start",
+        ge=1,
+        le=CACHE_FRAME_MAX,
+    )
+    scope: BlenderBakeScope = Field(
+        "rigid_body",
+        description=(
+            "rigid_body bakes only the rigid-body world's cache; all bakes every point "
+            "cache in the scene (rigid bodies, cloth, soft bodies, dynamic paint and "
+            "particles)"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "BlenderBakeSimulationRequest":
+        # An inverted range used to bake nothing and leave the cache unable to
+        # simulate any frame before its start, even after a free (Blender 5.0.1).
+        if self.frame_start >= self.frame_end:
+            raise ValueError(
+                f"frame_start ({self.frame_start}) must be less than frame_end ({self.frame_end})"
+            )
+        return self
 
 
 class BlenderBakeSimulationResponse(BaseModel):
@@ -2145,8 +2291,45 @@ class BlenderBakeSimulationResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    frame_start: int = Field(..., description="First baked frame")
-    frame_end: int = Field(..., description="Last baked frame")
+    scope: Optional[BlenderBakeScope] = Field(None, description="What was baked")
+    frame_start: Optional[int] = Field(
+        None,
+        description=(
+            "First frame of the rigid-body bake, as the cache holds it; null without "
+            "a rigid body world"
+        ),
+    )
+    frame_end: Optional[int] = Field(
+        None,
+        description=(
+            "Last frame of the rigid-body bake, as the cache holds it; null without "
+            "a rigid body world"
+        ),
+    )
+    frame_count: Optional[int] = Field(None, description="Frames in the rigid-body bake")
+    rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
+        None, description="The rigid-body cache after the bake"
+    )
+    caches: List[BlenderPointCacheEntry] = Field(
+        default_factory=list,
+        description="The caches in scope after the bake, with their ranges",
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="What the bake leaves out, such as frames of the scene range past its end",
+    )
+
+
+class BlenderFreeBakeRequest(BaseModel):
+    """Request to free baked simulation data."""
+
+    scope: BlenderBakeScope = Field(
+        "rigid_body",
+        description=(
+            "rigid_body frees only the rigid-body world's cache; all frees every point "
+            "cache in the scene"
+        ),
+    )
 
 
 class BlenderFreeBakeResponse(BaseModel):
@@ -2155,6 +2338,128 @@ class BlenderFreeBakeResponse(BaseModel):
     success: bool = Field(..., description="Whether free bake succeeded")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
+    )
+    scope: Optional[BlenderBakeScope] = Field(None, description="What was freed")
+    freed: List[BlenderPointCacheEntry] = Field(
+        default_factory=list, description="The caches that were baked and are now freed"
+    )
+    caches: List[BlenderPointCacheEntry] = Field(
+        default_factory=list, description="The caches in scope after freeing"
+    )
+    rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
+        None,
+        description="The rigid-body cache after freeing, fitted to the scene range",
+    )
+    warnings: List[str] = Field(default_factory=list, description="Anything left as it was")
+
+
+class BlenderSetRigidBodyWorldRequest(BaseModel):
+    """Request to change the scene's rigid body world."""
+
+    enabled: Optional[bool] = Field(None, description="Run the simulation")
+    gravity: Optional[List[float]] = Field(
+        None,
+        description=(
+            "Scene gravity [x, y, z] in m/s^2, shared with cloth, soft bodies and particles"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    use_gravity: Optional[bool] = Field(None, description="Apply the scene gravity")
+    substeps_per_frame: Optional[int] = Field(
+        None, description="Simulation steps per frame", ge=1, le=32767
+    )
+    solver_iterations: Optional[int] = Field(
+        None, description="Constraint solver iterations per step", ge=1, le=1000
+    )
+    time_scale: Optional[float] = Field(
+        None,
+        description="Simulation speed relative to the frame rate",
+        ge=0.0,
+        le=100.0,
+        allow_inf_nan=False,
+    )
+    use_split_impulse: Optional[bool] = Field(
+        None, description="Reduce extra velocity from penetration recovery"
+    )
+    cache_frame_start: Optional[int] = Field(
+        None,
+        description="First simulated frame",
+        ge=CACHE_FRAME_MIN,
+        le=CACHE_FRAME_MAX,
+    )
+    cache_frame_end: Optional[int] = Field(
+        None,
+        description="Last simulated frame; after cache_frame_start",
+        ge=1,
+        le=CACHE_FRAME_MAX,
+    )
+
+    @model_validator(mode="after")
+    def _finite_ordered(self) -> "BlenderSetRigidBodyWorldRequest":
+        if self.gravity is not None and not all(math.isfinite(v) for v in self.gravity):
+            raise ValueError("gravity must be three finite numbers")
+        if (
+            self.cache_frame_start is not None
+            and self.cache_frame_end is not None
+            and self.cache_frame_start >= self.cache_frame_end
+        ):
+            raise ValueError(
+                f"cache_frame_start ({self.cache_frame_start}) must be less than "
+                f"cache_frame_end ({self.cache_frame_end})"
+            )
+        return self
+
+
+class BlenderRigidBodyWorldResponse(BaseModel):
+    """The scene's rigid body world."""
+
+    success: bool = Field(..., description="Whether the query or change succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    exists: bool = Field(..., description="Whether the scene has a rigid body world")
+    created: Optional[bool] = Field(
+        None, description="set_blender_rigid_body_world only: whether it added the world"
+    )
+    enabled: Optional[bool] = Field(None, description="Whether the world simulates")
+    gravity: List[float] = Field(
+        ..., description="Scene gravity [x, y, z] in m/s^2", min_length=3, max_length=3
+    )
+    use_gravity: bool = Field(..., description="Whether the scene gravity applies")
+    substeps_per_frame: Optional[int] = Field(
+        None, description="Simulation steps per frame"
+    )
+    solver_iterations: Optional[int] = Field(
+        None, description="Constraint solver iterations per step"
+    )
+    time_scale: Optional[float] = Field(
+        None, description="Simulation speed relative to the frame rate"
+    )
+    use_split_impulse: Optional[bool] = Field(
+        None, description="Whether split impulse is on"
+    )
+    collection: Optional[str] = Field(
+        None, description="Collection of the simulated bodies"
+    )
+    body_count: Optional[int] = Field(
+        None, description="Rigid bodies in the world, active and passive"
+    )
+    constraint_count: Optional[int] = Field(
+        None, description="Rigid body constraints in the world"
+    )
+    rigid_body_cache: Optional[BlenderRigidBodyCache] = Field(
+        None, description="The world's cache: simulated range and bake state"
+    )
+    scene_frame_start: int = Field(..., description="Scene start frame")
+    scene_frame_end: int = Field(..., description="Scene end frame")
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "What makes the simulation differ from what playback suggests: a disabled "
+            "world, a cache that leaves out part of the scene range, a bake that "
+            "changed settings do not reach"
+        ),
     )
 
 
