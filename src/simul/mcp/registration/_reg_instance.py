@@ -5,11 +5,12 @@ Instance discovery, routing, and session management for the Simul MCP server.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from fastmcp.tools import ToolResult
 
 from ..schemas.common import ErrorResponse
+from ..session_manager import ClaimStoreError, claim_is_orphaned
 from ._helpers import with_param_descriptions
 
 if TYPE_CHECKING:
@@ -21,6 +22,24 @@ _CLAIM_MODE_SENTENCE = {
     True: "Claims are ENFORCED on this server (see claim_isaac_instance).",
     False: "Claims are ADVISORY on this server (see claim_isaac_instance).",
 }
+
+# Record fields only the session store and the server read.
+_PRIVATE_RECORD_KEYS = frozenset({"pid", "host"})
+
+
+def public_records(sessions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return session records as tools publish them.
+
+    The writing process's ``pid`` and ``host`` are left out; ``orphaned``
+    says whether the claim's session has ended or its server exited, so the
+    same ``agent_id`` may take it over at once.
+    """
+    published = []
+    for record in sessions:
+        entry = {key: value for key, value in record.items() if key not in _PRIVATE_RECORD_KEYS}
+        entry["orphaned"] = claim_is_orphaned(record)
+        published.append(entry)
+    return published
 
 
 def register_instance_tools(server: "SimulMCPServer") -> None:
@@ -69,10 +88,20 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
 
         async def _instance_entry(name: str, client: Any) -> Dict[str, Any]:
             brief = await server._get_instance_brief(name, client)
-            session_status = server.session_manager.get_instance_session(
-                client._port
-            ).get_status()
-            brief["sessions"] = session_status["sessions"]
+            try:
+                session_status = server.session_manager.get_instance_session(
+                    client._port
+                ).get_status()
+            except ClaimStoreError as exc:
+                # One instance's unreadable records must not hide the others,
+                # nor read as "free".
+                session_status = {
+                    "sessions": [],
+                    "session_count": 0,
+                    "status": "unverified",
+                }
+                brief["claims_error"] = str(exc)
+            brief["sessions"] = public_records(session_status["sessions"])
             brief["session_count"] = session_status["session_count"]
             # Open means this server is skipping the bridge after repeated
             # transport failures and talking to the stock socket instead.
@@ -93,7 +122,14 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
 
             brief["instance_status"] = session_status["status"]
 
-            if my_purpose and session_status["sessions"]:
+            if session_status["status"] == "unverified":
+                brief["compatibility"] = "blocked"
+                brief["compatibility_score"] = 0.0
+                brief["compatibility_reason"] = (
+                    "The instance's claims cannot be verified (unreadable or just "
+                    "repaired records); a claim may still be live."
+                )
+            elif my_purpose and session_status["sessions"]:
                 compat = server.session_manager.score_compatibility(
                     my_purpose, client._port, status=session_status
                 )
@@ -158,7 +194,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             agent_id: Unique label for this agent. Defaults to a label
                       derived from (but not revealing) the MCP session. A
                       claim stays bound to the MCP session that made it, so
-                      reusing another agent's label is refused.
+                      reusing another agent's label is refused, unless that
+                      claim is orphaned (its session ended or its server
+                      exited): then the same label takes it over.
 
         Returns:
             Confirmation with the new active instance, session info,
@@ -182,24 +220,32 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         _agent_id = server._resolve_agent_id(agent_id)
 
         compat_info: Dict[str, Any] = {}
+        session_result: Dict[str, Any] = {}
         if purpose:
-            holder = server._foreign_claim(instance_name, _agent_id)
-            if holder is not None:
-                return server._as_text_result(
-                    server._claimed_error(instance_name, holder, _agent_id)
+            # Registered before the switch, so a refused claim leaves the
+            # session on the instance it was using.
+            try:
+                compat_info = server.session_manager.score_compatibility(purpose, port)
+                session_result = server.session_manager.get_instance_session(port).register(
+                    _agent_id,
+                    purpose,
+                    owner=server._claim_owner(),
+                    conflict=(
+                        server._claim_conflict(instance_name, _agent_id) if enforced else None
+                    ),
                 )
-            compat_info = server.session_manager.score_compatibility(purpose, port)
+            except ClaimStoreError as exc:
+                return server._as_text_result(server._claim_store_error(exc, instance_name))
+            if session_result["status"] == "refused":
+                return server._as_text_result(
+                    server._claimed_error(instance_name, session_result["holder"], _agent_id)
+                )
 
         server._set_request_active_instance(instance_name)
         reachable = await client.ping()
 
-        session_result: Dict[str, Any] = {}
         binding_result: Dict[str, Any] = {}
         if purpose:
-            inst_session = server.session_manager.get_instance_session(port)
-            session_result = inst_session.register(
-                _agent_id, purpose, owner=server._claim_owner()
-            )
             binding = server._bind_request_session(
                 instance_name=instance_name,
                 port=port,
@@ -224,7 +270,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             result["compatibility"] = compat_info.get("compatibility")
             result["compatibility_score"] = compat_info.get("score")
             result["compatibility_reason"] = compat_info.get("reason")
-            result["existing_sessions"] = compat_info.get("sessions", [])
+            result["existing_sessions"] = public_records(compat_info.get("sessions", []))
         if session_result:
             result["session"] = session_result
         if binding_result:
@@ -241,7 +287,9 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
                 "fail with InstanceClaimed, and this call fails the same way when "
                 "another agent already holds a live claim. Read-only tools are never "
                 "blocked. A claim expires after 120 s without tool activity; call "
-                "release_isaac_instance when you are done."
+                "release_isaac_instance when you are done. After a reconnect or a "
+                "server restart, claiming again with the same agent_id takes your "
+                "orphaned claim over at once."
             )
             if enforced
             else (
@@ -272,7 +320,10 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
             agent_id: Unique label for this agent. Defaults to a label
                       derived from (but not revealing) the MCP session. A
                       claim stays bound to the MCP session that made it, so
-                      reusing another agent's label is refused.
+                      reusing another agent's label is refused, unless that
+                      claim is orphaned (its session ended or its server
+                      exited): then the same label takes it over. Pass the
+                      same agent_id after a reconnect to keep your claim.
 
         Returns:
             Registration result with compatibility info.
@@ -291,15 +342,21 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
 
         port = client._port
         _agent_id = server._resolve_agent_id(agent_id)
-        holder = server._foreign_claim(instance_name, _agent_id)
-        if holder is not None:
-            return server._as_text_result(
-                server._claimed_error(instance_name, holder, _agent_id)
-            )
         inst_session = server.session_manager.get_instance_session(port)
-
-        compat = server.session_manager.score_compatibility(purpose, port)
-        reg = inst_session.register(_agent_id, purpose, owner=server._claim_owner())
+        try:
+            compat = server.session_manager.score_compatibility(purpose, port)
+            reg = inst_session.register(
+                _agent_id,
+                purpose,
+                owner=server._claim_owner(),
+                conflict=server._claim_conflict(instance_name, _agent_id) if enforced else None,
+            )
+        except ClaimStoreError as exc:
+            return server._as_text_result(server._claim_store_error(exc, instance_name))
+        if reg["status"] == "refused":
+            return server._as_text_result(
+                server._claimed_error(instance_name, reg["holder"], _agent_id)
+            )
         binding = server._bind_request_session(
             instance_name=instance_name,
             port=port,
@@ -321,7 +378,7 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
                 "compatibility": compat["compatibility"],
                 "compatibility_score": compat["score"],
                 "compatibility_reason": compat["reason"],
-                "existing_sessions": compat["sessions"],
+                "existing_sessions": public_records(compat["sessions"]),
             }
         )
 
@@ -330,6 +387,8 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         description=(
             "Release your own claim on the active Isaac Sim instance; an "
             "agent_id that is not yours is refused. Call this when you're done. "
+            "After a reconnect or a server restart, pass the agent_id you claimed "
+            "with to release that orphaned claim. "
             + _CLAIM_MODE_SENTENCE[enforced]
         ),
         annotations=server._tool_annotations(
@@ -346,6 +405,8 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
 
         Args:
             agent_id: Agent session ID. Uses current session if not specified.
+                      Without a claim in this session, names an orphaned claim
+                      (its session ended or its server exited) to release.
 
         Returns:
             Release confirmation.
@@ -356,11 +417,6 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
         instance_name = server._get_effective_instance_name()
         binding = server._get_active_binding()
         _agent_id = agent_id or (binding.agent_id if binding is not None else None)
-        _port = binding.port if binding is not None else None
-        if not _agent_id or not _port:
-            return server._as_text_result(
-                {"success": False, "error": "No active session to release"}
-            )
         if binding is not None and _agent_id != binding.agent_id:
             return server._as_text_result(
                 ErrorResponse(
@@ -371,9 +427,37 @@ def register_instance_tools(server: "SimulMCPServer") -> None:
                     error_type="PermissionError",
                 ).model_dump()
             )
+        if binding is not None:
+            _port: Optional[int] = binding.port
+        else:
+            _port = server._port_of(instance_name) if _agent_id else None
+        if not _agent_id or not _port:
+            return server._as_text_result(
+                {"success": False, "error": "No active session to release"}
+            )
+
+        owner = server._claim_owner()
+
+        def releasable(record: Dict[str, Any]) -> bool:
+            # This session's own claim, or one nothing can renew any more.
+            return binding is not None or record.get("owner") == owner or claim_is_orphaned(record)
 
         inst_session = server.session_manager.get_instance_session(_port)
-        result = inst_session.release(_agent_id)
+        try:
+            result = inst_session.release(_agent_id, allowed=releasable)
+        except ClaimStoreError as exc:
+            return server._as_text_result(server._claim_store_error(exc, instance_name))
+        if result["status"] == "refused":
+            return server._as_text_result(
+                ErrorResponse(
+                    error=(
+                        f"The claim of agent_id {_agent_id!r} on {instance_name!r} belongs "
+                        "to another live MCP session; only your own claim, or an orphaned "
+                        "one, can be released."
+                    ),
+                    error_type="PermissionError",
+                ).model_dump()
+            )
         released = server._release_request_binding(instance_name, _agent_id)
         return server._as_text_result(
             {
