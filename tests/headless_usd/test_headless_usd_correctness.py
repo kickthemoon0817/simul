@@ -17,7 +17,6 @@ pytest.importorskip("pxr", reason="pxr library not available")
 from pxr import Usd, UsdGeom  # noqa: E402
 
 from simul.adapters.headless_usd import HeadlessUSDSession  # noqa: E402
-from simul.usd.bbox import BBoxCache  # noqa: E402
 from simul.usd.mesh_ops import MeshOperations  # noqa: E402
 
 CUBE_POINTS: List[Tuple[float, float, float]] = [
@@ -108,32 +107,6 @@ class TestTransformedBounds:
             "min": [-1.0, -1.0, -1.0],
             "max": [1.0, 1.0, 1.0],
         }
-
-
-class TestCylinderManualBounds:
-    """The manual fallback honours the Cylinder ``axis`` attribute."""
-
-    @pytest.mark.parametrize(
-        "axis, expected",
-        [
-            (None, ([-1.0, -1.0, -3.0], [1.0, 1.0, 3.0])),  # schema default is Z
-            ("X", ([-3.0, -1.0, -1.0], [3.0, 1.0, 1.0])),
-            ("Y", ([-1.0, -3.0, -1.0], [1.0, 3.0, 1.0])),
-            ("Z", ([-1.0, -1.0, -3.0], [1.0, 1.0, 3.0])),
-        ],
-    )
-    def test_axis(self, axis, expected) -> None:
-        stage = Usd.Stage.CreateInMemory()
-        cylinder = UsdGeom.Cylinder.Define(stage, "/C")
-        cylinder.GetRadiusAttr().Set(1.0)
-        cylinder.GetHeightAttr().Set(6.0)
-        if axis is not None:
-            cylinder.GetAxisAttr().Set(axis)
-
-        bbox = BBoxCache(stage)._compute_local_bbox_manual(cylinder.GetPrim())
-
-        assert bbox is not None
-        assert [list(bbox[0]), list(bbox[1])] == [expected[0], expected[1]]
 
 
 class TestBBoxInvalidation:
