@@ -67,6 +67,7 @@ UNDO_STEPS: dict[str, str] = {
     "set_light_params": "set_blender_light_params",
     "set_object_parent": "set_blender_object_parent",
     "set_object_transform": "set_blender_object_transform",
+    "set_rigid_body_world": "set_blender_rigid_body_world",
     "setup_rigid_body": "setup_blender_rigid_body",
     "setup_simready_hierarchy": "setup_simready_hierarchy",
 }
@@ -93,6 +94,7 @@ NO_UNDO_STEP = frozenset(
         "get_object_info",
         "get_object_trajectory",
         "get_physics_state",
+        "get_rigid_body_world",
         "get_runtime_info",
         "get_simready_metadata",
         "get_viewport_info",
