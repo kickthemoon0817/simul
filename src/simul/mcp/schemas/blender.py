@@ -1545,6 +1545,22 @@ BlenderSceneFrame = Annotated[int, Field(ge=0, le=1_048_574)]
 #: Frames between trajectory samples.
 BlenderFrameStep = Annotated[int, Field(ge=1)]
 
+# The same bounds as a tool's input schema states them. They only describe:
+# the request models above enforce them inside the server's envelope, so an
+# out-of-range argument is rate limited, recorded and answered with the
+# envelope's ValidationError like any other invalid input, instead of being
+# refused by FastMCP before the envelope sees it.
+#: A current frame, as advertised.
+AdvertisedFrame = Annotated[
+    int, Field(json_schema_extra={"minimum": -1_048_574, "maximum": 1_048_574})
+]
+#: A frame of a scene's frame range, as advertised.
+AdvertisedSceneFrame = Annotated[
+    int, Field(json_schema_extra={"minimum": 0, "maximum": 1_048_574})
+]
+#: Frames between trajectory samples, as advertised.
+AdvertisedFrameStep = Annotated[int, Field(json_schema_extra={"minimum": 1})]
+
 
 class BlenderSetFrameRequest(BaseModel):
     """Request to set the current animation frame."""
