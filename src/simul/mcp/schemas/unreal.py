@@ -641,28 +641,54 @@ class UnrealCallActorFunctionResponse(BaseModel):
 
 
 class UnrealSetActorParentResponse(BaseModel):
-    """Response after setting actor parent."""
+    """Response after attaching an actor to a parent or detaching it."""
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    actor_path: str = Field(..., description="Child actor path")
+    actor_path: str = Field(..., description="Path of the actor attached or detached")
     parent_path: Optional[str] = Field(
-        None, description="Parent actor path (None if detached)"
+        None,
+        description="The actor's parent read back after the call; null once detached",
+    )
+    previous_parent_path: Optional[str] = Field(
+        None, description="The actor's parent before the call; null when it had none"
+    )
+    changed: bool = Field(
+        ...,
+        description=(
+            "Whether the parent changed: false when the actor already had that parent, "
+            "or had none to detach from"
+        ),
     )
 
 
 class UnrealAddComponentResponse(BaseModel):
-    """Response after adding a component."""
+    """Response after adding a component, read back from the actor."""
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor that received the component")
-    component_path: str = Field(..., description="Full path of the new component")
-    component_class: str = Field(..., description="Class of the added component")
+    component_path: str = Field(
+        ..., min_length=1, description="Full path of the new component"
+    )
+    component_name: str = Field(..., description="Name of the new component")
+    component_class: str = Field(
+        ..., description="Class name of the new component, read back"
+    )
+    parent_component: Optional[str] = Field(
+        None,
+        description=(
+            "Name of the component it is attached under; null for a component that is "
+            "not a scene component, or one that became the actor's root"
+        ),
+    )
+    is_root: bool = Field(
+        False, description="Whether the new component is the actor's root component"
+    )
 
 
 class UnrealSetActorVisibilityResponse(BaseModel):
@@ -825,8 +851,16 @@ class UnrealSetRenderSettingsResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    setting_name: str = Field(..., description="Setting name")
-    applied: bool = Field(True, description="Whether the setting was applied")
+    setting_name: str = Field(..., description="Console variable name")
+    requested_value: Optional[str] = Field(None, description="The value asked for")
+    applied: bool = Field(
+        ..., description="Whether the variable reads back as the requested value"
+    )
+    value: Optional[str] = Field(
+        None,
+        description="The variable read back after the write, as Unreal formats it (true/false for a bool)",
+    )
+    previous_value: Optional[str] = Field(None, description="The variable before the write")
 
 
 # ------------------------------------------------------------------

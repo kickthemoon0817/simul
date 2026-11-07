@@ -443,7 +443,11 @@ class CameraMixin:
             except Exception as e:
                 print(json.dumps({{"error": f"Viewport capture error: {{e}}"}}))
         """)
-        return await self._execute_json_script(script)
+        # Rendering at a new resolution can recompile shaders, which stalls
+        # the frames this script waits on well past the default budget.
+        return await self._execute_json_script(
+            script, timeout_seconds=self._heavy_script_timeout()
+        )
 
     def _capture_dir_or_denial(self) -> Union[str, Dict[str, Any]]:
         """Pick the directory captures are written to, or explain why none is.

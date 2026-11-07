@@ -28,11 +28,12 @@ from pathlib import Path
 from typing import Any, Deque, Dict, Iterator, List, Optional
 
 from ..utils.filelock import exclusive_file_lock
+from ..utils.paths import state_dir
 
 logger = logging.getLogger(__name__)
 
-
-_DEFAULT_LOG_DIR = Path.home() / ".simul" / "logs"
+# Under $SIMUL_HOME (default ~/.simul); created on the first write, not here.
+_DEFAULT_LOG_DIR = state_dir() / "logs"
 #: Recent records kept in memory (and the largest ``limit`` the stats tool takes).
 MAX_RECENT = 200
 #: Sessions whose per-session stats are kept; the least recently active is
@@ -327,7 +328,9 @@ class ToolUsageTracker:
         self._stats.clear()
         self._session_stats.clear()
         self._recent.clear()
-        for rotated in _log_files(self._log_file)[:-1]:
+        for rotated in _log_files(self._log_file):
+            if rotated == self._log_file:
+                continue
             try:
                 rotated.unlink()
             except OSError as exc:

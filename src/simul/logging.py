@@ -133,7 +133,9 @@ LOG_DIR_MODE = 0o700
 
 def _simul_state_root() -> Path:
     """The directory simul owns its state under (``$SIMUL_HOME``, default ``~/.simul``)."""
-    return Path(os.environ.get("SIMUL_HOME") or "~/.simul").expanduser()
+    from .utils.paths import state_dir
+
+    return state_dir()
 
 
 def make_private_dir(path: Path) -> None:

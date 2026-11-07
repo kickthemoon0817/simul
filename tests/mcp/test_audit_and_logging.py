@@ -142,20 +142,11 @@ def test_the_outcome_is_reported_only_inside_a_call() -> None:
 
 @pytest.fixture
 def restore_logging() -> Iterator[None]:
-    """Put the loggers this module reconfigures back afterwards."""
-    names = ["", "simul", "simul.mcp", "fastmcp", "simul.audit", "simul.probe"]
-    saved = {name: (logging.getLogger(name).level, list(logging.getLogger(name).handlers)) for name in names}
+    """Stop the audit listener setup_logging starts (the conftest restores the loggers)."""
     try:
         yield
     finally:
         simul_logging._stop_audit_listener()
-        for name, (level, handlers) in saved.items():
-            logger = logging.getLogger(name)
-            for handler in list(logger.handlers):
-                if handler not in handlers:
-                    logger.removeHandler(handler)
-                    handler.close()
-            logger.setLevel(level)
 
 
 def _settings(tmp_path: Path, **logging_fields: Any) -> Settings:

@@ -126,7 +126,7 @@ class TestSharedOptions:
         self, captured: List[Dict[str, Any]], command: str
     ) -> None:
         result = runner.invoke(app, [command, "--blender-tools", "medium"])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert "Unknown --blender-tools value" in result.output
         assert not captured
 
@@ -135,7 +135,7 @@ class TestSharedOptions:
         self, captured: List[Dict[str, Any]], command: str
     ) -> None:
         result = runner.invoke(app, [command, "--backends", "usd,houdini"])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert "houdini" in result.output
 
     def test_apply_backend_options_parses_every_flag(self) -> None:
