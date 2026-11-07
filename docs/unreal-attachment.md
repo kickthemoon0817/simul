@@ -69,7 +69,7 @@ layouts often contain several viewports: supply a key explicitly when selection
 is ambiguous. These keys identify level viewports, not operating system windows
 or arbitrary asset-editor tabs.
 
-The selection is stored in `~/.simul/unreal/attachment.json` with owner-only
+The selection is stored in `$SIMUL_HOME/unreal/attachment.json` (default `~/.simul/unreal/attachment.json`) with owner-only
 permissions on POSIX. Passphrases are not copied into that file; configure
 `UNREAL__PASSPHRASE` on the client when the editor requires authentication.
 

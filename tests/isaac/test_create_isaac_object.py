@@ -104,7 +104,11 @@ def test_full_build_creates_the_object_on_a_stage(
     assert prim.GetTypeName() == "Cube"
     assert prim.HasAPI(UsdPhysics.RigidBodyAPI)
     assert prim.HasAPI(UsdPhysics.CollisionAPI)
-    assert UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Get() == "convexHull"
+    # A Cube collides as an analytic box; a mesh approximation would be ignored.
+    assert not prim.HasAPI(UsdPhysics.MeshCollisionAPI)
+    assert result["steps"]["collision"]["shapes"] == [
+        {"path": "/World/Box", "type": "Cube", "already_had_collision": False, "approximation": None}
+    ]
     assert UsdPhysics.MassAPI(prim).GetMassAttr().Get() == 2.5
     op_types = [op.GetOpType() for op in UsdGeom.Xformable(prim).GetOrderedXformOps()]
     assert op_types == [
@@ -239,7 +243,9 @@ def test_single_step_tools_still_work_on_a_stage(
     assert "already applied" in again["error"]
 
     collider = run(tools.add_isaac_collision("/World/Ball"))
-    assert collider["approximation"] == "none"
+    assert collider["shapes"] == [
+        {"path": "/World/Ball", "type": "Sphere", "already_had_collision": False, "approximation": None}
+    ]
     assert prim.HasAPI(UsdPhysics.CollisionAPI)
     assert not prim.HasAPI(UsdPhysics.MeshCollisionAPI)
 

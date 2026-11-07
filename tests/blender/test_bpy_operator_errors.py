@@ -39,9 +39,22 @@ def _session(
     monkeypatch: pytest.MonkeyPatch, ops: Dict[str, Any], tmp_path: Path
 ) -> Any:
     cube = SimpleNamespace(name="Cube", type="MESH", select_set=lambda value: None)
-    world = SimpleNamespace(point_cache=SimpleNamespace(frame_start=1, frame_end=250))
+    world = SimpleNamespace(
+        enabled=True,
+        time_scale=1.0,
+        collection=None,
+        point_cache=SimpleNamespace(
+            frame_start=1, frame_end=250, is_baked=False, is_outdated=False, info=""
+        ),
+    )
     scene = SimpleNamespace(
-        rigidbody_world=world, objects={"Cube": cube}, frame_current=1
+        name="Scene",
+        rigidbody_world=world,
+        objects={"Cube": cube},
+        frame_current=1,
+        frame_start=1,
+        frame_end=250,
+        frame_set=lambda frame: None,
     )
     fake = SimpleNamespace(
         app=SimpleNamespace(
@@ -166,7 +179,7 @@ def test_file_failures_name_the_resolved_path(
         ("screen", "animation_cancel", lambda s: s.play_animation("stop")),
         ("screen", "animation_play", lambda s: _play_from_rest(s)),
         ("object", "effector_add", lambda s: s.add_force_field("BOGUS")),
-        ("ptcache", "bake", lambda s: s.bake_simulation(1, 10)),
+        ("ptcache", "bake_from_cache", lambda s: s.bake_simulation(1, 10)),
         ("ptcache", "free_bake", lambda s: s.free_bake()),
     ],
     ids=["save-in-place", "cancel", "play", "force-field", "bake", "free-bake"],

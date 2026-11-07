@@ -288,7 +288,9 @@ class TestFrames:
         """Blender allows frame_start == frame_end; the tool refused it."""
         session, scene, _ = _blender(monkeypatch)
 
-        assert session.set_frame_range(10, 10) == {"frame_start": 10, "frame_end": 10}
+        result = session.set_frame_range(10, 10)
+
+        assert (result["frame_start"], result["frame_end"]) == (10, 10)
         assert (scene.frame_start, scene.frame_end) == (10, 10)
 
     @pytest.mark.parametrize(
