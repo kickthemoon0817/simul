@@ -955,7 +955,7 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | Scene and files | `get_blender_info`, `get_blender_file_info`, `summarize_blender_scene`, `list_blender_scene_objects`, `search_blender_objects`, `open_blender_file`, `save_blender_file`, `import_blender_file`, `export_blender_file` |
 | Objects | `create_blender_object`, `delete_blender_object`, `set_blender_object_mode`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `clean_blender_mesh`, `get_blender_mesh_info`, `add_blender_modifier`, `apply_blender_modifier`, `remove_blender_modifier` |
 | Measurement | `get_blender_bounding_box`, `check_blender_object_bounds`, `get_blender_distance_between` |
-| Materials and lights | `get_blender_material_info`, `assign_blender_material`, `set_blender_light_params` |
+| Materials and lights | `get_blender_material_info`, `assign_blender_material`, `uv_unwrap_blender_mesh`, `set_blender_light_params` |
 | Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`, `get_blender_rigid_body_world`, `set_blender_rigid_body_world` |
 | Animation | `get_blender_frame`, `set_blender_frame`, `set_blender_frame_range`, `play_blender_animation`, `insert_blender_keyframe`, `delete_blender_keyframe`, `get_blender_keyframes`, `get_blender_object_trajectory` |
 | Camera and viewport | `get_blender_camera_info`, `set_blender_camera_view`, `get_blender_viewport_info`, `focus_blender_on_object`, `capture_blender_viewport`, `capture_blender_viewport_sequence` |
@@ -1096,6 +1096,96 @@ Behaviour worth knowing:
   whose render settings differ (`show_render`, Subdivision `render_levels`).
   An object Blender does not evaluate (outside the view layer) has null
   evaluated counts.
+- `assign_blender_material` reuses the material named `material_name` when it
+  exists, so repeating a call changes nothing more (it used to create
+  `name.001` each time); `reuse_existing: false` creates a new one. Shading
+  arguments left out keep the material's own values, so an existing or
+  imported material can be assigned as it is. By default the material replaces
+  the object's: it goes into slot 0 and every face uses slot 0 (a second
+  material used to land in a slot no face used, so the USD kept the first).
+  `slot_index` sets one slot (the slot count appends one) and leaves the faces
+  alone; `face_indices` assigns the material to those faces through its slot,
+  or a new one. `link: "OBJECT"` puts the material in this object's slot
+  instead of the mesh's, but which faces use which slot, and how many slots
+  there are, belong to the mesh. So on mesh data that other objects share,
+  link OBJECT may change only an existing slot's material: assigning faces or
+  adding a slot is refused (`details.code: "shared_data"`, naming the other
+  objects) unless `single_user: true` gives this object its own copy of the
+  mesh first, which the reply reports. That copy needs the object, and its
+  data, in Object Mode: Blender 5.0.1 ignores a new data block for an object in
+  Edit Mode without an error. With link DATA the change is meant for every
+  object sharing the mesh, and the reply names them. `single_user` also makes
+  library-linked data local; a library-linked object is refused.
+  `base_color` is RGB or RGBA in 0-1: the alpha sets the Principled BSDF's
+  Alpha (exported as USD `opacity`) and, below 1,
+  `surface_render_method: BLENDED`. Image files can drive Base Color, Metallic
+  and Roughness, and Normal through a Normal Map node; a new texture replaces
+  the nodes of the old one. Data maps are read Non-Color; a base colour keeps
+  the colour space Blender loads the file in (sRGB for an 8-bit image, linear
+  for an EXR or other float image). An image of the same file already read
+  the way the input needs is reused, so repeating a call adds no datablock.
+  An image already in the file is never changed, since other materials may
+  read it: when every datablock of the file reads the other way, the input
+  gets one of its own (`albedo.png.001`). A texture replaced behind Reroute
+  nodes takes the Reroutes and its old nodes with it. Textures pass the filesystem sandbox; a missing file is
+  a `NotFoundError` and a file Blender cannot read as an image a
+  `ValidationError`. Textures need UV coordinates (`uv_unwrap_blender_mesh`);
+  a mesh without a UV map gets a warning, and so does a replaced material left
+  with no users (Blender discards it when the file is saved and reopened).
+  Everything is checked before the scene changes, and a failure removes the
+  material, slot, mesh copy and images the call made. Writing face indices
+  needs Object Mode, also of any other object editing the same mesh. On
+  Blender 5.0 the tool never touches the deprecated `Material.use_nodes`.
+  Blender's USD exporter writes UsdPreviewSurface materials only: SimReady's
+  `shader_type: OmniPBR` is recorded as metadata, not produced.
+- `get_blender_material_info` reports the Principled BSDF that feeds the
+  active Material Output. An input a link drives reads `null` in
+  `principled_params` (its own value is unused) and appears in
+  `linked_inputs` with the source node and socket and, for an image texture,
+  also behind a Normal Map node, the image's path, colour space and whether it
+  is packed. Reroute nodes are followed to the node behind them; a muted link
+  drives nothing, so its input reports its own value. `nodes` lists at most
+  `max_nodes` (default 50), those feeding the output first; `node_count`
+  counts the whole tree.
+- `uv_unwrap_blender_mesh` generates UVs for every face, hidden ones
+  included: `SMART_PROJECT` (islands split where faces meet at more than
+  `angle_limit`, 66 degrees by default, packed with `island_margin`) or
+  `CUBE_PROJECT` (`cube_size`). It writes `uv_map_name`, created when missing,
+  else the active UV map, else a new `UVMap`. The active UV map stays what it
+  was (a mesh's first UV map becomes the active and render one, as Blender
+  makes it); the reply's `render_uv_map` is the map image textures read and USD
+  export names `st`, with a warning when it is not the one written. The UV
+  operators need Edit Mode, so the object briefly becomes the active, only
+  selected one and its hidden faces are shown; the mesh's selection and hidden
+  faces, the object selection and the active object are restored, and a
+  failure removes a UV map the call created. The object and Blender must be in
+  Object Mode; a hidden object and library-linked data are refused.
+- The material, light and UV tools refuse bad arguments with `error_type`
+  `ValidationError` (or `NotFoundError` for a missing material or texture
+  file) and a stable `details.code`, such as `shared_data`, `out_of_range`,
+  `setting_not_for_light_type`, `wrong_mode` or `linked_from_library`.
+- These calls need a Blender add-on built for bridge protocol 11 or later:
+  assignment now replaces where it appended, so an older add-on is refused
+  with the rebuild instructions rather than silently appending a slot no face
+  uses.
+- `set_blender_light_params` checks each setting against the light's type
+  (after `light_type`, when given): `shadow_soft_size` is the radius of POINT
+  and SPOT lights, `spot_size` and `spot_blend` are SPOT's, `angle` is a sun's
+  softness, and `shape`, `size` and `size_y` (RECTANGLE and ELLIPSE) are an
+  area light's. A setting of another type is refused instead of ignored, a
+  value outside Blender's limits is refused instead of clamped, and energy
+  may not be negative. Nothing changes unless every value is valid, and the
+  reply reports every setting of the light's type as stored. Light data shared
+  by several objects is reported. Blender 5.0.1's USD exporter writes a point
+  or spot light as a SphereLight whose `radius` is `shadow_soft_size` (a
+  spot's cone as `shaping:cone:angle`, half of `spot_size` in degrees, and
+  `spot_blend` as its softness), a sun as a DistantLight whose `angle` is half
+  of the sun's `angle` in degrees, and an area light as a RectLight of
+  `size` x `size_y` (`size` x `size` for SQUARE) or a DiskLight of radius
+  `size` / 2.
+- Not covered by granular tools yet (use `execute_blender_script`): smooth
+  or flat shading and custom normals, and UV coordinates given with
+  `create_blender_mesh_from_data`.
 - `capture_blender_viewport` captures the 3D View the user sees in attached
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
