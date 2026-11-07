@@ -183,7 +183,7 @@ class TestAssignMaterialSlots:
         result = session.assign_material("crate", "steel", slot_index=0)
         assert (result["faces_assigned"], _slots(crate)) == (None, ["steel"])
 
-    def test_object_link_keeps_the_material_off_linked_duplicates(
+    def test_object_link_changes_only_this_objects_slot(
         self, fake_bpy: FakeBpy, session: blender_runtime.BlenderRuntimeSession, crate: Any
     ) -> None:
         """The material went on the mesh data, so every linked duplicate changed."""
@@ -196,10 +196,10 @@ class TestAssignMaterialSlots:
         assert result["link"] == "OBJECT"
         assert result["warnings"] == []
         shared = session.assign_material("crate", "oak")
-        assert shared["warnings"] == [
-            "Mesh data 'crate' is shared by 2 users; a DATA slot changes on all of them "
-            "(link='OBJECT' changes only this object)"
-        ]
+        assert shared["warnings"][0] == (
+            "Mesh data 'crate' is shared with 'twin'; its slots and face assignments change "
+            "on all of them (single_user=true changes only this object)"
+        )
 
     def test_link_must_be_data_or_object(self, session: blender_runtime.BlenderRuntimeSession, crate: Any) -> None:
         with pytest.raises(ValueError, match="link must be DATA or OBJECT"):
@@ -785,6 +785,7 @@ class TestUVUnwrap:
 
         assert fake_bpy.edit_ops == [
             ("mode_set", {"mode": "EDIT", "object": "plate"}),
+            ("reveal", {"select": True}),
             ("select_all", {"action": "SELECT"}),
             ("smart_project", {"angle_limit": math.radians(66.0), "island_margin": 0.02}),
             ("mode_set", {"mode": "OBJECT", "object": "plate"}),
@@ -796,6 +797,8 @@ class TestUVUnwrap:
             "created_uv_map": True,
             "method": "SMART_PROJECT",
             "uv_layer_names": ["UVMap"],
+            "active_uv_map": "UVMap",
+            "render_uv_map": "UVMap",
             "face_count": 6,
             "warnings": [],
         }
@@ -815,7 +818,11 @@ class TestUVUnwrap:
         assert (result["uv_map"], result["created_uv_map"], result["uv_layer_names"]) == (
             "Lightmap", True, ["UVMap", "Lightmap"]
         )
-        assert plate.data.uv_layers.active.name == "Lightmap"
+        assert plate.data.uv_layers.get("Lightmap").written_by[0] == "cube_project"
+        # The active UV map stays the one the user had; textures read the render map.
+        assert (result["active_uv_map"], result["render_uv_map"]) == ("UVMap", "UVMap")
+        assert plate.data.uv_layers.active.name == "UVMap"
+        assert result["warnings"] == ["Image textures read the render UV map 'UVMap', not 'Lightmap'"]
 
     def test_the_active_uv_map_is_rewritten_by_default(
         self, fake_bpy: FakeBpy, session: blender_runtime.BlenderRuntimeSession, plate: Any

@@ -120,10 +120,7 @@ class SimReadyMaterialProperties(BaseModel):
     )
     shader_type: Optional[str] = Field(
         None,
-        description=(
-            "Target shader recorded as metadata (OmniPBR, OmniGlass, SimPBR). Blender's USD "
-            "exporter still writes UsdPreviewSurface materials; it cannot write OmniPBR or MDL"
-        ),
+        description="Target shader: OmniPBR, OmniGlass, SimPBR",
     )
     texel_density: Optional[float] = Field(
         None, gt=0.0, description="Target texel density in pixels per meter"

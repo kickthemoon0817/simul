@@ -1205,7 +1205,19 @@ class BlenderAssignMaterialRequest(BaseModel):
         None, min_length=1, description="Mesh faces to assign the material to"
     )
     link: Literal["DATA", "OBJECT"] = Field(
-        "DATA", description="DATA: the mesh's slot (shared by linked duplicates); OBJECT: this object's"
+        "DATA",
+        description=(
+            "DATA: the mesh's slot (shared by linked duplicates); OBJECT: this object's slot. "
+            "Faces and the slot count are the mesh's either way"
+        ),
+    )
+    single_user: bool = Field(
+        False,
+        description=(
+            "Give the object its own copy of data it shares first, so the change leaves the "
+            "other objects alone (required to change faces or add a slot with link OBJECT on "
+            "shared data)"
+        ),
     )
     reuse_existing: bool = Field(
         True, description="Reuse a material of that name when one exists; false creates a new one"
@@ -1443,10 +1455,16 @@ class BlenderUVUnwrapResponse(BaseModel):
         None, description="Error message when success is False"
     )
     object_name: str = Field(..., description="Object name")
-    uv_map: str = Field(..., description="UV map written, now the active one")
+    uv_map: str = Field(..., description="UV map written")
     created_uv_map: bool = Field(..., description="Whether the UV map was created")
     method: str = Field(..., description="SMART_PROJECT or CUBE_PROJECT")
     uv_layer_names: List[str] = Field(default_factory=list, description="The mesh's UV maps")
+    active_uv_map: Optional[str] = Field(
+        None, description="The active UV map (left as it was, or the mesh's first one)"
+    )
+    render_uv_map: Optional[str] = Field(
+        None, description="The render UV map, which image textures read and USD export names st"
+    )
     face_count: int = Field(..., description="Faces unwrapped")
     warnings: List[str] = Field(default_factory=list, description="Mesh data shared by several objects")
 

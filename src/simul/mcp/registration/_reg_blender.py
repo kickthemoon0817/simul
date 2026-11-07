@@ -45,7 +45,7 @@ from typing import (
 )
 
 from fastmcp.tools import ToolResult
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 
 from ...adapters.blender_runtime import BlenderRuntimeSession
 from ...tool_surfaces import THIN_BLENDER_TOOLS
@@ -955,18 +955,27 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "one), and shading arguments left out keep the material's values, so an existing "
             "material can be assigned as it is. By default it replaces the object's material: "
             "slot 0, every face. slot_index puts it in one slot (the slot count adds one); "
-            "face_indices assigns it to those faces only. link='OBJECT' keeps it off linked "
-            "duplicates sharing the mesh. base_color is RGB or RGBA in 0-1; alpha below 1 sets "
-            "the Principled Alpha and blended rendering (exported as USD opacity). Image textures "
-            "can drive base color, metallic, roughness and normal (they need a UV map: "
-            "uv_unwrap_blender_mesh). Blender's USD exporter writes UsdPreviewSurface; it does not "
-            "write OmniPBR or MDL. Everything is checked first; a failure leaves nothing behind."
+            "face_indices assigns it to those faces only. link='OBJECT' puts it in this object's "
+            "slot instead of the mesh's, but faces and the slot count belong to the mesh: on mesh "
+            "data other objects share, changing them is refused unless single_user=true gives this "
+            "object its own copy first. base_color is RGB or RGBA in 0-1; alpha below 1 sets the "
+            "Principled Alpha and blended rendering (exported as USD opacity). Image textures can "
+            "drive base color, metallic, roughness and normal (they need a UV map: "
+            "uv_unwrap_blender_mesh); an image already in the file keeps its colour space, and an "
+            "input reading it differently gets its own copy. Blender's USD exporter writes "
+            "UsdPreviewSurface; it does not write OmniPBR or MDL. Everything is checked first; a "
+            "failure leaves nothing behind."
         ),
         hints=OVERWRITING,
         operation="assign_material",
         request=BlenderAssignMaterialRequest,
         response=BlenderAssignMaterialResponse,
-        params={"link": Param(Literal["DATA", "OBJECT"], "DATA")},
+        params={
+            # Strict, so FastMCP's argument check does not read true as face or slot 1.
+            "slot_index": Param(Optional[StrictInt]),
+            "face_indices": Param(Optional[List[StrictInt]]),
+            "link": Param(Literal["DATA", "OBJECT"], "DATA"),
+        },
     ),
     BlenderTool(
         name="add_blender_modifier",
@@ -1335,11 +1344,13 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="uv_unwrap_blender_mesh",
         description=(
-            "Generate UV coordinates for every face of a Blender mesh object, as image textures "
-            "need: SMART_PROJECT (Smart UV Project: islands split at angle_limit, packed with "
-            "island_margin) or CUBE_PROJECT (each face projected onto the cube side it faces). "
-            "Writes uv_map_name (created when missing), else the active UV map, else a new UVMap. "
-            "Enters Edit Mode briefly and restores the selection and active object. Requires "
+            "Generate UV coordinates for every face of a Blender mesh object, hidden ones "
+            "included, as image textures need: SMART_PROJECT (Smart UV Project: islands split at "
+            "angle_limit, packed with island_margin) or CUBE_PROJECT (each face projected onto the "
+            "cube side it faces). Writes uv_map_name (created when missing), else the active UV "
+            "map, else a new UVMap; the active UV map stays as it was, and the reply names the "
+            "render UV map, the one textures read. Enters Edit Mode briefly and restores the mesh's "
+            "selection and hidden faces, the object selection and the active object. Requires "
             "Object Mode."
         ),
         hints=OVERWRITING,

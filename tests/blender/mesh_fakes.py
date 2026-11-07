@@ -241,15 +241,17 @@ class FakePolygon(SimpleNamespace):
 
 
 class FakeVertex(tuple):
-    """One vertex: its position, plus the select flag Blender stores per vertex."""
+    """One vertex: its position, plus the select and hide flags Blender stores per vertex."""
 
     select = False
+    hide = False
 
 
 class FakeEdge(tuple):
-    """One edge: its two vertex indices, plus its select flag."""
+    """One edge: its two vertex indices, plus its select and hide flags."""
 
     select = False
+    hide = False
 
 
 class FakeElements(list):
@@ -276,7 +278,9 @@ class FakeUVLayers(list):
     def new(self, name: str = "UVMap") -> Any:
         if len(self) >= self.limit:
             return None
-        layer = SimpleNamespace(name=unique_name(name, [uv.name for uv in self]), written_by=None)
+        layer = SimpleNamespace(
+            name=unique_name(name, [uv.name for uv in self]), written_by=None, active_render=not self
+        )
         self.append(layer)
         if self.active is None:
             self.active = layer
@@ -316,6 +320,9 @@ class FakeMesh:
         self.shape_keys = None
         self.extra_users = 0
         self.materials = FakeMaterialSlots()
+        # Edit Mode through any object that uses the mesh; a library it is linked from.
+        self.is_editmode = False
+        self.library = None
         self._set_geometry(vertices, edges, faces)
         self.invalid_faces = list(invalid_faces)
 
@@ -327,7 +334,7 @@ class FakeMesh:
             FakeEdge(edge) for edge in (sorted(face_edges | loose) if edges is not None or faces else [])
         )
         self.polygons = FakeElements(
-            FakePolygon(vertices=tuple(face), material_index=0, index=i, select=False)
+            FakePolygon(vertices=tuple(face), material_index=0, index=i, select=False, hide=False)
             for i, face in enumerate(faces)
         )
         self.loops = [corner for face in faces for corner in face]
@@ -353,8 +360,14 @@ class FakeMesh:
         return True
 
     def copy(self) -> "FakeMesh":
+        """A local copy, as ``ID.copy()`` makes: geometry, face materials, slots and UV maps."""
         clone = self._registry.new(self.name)
         clone._set_geometry(self.vertices, [], [p.vertices for p in self.polygons])
+        for source, copied in zip(self.polygons, clone.polygons):
+            copied.material_index = source.material_index
+        clone.materials.extend(self.materials)
+        for layer in self.uv_layers:
+            clone.uv_layers.new(layer.name)
         clone.invalid_faces = list(self.invalid_faces)
         return clone
 
@@ -427,6 +440,7 @@ NODE_SPECS: Dict[str, Tuple[str, str, List[Tuple[str, Any]], List[str]]] = {
     "ShaderNodeNormalMap": ("NORMAL_MAP", "Normal Map", [("Strength", 1.0), ("Color", (0.5, 0.5, 1.0, 1.0))],
                             ["Normal"]),
     "ShaderNodeMath": ("MATH", "Math", [("Value", 0.5), ("Value_001", 0.5)], ["Value"]),
+    "NodeReroute": ("REROUTE", "Reroute", [("Input", None)], ["Output"]),
     "ShaderNodeEmission": ("EMISSION", "Emission", [("Color", (1.0, 1.0, 1.0, 1.0)), ("Strength", 1.0)],
                            ["Emission"]),
 }
@@ -470,6 +484,8 @@ class FakeLink:
         self.to_socket = to_socket
         self.from_node = from_socket.node
         self.to_node = to_socket.node
+        self.is_muted = False
+        self.is_valid = True
 
 
 class FakeNode:
@@ -601,9 +617,22 @@ class FakeImage:
     def __init__(self, registry: "FakeIDCollection", name: str, filepath: str = "", readable: bool = True) -> None:
         self.name = name
         self.filepath = filepath
-        self.colorspace_settings = SimpleNamespace(name="sRGB")
+        # Blender reads an 8-bit file as sRGB and a float one (EXR) as linear.
+        self.is_float = filepath.lower().endswith(".exr")
+        self.colorspace_settings = FakeColorspace("Linear Rec.709" if self.is_float else "sRGB")
         self.packed_file = None
         self.size = (4, 4) if readable else (0, 0)
+
+
+class FakeColorspace:
+    """``ColorManagedInputColorspaceSettings``: the name, and is_data for Non-Color."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    @property
+    def is_data(self) -> bool:
+        return self.name == "Non-Color"
 
 
 # -- Lights ---------------------------------------------------------------------
@@ -710,6 +739,7 @@ class FakeMeshObject:
         self.editmode_updates = 0
         self.cleared_evaluated = 0
         self.hidden = False
+        self.library = None
         self._selected = False
         # Per slot: its link, and the material an OBJECT-linked slot holds.
         self.slot_links: Dict[int, str] = {}
@@ -900,7 +930,7 @@ class FakeBpy:
         self.unwrap_error: Optional[str] = None
         self.ops = SimpleNamespace(
             object=SimpleNamespace(modifier_apply=self._modifier_apply, mode_set=self._mode_set),
-            mesh=SimpleNamespace(select_all=self._select_all),
+            mesh=SimpleNamespace(select_all=self._select_all, reveal=self._reveal),
             uv=SimpleNamespace(smart_project=self._unwrap("smart_project"), cube_project=self._unwrap("cube_project")),
         )
         self.types = SimpleNamespace(
@@ -949,7 +979,7 @@ class FakeBpy:
             # Leaving Edit Mode rebuilds the mesh's layers: a UV layer struct
             # fetched before reads as freed memory (its name "" on Blender 5.0.1).
             layers = active.data.uv_layers
-            rebuilt = [SimpleNamespace(name=old.name, written_by=old.written_by) for old in layers]
+            rebuilt = [SimpleNamespace(**vars(old)) for old in layers]
             active_index = next((i for i, old in enumerate(layers) if old is layers.active), None)
             for old in layers:
                 old.name = ""
@@ -964,7 +994,20 @@ class FakeBpy:
         self.edit_ops.append(("select_all", {"action": action}))
         for domain in ("vertices", "edges", "polygons"):
             for element in getattr(active.data, domain):
-                element.select = action == "SELECT"
+                # Like Blender, selecting all leaves hidden elements alone.
+                if not element.hide:
+                    element.select = action == "SELECT"
+        return {"FINISHED"}
+
+    def _reveal(self, select: bool = True) -> set:
+        """``mesh.reveal``: show hidden elements, selecting them when asked."""
+        active = self.context.view_layer.objects.active
+        self.edit_ops.append(("reveal", {"select": select}))
+        for domain in ("vertices", "edges", "polygons"):
+            for element in getattr(active.data, domain):
+                if element.hide:
+                    element.hide = False
+                    element.select = select
         return {"FINISHED"}
 
     def _unwrap(self, operator: str) -> Callable[..., set]:
@@ -976,6 +1019,10 @@ class FakeBpy:
             if self.unwrap_error:
                 raise RuntimeError(self.unwrap_error)
             active.data.uv_layers.active.written_by = (operator, dict(options))
+            # The operators unwrap the selected faces that are not hidden.
+            active.data.uv_layers.active.faces_unwrapped = sum(
+                1 for face in active.data.polygons if face.select and not face.hide
+            )
             return {"FINISHED"}
 
         return run

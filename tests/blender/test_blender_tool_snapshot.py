@@ -202,6 +202,7 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "slot_index": 1,
             "face_indices": [0, 2],
             "link": "OBJECT",
+            "single_user": True,
             "reuse_existing": False,
             "base_color_texture": "/tmp/albedo.png",
             "metallic_texture": "/tmp/metallic.png",

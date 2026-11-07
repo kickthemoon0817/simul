@@ -804,36 +804,65 @@ Behaviour worth knowing:
   material used to land in a slot no face used, so the USD kept the first).
   `slot_index` sets one slot (the slot count appends one) and leaves the faces
   alone; `face_indices` assigns the material to those faces through its slot,
-  or a new one. `link: "OBJECT"` puts it on this object's slot, so linked
-  duplicates that share the mesh keep theirs. `base_color` is RGB or RGBA in
-  0-1: the alpha sets the Principled BSDF's Alpha (exported as USD
-  `opacity`) and, below 1, `surface_render_method: BLENDED`. Image files can
-  drive Base Color (sRGB), Metallic and Roughness (Non-Color), and Normal
-  through a Normal Map node; a new texture replaces the nodes of the old one.
-  Textures pass the filesystem sandbox, and a file Blender cannot read as an
-  image is refused. Textures need UV coordinates (`uv_unwrap_blender_mesh`);
-  a mesh without a UV map gets a warning. Everything is checked before the
-  scene changes, and a failure removes the material, slot and images the call
-  made. Writing face indices needs Object Mode. On Blender 5.0 the tool never
-  touches the deprecated `Material.use_nodes`. Blender's USD exporter writes
-  UsdPreviewSurface materials only: SimReady's `shader_type: OmniPBR` is
-  recorded as metadata, not produced.
+  or a new one. `link: "OBJECT"` puts the material in this object's slot
+  instead of the mesh's, but which faces use which slot, and how many slots
+  there are, belong to the mesh. So on mesh data that other objects share,
+  link OBJECT may change only an existing slot's material: assigning faces or
+  adding a slot is refused (`details.code: "shared_data"`, naming the other
+  objects) unless `single_user: true` gives this object its own copy of the
+  mesh first, which the reply reports. With link DATA the change is meant for
+  every object sharing the mesh, and the reply names them. `single_user` also
+  makes library-linked data local; a library-linked object is refused.
+  `base_color` is RGB or RGBA in 0-1: the alpha sets the Principled BSDF's
+  Alpha (exported as USD `opacity`) and, below 1,
+  `surface_render_method: BLENDED`. Image files can drive Base Color, Metallic
+  and Roughness, and Normal through a Normal Map node; a new texture replaces
+  the nodes of the old one. Data maps are read Non-Color; a base colour keeps
+  the colour space Blender loads the file in (sRGB for an 8-bit image, linear
+  for an EXR or other float image). An image already in the file is never
+  changed, since other materials may read it: when its colour space is the
+  other kind, the input gets its own image datablock of the same file
+  (`albedo.png.001`). Textures pass the filesystem sandbox; a missing file is
+  a `NotFoundError` and a file Blender cannot read as an image a
+  `ValidationError`. Textures need UV coordinates (`uv_unwrap_blender_mesh`);
+  a mesh without a UV map gets a warning, and so does a replaced material left
+  with no users (Blender discards it when the file is saved and reopened).
+  Everything is checked before the scene changes, and a failure removes the
+  material, slot, mesh copy and images the call made. Writing face indices
+  needs Object Mode, also of any other object editing the same mesh. On
+  Blender 5.0 the tool never touches the deprecated `Material.use_nodes`.
+  Blender's USD exporter writes UsdPreviewSurface materials only: SimReady's
+  `shader_type: OmniPBR` is recorded as metadata, not produced.
 - `get_blender_material_info` reports the Principled BSDF that feeds the
   active Material Output. An input a link drives reads `null` in
   `principled_params` (its own value is unused) and appears in
   `linked_inputs` with the source node and socket and, for an image texture,
   also behind a Normal Map node, the image's path, colour space and whether it
-  is packed. `nodes` lists at most `max_nodes` (default 50), those feeding the
-  output first; `node_count` counts the whole tree.
-- `uv_unwrap_blender_mesh` generates UVs for every face: `SMART_PROJECT`
-  (islands split where faces meet at more than `angle_limit`, 66 degrees by
-  default, packed with `island_margin`) or `CUBE_PROJECT` (`cube_size`). It
-  writes `uv_map_name`, created when missing, else the active UV map, else a
-  new `UVMap`, which becomes active. The UV operators need Edit Mode, so the
-  object briefly becomes the active, only selected one; the mesh's selection,
-  the object selection and the active object are restored, and a failure
-  removes a UV map the call created. The object and Blender must be in Object
-  Mode, and a hidden object is refused.
+  is packed. Reroute nodes are followed to the node behind them; a muted link
+  drives nothing, so its input reports its own value. `nodes` lists at most
+  `max_nodes` (default 50), those feeding the output first; `node_count`
+  counts the whole tree.
+- `uv_unwrap_blender_mesh` generates UVs for every face, hidden ones
+  included: `SMART_PROJECT` (islands split where faces meet at more than
+  `angle_limit`, 66 degrees by default, packed with `island_margin`) or
+  `CUBE_PROJECT` (`cube_size`). It writes `uv_map_name`, created when missing,
+  else the active UV map, else a new `UVMap`. The active UV map stays what it
+  was (a mesh's first UV map becomes the active and render one, as Blender
+  makes it); the reply's `render_uv_map` is the map image textures read and USD
+  export names `st`, with a warning when it is not the one written. The UV
+  operators need Edit Mode, so the object briefly becomes the active, only
+  selected one and its hidden faces are shown; the mesh's selection and hidden
+  faces, the object selection and the active object are restored, and a
+  failure removes a UV map the call created. The object and Blender must be in
+  Object Mode; a hidden object and library-linked data are refused.
+- The material, light and UV tools refuse bad arguments with `error_type`
+  `ValidationError` (or `NotFoundError` for a missing material or texture
+  file) and a stable `details.code`, such as `shared_data`, `out_of_range`,
+  `setting_not_for_light_type`, `wrong_mode` or `linked_from_library`.
+- These calls need a Blender add-on built for bridge protocol 9 or later:
+  assignment now replaces where it appended, so an older add-on is refused
+  with the rebuild instructions rather than silently appending a slot no face
+  uses.
 - `set_blender_light_params` checks each setting against the light's type
   (after `light_type`, when given): `shadow_soft_size` is the radius of POINT
   and SPOT lights, `spot_size` and `spot_blend` are SPOT's, `angle` is a sun's
