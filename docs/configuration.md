@@ -150,7 +150,11 @@ default `true`). When `false`, the server does not register
 Unreal's `call_unreal_actor_function` and `batch_unreal_operations`
 dispatchers, and `simul isaac exec` / `simul unreal exec` return a
 `ScriptExecutionDisabled` error. The fixed granular tools, including
-`control_unreal_ui`, keep working.
+`control_unreal_ui`, keep working. The Isaac prim tools refuse the writes
+that would plant code instead (`ScriptExecutionDisabled`): code-carrying
+attributes such as `inputs:script*` and `inputs:codeStr`, a `node:type` that
+runs code (ScriptNode, omni.warp's WarpKernel, Replicator's OgnAugment), any
+write to such a node, creating one and duplicating a subtree that holds one.
 
 Isaac Sim also runs Python that an OmniGraph node carries as data:
 `omni.graph.scriptnode.ScriptNode` runs its `inputs:script`,
@@ -330,7 +334,8 @@ Some operations refuse by default to protect the running application and
 your data. Each refusal is a structured `RefusedOperation` error:
 
 - `delete_isaac_prim` refuses `/`, and refuses `/World` unless
-  `allow_root_delete=true`.
+  `allow_root_delete=true`. A prim from a referenced asset is deactivated
+  rather than removed (`mode="remove"` refuses it instead).
 - `disable_isaac_extension` refuses the transport extensions
   (`khemoo.simul`, `isaacsim.code_editor.python_server`,
   `isaacsim.code_editor.vscode`).

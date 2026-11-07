@@ -67,6 +67,12 @@ class FakePrim:
     def IsActive(self) -> bool:
         return True
 
+    def IsInstanceProxy(self) -> bool:
+        return False
+
+    def GetFilteredChildren(self, predicate: Any) -> List["FakePrim"]:
+        return list(self.children)
+
     def GetPath(self) -> str:
         return self.path
 
@@ -96,10 +102,23 @@ class InvalidPrim:
         return False
 
 
+class FakePredicate:
+    """A ``Usd`` prim flag or predicate; every fake prim satisfies all of them."""
+
+    def __and__(self, other: Any) -> "FakePredicate":
+        return self
+
+    def __invert__(self) -> "FakePredicate":
+        return self
+
+
+PREDICATE = FakePredicate()
+
+
 class FakePrimRange:
     """Pre-order traversal with ``PruneChildren`` like ``Usd.PrimRange``."""
 
-    def __init__(self, root: FakePrim) -> None:
+    def __init__(self, root: FakePrim, predicate: Any = None) -> None:
         self._stack: List[FakePrim] = [root]
         self._current: Optional[FakePrim] = None
         self._pruned = False
@@ -320,6 +339,13 @@ def usd_modules(stage: FakeStage) -> Dict[str, types.ModuleType]:
             PrimRange=FakePrimRange,
             TimeCode=types.SimpleNamespace(Default=lambda: 0.0),
             SchemaRegistry=SCHEMA_REGISTRY,
+            PrimIsActive=PREDICATE,
+            PrimIsDefined=PREDICATE,
+            PrimIsLoaded=PREDICATE,
+            PrimIsAbstract=PREDICATE,
+            PrimDefaultPredicate=PREDICATE,
+            PrimAllPrimsPredicate=PREDICATE,
+            TraverseInstanceProxies=lambda predicate=PREDICATE: predicate,
         ),
         "UsdGeom": types.SimpleNamespace(
             Camera=Camera,
