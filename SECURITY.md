@@ -40,8 +40,13 @@ In scope, for example:
   the docs say it is loopback-only or protected: the Blender bridge's
   per-instance token in owner-only discovery/attachment files, the Isaac
   Sim socket auth token, or an Unreal Remote Control passphrase;
-- leaking those tokens or passphrases through logs, process arguments,
-  discovery files or tool results;
+- reaching the MCP server's `--transport http`/`sse` listener from a web
+  page (DNS rebinding, a foreign `Origin`), from another host without
+  `--allow-public`, or without its bearer token once one is configured;
+- leaking any of those tokens or passphrases through logs, process
+  arguments, discovery files or tool results;
+- a working-directory `.env` (or any file other than the one
+  `SIMUL_ENV_FILE` names) changing the server's settings;
 - code execution that remains possible with
   `SECURITY__ALLOW_SCRIPT_EXECUTION=false`;
 - injection into the Python that simul generates from tool arguments.
@@ -51,6 +56,7 @@ Out of scope:
 - an agent or user you have allowed to execute scripts running arbitrary
   code in the engine — that is the product's purpose;
 - exposure you opted into, such as `simul unreal setup --bind <host>
-  --allow-public` (Unreal Remote Control has no authentication of its own);
+  --allow-public` (Unreal Remote Control has no authentication of its own)
+  or `simul server --transport http --allow-public` without a bearer token;
 - vulnerabilities in Isaac Sim, Unreal Engine, Blender or OpenUSD
   themselves — please report those upstream.
