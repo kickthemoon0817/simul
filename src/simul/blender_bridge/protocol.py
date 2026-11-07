@@ -27,10 +27,13 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # Version 8: export_simready_usd takes include_children, include_lights_and_cameras and force, and
 # authors UsdPhysics and UsdSemantics schemas through the add-on's bundled simready_usd module.
 # Version 9: capture tools take camera_name; capture_viewport_sequence writes files (output_dir, max_frames).
-# Version 10: apply_simready_metadata takes clear; validate_simready_compliance takes check_metadata,
+# Version 10: setup_rigid_body, add_force_field and add_rigid_body_constraint take new settings
+# (kinematic, direction, axis, limits, springs, motors, ...) and check them up front;
+# bake_simulation takes allow_long_bake and refuses a bake over its work budget without it.
+# Version 11: apply_simready_metadata takes clear; validate_simready_compliance takes check_metadata,
 # check_physics, check_geometry, include_children, severity, offset and limit;
 # setup_simready_hierarchy takes reuse_root; export_simready_usd takes skip_checks.
-PROTOCOL_VERSION = 10
+PROTOCOL_VERSION = 11
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 
