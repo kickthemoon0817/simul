@@ -1,7 +1,7 @@
 """Transport and policy machinery every Isaac tool mixin builds on."""
 
 import json
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from ....adapters import IsaacSocketClient, ScriptResult
 from ....adapters.isaac_socket_client import BridgeRequestDeliveredError
@@ -11,8 +11,76 @@ from ....utils.paths import PathPolicy
 from ...registration._helpers import apply_success_from_error
 from ...schemas.common import ErrorResponse
 from ._shared import (
+    HEAVY_SCRIPT_TIMEOUT_SECONDS,
     logger,
 )
+
+#: How much of the stdout that was not the tool's JSON a reply carries back.
+FOREIGN_OUTPUT_REPORT_CHARS = 2000
+#: Positions in one line tried as the start of the tool's JSON object.
+_MAX_JSON_START_ATTEMPTS = 8
+
+
+def extract_tool_json(output: str) -> Tuple[Optional[Any], str]:
+    """Return the JSON a tool script printed and any other text around it.
+
+    A generated script prints exactly one JSON object, as its last act. While
+    it awaits frames, other Python code in Kit (a physics callback, a script
+    node, an extension) can print into the same stdout capture: every
+    transport redirects the process-wide ``sys.stdout``, and the stock
+    sockets do so across the script's awaits. Such text lands before the
+    script's final line, or glued to its start when it printed no newline,
+    never after it, because the capture ends in the step that prints it.
+
+    Args:
+        output: The script's captured stdout.
+
+    Returns:
+        ``(value, other_output)``: the parsed JSON, or None when no line ends
+        in a JSON object, and the remaining text (empty when the whole output
+        was the JSON).
+    """
+    text = output.strip()
+    try:
+        return json.loads(text), ""
+    except json.JSONDecodeError:
+        pass
+    lines = text.splitlines()
+    decoder = json.JSONDecoder()
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index].strip()
+        if not line.endswith("}"):
+            continue
+        start = line.find("{")
+        attempts = 0
+        while start != -1 and attempts < _MAX_JSON_START_ATTEMPTS:
+            attempts += 1
+            try:
+                value, end = decoder.raw_decode(line, start)
+            except json.JSONDecodeError:
+                value, end = None, -1
+            if end == len(line) and isinstance(value, dict):
+                other = lines[:index] + [line[:start]] + lines[index + 1:]
+                return value, "\n".join(part for part in other if part.strip()).strip()
+            start = line.find("{", start + 1)
+    return None, text
+
+
+def _note_foreign_output(data: Dict[str, Any], other: str) -> None:
+    """Record in ``data`` that stdout carried text besides the tool's JSON."""
+    lines = len(other.splitlines())
+    note = (
+        f"Ignored {lines} line(s) of other output printed while the script ran "
+        "(Kit's stdout is shared with every Python callback); see foreign_output."
+    )
+    warnings = data.get("warnings")
+    if warnings is None:
+        data["warnings"] = [note]
+    elif isinstance(warnings, list):
+        warnings.append(note)
+    else:
+        data["stdout_warning"] = note
+    data["foreign_output"] = other[:FOREIGN_OUTPUT_REPORT_CHARS]
 
 
 class IsaacScriptBase(LoggerMixin):
@@ -139,32 +207,58 @@ class IsaacScriptBase(LoggerMixin):
             details={"traceback": error.get("traceback")} if error.get("traceback") else None,
         ).model_dump()
 
+    def _heavy_script_timeout(self) -> float:
+        """Script budget for operations known to outlast the default.
+
+        Opening a stage, a camera's first render (shader compilation) and
+        enabling a large extension routinely take longer than the default
+        29 s, and a timeout there reports failure for work Kit then finishes.
+        A longer configured socket timeout is never shortened.
+        """
+        configured = getattr(self._client, "script_timeout_seconds", None)
+        if isinstance(configured, bool) or not isinstance(configured, (int, float)):
+            configured = 0.0
+        return max(float(configured), HEAVY_SCRIPT_TIMEOUT_SECONDS)
+
     async def _execute_json_script(
-        self, script: str, transport_mode: str = "default"
+        self,
+        script: str,
+        transport_mode: str = "default",
+        *,
+        timeout_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Execute a Python script in Isaac Sim and parse JSON from stdout.
 
-        The script MUST print exactly one JSON object via json.dumps().
+        The script MUST print exactly one JSON object via json.dumps(), last.
         This helper handles connectivity errors, timeouts, parse failures,
-        and script-level exceptions uniformly.
+        and script-level exceptions uniformly. Text other Python code printed
+        into the same capture is set aside (see :func:`extract_tool_json`)
+        and reported under ``foreign_output`` instead of failing the call.
 
         Args:
             script: Python source code that prints a JSON object to stdout.
             transport_mode: Transport routing -- "default" uses client's preferred
                 transport, "bridge_only" forces the bridge, "vscode_only" forces
                 the VS Code socket.
+            timeout_seconds: Script budget for this call; the client's default
+                when None.
 
         Returns:
             Parsed dict from stdout JSON, or an ErrorResponse dict.
         """
+        # Passed only when set, so a client double with the plain
+        # execute(code) signature keeps working for every other tool.
+        kwargs: Dict[str, Any] = (
+            {} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}
+        )
         try:
             if transport_mode == "bridge_only":
-                result = await self._client.execute_bridge_script_only(script)
+                result = await self._client.execute_bridge_script_only(script, **kwargs)
             elif transport_mode == "vscode_only":
-                result = await self._client.execute_vscode_only(script)
+                result = await self._client.execute_vscode_only(script, **kwargs)
             else:
-                result = await self._client.execute(script)
+                result = await self._client.execute(script, **kwargs)
         except ConnectionRefusedError as exc:
             return ErrorResponse(
                 error=str(exc),
@@ -191,14 +285,21 @@ class IsaacScriptBase(LoggerMixin):
                 error_type="EmptyOutput",
             ).model_dump()
 
-        try:
-            data: Dict[str, Any] = json.loads(output)
-        except json.JSONDecodeError as exc:
+        data, other_output = extract_tool_json(output)
+        if not isinstance(data, dict):
+            try:
+                json.loads(output)
+            except json.JSONDecodeError as exc:
+                reason = str(exc)
+            else:
+                reason = f"expected a JSON object, got {type(data).__name__}"
             return ErrorResponse(
-                error=f"Failed to parse script output as JSON: {exc}",
+                error=f"Failed to parse script output as JSON: {reason}",
                 error_type="JSONDecodeError",
                 details={"raw_output": output[:2000]},
             ).model_dump()
+        if other_output:
+            _note_foreign_output(data, other_output)
         # A script that sets `success` itself is trusted; otherwise `error`
         # or any `*_error` key marks the call failed, so a partial result
         # (`syntheticdata_error` beside a valid listing) is not reported green.
@@ -271,4 +372,3 @@ class IsaacScriptBase(LoggerMixin):
         stock socket stays as the fallback ``execute`` already provides.
         """
         return "default"
-
