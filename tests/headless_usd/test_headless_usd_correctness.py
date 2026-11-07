@@ -191,7 +191,8 @@ class TestMeshClosed:
         info = MeshOperations().get_mesh_statistics(_mesh(stage, "/Box", CUBE_POINTS, CUBE_FACES[:1] + CUBE_FACES[2:]))
 
         assert info.is_closed is False
-        assert info.volume == 0.0
+        # An open surface encloses nothing: no volume rather than a made-up 0.
+        assert info.volume is None
 
     def test_open_grid(self) -> None:
         n = 4
@@ -205,7 +206,8 @@ class TestMeshClosed:
         info = MeshOperations().get_mesh_statistics(_mesh(stage, "/Grid", points, faces))
 
         assert info.is_closed is False
-        assert info.volume == 0.0
+        # An open surface encloses nothing: no volume rather than a made-up 0.
+        assert info.volume is None
 
     def test_closed_tetrahedron(self) -> None:
         points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]

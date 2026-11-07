@@ -63,7 +63,7 @@ After getting all mesh paths, call `get_mesh_info` on each and filter for `face_
 
 ### Assess normals
 
-If `has_normals: false`, the mesh will render with flat shading. This is common for collision meshes that are not meant to be visible.
+If `has_normals: false`, the mesh will render with flat shading. This is common for collision meshes that are not meant to be visible. `normals_source` says whether the normals come from `primvars:normals` (which wins) or the `normals` attribute.
 
 ## Bounding Box Patterns
 

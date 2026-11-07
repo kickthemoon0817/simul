@@ -213,3 +213,43 @@ def test_stage_tools_run_in_the_foreground_even_with_tasks(
     assert [
         tool.name for tool in instance.mcp.tools if tool.name in usd_tools and tool.kwargs.get("task")
     ] == []
+
+
+def test_a_load_waits_for_a_running_read(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A load may reread shared layers in place, so it never runs beside a read."""
+    import threading
+
+    from simul.adapters.headless_usd import HeadlessUSDSession
+
+    (sandbox / "other.usda").write_text((sandbox / "robot.usda").read_text())
+    server = _server(sandbox)
+    armed, entered, release = threading.Event(), threading.Event(), threading.Event()
+    original = HeadlessUSDSession.get_stage
+
+    def gated(session: HeadlessUSDSession, stage_id: str) -> Any:
+        if armed.is_set():
+            armed.clear()
+            entered.set()
+            release.wait(5)
+        return original(session, stage_id)
+
+    monkeypatch.setattr(HeadlessUSDSession, "get_stage", gated)
+
+    async def _main() -> Dict[str, Any]:
+        async with Client(server.mcp) as client:
+            stage_id = (await _call(client, "load_usd_file", file_path=str(sandbox / "robot.usda")))["stage_id"]
+            armed.set()
+            read = asyncio.create_task(_call(client, "get_bounding_box", stage_id=stage_id))
+            while not entered.is_set():
+                await asyncio.sleep(0.01)
+            load = asyncio.create_task(_call(client, "load_usd_file", file_path=str(sandbox / "other.usda")))
+            await asyncio.sleep(0.3)
+            load_finished_beside_the_read = load.done()
+            release.set()
+            return {"read": await read, "load": await load, "overlapped": load_finished_beside_the_read}
+
+    outcome = asyncio.run(_main())
+
+    assert outcome["overlapped"] is False
+    assert outcome["read"]["success"] is True
+    assert outcome["load"]["success"] is True

@@ -1,9 +1,17 @@
 """Blender MCP schemas."""
 
 import math
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 
-from pydantic import AfterValidator, BaseModel, Field, FiniteFloat, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    FiniteFloat,
+    field_validator,
+    model_validator,
+)
 from pydantic.json_schema import SkipJsonSchema
 
 # Printed-output cap of execute_blender_script. Mirrors DEFAULT_SCRIPT_OUTPUT_CHARS
@@ -13,12 +21,18 @@ SCRIPT_OUTPUT_CHARS_DEFAULT = 32_000
 SCRIPT_OUTPUT_CHARS_MAX = 100_000
 # Mirrors MAX_SCRIPT_OUTPUT_JSON_BYTES: output that JSON escapes heavily is cut here.
 SCRIPT_OUTPUT_JSON_BYTES_MAX = 300_000
+# capture_blender_viewport_sequence: mirrors DEFAULT_SEQUENCE_FRAMES,
+# MAX_SEQUENCE_FRAMES and SEQUENCE_TIME_BUDGET_SECONDS in blender_runtime.
+SEQUENCE_FRAMES_DEFAULT = 50
+SEQUENCE_FRAMES_MAX = 100
+SEQUENCE_TIME_BUDGET_SECONDS = 10.0
 
 # How capture_blender_viewport produces its image; see BlenderRuntimeSession.capture_viewport.
 BlenderCaptureMethod = Literal["auto", "viewport", "render"]
 
 _CAPTURE_METHOD_RESULT = (
     "How the image was made: viewport (the 3D View redrawn offscreen as the user sees it), "
+    "viewport_camera (the 3D View's shading drawn offscreen from camera_name), "
     "viewport_screen (the 3D View's on-screen pixels, used for Rendered shading of an "
     "external engine such as Cycles), render (bpy.ops.render.render through the scene "
     "camera), render_temp_camera_view or render_temp_camera_framing (a render through a "
@@ -77,8 +91,27 @@ class BlenderObjectInfo(BaseModel):
 
     name: str = Field(..., description="Object name")
     object_type: str = Field(..., description="Blender object type")
-    collection: Optional[str] = Field(None, description="Collection name filter")
+    collection: Optional[str] = Field(
+        None,
+        description=(
+            "A collection holding the object: the filtered one, else its first in the current "
+            "scene ('Scene Collection' for the scene's own); null from an add-on that predates it"
+        ),
+    )
     visible: bool = Field(..., description="Whether object is visible")
+
+
+# Mirrors LISTING_JSON_BYTES_MAX in simul.adapters.blender_runtime, which ships in
+# the Blender add-on and cannot import this module; a test keeps the two in step.
+LISTING_JSON_BYTES_MAX = 30_000
+
+_PAGE_COUNT = (
+    "Number of objects in this page; fewer than requested when their JSON would pass "
+    f"{LISTING_JSON_BYTES_MAX} bytes, so the reply fits the result budget"
+)
+_PAGE_TOTAL = "Number of matching objects in all pages"
+_PAGE_NEXT = "offset of the next page; null after the last page"
+_PAGE_TRUNCATED = "Whether more matching objects follow this page (see next_offset)"
 
 
 class BlenderSceneObjectsRequest(BaseModel):
@@ -98,6 +131,9 @@ class BlenderSceneObjectsRequest(BaseModel):
         ge=1,
         le=5000,
     )
+    offset: int = Field(
+        0, description="Matching objects to skip; pass the previous page's next_offset", ge=0
+    )
 
 
 class BlenderSceneObjectsResponse(BaseModel):
@@ -112,12 +148,16 @@ class BlenderSceneObjectsResponse(BaseModel):
         ..., description="Whether hidden objects were included"
     )
     max_items: int = Field(..., description="Maximum number of requested objects")
-    count: int = Field(..., description="Number of objects in response")
+    count: int = Field(..., description=_PAGE_COUNT)
     objects: List[BlenderObjectInfo] = Field(
         ...,
         description="Listed Blender objects",
     )
-    truncated: bool = Field(..., description="Whether output reached max_items limit")
+    truncated: bool = Field(..., description=_PAGE_TRUNCATED)
+    # Optional: an add-on built before paging still answers.
+    offset: Optional[int] = Field(None, description="Matching objects skipped before this page")
+    total: Optional[int] = Field(None, description=_PAGE_TOTAL)
+    next_offset: Optional[int] = Field(None, description=_PAGE_NEXT)
 
 
 # ---------------------------------------------------------------------------
@@ -363,9 +403,22 @@ class BlenderSearchObjectsRequest(BaseModel):
         ),
     )
     object_type: Optional[str] = Field(
-        None, description="Filter by Blender object type (MESH, LIGHT, CAMERA, etc.)"
+        None,
+        description=(
+            "Filter by Blender object type (MESH, LIGHT, CAMERA, etc.), in any case; "
+            "a type the running Blender does not have is refused"
+        ),
     )
     max_results: int = Field(50, description="Maximum number of results", ge=1, le=5000)
+    offset: int = Field(
+        0, description="Matching objects to skip; pass the previous page's next_offset", ge=0
+    )
+
+    @field_validator("object_type")
+    @classmethod
+    def _upper_case_type(cls, value: Optional[str]) -> Optional[str]:
+        """Blender's type identifiers are upper case: 'mesh' used to match nothing."""
+        return None if value is None else value.strip().upper()
 
 
 class BlenderSearchObjectsResponse(BaseModel):
@@ -377,9 +430,13 @@ class BlenderSearchObjectsResponse(BaseModel):
     )
     pattern: Optional[str] = Field(None, description="Name pattern used")
     object_type: Optional[str] = Field(None, description="Type filter used")
-    count: int = Field(..., description="Number of matching objects")
+    count: int = Field(..., description=_PAGE_COUNT)
     objects: List[BlenderObjectInfo] = Field(..., description="Matching objects")
-    truncated: bool = Field(..., description="Whether results were capped")
+    truncated: bool = Field(..., description=_PAGE_TRUNCATED)
+    # Optional: an add-on built before paging still answers.
+    offset: Optional[int] = Field(None, description="Matching objects skipped before this page")
+    total: Optional[int] = Field(None, description=_PAGE_TOTAL)
+    next_offset: Optional[int] = Field(None, description=_PAGE_NEXT)
 
 
 class BlenderSceneSummaryResponse(BaseModel):
@@ -394,7 +451,11 @@ class BlenderSceneSummaryResponse(BaseModel):
         ..., description="Object counts keyed by Blender type"
     )
     collection_names: List[str] = Field(
-        default_factory=list, description="Top-level collection names"
+        default_factory=list,
+        description=(
+            "The scene's top-level collections, directly under its own; nested ones, other "
+            "scenes' and unlinked ones are left out"
+        ),
     )
     active_camera: Optional[str] = Field(
         None, description="Name of the active scene camera"
@@ -481,6 +542,21 @@ class BlenderBoundsCheckRequest(BaseModel):
         ..., description="Maximum bounds [x, y, z]", min_length=3, max_length=3
     )
 
+    @model_validator(mode="after")
+    def _ordered(self) -> "BlenderBoundsCheckRequest":
+        """Refuse a box whose minimum passes its maximum: it holds nothing."""
+        values = [*self.bounds_min, *self.bounds_max]
+        if not all(math.isfinite(v) for v in values):
+            raise ValueError("bounds_min and bounds_max must be finite")
+        inverted = [
+            axis
+            for axis, low, high in zip("xyz", self.bounds_min, self.bounds_max)
+            if low > high
+        ]
+        if inverted:
+            raise ValueError(f"bounds_min exceeds bounds_max on {', '.join(inverted)}")
+        return self
+
 
 class BlenderBoundsCheckResponse(BaseModel):
     """Result of a spatial bounds check."""
@@ -491,11 +567,41 @@ class BlenderBoundsCheckResponse(BaseModel):
     )
     object_name: str = Field(..., description="Object name checked")
     within_bounds: bool = Field(
-        ..., description="Whether object location is within the bounds"
+        ...,
+        description=(
+            "Whether the object's whole world-space bounding box is within the bounds "
+            "(an add-on that predates relation tests only its origin)"
+        ),
     )
     object_location: List[float] = Field(
         ...,
-        description="Object world location [x, y, z]",
+        description="Object origin's world location [x, y, z]",
+        min_length=3,
+        max_length=3,
+    )
+    # Optional: an add-on built before them still answers.
+    relation: Optional[Literal["inside", "intersecting", "outside"]] = Field(
+        None,
+        description=(
+            "Where the object's world-space bounding box lies: wholly inside the bounds, "
+            "partly (touching counts), or not at all"
+        ),
+    )
+    intersects: Optional[bool] = Field(
+        None, description="Whether any part of the bounding box is within the bounds"
+    )
+    origin_within_bounds: Optional[bool] = Field(
+        None, description="Whether the object's origin is within the bounds"
+    )
+    object_bbox_min: Optional[List[float]] = Field(
+        None,
+        description="Minimum of the object's world-space bounding box corners [x, y, z]",
+        min_length=3,
+        max_length=3,
+    )
+    object_bbox_max: Optional[List[float]] = Field(
+        None,
+        description="Maximum of the object's world-space bounding box corners [x, y, z]",
         min_length=3,
         max_length=3,
     )
@@ -541,6 +647,9 @@ class BlenderCaptureViewportRequest(BaseModel):
     use_render_fallback: bool = Field(
         False, description="Deprecated; same as method='render'"
     )
+    camera_name: Optional[str] = Field(
+        None, min_length=1, description="Capture through this camera"
+    )
 
     @model_validator(mode="after")
     def _apply_render_alias(self) -> "BlenderCaptureViewportRequest":
@@ -585,6 +694,13 @@ class BlenderCaptureViewportResponse(BaseModel):
     )
     capture_method: str = Field(..., description=_CAPTURE_METHOD_RESULT)
     format: str = Field("jpeg", description="Encoded format of the attached image")
+    camera_name: Optional[str] = Field(
+        None,
+        description=(
+            "Camera captured through: camera_name, or the scene camera of a render; null "
+            "for the 3D View's angle or a temporary camera"
+        ),
+    )
 
 
 class BlenderSetCameraViewRequest(BaseModel):
@@ -852,6 +968,29 @@ class BlenderFocusOnObjectResponse(BaseModel):
     warning: Optional[str] = Field(None, description=_PLACEMENT_WARNING)
 
 
+class BlenderView3DState(BaseModel):
+    """The view state of the 3D View captures use; see BlenderRuntimeSession.get_viewport_info."""
+
+    view_perspective: str = Field(..., description="PERSP, ORTHO or CAMERA")
+    is_perspective: bool = Field(..., description="Whether the view projects in perspective")
+    view_matrix: List[List[float]] = Field(
+        ..., description="World-to-view matrix, 4 rows of 4"
+    )
+    eye_location: List[float] = Field(..., description="World-space point the view looks from")
+    view_location: List[float] = Field(..., description="World-space point the view orbits")
+    view_rotation: List[float] = Field(..., description="View rotation as a quaternion [w, x, y, z]")
+    view_distance: float = Field(..., description="Distance from eye to view_location")
+    lens: float = Field(..., description="The 3D View's focal length in mm")
+    clip_start: float = Field(..., description="The 3D View's near clip distance")
+    clip_end: float = Field(..., description="The 3D View's far clip distance")
+    shading_type: str = Field(..., description="WIREFRAME, SOLID, MATERIAL or RENDERED")
+    view_camera: Optional[str] = Field(
+        None, description="The camera a CAMERA view looks through; null otherwise"
+    )
+    region_width: int = Field(..., description="Width of the view's region in pixels")
+    region_height: int = Field(..., description="Height of the view's region in pixels")
+
+
 class BlenderViewportInfoResponse(BaseModel):
     """Active viewport / render settings summary."""
 
@@ -867,6 +1006,16 @@ class BlenderViewportInfoResponse(BaseModel):
         ..., description="Whether film transparency is enabled"
     )
     active_camera: Optional[str] = Field(None, description="Active camera name or None")
+    view3d: Optional[BlenderView3DState] = Field(
+        None,
+        description=(
+            "The largest 3D View of the attached window, which captures use; null without "
+            "an editor window (embedded bpy, blender -b) or 3D View"
+        ),
+    )
+    view3d_unavailable_reason: Optional[str] = Field(
+        None, description="Why view3d is null; null when it is reported"
+    )
 
 
 class BlenderCaptureSequenceRequest(BaseModel):
@@ -883,20 +1032,67 @@ class BlenderCaptureSequenceRequest(BaseModel):
     method: BlenderCaptureMethod = Field(
         "auto", description="viewport, render or auto, as for capture_blender_viewport"
     )
+    camera_name: Optional[str] = Field(
+        None, min_length=1, description="Capture through this camera"
+    )
+    output_dir: Optional[str] = Field(
+        None, min_length=1, description="Folder for the frame files, inside the sandbox"
+    )
+    max_frames: int = Field(
+        SEQUENCE_FRAMES_DEFAULT,
+        ge=1,
+        le=SEQUENCE_FRAMES_MAX,
+        description="Most frames captured by this call",
+    )
+
+    @model_validator(mode="after")
+    def _check_range(self) -> "BlenderCaptureSequenceRequest":
+        """An end before the start used to succeed with no frames."""
+        if self.end_frame < self.start_frame:
+            raise ValueError(
+                f"end_frame ({self.end_frame}) is before start_frame ({self.start_frame})"
+            )
+        return self
 
 
 class BlenderCaptureSequenceResponse(BaseModel):
-    """Multi-frame capture result with per-frame base64 images."""
+    """Multi-frame capture result: JPEG files on disk and their paths."""
 
     success: bool = Field(..., description="Whether capture succeeded")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     frames: List[Dict[str, Any]] = Field(
-        ..., description="Per-frame data: [{frame: int, image_base64: str}, ...]"
+        ...,
+        description="The frames captured by this call: [{frame: int, file_path: str}, ...]",
     )
-    frame_count: int = Field(..., description="Number of frames captured")
+    frame_count: int = Field(..., description="Number of frames captured by this call")
     capture_method: str = Field(..., description=_CAPTURE_METHOD_RESULT)
+    # Optional: an add-on built before these were reported still answers.
+    requested_frame_count: Optional[int] = Field(
+        None, description="Frames in start_frame..end_frame at step"
+    )
+    complete: Optional[bool] = Field(
+        None, description="Whether every requested frame has been captured"
+    )
+    next_start_frame: Optional[int] = Field(
+        None,
+        description="First frame not captured yet: call again with it as start_frame; null when complete",
+    )
+    stopped_by: Optional[str] = Field(
+        None,
+        description=(
+            "Why the call stopped early: max_frames, or time_budget (no frame is started after "
+            f"{SEQUENCE_TIME_BUDGET_SECONDS:g} s); null when complete"
+        ),
+    )
+    output_dir: Optional[str] = Field(None, description="Folder holding the frame files")
+    width: Optional[int] = Field(None, description="Image width of the frames")
+    height: Optional[int] = Field(None, description="Image height of the frames")
+    format: Optional[str] = Field(None, description="Encoded format of the frame files")
+    camera_name: Optional[str] = Field(
+        None, description="Camera captured through; null for the 3D View's angle"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -957,12 +1153,31 @@ class BlenderCreateObjectResponse(BaseModel):
         min_length=3,
         max_length=3,
     )
+    # Optional: an add-on built before them still answers.
+    collection: Optional[str] = Field(None, description="Collection the object was created in")
+    mode: Optional[str] = Field(
+        None, description="Blender's mode after the creation (OBJECT unless it was not before)"
+    )
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Set when the active collection was excluded, hidden or disabled in viewports, "
+            "so the object went in the scene's own collection instead"
+        ),
+    )
 
 
 class BlenderDeleteObjectRequest(BaseModel):
     """Request to delete an object from the scene."""
 
     object_name: str = Field(..., description="Name of object to delete")
+    use_global: bool = Field(
+        False,
+        description=(
+            "Delete the object from every scene and the file (Blender's Delete Globally); by "
+            "default it leaves only the current scene, as Blender's Delete does"
+        ),
+    )
 
 
 class BlenderDeleteObjectResponse(BaseModel):
@@ -973,6 +1188,47 @@ class BlenderDeleteObjectResponse(BaseModel):
         None, description="Error message when success is False"
     )
     deleted_name: str = Field(..., description="Name of deleted object")
+    # Optional: an add-on built before them still answers.
+    use_global: Optional[bool] = Field(
+        None, description="Whether it was deleted from every scene"
+    )
+    removed_from_file: Optional[bool] = Field(
+        None, description="Whether the object is gone from the file (no scene links it any more)"
+    )
+    remaining_scenes: Optional[List[str]] = Field(
+        None, description="Scenes that still link the object"
+    )
+
+
+class BlenderSetObjectModeRequest(BaseModel):
+    """Request to switch an object into a mode."""
+
+    mode: str = Field(
+        "OBJECT",
+        description=(
+            "OBJECT (default), EDIT, POSE, SCULPT, VERTEX_PAINT, WEIGHT_PAINT, TEXTURE_PAINT or "
+            "another mode Blender's object.mode_set takes, in any case"
+        ),
+    )
+    object_name: Optional[str] = Field(
+        None, description="Object to switch, made active first; the active object by default"
+    )
+
+
+class BlenderSetObjectModeResponse(BaseModel):
+    """Response after switching an object's mode."""
+
+    success: bool = Field(..., description="Whether the switch succeeded")
+    error: Optional[str] = Field(
+        None, description="Error message when success is False"
+    )
+    object_name: Optional[str] = Field(
+        None, description="Object switched; null when there was none and the mode was OBJECT"
+    )
+    mode: str = Field(..., description="The object's mode afterwards")
+    previous_mode: str = Field(..., description="The object's mode before")
+    context_mode: str = Field(..., description="Blender's context mode afterwards, such as EDIT_MESH")
+    changed: bool = Field(..., description="Whether the mode changed")
 
 
 class BlenderSetTransformRequest(BaseModel):
@@ -1523,8 +1779,19 @@ class BlenderFileInfoResponse(BaseModel):
     file_path: str = Field(..., description="Current .blend file path")
     is_saved: bool = Field(..., description="Whether the file has been saved to disk")
     is_dirty: bool = Field(..., description="Whether there are unsaved changes")
-    object_count: int = Field(..., description="Number of objects in the scene")
+    object_count: int = Field(
+        ...,
+        description=(
+            "Number of objects in the current scene (an add-on that predates "
+            "file_object_count counts every object in the file)"
+        ),
+    )
     scene_name: str = Field(..., description="Active scene name")
+    # Optional: an add-on built before it still answers.
+    file_object_count: Optional[int] = Field(
+        None,
+        description="Number of objects in the file: every scene's and those no scene links",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1714,26 +1981,160 @@ class BlenderGetKeyframesResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _upper_name(value: Any) -> Any:
+    """Accept Blender enum names in any case, as the session always has."""
+    return value.upper() if isinstance(value, str) else value
+
+
+def _field_type_name(value: Any) -> Any:
+    # MAGNETIC is what simul used to document; FLUID_FLOW is what a FLUID
+    # field's FieldSettings.type reports. effector_add takes neither.
+    if not isinstance(value, str):
+        return value
+    value = value.upper()
+    return {"MAGNETIC": "MAGNET", "FLUID_FLOW": "FLUID"}.get(value, value)
+
+
+# Blender 4.2-5.0's enum items; BlenderRuntimeSession repeats them for the
+# add-on, which cannot import these schemas.
+BlenderBodyType = Annotated[Literal["ACTIVE", "PASSIVE"], BeforeValidator(_upper_name)]
+BlenderCollisionShape = Annotated[
+    Literal["BOX", "SPHERE", "CAPSULE", "CYLINDER", "CONE", "CONVEX_HULL", "MESH", "COMPOUND"],
+    BeforeValidator(_upper_name),
+]
+BlenderForceFieldType = Annotated[
+    Literal[
+        "FORCE",
+        "WIND",
+        "VORTEX",
+        "MAGNET",
+        "HARMONIC",
+        "CHARGE",
+        "LENNARDJ",
+        "TEXTURE",
+        "GUIDE",
+        "BOID",
+        "TURBULENCE",
+        "DRAG",
+        "FLUID",
+    ],
+    BeforeValidator(_field_type_name),
+]
+BlenderFieldShape = Annotated[
+    Literal["POINT", "LINE", "PLANE", "SURFACE", "POINTS"], BeforeValidator(_upper_name)
+]
+BlenderFalloffType = Annotated[
+    Literal["SPHERE", "TUBE", "CONE"], BeforeValidator(_upper_name)
+]
+BlenderConstraintType = Annotated[
+    Literal[
+        "FIXED", "POINT", "HINGE", "SLIDER", "PISTON", "GENERIC", "GENERIC_SPRING", "MOTOR"
+    ],
+    BeforeValidator(_upper_name),
+]
+#: A constraint limit's local axis: lin_* in meters, ang_* in radians.
+BlenderConstraintLimitAxis = Literal["lin_x", "lin_y", "lin_z", "ang_x", "ang_y", "ang_z"]
+#: A GENERIC_SPRING spring's local axis.
+BlenderSpringAxis = Literal["x", "y", "z", "ang_x", "ang_y", "ang_z"]
+#: A spring's settings: stiffness and damping, each 0 or more.
+BlenderSpringSettings = Dict[Literal["stiffness", "damping"], float]
+
+# The limits each constraint type applies; BlenderRuntimeSession repeats them.
+_CONSTRAINT_LIMITS: Dict[str, Tuple[str, ...]] = {
+    "HINGE": ("ang_z",),
+    "SLIDER": ("lin_x",),
+    "PISTON": ("lin_x", "ang_x"),
+    "GENERIC": ("lin_x", "lin_y", "lin_z", "ang_x", "ang_y", "ang_z"),
+    "GENERIC_SPRING": ("lin_x", "lin_y", "lin_z", "ang_x", "ang_y", "ang_z"),
+}
+
+# Blender's RNA ranges for rigid-body and field settings, which the tools also
+# advertise; Blender itself stored a mass of -5 unclamped.
+RigidBodyMass = Annotated[float, Field(ge=0.001, allow_inf_nan=False)]
+NonNegativeFloat = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
+UnitFloat = Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False)]
+FieldTenth = Annotated[float, Field(ge=0.0, le=10.0, allow_inf_nan=False)]
+# RigidBodyWorld's RNA ranges.
+WorldSubsteps = Annotated[int, Field(ge=1, le=32767)]
+WorldSolverIterations = Annotated[int, Field(ge=1, le=1000)]
+WorldTimeScale = Annotated[float, Field(ge=0.0, le=100.0, allow_inf_nan=False)]
+
+
+def _finite_vector(value: Optional[List[float]], label: str) -> None:
+    if value is not None and not all(math.isfinite(v) for v in value):
+        raise ValueError(f"{label} must be three finite numbers")
+
+
+def _nonzero_vector(value: Optional[List[float]], label: str) -> None:
+    _finite_vector(value, label)
+    if value is not None and not any(value):
+        raise ValueError(f"{label} must not be the zero vector")
+
+
 class BlenderSetupRigidBodyRequest(BaseModel):
     """Request to set up rigid body physics on an object."""
 
-    object_name: str = Field(..., description="Name of the target object")
-    body_type: str = Field(
+    object_name: str = Field(..., description="Name of the target mesh object")
+    body_type: BlenderBodyType = Field(
         "ACTIVE",
-        description="Rigid body type: ACTIVE (dynamic) or PASSIVE (static)",
+        description="ACTIVE (simulated) or PASSIVE (static or animated collider)",
     )
-    mass: float = Field(1.0, description="Mass in kilograms")
-    friction: float = Field(0.5, description="Surface friction coefficient")
-    restitution: float = Field(0.0, description="Bounciness (0-1)")
-    collision_shape: str = Field(
+    mass: float = Field(
+        1.0, description="Mass in kilograms", ge=0.001, allow_inf_nan=False
+    )
+    friction: float = Field(
+        0.5, description="Surface friction coefficient", ge=0.0, allow_inf_nan=False
+    )
+    restitution: float = Field(
+        0.0, description="Bounciness (0-1)", ge=0.0, le=1.0, allow_inf_nan=False
+    )
+    collision_shape: BlenderCollisionShape = Field(
         "CONVEX_HULL",
         description=(
-            "Collision shape: BOX, SPHERE, CAPSULE, CYLINDER, "
-            "CONE, CONVEX_HULL, MESH"
+            "Collision shape: BOX, SPHERE, CAPSULE, CYLINDER, CONE, CONVEX_HULL, MESH "
+            "or COMPOUND (the children's shapes combined)"
         ),
     )
-    linear_damping: float = Field(0.04, description="Linear damping factor")
-    angular_damping: float = Field(0.1, description="Angular damping factor")
+    linear_damping: float = Field(
+        0.04,
+        description="Fraction of linear velocity lost per second (0-1)",
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+    angular_damping: float = Field(
+        0.1,
+        description="Fraction of angular velocity lost per second (0-1)",
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+    kinematic: Optional[bool] = Field(
+        None,
+        description=(
+            "Animated: the body follows its own animation and pushes simulated bodies"
+        ),
+    )
+    collision_margin: Optional[float] = Field(
+        None,
+        description="Collision margin in meters (0-1); omitted keeps Blender's automatic margin",
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+    collision_collections: Optional[List[Annotated[int, Field(ge=0, le=19)]]] = Field(
+        None,
+        description=(
+            "Collision collections 0-19 the body is in; bodies collide only when they share one"
+        ),
+        max_length=20,
+    )
+    use_deactivation: Optional[bool] = Field(
+        None, description="Let the body sleep when it nearly stops"
+    )
+    start_deactivated: Optional[bool] = Field(
+        None, description="Start asleep until something hits it"
+    )
 
 
 class BlenderSetupRigidBodyResponse(BaseModel):
@@ -1747,19 +2148,39 @@ class BlenderSetupRigidBodyResponse(BaseModel):
     body_type: str = Field(..., description="Rigid body type set")
     mass: float = Field(..., description="Mass set")
     collision_shape: str = Field(..., description="Collision shape set")
+    # Null from an add-on built before these were reported.
+    friction: Optional[float] = Field(None, description="Friction set")
+    restitution: Optional[float] = Field(None, description="Restitution set")
+    linear_damping: Optional[float] = Field(None, description="Linear damping set")
+    angular_damping: Optional[float] = Field(None, description="Angular damping set")
+    kinematic: Optional[bool] = Field(None, description="Whether the body is animated")
+    collision_margin: Optional[float] = Field(
+        None, description="Collision margin, or null for Blender's automatic margin"
+    )
+    collision_collections: Optional[List[int]] = Field(
+        None, description="Collision collections the body is in"
+    )
+    use_deactivation: Optional[bool] = Field(None, description="Whether the body can sleep")
+    start_deactivated: Optional[bool] = Field(None, description="Whether it starts asleep")
+    world_created: Optional[bool] = Field(
+        None, description="Whether the call added the scene's rigid body world"
+    )
+    replaced: Optional[bool] = Field(
+        None, description="Whether the object already had a rigid body"
+    )
 
 
 class BlenderAddForceFieldRequest(BaseModel):
     """Request to add a force field to the scene."""
 
-    field_type: str = Field(
+    field_type: BlenderForceFieldType = Field(
         ...,
         description=(
-            "Force field type: FORCE, WIND, VORTEX, MAGNETIC, "
-            "HARMONIC, CHARGE, LENNARDJ, TURBULENCE, DRAG"
+            "Force field type: FORCE, WIND, VORTEX, MAGNET, HARMONIC, CHARGE, LENNARDJ, "
+            "TEXTURE, GUIDE, BOID, TURBULENCE, DRAG or FLUID"
         ),
     )
-    strength: float = Field(1.0, description="Field strength")
+    strength: float = Field(1.0, description="Field strength", allow_inf_nan=False)
     # Optional, not a default list: the tool passes None when the caller omits
     # the location, and a List[float] field rejects None.
     location: Optional[List[float]] = Field(
@@ -1769,6 +2190,38 @@ class BlenderAddForceFieldRequest(BaseModel):
         max_length=3,
     )
     name: Optional[str] = Field(None, description="Optional name for the field")
+    direction: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World-space direction of the field's local +Z (where WIND blows, the "
+            "axis VORTEX turns about); world +Z when omitted"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    shape: Optional[BlenderFieldShape] = Field(
+        None, description="POINT, LINE, PLANE, SURFACE or POINTS"
+    )
+    flow: Optional[float] = Field(None, description="Air flow", allow_inf_nan=False)
+    falloff_type: Optional[BlenderFalloffType] = Field(
+        None, description="SPHERE, TUBE or CONE"
+    )
+    falloff_power: Optional[float] = Field(
+        None, description="How fast the field weakens with distance", ge=0.0, le=10.0
+    )
+    distance_max: Optional[float] = Field(
+        None,
+        description="Distance past which the field has no effect; 0 for no limit",
+        ge=0.0,
+        allow_inf_nan=False,
+    )
+    noise: Optional[float] = Field(None, description="Random noise", ge=0.0, le=10.0)
+
+    @model_validator(mode="after")
+    def _finite_vectors(self) -> "BlenderAddForceFieldRequest":
+        _finite_vector(self.location, "location")
+        _nonzero_vector(self.direction, "direction")
+        return self
 
 
 class BlenderAddForceFieldResponse(BaseModel):
@@ -1779,13 +2232,37 @@ class BlenderAddForceFieldResponse(BaseModel):
         None, description="Error message when success is False"
     )
     name: str = Field(..., description="Name of the created force field object")
-    field_type: str = Field(..., description="Type of force field")
+    field_type: str = Field(
+        ..., description="Type of force field (a FLUID field reports FLUID_FLOW)"
+    )
     strength: float = Field(..., description="Strength of the field")
     location: List[float] = Field(
         ...,
         description="Location of the field [x, y, z]",
         min_length=3,
         max_length=3,
+    )
+    # Null from an add-on built before these were reported.
+    rotation_euler: Optional[List[float]] = Field(
+        None, description="World XYZ Euler rotation, radians"
+    )
+    direction: Optional[List[float]] = Field(
+        None, description="World direction of the field's local +Z"
+    )
+    shape: Optional[str] = Field(None, description="Field shape")
+    flow: Optional[float] = Field(None, description="Air flow")
+    falloff_type: Optional[str] = Field(None, description="Falloff type")
+    falloff_power: Optional[float] = Field(None, description="Falloff power")
+    distance_max: Optional[float] = Field(
+        None, description="Maximum distance, or null for no limit"
+    )
+    noise: Optional[float] = Field(None, description="Noise")
+    warning: Optional[str] = Field(
+        None,
+        description=(
+            "Set when the field went into the scene collection because the active "
+            "collection is hidden, disabled in viewports or linked"
+        ),
     )
 
 
@@ -1813,29 +2290,125 @@ class BlenderGetForceFieldInfoResponse(BaseModel):
         min_length=3,
         max_length=3,
     )
+    # Null from an add-on built before these were reported.
+    rotation_euler: Optional[List[float]] = Field(
+        None, description="World XYZ Euler rotation, radians"
+    )
+    direction: Optional[List[float]] = Field(
+        None, description="World direction of the field's local +Z"
+    )
+    falloff_type: Optional[str] = Field(None, description="Falloff type")
+    falloff_power: Optional[float] = Field(None, description="Falloff power")
+    distance_max: Optional[float] = Field(
+        None, description="Maximum distance, or null for no limit"
+    )
+    noise: Optional[float] = Field(None, description="Noise")
 
 
 class BlenderAddConstraintRequest(BaseModel):
     """Request to add a rigid body constraint."""
 
-    constraint_type: str = Field(
+    constraint_type: BlenderConstraintType = Field(
         ...,
         description=(
             "Constraint type: FIXED, POINT, HINGE, SLIDER, "
             "PISTON, GENERIC, GENERIC_SPRING, MOTOR"
         ),
     )
-    object1_name: str = Field(..., description="First constrained object")
-    object2_name: str = Field(..., description="Second constrained object")
+    object1_name: str = Field(..., description="First constrained rigid body")
+    object2_name: str = Field(..., description="Second constrained rigid body")
     location: Optional[List[float]] = Field(
         None,
-        description="Optional location for the constraint empty",
+        description="World-space pivot; midway between the two objects when omitted",
         min_length=3,
         max_length=3,
     )
     disable_collisions: bool = Field(
         True, description="Disable collisions between constrained objects"
     )
+    axis: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World direction of the constraint axis: the hinge axis (local Z) for "
+            "HINGE, the slide or motor axis (local X) for SLIDER, PISTON and MOTOR, "
+            "local Z otherwise; unrotated (world axes) when omitted"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    limits: Optional[Dict[BlenderConstraintLimitAxis, List[FiniteFloat]]] = Field(
+        None,
+        description="Limits by local axis as [lower, upper]; meters for lin_*, radians for ang_*",
+    )
+    springs: Optional[Dict[BlenderSpringAxis, BlenderSpringSettings]] = Field(
+        None, description="GENERIC_SPRING only: stiffness and damping by local axis"
+    )
+    motor_angular_velocity: Optional[float] = Field(
+        None, description="MOTOR only: target rad/s about local X", allow_inf_nan=False
+    )
+    motor_angular_max_impulse: Optional[float] = Field(
+        None, description="MOTOR only: angular motor impulse cap", ge=0.0, allow_inf_nan=False
+    )
+    motor_linear_velocity: Optional[float] = Field(
+        None, description="MOTOR only: target m/s along local X", allow_inf_nan=False
+    )
+    motor_linear_max_impulse: Optional[float] = Field(
+        None, description="MOTOR only: linear motor impulse cap", ge=0.0, allow_inf_nan=False
+    )
+    breaking_threshold: Optional[float] = Field(
+        None,
+        description="Impulse that breaks the constraint; omitted, it never breaks",
+        ge=0.0,
+        allow_inf_nan=False,
+    )
+
+    @model_validator(mode="after")
+    def _fits_the_type(self) -> "BlenderAddConstraintRequest":
+        if self.object1_name == self.object2_name:
+            raise ValueError("object1_name and object2_name must name two different objects")
+        _finite_vector(self.location, "location")
+        _nonzero_vector(self.axis, "axis")
+        allowed = _CONSTRAINT_LIMITS.get(self.constraint_type, ())
+        for key, bounds in (self.limits or {}).items():
+            if key not in allowed:
+                raise ValueError(
+                    f"A {self.constraint_type} constraint has no {key} limit; it limits "
+                    f"{', '.join(allowed) or 'nothing'}"
+                )
+            if len(bounds) != 2 or bounds[0] > bounds[1]:
+                raise ValueError(f"limits.{key} must be [lower, upper] with lower <= upper")
+            if key.startswith("ang_") and max(abs(v) for v in bounds) > 2 * math.pi:
+                raise ValueError(f"limits.{key} must be within +-2 pi radians")
+        if self.springs:
+            if self.constraint_type != "GENERIC_SPRING":
+                raise ValueError("springs apply to GENERIC_SPRING constraints only")
+            for spring_axis, spring in self.springs.items():
+                if any(not math.isfinite(v) or v < 0 for v in spring.values()):
+                    raise ValueError(
+                        f"springs.{spring_axis} needs finite stiffness and damping >= 0"
+                    )
+        motor = (
+            self.motor_angular_velocity,
+            self.motor_angular_max_impulse,
+            self.motor_linear_velocity,
+            self.motor_linear_max_impulse,
+        )
+        if self.constraint_type != "MOTOR" and any(v is not None for v in motor):
+            raise ValueError("motor settings apply to MOTOR constraints only")
+        return self
+
+
+class BlenderConstraintMotor(BaseModel):
+    """A MOTOR constraint's drive along and about its local X."""
+
+    angular_velocity: Optional[float] = Field(
+        None, description="Target rad/s about local X; null when the angular motor is off"
+    )
+    angular_max_impulse: float = Field(..., description="Angular motor impulse cap")
+    linear_velocity: Optional[float] = Field(
+        None, description="Target m/s along local X; null when the linear motor is off"
+    )
+    linear_max_impulse: float = Field(..., description="Linear motor impulse cap")
 
 
 class BlenderAddConstraintResponse(BaseModel):
@@ -1849,6 +2422,39 @@ class BlenderAddConstraintResponse(BaseModel):
     constraint_type: str = Field(..., description="Type of constraint")
     object1_name: str = Field(..., description="First constrained object")
     object2_name: str = Field(..., description="Second constrained object")
+    # Null from an add-on built before these were reported.
+    pivot: Optional[List[float]] = Field(
+        None, description="World-space pivot (the constraint empty's location)"
+    )
+    axis: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World direction of the constraint axis: local Z for HINGE, local X for "
+            "SLIDER, PISTON and MOTOR, local Z otherwise"
+        ),
+    )
+    local_axes: Optional[Dict[str, List[float]]] = Field(
+        None,
+        description="World directions of the empty's local x, y and z, which limits refer to",
+    )
+    rotation_euler: Optional[List[float]] = Field(
+        None, description="The empty's world XYZ Euler rotation, radians"
+    )
+    limits: Optional[Dict[str, List[float]]] = Field(
+        None, description="Enabled limits by local axis, [lower, upper]"
+    )
+    springs: Optional[Dict[str, Dict[str, float]]] = Field(
+        None, description="Enabled springs by local axis"
+    )
+    motor: Optional[BlenderConstraintMotor] = Field(
+        None, description="The motor of a MOTOR constraint"
+    )
+    breaking_threshold: Optional[float] = Field(
+        None, description="Impulse that breaks it, or null when unbreakable"
+    )
+    warnings: List[str] = Field(
+        default_factory=list, description="Settings the constraint still needs"
+    )
 
 
 class BlenderGetConstraintInfoRequest(BaseModel):
@@ -1874,6 +2480,36 @@ class BlenderGetConstraintInfoResponse(BaseModel):
     )
     enabled: bool = Field(..., description="Whether constraint is enabled")
     disable_collisions: bool = Field(..., description="Whether collisions are disabled")
+    # Null from an add-on built before these were reported.
+    pivot: Optional[List[float]] = Field(
+        None, description="World-space pivot (the constraint empty's location)"
+    )
+    axis: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World direction of the constraint axis: local Z for HINGE, local X for "
+            "SLIDER, PISTON and MOTOR, local Z otherwise"
+        ),
+    )
+    local_axes: Optional[Dict[str, List[float]]] = Field(
+        None,
+        description="World directions of the empty's local x, y and z, which limits refer to",
+    )
+    rotation_euler: Optional[List[float]] = Field(
+        None, description="The empty's world XYZ Euler rotation, radians"
+    )
+    limits: Optional[Dict[str, List[float]]] = Field(
+        None, description="Enabled limits by local axis, [lower, upper]"
+    )
+    springs: Optional[Dict[str, Dict[str, float]]] = Field(
+        None, description="Enabled springs by local axis"
+    )
+    motor: Optional[BlenderConstraintMotor] = Field(
+        None, description="The motor of a MOTOR constraint"
+    )
+    breaking_threshold: Optional[float] = Field(
+        None, description="Impulse that breaks it, or null when unbreakable"
+    )
 
 
 # Bounds of a Blender point cache's frame range (PointCache RNA, Blender
@@ -2087,6 +2723,13 @@ class BlenderBakeSimulationRequest(BaseModel):
             "rigid_body bakes only the rigid-body world's cache; all bakes every point "
             "cache in the scene (rigid bodies, cloth, soft bodies, dynamic paint and "
             "particles)"
+        ),
+    )
+    allow_long_bake: bool = Field(
+        False,
+        description=(
+            "Bake above 20 000 frames or 400 000 body-frames, which can outlast the "
+            "client timeout while Blender keeps baking"
         ),
     )
 
@@ -2462,6 +3105,7 @@ __all__ = [
     "SCRIPT_OUTPUT_CHARS_DEFAULT",
     "SCRIPT_OUTPUT_CHARS_MAX",
     "SCRIPT_OUTPUT_JSON_BYTES_MAX",
+    "LISTING_JSON_BYTES_MAX",
     "BlenderCaptureMethod",
     "BlenderInfoResponse",
     "BlenderObjectInfo",
@@ -2502,6 +3146,8 @@ __all__ = [
     "BlenderCreateObjectResponse",
     "BlenderDeleteObjectRequest",
     "BlenderDeleteObjectResponse",
+    "BlenderSetObjectModeRequest",
+    "BlenderSetObjectModeResponse",
     "BlenderSetTransformRequest",
     "BlenderSetTransformResponse",
     "BlenderSetParentRequest",

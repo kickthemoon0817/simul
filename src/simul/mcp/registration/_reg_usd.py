@@ -5,12 +5,16 @@ Every tool here is a thin closure around ``server._exec_backend``: the
 closure validates its input, performs the stage operation and builds the
 response model; the envelope owns the rate limit, usage record, sandbox
 and exception wrapping, result budget and single transmission.
+
+The pxr work of every tool runs on a worker thread through one
+``USDCallScheduler`` per server, so a slow call no longer stalls the event
+loop: reads run concurrently (one at a time per stage), and an edit, a load
+or a reload runs alone (see ``simul.mcp.usd_scheduler``).
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from fastmcp.tools import ToolResult
 
@@ -50,14 +54,26 @@ from ..schemas.usd import (
     USDValidateRequest,
 )
 from ...logging import get_logger
-from ...usd.validation import WARNING, composition_issues
+from ...usd.sandbox import CompositionSandbox
+from ...usd.validation import WARNING, composition_issues, url_scheme
 from ...usd.validation import validate_usd_file as run_validation
+from ..usd_scheduler import USDCallScheduler
 from ._helpers import with_param_descriptions
 
 if TYPE_CHECKING:
     from ...adapters.headless_usd import HeadlessUSDSession
     from ...usd.editing import USDEditError
     from ..server import SimulMCPServer
+
+SessionWork = Callable[["HeadlessUSDSession"], Dict[str, Any]]
+SessionCall = Callable[["HeadlessUSDSession"], Awaitable[Dict[str, Any]]]
+
+# Stage-bound queries an agent makes once per prim while it inspects an
+# asset. They count only against the per-agent ceiling
+# (security.global_requests_per_minute), not a per-tool bucket of their own.
+PER_PRIM_QUERY_TOOLS = frozenset(
+    {"get_prim_info", "get_mesh_info", "get_bounding_box", "search_prims"}
+)
 
 logger = get_logger(__name__)
 
@@ -88,28 +104,78 @@ def _loaded_stage(session: "HeadlessUSDSession", stage_id: str) -> Any:
     if stage is None:
         raise USDLookupError(
             f"Stage not loaded: {stage_id!r}. Load the file with load_usd_file "
-            "and pass the stage_id it returns."
+            "and pass the stage_id it returns.",
+            stage_id=stage_id,
         )
     return stage
 
 
 def register_usd_tools(server: "SimulMCPServer") -> None:
     """Register USD-related tools."""
+    scheduler = USDCallScheduler(server.settings.server.timeout)
+    server.exempt_from_per_tool_rate_limit(PER_PRIM_QUERY_TOOLS)
+
+    def request_owner() -> Optional[str]:
+        """The MCP session of the current request, read on the event loop.
+
+        Its end is hooked here, so the session's stages are released then.
+        """
+        session_id = server._get_request_session_id()
+        if session_id is not None:
+            server._watch_session_end(session_id)
+        return session_id
+
+    def scheduled(
+        tool_name: str, work: SessionWork, *, stage_id: Optional[str] = None, writes: bool = False
+    ) -> SessionCall:
+        """Run ``work`` on a worker thread once the scheduler admits it.
+
+        The worker thread cannot see the MCP request, so the calling session
+        is read here, on the event loop, and the work runs as that session
+        (``HeadlessUSDSession.acting_for``): a stage belongs to the session
+        that loaded it.
+        """
+
+        async def call(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            owner = request_owner()
+            acting_for = getattr(session, "acting_for", None)
+
+            def run() -> Dict[str, Any]:
+                if acting_for is None:
+                    return work(session)
+                with acting_for(owner):
+                    return work(session)
+
+            return await scheduler.run(tool_name, run, stage_key=stage_id, writes=writes)
+
+        return call
+
+    def usd_target(file_path: str) -> str:
+        """The location a file argument names, checked against the sandbox.
+
+        A local path comes back absolute: ``~`` and ``$VARS`` expanded and a
+        relative path resolved against ``security.relative_path_base`` (the
+        server's working directory by default), with the sandbox on or off. A
+        URL comes back verbatim; the session refuses one no installed asset
+        resolver handles.
+
+        Raises:
+            SandboxDenied: The location is outside the sandbox.
+        """
+        authorized = server._path_policy.authorize(file_path)
+        if url_scheme(authorized) is not None:
+            return authorized
+        return str(server._path_policy.resolve(authorized))
+
     from ...usd.editing import USDEditError
 
-    # Stages belong to the MCP session that loaded them (see HeadlessUSDSession),
-    # and are released when that session ends.
+    # Stages belong to the MCP session that loaded them (see scheduled above)
+    # and are released when that session ends; files a load or reload rereads
+    # are held to the composition sandbox.
     adapter = server.headless_adapter
-    if adapter is not None and hasattr(adapter, "set_owner_resolver"):
-
-        def _stage_owner() -> Optional[str]:
-            session_id = server._get_request_session_id()
-            if session_id is not None:
-                server._watch_session_end(session_id)
-            return session_id
-
-        adapter.set_owner_resolver(_stage_owner)
+    if adapter is not None and hasattr(adapter, "release_session"):
         server.add_session_end_hook(adapter.release_session)
+        adapter.set_sandbox_factory(lambda: CompositionSandbox(server._path_policy))
 
     @server.mcp.tool(
         name="load_usd_file",
@@ -117,13 +183,21 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "Load a USD file into a stage private to this MCP session and return stage "
             "information. Loading the same file again returns the same stage while it has "
             "no unsaved edits and its files are unchanged on disk; otherwise a fresh stage "
-            "is read from disk, rereading changed sublayers and references. Edits stay in "
-            "memory until save_usd_stage or export_usd_stage writes them. A file pxr "
-            "cannot open fails with LoadError, whose details.reason names the cause "
-            "(ParseError with line and column, CorruptFile, EmptyFile, FileTooLarge, "
-            "PermissionDenied, UnsupportedExtension, FileNotFound, NotAFile). Missing "
-            "sublayers, references or payloads do not fail the load; they are listed "
-            "in warnings. Paths: sandbox (security.allowed_paths)."
+            "is read from disk, rereading changed sublayers and references (each held to "
+            "the sandbox first). Edits stay in memory until save_usd_stage or "
+            "export_usd_stage writes them, and are dropped when the session ends. "
+            "A file pxr cannot open fails with LoadError, whose details.reason names "
+            "the cause (ParseError "
+            "with line and column, CorruptFile, EmptyFile, FileTooLarge, "
+            "PermissionDenied, UnsupportedExtension, FileNotFound, NotAFile, "
+            "UnsupportedURL for a URL no installed asset resolver opens, such as "
+            "omniverse:// here). Missing sublayers, references or payloads do not fail "
+            "the load; they are listed in warnings. A relative path resolves against "
+            "security.relative_path_base (default: the server's working directory); "
+            "file_path in the result is the resolved path. Paths: sandbox "
+            "(security.allowed_paths), which also holds every sublayer, reference, "
+            "payload, clip and asset path the file draws on: one outside it fails the "
+            "load with SandboxError listing them."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -144,17 +218,13 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             Stage information or error
         """
 
-        def _load(session: "HeadlessUSDSession") -> Dict[str, Any]:
-            input_data = server._validate_input(USDFileRequest, file_path=file_path)
-            if isinstance(input_data, dict):
-                return input_data
-
+        def _load(session: "HeadlessUSDSession", target: str) -> Dict[str, Any]:
             # A USDLoadError carries pxr's reason; the envelope reports it as
             # LoadError with details.reason. A session at its stage limit is
             # refused as a RefusedOperation.
             try:
                 stage_id = session.load_stage_or_raise(
-                    server._path_policy.authorize(input_data.file_path)
+                    target, sandbox=CompositionSandbox(server._path_policy)
                 )
             except USDEditError as exc:
                 return _edit_error("load_usd_file", exc)
@@ -162,12 +232,12 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             stage_info = session.get_stage_info(stage_id)
             if stage is None or stage_info is None:
                 return ErrorResponse(
-                    error=f"Loaded {input_data.file_path} but could not read its stage information",
+                    error=f"Loaded {target} but could not read its stage information",
                     error_type="LoadError",
                 ).model_dump()
             return StageInfo(
                 stage_id=stage_id,
-                file_path=input_data.file_path,
+                file_path=target,
                 up_axis=stage_info.up_axis,
                 meters_per_unit=stage_info.meters_per_unit,
                 time_codes_per_second=stage_info.time_codes_per_second,
@@ -176,18 +246,28 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 frame_rate=stage_info.frame_rate,
                 total_prims=stage_info.prim_count,
                 root_prims=stage_info.root_prims,
-                has_animation=stage_info.start_time_code != stage_info.end_time_code,
+                has_animation=stage_info.has_animation,
                 layer_count=len(stage_info.layers),
                 default_prim=stage_info.default_prim_path,
                 warnings=[issue.to_dict() for issue in composition_issues(stage, WARNING)],
             ).model_dump()
+
+        async def _load_call(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            input_data = server._validate_input(USDFileRequest, file_path=file_path)
+            if isinstance(input_data, dict):
+                return input_data
+            target = usd_target(input_data.file_path)
+            # Alone: a load may reread a changed sublayer or reference in place,
+            # which recomposes every stage using it. Its stage id is random and
+            # only known once it registers, so no read can be waiting on it.
+            return await scheduled("load_usd_file", lambda s: _load(s, target), writes=True)(session)
 
         return await server._exec_backend(
             "load_usd_file",
             server.headless_adapter,
             "USD",
             StageInfo,
-            _load,
+            _load_call,
             params={"file_path": file_path},
         )
 
@@ -203,7 +283,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "and pxr's UsdValidation validators, with the usdz package rules for a "
             ".usdz. Returns is_valid (no error-severity issue), can_read (pxr opened "
             "it, so load_usd_file can) and issues with severity, code and location. "
-            "Paths: sandbox (security.allowed_paths)."
+            "Paths: sandbox (security.allowed_paths), applied to everything the file "
+            "draws on as load_usd_file applies it."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -222,21 +303,28 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             File validity information or error
         """
 
-        def _validate(session: "HeadlessUSDSession") -> Dict[str, Any]:
+        def _validate(target: str) -> Dict[str, Any]:
+            report = run_validation(
+                target,
+                server.settings.usd,
+                sandbox=CompositionSandbox(server._path_policy),
+            )
+            return USDFileInfo(**report.to_dict()).model_dump()
+
+        async def _validate_call(session: "HeadlessUSDSession") -> Dict[str, Any]:
             input_data = server._validate_input(USDValidateRequest, file_path=file_path)
             if isinstance(input_data, dict):
                 return input_data
-
-            path = Path(server._path_policy.authorize(input_data.file_path))
-            report = run_validation(str(path.resolve()), server.settings.usd)
-            return USDFileInfo(**report.to_dict()).model_dump()
+            target = usd_target(input_data.file_path)
+            # Touches no loaded stage: it waits only for a running edit.
+            return await scheduler.run("validate_usd_file", lambda: _validate(target))
 
         return await server._exec_backend(
             "validate_usd_file",
             server.headless_adapter,
             "USD",
             USDFileInfo,
-            _validate,
+            _validate_call,
             params={"file_path": file_path},
         )
 
@@ -322,7 +410,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             PrimInfo,
-            _prim_info,
+            scheduled("get_prim_info", _prim_info, stage_id=stage_id),
             params={"stage_id": stage_id, "prim_path": prim_path, "time_code": time_code},
         )
 
@@ -423,7 +511,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             PrimActionResponse,
-            _create,
+            scheduled("create_prim", _create, writes=True),
             params={
                 "stage_id": stage_id,
                 "prim_path": prim_path,
@@ -516,7 +604,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             PrimActionResponse,
-            _update,
+            scheduled("update_prim_attributes", _update, writes=True),
             params={
                 "stage_id": stage_id,
                 "prim_path": prim_path,
@@ -589,7 +677,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             PrimActionResponse,
-            _delete,
+            scheduled("delete_prim", _delete, writes=True),
             params={
                 "stage_id": stage_id,
                 "prim_path": prim_path,
@@ -599,20 +687,34 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="get_mesh_info",
-        description="Get mesh information for a mesh prim.",
+        description=(
+            "Get statistics for a Mesh prim: vertex, face and face-vertex counts; "
+            "normals (primvars:normals or normals), UV sets, colours, tangents; "
+            "topology validity, watertightness, surface area and (closed meshes "
+            "only) volume, and the points' bounds, all in the mesh's own "
+            "space; the materials UsdShade resolves for the mesh and for each "
+            "materialBind geometry subset, and its physics material. Computed with "
+            "numpy, so a million-vertex mesh takes well under a second. time_code "
+            "reads a deforming mesh's points; points_time_samples says whether it "
+            "deforms."
+        ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
         output_schema=None,
     )
     @with_param_descriptions()
-    async def get_mesh_info(stage_id: str, prim_path: str) -> ToolResult:
+    async def get_mesh_info(
+        stage_id: str, prim_path: str, time_code: Optional[float] = None
+    ) -> ToolResult:
         """
         Get mesh information for a mesh prim.
 
         Args:
             stage_id: Stage identifier
-            prim_path: Path to the mesh prim
+            prim_path: Absolute path to the Mesh prim
+            time_code: Time code to read points and topology at; None for the
+                default (unanimated) value
 
         Returns:
             Mesh statistics or error
@@ -620,26 +722,36 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
         def _mesh_info(session: "HeadlessUSDSession") -> Dict[str, Any]:
             input_data = server._validate_input(
-                MeshInfoRequest, stage_id=stage_id, prim_path=prim_path
+                MeshInfoRequest, stage_id=stage_id, prim_path=prim_path, time_code=time_code
             )
             if isinstance(input_data, dict):
                 return input_data
 
-            mesh_info = session.get_mesh_info(input_data.stage_id, input_data.prim_path)
-            if not mesh_info:
+            from ...usd._pxr import UsdGeom
+            from ...usd.lookup import lookup_prim
+            from ...usd.mesh_ops import MeshOperations, mesh_info_to_dict
+
+            stage = _loaded_stage(session, input_data.stage_id)
+            prim = lookup_prim(stage, input_data.prim_path)
+            if not prim.IsA(UsdGeom.Mesh):
                 return ErrorResponse(
-                    error=f"Mesh not found: {input_data.prim_path}",
+                    error=(
+                        f"Mesh not found: {input_data.prim_path} is a "
+                        f"{prim.GetTypeName() or 'typeless prim'}, not a Mesh"
+                    ),
                     error_type="NotFoundError",
+                    details={"prim_path": input_data.prim_path, "prim_type": prim.GetTypeName()},
                 ).model_dump()
-            return MeshInfo(**mesh_info).model_dump()
+            info = MeshOperations().get_mesh_statistics(prim, input_data.time_code)
+            return MeshInfo(**mesh_info_to_dict(info)).model_dump()
 
         return await server._exec_backend(
             "get_mesh_info",
             server.headless_adapter,
             "USD",
             MeshInfo,
-            _mesh_info,
-            params={"stage_id": stage_id, "prim_path": prim_path},
+            scheduled("get_mesh_info", _mesh_info, stage_id=stage_id),
+            params={"stage_id": stage_id, "prim_path": prim_path, "time_code": time_code},
         )
 
     @server.mcp.tool(
@@ -752,7 +864,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             PrimSearchResponse,
-            _search,
+            scheduled("search_prims", _search, stage_id=stage_id),
             params={
                 "stage_id": stage_id,
                 "search_type": search_type,
@@ -857,7 +969,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             PrimSubtreeResponse,
-            _subtree,
+            scheduled("get_prim_subtree", _subtree, stage_id=stage_id),
             params={"stage_id": stage_id, "root_path": root_path, "offset": offset},
         )
 
@@ -958,7 +1070,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             BBoxResponse,
-            _bbox,
+            scheduled("get_bounding_box", _bbox, stage_id=stage_id),
             params={
                 "stage_id": stage_id,
                 "prim_path": prim_path,
@@ -969,7 +1081,20 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="summarize_scene",
-        description="Generate a summary of a USD scene.",
+        description=(
+            "Summarise a USD stage in one call: prim counts by type (instance "
+            "proxies included; '(typeless)' for prims without a type), the scene "
+            "bounds and size in stage units and in metres, mesh totals (vertices, "
+            "faces, normals, UVs, closed meshes; surface area and volume summed in "
+            "each mesh's own space, before transforms; instanced meshes counted per "
+            "instance; a deforming mesh with time-sampled points measured at its "
+            "first sample), materials, root prims, and animation: detected from "
+            "time samples spanning more than one time even without an authored "
+            "time range, with its duration in seconds. warnings groups the layers "
+            "whose upAxis or metersPerUnit differs from the stage's (USD does not "
+            "rescale them), with a count and example layers per group. format "
+            "text adds a short digest."
+        ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
@@ -1028,9 +1153,15 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                     "scene_bbox": summary.scene_bbox,
                     "scene_center": summary.scene_center,
                     "scene_size": summary.scene_size,
+                    "scene_size_meters": summary.scene_size_meters,
                     "mesh_statistics": summary.mesh_statistics,
                     "hierarchy_depth": summary.hierarchy_depth,
                     "animation_info": summary.animation_info,
+                    "root_prim_count": summary.root_prim_count,
+                    "root_prims": summary.root_prim_paths,
+                    "material_count": len(summary.materials),
+                    "materials": [material.path for material in summary.materials[:50]],
+                    "warnings": summary.warnings,
                 },
                 digest=digest,
             ).model_dump()
@@ -1040,7 +1171,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             SceneSummaryResponse,
-            _summarize,
+            scheduled("summarize_scene", _summarize, stage_id=stage_id),
             params={"stage_id": stage_id, "include_meshes": include_meshes, "format": format},
         )
 
@@ -1071,7 +1202,12 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             return StageListResponse(success=True, stages=stages, count=len(stages)).model_dump()
 
         return await server._exec_backend(
-            "list_usd_stages", server.headless_adapter, "USD", StageListResponse, _list, params={}
+            "list_usd_stages",
+            server.headless_adapter,
+            "USD",
+            StageListResponse,
+            scheduled("list_usd_stages", _list),
+            params={},
         )
 
     @server.mcp.tool(
@@ -1134,7 +1270,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             StageSaveResponse,
-            _save,
+            scheduled("save_usd_stage", _save, stage_id=stage_id),
             params={
                 "stage_id": stage_id,
                 "overwrite_external_changes": overwrite_external_changes,
@@ -1204,7 +1340,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             StageExportResponse,
-            _export,
+            scheduled("export_usd_stage", _export, stage_id=stage_id),
             params={
                 "stage_id": stage_id,
                 "file_path": file_path,
@@ -1259,7 +1395,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             StageReloadResponse,
-            _reload,
+            scheduled("reload_usd_stage", _reload, writes=True),
             params={"stage_id": stage_id, "discard_unsaved": discard_unsaved},
         )
 
@@ -1313,6 +1449,6 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             server.headless_adapter,
             "USD",
             StageUnloadResponse,
-            _unload,
+            scheduled("unload_usd_stage", _unload, stage_id=stage_id),
             params={"stage_id": stage_id, "discard_unsaved": discard_unsaved},
         )

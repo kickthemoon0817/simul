@@ -925,15 +925,64 @@ def fake_mathutils() -> ModuleType:
 
 
 class FakeCollection:
-    """``bpy.types.Collection`` stand-in: its name and Disable in Viewports (hide_viewport)."""
+    """``bpy.types.Collection`` stand-in: its name, Disable in Viewports (hide_viewport)
+    and child collections. A scene's own collection is one named "Scene Collection".
+    """
 
-    def __init__(self, name: str, hide_viewport: bool = False) -> None:
+    def __init__(
+        self,
+        name: str,
+        hide_viewport: bool = False,
+        children: Sequence["FakeCollection"] = (),
+    ) -> None:
         self.name = name
         self.hide_viewport = hide_viewport
+        self.children = list(children)
 
     def link(self, obj: Any) -> None:
         """Put an object in this collection, as ``collection.objects.link`` does."""
         obj.users_collection.append(self)
+
+    @property
+    def children_recursive(self) -> List["FakeCollection"]:
+        """Every collection below this one, as ``Collection.children_recursive`` lists them."""
+        below: List["FakeCollection"] = []
+        for child in self.children:
+            below += [child, *child.children_recursive]
+        return below
+
+    def as_pointer(self) -> int:
+        return id(self)
+
+
+# Object.type's identifiers on Blender 5.0.1, in Blender's order.
+BLENDER_5_OBJECT_TYPES = (
+    "MESH",
+    "CURVE",
+    "SURFACE",
+    "META",
+    "FONT",
+    "CURVES",
+    "POINTCLOUD",
+    "VOLUME",
+    "GREASEPENCIL",
+    "ARMATURE",
+    "LATTICE",
+    "EMPTY",
+    "LIGHT",
+    "LIGHT_PROBE",
+    "CAMERA",
+    "SPEAKER",
+)
+
+
+def fake_bpy_types() -> SimpleNamespace:
+    """``bpy.types`` stand-in whose ``Object.bl_rna`` lists Blender 5.0.1's object types."""
+    enum_items = [SimpleNamespace(identifier=name) for name in BLENDER_5_OBJECT_TYPES]
+    bl_rna = SimpleNamespace(
+        properties={"type": SimpleNamespace(enum_items=enum_items)}
+    )
+    return SimpleNamespace(Object=SimpleNamespace(bl_rna=bl_rna))
 
 
 class FakeLayerCollection:

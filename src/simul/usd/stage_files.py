@@ -4,12 +4,17 @@ Each loaded stage gets its own instance of its root layer. Sdf keeps one
 layer object per identifier for the whole process, so two stages opened
 from the same file (or a stage and another stage that references that file)
 would otherwise share the layer, and an unsaved edit made through one would
-show up in the other. :func:`open_private_stage` opens the root layer with a
+show up in the other. :func:`open_private_root` opens the root layer with a
 file format argument unique to the load, which Sdf keys as a separate layer
 while it still reads from and saves to the real file. Edits only ever go to
 that private root layer (the stage's edit target), so the shared layers a
 stage composes (sublayers, references, payloads) are never dirtied and can
 be reloaded from disk when the files change.
+
+A changed file's new content is read into a throwaway layer
+(:func:`open_candidate`) and checked against the composition sandbox before
+the shared layer is reloaded in place, since a reload recomposes every
+stage that uses the layer.
 """
 
 from __future__ import annotations
@@ -27,35 +32,73 @@ from ._pxr import Sdf, Usd
 
 # The file format argument that makes a load's root layer its own instance.
 STAGE_ARG = "simul_stage"
+# The one that keys a throwaway copy of a file read to check its new content.
+CHECK_ARG = "simul_check"
 EXPORT_FORMATS = (".usda", ".usdc", ".usd", ".usdz")
 # A scheme such as omniverse:// or https:// ; a Windows drive letter is not one.
 _URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:")
 
 
-def open_private_stage(file_path: str) -> Tuple[Usd.Stage, str]:
-    """Open ``file_path`` as a stage whose root layer no other stage shares.
+def open_private_root(identifier: str) -> Sdf.Layer:
+    """Open ``identifier`` (a resolved path or a URL) as a root layer no other stage shares.
 
-    Args:
-        file_path: Resolved path of a USD file.
-
-    Returns:
-        The stage and the token that keys its root layer.
+    Nothing is composed yet, so the layer can be held to the composition
+    sandbox before any layer it names is read.
 
     Raises:
-        RuntimeError: pxr could not open the file.
+        Tf.ErrorException: pxr could not parse the file.
+        RuntimeError: pxr could not open it and gave no reason.
     """
-    token = secrets.token_hex(8)
-    root = Sdf.Layer.FindOrOpen(file_path, args={STAGE_ARG: token})
+    root = Sdf.Layer.FindOrOpen(identifier, args={STAGE_ARG: secrets.token_hex(8)})
     if root is None:
-        raise RuntimeError(f"pxr could not open {file_path}")
+        raise RuntimeError(f"pxr could not open {identifier}")
+    return root
+
+
+def compose_stage(root: Sdf.Layer) -> Usd.Stage:
+    """Compose a stage on ``root``, with ``root`` as its edit target.
+
+    Raises:
+        RuntimeError: pxr could not compose a stage.
+    """
     stage = Usd.Stage.Open(root)
     if stage is None:
-        raise RuntimeError(f"pxr could not compose a stage from {file_path}")
+        raise RuntimeError(f"pxr could not compose a stage from {root.realPath or root.identifier}")
     stage.SetEditTarget(Usd.EditTarget(root))
-    return stage, token
+    return stage
 
 
-def _mtime(path: str) -> Optional[int]:
+def open_private_stage(file_path: str) -> Tuple[Usd.Stage, str]:
+    """Open ``file_path`` as a stage whose root layer no other stage shares (no sandbox check).
+
+    Returns:
+        The stage and its root layer's identifier.
+    """
+    stage = compose_stage(open_private_root(file_path))
+    return stage, stage.GetRootLayer().identifier
+
+
+def open_candidate(layer: Sdf.Layer) -> Sdf.Layer:
+    """Read ``layer``'s file again into a separate, throwaway layer.
+
+    The layer in use keeps its content; the candidate holds what the file
+    says now, so it can be checked before ``layer`` is reloaded in place.
+
+    Raises:
+        Tf.ErrorException: pxr could not parse the file's new content.
+        RuntimeError: pxr could not open it and gave no reason.
+    """
+    path, args = Sdf.Layer.SplitIdentifier(layer.identifier)
+    arguments = {key: value for key, value in dict(args).items() if key != STAGE_ARG}
+    arguments[CHECK_ARG] = secrets.token_hex(8)
+    candidate = Sdf.Layer.FindOrOpen(path, args=arguments)
+    if candidate is None:
+        raise RuntimeError(f"pxr could not open {path}")
+    return candidate
+
+
+def mtime(path: str) -> Optional[int]:
+    """A file's modification time in nanoseconds, or None when it cannot be read."""
     try:
         return os.stat(path).st_mtime_ns
     except OSError:
@@ -71,35 +114,12 @@ def file_layers(stage: Usd.Stage) -> List[Sdf.Layer]:
 
 def file_mtimes(stage: Usd.Stage) -> Dict[str, Optional[int]]:
     """Modification time of each file the stage composes, by real path."""
-    return {layer.realPath: _mtime(layer.realPath) for layer in file_layers(stage)}
+    return {layer.realPath: mtime(layer.realPath) for layer in file_layers(stage)}
 
 
 def changed_files(stage: Usd.Stage, recorded: Dict[str, Optional[int]]) -> List[str]:
     """The files whose modification time differs from ``recorded``."""
-    return [path for path, mtime in recorded.items() if _mtime(path) != mtime]
-
-
-def refresh_shared_layers(stage: Usd.Stage) -> List[str]:
-    """Reload the stage's non-root layers whose files changed on disk.
-
-    Sdf hands every stage the same layer object for a sublayer or a
-    referenced file and never rereads it on its own, so an edit made to the
-    file outside this process stays invisible. ``Reload()`` without
-    ``force`` rereads a layer only when its file's timestamp changed; dirty
-    layers are skipped, since reloading would discard their edits (the
-    session never edits them, so none should be dirty).
-
-    Returns:
-        The real paths of the layers that were reloaded.
-    """
-    root = stage.GetRootLayer()
-    reloaded = []
-    for layer in file_layers(stage):
-        if layer == root or layer.dirty:
-            continue
-        if layer.Reload():
-            reloaded.append(layer.realPath)
-    return reloaded
+    return [path for path, when in recorded.items() if mtime(path) != when]
 
 
 def _reanchor(layer: Sdf.Layer, source: Sdf.Layer, destination_dir: Optional[str]) -> int:
@@ -180,12 +200,16 @@ def export_stage(stage: Usd.Stage, destination: str, *, flatten: bool) -> Dict[s
 
 
 __all__ = [
+    "CHECK_ARG",
     "EXPORT_FORMATS",
     "STAGE_ARG",
     "changed_files",
+    "compose_stage",
     "export_stage",
     "file_layers",
     "file_mtimes",
+    "mtime",
+    "open_candidate",
+    "open_private_root",
     "open_private_stage",
-    "refresh_shared_layers",
 ]

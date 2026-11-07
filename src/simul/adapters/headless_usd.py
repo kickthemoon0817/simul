@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import os
 import secrets
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple, Union
 
-from ..usd._pxr import Gf, Usd, UsdGeom, UsdShade
+from ..usd._pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
 from ..logging import get_logger, LoggerMixin
 from ..utils.timing import monitor_performance
@@ -25,9 +26,36 @@ from ..usd import editing, stage_files
 from ..usd.editing import USDEditError
 from ..usd.reader import USDStageInfo, USDPrimInfo
 from ..usd.summarize import SceneSummary
-from ..usd.validation import USDLoadError, check_usd_file, open_root_layer
+from ..usd.sandbox import CompositionSandbox
+from ..usd.validation import (
+    USDLoadError,
+    check_usd_file,
+    check_usd_url,
+    open_root_layer,
+    url_scheme,
+)
+from ..utils.paths import SandboxDenied
 
 logger = get_logger(__name__)
+
+_UNSET = object()
+
+
+def _checked(check: Callable[[], Any]) -> Any:
+    """Run a composition sandbox check, naming files without the session's layer arguments.
+
+    A private root layer's identifier carries a ``simul_stage`` file format
+    argument and a throwaway copy a ``simul_check`` one; a denial reports the
+    plain file path the caller knows.
+    """
+    try:
+        return check()
+    except SandboxDenied as exc:
+        for entry in exc.details.get("outside_sandbox", []):
+            if isinstance(entry, dict) and entry.get("layer"):
+                entry["layer"] = Sdf.Layer.SplitIdentifier(entry["layer"])[0]
+        raise
+
 
 # A session that keeps loading without unloading is refused past this many stages.
 MAX_STAGES_PER_OWNER = 32
@@ -60,12 +88,21 @@ class HeadlessUSDSession(LoggerMixin):
     using only the pxr library.
 
     Stage model: every load opens the file into its own stage with a root
-    layer no other stage shares (``stage_files.open_private_stage``), and
+    layer no other stage shares (``stage_files.open_private_root``), and
     edits go only to that root layer, so unsaved edits never leak into
     another stage. A stage belongs to the MCP session that loaded it and is
     invisible to every other session. Loading a file the session already
     holds a clean, current stage for returns that stage; otherwise (unsaved
     edits, or the file changed on disk) a fresh stage is opened from disk.
+
+    A changed sublayer or referenced file is reloaded in place, which every
+    stage composing it sees; its new content is first held to the
+    composition sandbox (``set_sandbox_factory``), and a file that now
+    reaches outside it is not reloaded.
+
+    Calls may run on worker threads (the MCP server's USD scheduler); the
+    stage registry is guarded by a lock, and the calling MCP session is
+    named per thread with ``acting_for``.
     """
 
     def __init__(self, settings: Optional[Settings] = None):
@@ -83,8 +120,17 @@ class HeadlessUSDSession(LoggerMixin):
         self._active_stages: Dict[str, Usd.Stage] = {}
         self._bbox_caches: Dict[str, BBoxCache] = {}
         self._stage_records: Dict[str, _StageRecord] = {}
-        # Names the MCP session a call belongs to; the registration installs
-        # the server's resolver. Outside MCP every caller is the same owner.
+        self._registry = threading.RLock()
+        # Modification time of each shared (non-root) layer's file when the
+        # session last read or checked it, to tell which ones changed since.
+        self._shared_mtimes: Dict[str, Optional[int]] = {}
+        # Builds a fresh CompositionSandbox for the reload checks; None (the
+        # CLI, direct use) checks nothing beyond what a load is given.
+        self._sandbox_factory: Optional[Callable[[], CompositionSandbox]] = None
+        # Names the MCP session a call belongs to: acting_for sets it for the
+        # calling thread; the resolver is the fallback. Outside MCP every
+        # caller is the same owner.
+        self._acting = threading.local()
         self._owner_resolver: Callable[[], Optional[str]] = lambda: None
 
         self.logger.info("Headless USD session initialized")
@@ -93,12 +139,49 @@ class HeadlessUSDSession(LoggerMixin):
         """
         Install the function that names the MCP session of the current call.
 
+        Used when no ``acting_for`` block names it for the calling thread.
+
         Args:
             resolver: Returns the calling session's id, or None
         """
         self._owner_resolver = resolver
 
+    def set_sandbox_factory(self, factory: Optional[Callable[[], CompositionSandbox]]) -> None:
+        """
+        Install what builds a fresh composition sandbox for reload checks.
+
+        Args:
+            factory: Returns a new CompositionSandbox for the server's path
+                policy; None turns the checks off
+        """
+        self._sandbox_factory = factory
+
+    @contextmanager
+    def acting_for(self, owner: Optional[str]) -> Iterator[None]:
+        """
+        Run the calls in this block, on this thread, as MCP session ``owner``.
+
+        The server reads the session from the request on its event loop and
+        runs the pxr work on a worker thread, where the request is not
+        visible; this carries it across.
+
+        Args:
+            owner: The calling MCP session's id, or None
+        """
+        previous = getattr(self._acting, "owner", _UNSET)
+        self._acting.owner = owner
+        try:
+            yield
+        finally:
+            if previous is _UNSET:
+                del self._acting.owner
+            else:
+                self._acting.owner = previous
+
     def _owner(self) -> Optional[str]:
+        owner = getattr(self._acting, "owner", _UNSET)
+        if owner is not _UNSET:
+            return owner
         try:
             return self._owner_resolver()
         except Exception:
@@ -106,7 +189,8 @@ class HeadlessUSDSession(LoggerMixin):
 
     def _owned_ids(self) -> List[str]:
         owner = self._owner()
-        return [stage_id for stage_id, record in self._stage_records.items() if record.owner == owner]
+        with self._registry:
+            return [stage_id for stage_id, record in self._stage_records.items() if record.owner == owner]
 
     def load_stage(self, file_path: Union[str, Path]) -> Optional[str]:
         """
@@ -140,17 +224,23 @@ class HeadlessUSDSession(LoggerMixin):
             return None
 
     @monitor_performance("headless_session.load_stage")
-    def load_stage_or_raise(self, file_path: Union[str, Path]) -> str:
+    def load_stage_or_raise(
+        self, file_path: Union[str, Path], sandbox: Optional[CompositionSandbox] = None
+    ) -> str:
         """
         Load a USD stage from file, saying why when it cannot.
 
         Returns the caller's existing stage for the file when it has no
-        unsaved edits and no file it composes changed on disk; otherwise
-        opens a new stage from disk (``stage_files.open_private_stage``),
-        rereading any changed sublayer or referenced file first.
+        unsaved edits and no file it composes changed on disk. Otherwise it
+        opens the file into a private root layer, holds that layer and
+        everything it names to ``sandbox`` before composing, composes the
+        stage, rereads any shared layer whose file changed (once its new
+        content passed the sandbox too), and checks the composed stage.
 
         Args:
             file_path: Path to USD file
+            sandbox: Holds every layer and asset the stage draws on to the
+                file sandbox; None (the CLI) checks nothing beyond the file.
 
         Returns:
             Stage identifier
@@ -161,23 +251,34 @@ class HeadlessUSDSession(LoggerMixin):
                 ``usd.allowed_extensions``, unreadable, empty, over
                 ``usd.max_file_size_mb``) or pxr could not parse it; the
                 error carries pxr's own reason.
+            SandboxDenied: The file's composition reaches outside the
+                sandbox, or a changed shared file now does (that file is not
+                reloaded; stages using it keep its old content).
             USDEditError: The caller already holds ``MAX_STAGES_PER_OWNER``
                 stages.
         """
-        file_path = str(Path(file_path).resolve())
-        facts = check_usd_file(file_path, self.settings.usd)
+        remote = url_scheme(str(file_path)) is not None
+        head = b""
+        if remote:
+            # Only with an asset resolver registered for the scheme.
+            file_path = str(file_path)
+            check_usd_url(file_path)
+        else:
+            file_path = str(Path(file_path).resolve())
+            head = check_usd_file(file_path, self.settings.usd).head
 
         owner = self._owner()
-        for stage_id in self._owned_ids():
-            record = self._stage_records[stage_id]
-            stage = self._active_stages[stage_id]
-            if (
-                record.file_path == file_path
-                and not stage.GetRootLayer().dirty
-                and not stage_files.changed_files(stage, record.mtimes)
-            ):
-                self.logger.info(f"Reusing clean USD stage {stage_id} for {file_path}")
-                return stage_id
+        with self._registry:
+            for stage_id, record in self._stage_records.items():
+                stage = self._active_stages[stage_id]
+                if (
+                    record.owner == owner
+                    and record.file_path == file_path
+                    and not stage.GetRootLayer().dirty
+                    and not stage_files.changed_files(stage, record.mtimes)
+                ):
+                    self.logger.info(f"Reusing clean USD stage {stage_id} for {file_path}")
+                    return stage_id
         owned = self._owned_ids()
         if len(owned) >= MAX_STAGES_PER_OWNER:
             raise USDEditError(
@@ -189,34 +290,130 @@ class HeadlessUSDSession(LoggerMixin):
             )
 
         try:
-            stage, _ = stage_files.open_private_stage(file_path)
+            root = stage_files.open_private_root(file_path)
         except Exception as exc:
             # The file is parsed once, into the private root layer. Only when
             # that fails is it opened again the way validation opens it, so
             # the error names pxr's reason (ParseError with line and column,
             # CorruptFile, ...) as validate_usd_file reports it.
-            open_root_layer(file_path, facts.head)
+            open_root_layer(file_path, head)
+            raise USDLoadError(
+                file_path, "OpenFailed", f"pxr could not open it: {editing.tf_error_reason(exc)}"
+            ) from exc
+        # Held while the stage is composed, so composition finds these layers
+        # in pxr's registry instead of parsing the files again.
+        walked = _checked(lambda: sandbox.check_layers(root)) if sandbox is not None else []
+        try:
+            stage = stage_files.compose_stage(root)
+        except Exception as exc:
             raise USDLoadError(
                 file_path,
                 "OpenFailed",
-                f"pxr could not compose a stage from it: {editing.tf_error_reason(exc)}",
+                f"pxr parsed the {root.GetFileFormat().formatId} layer but could not compose a "
+                f"stage from it: {editing.tf_error_reason(exc)}",
             ) from exc
-        reloaded = stage_files.refresh_shared_layers(stage)
+        reloaded = self._refresh_shared(stage)
         if reloaded:
             self.logger.info(f"Reread changed files for {file_path}: {reloaded}")
+        if sandbox is not None:
+            # Judged afresh; a stage that fails is never registered.
+            _checked(lambda: sandbox.check_stage(stage))
+        del walked
 
         stage_id = self._generate_stage_id(file_path)
-        self._active_stages[stage_id] = stage
-        self._bbox_caches[stage_id] = BBoxCache(stage)
-        self._stage_records[stage_id] = _StageRecord(
-            file_path=file_path, owner=owner, mtimes=stage_files.file_mtimes(stage)
-        )
+        with self._registry:
+            self._active_stages[stage_id] = stage
+            self._bbox_caches[stage_id] = BBoxCache(stage)
+            self._stage_records[stage_id] = _StageRecord(
+                file_path=file_path, owner=owner, mtimes=stage_files.file_mtimes(stage)
+            )
         self.logger.info(f"Loaded USD stage: {file_path} -> {stage_id}")
         return stage_id
 
+    def _refresh_shared(self, stage: Usd.Stage) -> List[str]:
+        """
+        Reload the shared layers of ``stage`` whose files changed since the session read them.
+
+        Sdf hands every stage the same layer object for a sublayer or a
+        referenced file and never rereads it on its own, so an edit made to
+        the file outside this process would stay invisible. A reload
+        recomposes every stage using the layer, other sessions' included, so
+        each changed file's new content is first read into a throwaway layer
+        and held to the composition sandbox; only when every one passes are
+        the layers reloaded. Afterwards each other stage using a reloaded
+        layer is checked again, and one that now reaches outside the sandbox
+        (a file swapped between the check and the reload) is dropped.
+
+        Returns:
+            The real paths of the layers reloaded.
+
+        Raises:
+            SandboxDenied: A changed file now reaches outside the sandbox;
+                nothing was reloaded.
+        """
+        root = stage.GetRootLayer()
+        changed: List[Any] = []
+        with self._registry:
+            for layer in stage_files.file_layers(stage):
+                if layer == root or layer.dirty:
+                    continue
+                path = layer.realPath
+                current = stage_files.mtime(path)
+                if path not in self._shared_mtimes:
+                    # First seen: this load just read it.
+                    self._shared_mtimes[path] = current
+                elif self._shared_mtimes[path] != current:
+                    changed.append(layer)
+        if not changed:
+            return []
+        factory = self._sandbox_factory
+        refreshable = []
+        for layer in changed:
+            try:
+                candidate = stage_files.open_candidate(layer)
+            except Exception as exc:
+                # Unreadable now: keep the content in use; status still shows
+                # the file as changed on disk.
+                self.logger.warning(f"Not rereading {layer.realPath}, which pxr cannot parse now: {exc}")
+                continue
+            if factory is not None:
+                _checked(lambda: factory().check_layers(candidate))
+            refreshable.append(layer)
+        reloaded = []
+        for layer in refreshable:
+            if layer.Reload():
+                reloaded.append(layer.realPath)
+            with self._registry:
+                self._shared_mtimes[layer.realPath] = stage_files.mtime(layer.realPath)
+        if reloaded and factory is not None:
+            self._recheck_stages_using(reloaded, factory, skip=stage)
+        return reloaded
+
+    def _recheck_stages_using(
+        self, paths: List[str], factory: Callable[[], CompositionSandbox], skip: Optional[Usd.Stage] = None
+    ) -> None:
+        """Drop each loaded stage using one of ``paths`` that now reaches outside the sandbox."""
+        reloaded = set(paths)
+        with self._registry:
+            candidates = [
+                (stage_id, self._active_stages[stage_id])
+                for stage_id, record in self._stage_records.items()
+                if reloaded & set(record.mtimes) and self._active_stages[stage_id] is not skip
+            ]
+        for stage_id, stage in candidates:
+            try:
+                factory().check_stage(stage)
+            except SandboxDenied as exc:
+                self._drop(stage_id)
+                self.logger.warning(
+                    f"Dropped USD stage {stage_id}: after its files were reread it draws on files "
+                    f"outside the sandbox ({exc})"
+                )
+
     def _owned_stage(self, stage_id: str) -> Tuple[Usd.Stage, _StageRecord]:
         stage = self.require_stage(stage_id)
-        return stage, self._stage_records[stage_id]
+        with self._registry:
+            return stage, self._stage_records[stage_id]
 
     def unload_stage(self, stage_id: str, discard_unsaved: bool = False) -> bool:
         """
@@ -250,9 +447,15 @@ class HeadlessUSDSession(LoggerMixin):
         return True
 
     def _drop(self, stage_id: str) -> None:
-        self._active_stages.pop(stage_id, None)
-        self._bbox_caches.pop(stage_id, None)
-        self._stage_records.pop(stage_id, None)
+        with self._registry:
+            self._active_stages.pop(stage_id, None)
+            self._bbox_caches.pop(stage_id, None)
+            self._stage_records.pop(stage_id, None)
+            # Forget the shared files no remaining stage composes, so a later
+            # load that reads one fresh does not take it for changed.
+            in_use = {path for record in self._stage_records.values() for path in record.mtimes}
+            for path in [path for path in self._shared_mtimes if path not in in_use]:
+                del self._shared_mtimes[path]
 
     def release_owner(self, owner: Optional[str]) -> List[str]:
         """
@@ -269,14 +472,15 @@ class HeadlessUSDSession(LoggerMixin):
         Returns:
             The ids of the stages released
         """
-        released = [stage_id for stage_id, record in self._stage_records.items() if record.owner == owner]
-        dirty = [
-            f"{stage_id} ({self._stage_records[stage_id].file_path})"
-            for stage_id in released
-            if self._active_stages[stage_id].GetRootLayer().dirty
-        ]
-        for stage_id in released:
-            self._drop(stage_id)
+        with self._registry:
+            released = [stage_id for stage_id, record in self._stage_records.items() if record.owner == owner]
+            dirty = [
+                f"{stage_id} ({self._stage_records[stage_id].file_path})"
+                for stage_id in released
+                if self._active_stages[stage_id].GetRootLayer().dirty
+            ]
+            for stage_id in released:
+                self._drop(stage_id)
         if dirty:
             self.logger.warning(
                 f"MCP session {owner} ended with unsaved edits in {len(dirty)} USD stage(s), which "
@@ -296,10 +500,11 @@ class HeadlessUSDSession(LoggerMixin):
         Returns:
             USD Stage, or None if not found or loaded by another MCP session
         """
-        stage = self._active_stages.get(stage_id)
+        with self._registry:
+            stage = self._active_stages.get(stage_id)
+            record = self._stage_records.get(stage_id)
         if stage is None:
             return None
-        record = self._stage_records.get(stage_id)
         if record is not None and record.owner != self._owner():
             return None
         return stage
@@ -508,9 +713,19 @@ class HeadlessUSDSession(LoggerMixin):
             ``stage_id``, ``file_path``, ``discarded_unsaved`` and
             ``reloaded_files``
 
+        A changed root file is read into a throwaway layer and held to the
+        composition sandbox before the stage's root is reloaded, and changed
+        shared files are checked the same way before they are reloaded in
+        place (see ``_refresh_shared``). A file that now reaches outside the
+        sandbox is not reloaded, so the stage keeps its content. After the
+        reload the stage is checked again as a whole; if it reaches outside
+        the sandbox anyway (a file swapped between the check and the reload),
+        it is unloaded.
+
         Raises:
             USDEditError: The stage has unsaved edits and ``discard_unsaved``
                 is False, or the reload failed.
+            SandboxDenied: A changed file now reaches outside the sandbox.
         """
         stage, record = self._owned_stage(stage_id)
         root = stage.GetRootLayer()
@@ -524,9 +739,22 @@ class HeadlessUSDSession(LoggerMixin):
                 override="discard_unsaved",
             )
         changed = stage_files.changed_files(stage, record.mtimes)
+        factory = self._sandbox_factory
+        if factory is not None and record.file_path in changed:
+            try:
+                candidate = stage_files.open_candidate(root)
+            except Exception as exc:
+                raise USDEditError(
+                    SAVE_FAILED,
+                    f"Reloading {record.file_path} failed: {editing.tf_error_reason(exc)}",
+                    file_path=record.file_path,
+                ) from exc
+            _checked(lambda: factory().check_layers(candidate))
         try:
             root.Reload(True)
-            reloaded = stage_files.refresh_shared_layers(stage)
+            reloaded = self._refresh_shared(stage)
+        except SandboxDenied:
+            raise
         except Exception as exc:
             raise USDEditError(
                 SAVE_FAILED,
@@ -534,7 +762,17 @@ class HeadlessUSDSession(LoggerMixin):
                 file_path=record.file_path,
             ) from exc
         self._invalidate_bbox_cache(stage_id)
-        record.mtimes = stage_files.file_mtimes(stage)
+        if factory is not None:
+            try:
+                _checked(lambda: factory().check_stage(stage))
+            except SandboxDenied:
+                self._drop(stage_id)
+                self.logger.warning(
+                    f"Unloaded USD stage {stage_id}: after the reload it draws on files outside the sandbox"
+                )
+                raise
+        with self._registry:
+            record.mtimes = stage_files.file_mtimes(stage)
         reloaded_files = sorted(set(changed) | set(reloaded) | {record.file_path})
         self.logger.info(f"Reloaded USD stage {stage_id} (discarded unsaved edits: {dirty})")
         return {
@@ -905,9 +1143,11 @@ class HeadlessUSDSession(LoggerMixin):
     def cleanup(self) -> None:
         """Clean up all resources."""
         try:
-            self._active_stages.clear()
-            self._bbox_caches.clear()
-            self._stage_records.clear()
+            with self._registry:
+                self._active_stages.clear()
+                self._bbox_caches.clear()
+                self._stage_records.clear()
+                self._shared_mtimes.clear()
             self.usd_reader.clear_cache()
             self.logger.info("Headless USD session cleaned up")
         except Exception as e:
@@ -959,6 +1199,10 @@ class HeadlessUSDAdapter(LoggerMixin):
     def release_session(self, session_id: str) -> None:
         """Unload the stages of an MCP session that has ended."""
         self._session.release_owner(session_id)
+
+    def set_sandbox_factory(self, factory: Optional[Callable[[], CompositionSandbox]]) -> None:
+        """Hold the files a reload rereads to the composition sandbox ``factory`` builds."""
+        self._session.set_sandbox_factory(factory)
 
     def is_available(self) -> bool:
         """

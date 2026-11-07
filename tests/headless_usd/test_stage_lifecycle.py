@@ -22,7 +22,9 @@ from pxr import Sdf, Usd, UsdGeom  # noqa: E402
 from simul.adapters import headless_usd  # noqa: E402
 from simul.adapters.headless_usd import HeadlessUSDSession  # noqa: E402
 from simul.usd import stage_files  # noqa: E402
+from simul.usd.sandbox import CompositionSandbox  # noqa: E402
 from simul.usd.editing import USDEditError  # noqa: E402
+from simul.utils.paths import PathPolicy, SandboxDenied  # noqa: E402
 
 
 def _write_robot(path: Path) -> None:
@@ -361,3 +363,113 @@ class TestDiscard:
         assert session.unload_stage(stage_id, discard_unsaved=True) is True
         assert session.get_stage(stage_id) is None
         assert not session.get_stage(session.load_stage(files["robot"])).GetPrimAtPath("/Robot/Extra")
+
+
+_ASSET = '#usda 1.0\n(\n    defaultPrim = "A"\n)\ndef Xform "A"\n{\n}\n'
+_ASSET_REACHING_OUT = (
+    '#usda 1.0\n(\n    defaultPrim = "A"\n)\ndef Xform "A"\n{\n    def "Extra" (\n'
+    "        references = @../outside/secret.usda@\n    )\n    {\n    }\n}\n"
+)
+_SCENE = (
+    '#usda 1.0\ndef Xform "World"\n{\n    def "Asset" (\n'
+    "        references = @./asset.usda@\n    )\n    {\n    }\n}\n"
+)
+_ASSET_WITH_A_CHILD = _ASSET.replace('def Xform "A"\n{\n}', 'def Xform "A"\n{\n    def "Added"\n    {\n    }\n}')
+
+
+class TestRereadsStayInTheSandbox:
+    """A changed shared file is held to the composition sandbox before it is reread in place.
+
+    A reload recomposes every stage using the layer, other sessions' too, so
+    without the check a file rewritten to reference ``../outside`` would put
+    outside content into a stage that passed the sandbox when it loaded.
+    """
+
+    @pytest.fixture
+    def tree(self, tmp_path: Path) -> Dict[str, Path]:
+        inside, outside = tmp_path / "inside", tmp_path / "outside"
+        inside.mkdir()
+        outside.mkdir()
+        (outside / "secret.usda").write_text(
+            '#usda 1.0\n(\n    defaultPrim = "S"\n)\ndef "S"\n{\n    custom string marker = "OUTSIDE"\n}\n'
+        )
+        (inside / "asset.usda").write_text(_ASSET)
+        for name in ("scene", "other"):
+            (inside / f"{name}.usda").write_text(_SCENE)
+        return {"inside": inside, "outside": outside}
+
+    @pytest.fixture
+    def guarded(self, session: HeadlessUSDSession, tree: Dict[str, Path]) -> HeadlessUSDSession:
+        policy = PathPolicy(enabled=True, allowed_paths=[str(tree["inside"])])
+        session.set_sandbox_factory(lambda: CompositionSandbox(policy))
+        return session
+
+    @staticmethod
+    def _rewrite(path: Path, text: str) -> None:
+        path.write_text(text)
+        _touch_later(path)
+
+    @staticmethod
+    def _load(session: HeadlessUSDSession, path: Path) -> str:
+        """Load as the server does: the load's own sandbox from the same policy."""
+        return session.load_stage_or_raise(path, sandbox=session._sandbox_factory())
+
+    def test_a_load_does_not_reread_a_shared_file_that_now_reaches_outside(self, guarded, tree) -> None:
+        scene = self._load(guarded, tree["inside"] / "scene.usda")
+        self._rewrite(tree["inside"] / "asset.usda", _ASSET_REACHING_OUT)
+
+        with pytest.raises(SandboxDenied) as caught:
+            self._load(guarded, tree["inside"] / "other.usda")
+
+        assert caught.value.details["outside_sandbox"][0]["layer"] == str((tree["inside"] / "asset.usda").resolve())
+        stage = guarded.get_stage(scene)
+        assert not stage.GetPrimAtPath("/World/Asset/Extra")
+        assert guarded.list_stages() == [scene]
+
+    def test_reload_refuses_a_changed_file_that_reaches_outside(self, guarded, tree) -> None:
+        scene = self._load(guarded, tree["inside"] / "scene.usda")
+        self._rewrite(tree["inside"] / "asset.usda", _ASSET_REACHING_OUT)
+
+        with pytest.raises(SandboxDenied):
+            guarded.reload_stage(scene)
+        assert not guarded.get_stage(scene).GetPrimAtPath("/World/Asset/Extra")
+
+        self._rewrite(tree["inside"] / "asset.usda", _ASSET)
+        self._rewrite(
+            tree["inside"] / "scene.usda", _SCENE.replace("./asset.usda", "../outside/secret.usda")
+        )
+
+        with pytest.raises(SandboxDenied):
+            guarded.reload_stage(scene)
+        stage = guarded.get_stage(scene)
+        assert stage is not None and stage.GetPrimAtPath("/World/Asset")
+        assert not stage.GetPrimAtPath("/World/Asset").GetAttribute("marker")
+
+    def test_an_allowed_change_is_reread_by_every_stage_using_it(self, guarded, tree) -> None:
+        scene = self._load(guarded, tree["inside"] / "scene.usda")
+        self._rewrite(tree["inside"] / "asset.usda", _ASSET_WITH_A_CHILD)
+
+        other = self._load(guarded, tree["inside"] / "other.usda")
+
+        assert guarded.get_stage(other).GetPrimAtPath("/World/Asset/Added")
+        assert guarded.get_stage(scene).GetPrimAtPath("/World/Asset/Added")
+
+    def test_a_stage_that_reaches_outside_after_a_reread_is_dropped(self, guarded, tree, monkeypatch) -> None:
+        """The backstop: a file swapped between the check and the reload."""
+        scene = self._load(guarded, tree["inside"] / "scene.usda")
+        self._rewrite(tree["inside"] / "asset.usda", _ASSET_REACHING_OUT)
+        real = CompositionSandbox.check_layers
+        swapped = {"done": False}
+
+        def check_old_content_once(sandbox: CompositionSandbox, layer: Any) -> Any:
+            if not swapped["done"]:
+                swapped["done"] = True
+                return []  # as if the file still had its old content when it was checked
+            return real(sandbox, layer)
+
+        monkeypatch.setattr(CompositionSandbox, "check_layers", check_old_content_once)
+
+        with pytest.raises(SandboxDenied):
+            guarded.reload_stage(scene)
+
+        assert guarded.get_stage(scene) is None

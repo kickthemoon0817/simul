@@ -46,6 +46,7 @@ class USDIssue(BaseModel):
 class USDFileInfo(BaseModel):
     """USD file information."""
 
+    success: bool = Field(True, description="Whether the file was checked (see is_valid)")
     file_path: str = Field(..., description="Path to USD file")
     file_size: int = Field(..., description="File size in bytes")
     format: str = Field(..., description="File extension (usd, usda, usdc, usdz)")
@@ -89,6 +90,7 @@ class USDValidateRequest(BaseModel):
 class StageInfo(BaseModel):
     """USD stage information."""
 
+    success: bool = Field(True, description="Whether the stage loaded")
     stage_id: str = Field(..., description="Unique stage identifier")
     file_path: str = Field(..., description="Path to USD file")
     up_axis: str = Field(..., description="Stage up axis (Y or Z)")
@@ -119,6 +121,7 @@ class PrimInfo(BaseModel):
     ``"Infinity"``, ``"-Infinity"`` or ``"NaN"``.
     """
 
+    success: bool = Field(True, description="Whether the prim was read")
     path: str = Field(..., description="Prim path")
     name: str = Field(..., description="Prim name")
     type: str = Field(..., description="Prim type")
@@ -210,6 +213,7 @@ class MeshInfoRequest(BaseModel):
 
     stage_id: str = Field(..., description="Stage identifier", min_length=1)
     prim_path: str = Field(..., description="Mesh prim path", min_length=1)
+    time_code: Optional[float] = Field(None, description="Time code to read points at")
 
 
 class PrimCreateRequest(BaseModel):
@@ -255,22 +259,65 @@ class PrimDeleteRequest(BaseModel):
 class MeshInfo(BaseModel):
     """USD mesh information."""
 
+    success: bool = Field(True, description="Whether the mesh was read")
     prim_path: str = Field(..., description="Mesh prim path")
     vertex_count: int = Field(..., description="Number of vertices")
     face_count: int = Field(..., description="Number of faces")
     point_count: int = Field(..., description="Number of face vertex indices")
-    has_normals: bool = Field(..., description="Whether mesh has normals")
+    has_normals: bool = Field(
+        ..., description="Whether mesh has normals (primvars:normals or normals)"
+    )
+    normals_source: Optional[str] = Field(
+        None, description="primvars:normals or normals (the former wins), None without normals"
+    )
     has_uvs: bool = Field(..., description="Whether mesh has UV coordinates")
+    uv_sets: List[str] = Field(default_factory=list, description="Texture-coordinate primvar names")
     has_colors: bool = Field(..., description="Whether mesh has vertex colors")
     has_tangents: bool = Field(..., description="Whether mesh has tangents")
     subdivision_scheme: str = Field(..., description="Subdivision scheme")
-    topology_valid: bool = Field(..., description="Whether topology is valid")
-    is_closed: bool = Field(..., description="Whether mesh is watertight")
-    surface_area: float = Field(..., description="Surface area")
-    volume: float = Field(..., description="Volume (if closed)")
-    bbox: BoundingBox = Field(..., description="Mesh bounding box")
-    materials: List[str] = Field(..., description="Material paths")
-    subsets: List[Dict[str, Any]] = Field(..., description="Geometry subsets")
+    topology_valid: Optional[bool] = Field(
+        ..., description="Whether topology is valid; None when the mesh was not measured"
+    )
+    is_closed: Optional[bool] = Field(
+        ..., description="Whether mesh is watertight; None when the mesh was not measured"
+    )
+    surface_area: Optional[float] = Field(
+        ..., description="Surface area in the mesh's own space (before transforms); None for invalid topology"
+    )
+    volume: Optional[float] = Field(
+        ..., description="Enclosed volume in the mesh's own space; None unless the mesh is closed"
+    )
+    bbox: Optional[BoundingBox] = Field(
+        ..., description="Bounds of the points in the mesh's own space; None without points"
+    )
+    materials: List[str] = Field(
+        ..., description="Bound materials: the mesh's, then its material subsets'"
+    )
+    physics_material: Optional[str] = Field(
+        None, description="Material bound for physics, when it has PhysicsMaterialAPI"
+    )
+    subsets: List[Dict[str, Any]] = Field(
+        ...,
+        description=(
+            "Geometry subsets: name, path, element_type, family_name, index_count, "
+            "the first indices, and material for materialBind subsets"
+        ),
+    )
+    points_time_samples: int = Field(0, description="Time samples on points (deforming mesh)")
+    measured: bool = Field(
+        True,
+        description=(
+            "False when points or topology exist only as time samples and none "
+            "applies at time_code; pass a time_code in sampled_time_range"
+        ),
+    )
+    sampled_time_range: Optional[List[float]] = Field(
+        None, description="[first, last] sample time of an unmeasured mesh's topology"
+    )
+    note: Optional[str] = Field(None, description="Why the mesh was not measured")
+    time_code: Optional[float] = Field(
+        None, description="Time code read; None for the default time"
+    )
 
 
 class FocusPrimResponse(BaseModel):

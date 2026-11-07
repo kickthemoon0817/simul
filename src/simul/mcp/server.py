@@ -342,6 +342,9 @@ class SimulMCPServer(LoggerMixin):
         # Token buckets keyed by (agent, tool); the per-agent ceiling across
         # every tool uses _GLOBAL_RATE_BUCKET as the tool key.
         self._rate_limiters: Dict[Tuple[str, str], RateLimiter] = {}
+        # Tools that skip the per-tool bucket and spend only the agent's
+        # ceiling; see exempt_from_per_tool_rate_limit.
+        self._per_tool_rate_exempt: Set[str] = set()
         self._rate_limit_enabled = self.settings.security.rate_limiting_enabled
         self._rate_limit_rate = self.settings.security.requests_per_minute / 60.0
         self._rate_limit_burst = self.settings.security.burst_size
@@ -525,6 +528,20 @@ class SimulMCPServer(LoggerMixin):
                 self._watch_session_end(session_id)
         return limiter
 
+    def exempt_from_per_tool_rate_limit(self, tool_names: Iterable[str]) -> None:
+        """Count ``tool_names`` only against each agent's ceiling across all tools.
+
+        For cheap local queries an agent issues once per item while it works
+        through a scene (the headless USD per-prim queries): a per-tool
+        bucket of ``security.requests_per_minute`` with ``burst_size`` refused
+        most of a prim-by-prim inspection, while the per-agent ceiling
+        (``security.global_requests_per_minute``) still stops a runaway loop.
+
+        Args:
+            tool_names: Registered tool names.
+        """
+        self._per_tool_rate_exempt.update(tool_names)
+
     def _sweep_idle_rate_limiters(self) -> None:
         """Drop the buckets that have refilled to their burst size.
 
@@ -653,12 +670,17 @@ class SimulMCPServer(LoggerMixin):
         if not self._rate_limit_enabled:
             return None
         agent = agent_id or self._resolve_agent_id(None)
-        tool_bucket = self._get_rate_limiter(tool_name, agent)
+        tool_bucket = (
+            None
+            if tool_name in self._per_tool_rate_exempt
+            else self._get_rate_limiter(tool_name, agent)
+        )
         agent_bucket = self._get_rate_limiter(_GLOBAL_RATE_BUCKET, agent)
-        tool_wait = tool_bucket.seconds_until_available()
+        tool_wait = tool_bucket.seconds_until_available() if tool_bucket is not None else 0.0
         agent_wait = agent_bucket.seconds_until_available()
         if tool_wait <= 0.0 and agent_wait <= 0.0:
-            tool_bucket.acquire()
+            if tool_bucket is not None:
+                tool_bucket.acquire()
             agent_bucket.acquire()
             return None
 
@@ -1387,7 +1409,7 @@ class SimulMCPServer(LoggerMixin):
             The error envelope.
         """
         if isinstance(exc, SandboxDenied):
-            return sandbox_error(exc.details)
+            return sandbox_error(exc.details, error=exc.error_message)
         error_type = exception_type_name(exc)
         message = exception_message(exc)
         self.logger.error("Tool %s failed: %s: %s", tool_name, error_type, message)
@@ -1844,7 +1866,11 @@ class SimulMCPServer(LoggerMixin):
         @register_resource(
             "simul://isaac-sim/api/core",
             name="Isaac Sim Core API",
-            description="SimulationContext, PhysicsContext, Articulation, RigidPrim, XFormPrim reference.",
+            description=(
+                "Isaac Sim 5.1 SimulationContext, PhysicsContext, Articulation, RigidPrim, "
+                "XFormPrim reference (deprecated on 6.0), with the isaacsim.core.experimental "
+                "equivalents to use on 6.0."
+            ),
         )
         def api_core() -> str:
             return _read_packaged_doc("docs", "api", "core.md")
