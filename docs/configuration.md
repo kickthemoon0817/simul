@@ -158,18 +158,23 @@ augmentation and condition nodes run their `*Script` inputs. Both
 `omni.graph.scriptnode` and `omni.warp` are enabled in Isaac Sim's own
 `.kit`. With the switch off, these tools refuse with `ScriptExecutionDisabled`:
 
-- `create_isaac_graph_node` refuses those node types and any type with
-  `script` or `warp` in its name.
-- `set_isaac_graph_node_values` refuses code attributes (any name containing
-  `script` or `code`, without regard to case) and any write to a
-  script-capable node.
+- `create_isaac_graph_node` refuses those node types and any type whose
+  name has a word starting with `script`.
+- `set_isaac_graph_node_values` refuses code attributes (a name with a word
+  starting with `script` or `code`) and any write to a script-capable node.
 - `connect_isaac_graph_nodes` refuses a connection into a code attribute or
   into a script-capable node.
 - `import_isaac_asset` and `add_isaac_reference` refuse an asset whose
   composed content holds such a node.
 - `enable_isaac_extension` refuses `omni.graph.scriptnode`,
-  `omni.kit.scripting`, `omni.warp` and any extension with `script` or
-  `warp` in its name.
+  `omni.kit.scripting`, `omni.warp` and any extension whose name has a word
+  starting with `script`.
+
+Names are split into words at `.`, `:`, `_`, `-` and camelCase boundaries,
+so `inputs:codeStr` and `inputs:augmentationScript` count as code
+attributes while `inputs:usdTimecode` does not, and
+`omni.isaac.robot_description_editor` is not a script extension. The other
+`omni.warp` nodes, which run fixed kernels, stay usable.
 
 Routes this does not close: the prim-editing tools (`set_isaac_prim_attribute`
 on a node's code attribute or `node:type`, `create_isaac_prim` and
