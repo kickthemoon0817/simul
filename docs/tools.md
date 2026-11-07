@@ -1615,18 +1615,42 @@ Behaviour worth knowing:
     (`UsdPhysics.MaterialAPI` on a `UsdShade.Material` under
     `<asset root>/PhysicsMaterials`) bound to those colliders with the
     `physics` purpose;
-  - the semantic fields: `UsdSemantics.LabelsAPI` labels in the taxonomies
-    `class`, `hierarchy`, `qcode` and each additional label's key. A Blender
+  - the semantic fields: `UsdSemantics.LabelsAPI` labels in SimReady's
+    taxonomies `class`, `hierarchy` and `wikidata_qcode`, and each additional
+    label's key (files from an earlier Simul carry the Q-code under `qcode`, so
+    a reader should accept both). A Blender
     whose bundled USD has no UsdSemantics module gets Isaac Sim's
     older `SemanticsAPI:Semantics_<taxonomy>` attributes instead;
-    `semantics.labels_schema` in the result says which.
+    `semantics.labels_schema` in the result says which;
+  - each rigid body constraint between two exported objects
+    (`add_blender_rigid_body_constraint`): a UsdPhysics joint under
+    `<asset root>/Joints`. FIXED becomes a `FixedJoint`, POINT a
+    `SphericalJoint`, HINGE a `RevoluteJoint` about the constraint's local Z,
+    SLIDER a `PrismaticJoint` along its local X, and PISTON, GENERIC and
+    GENERIC_SPRING a D6 `PhysicsJoint` with a `LimitAPI` per locked or limited
+    axis (an axis Blender leaves unlimited stays free). `body0` is object1's
+    rigid body (its own, the nearest exported one above it, or the object as a
+    static body) and `body1` object2's; `localPos`/`localRot` place the
+    constraint empty's frame in each body, `collisionEnabled` is the opposite
+    of `disable_collisions` and `jointEnabled` follows `enabled`. Limits are
+    written as UsdPhysics reads them, body1 relative to body0, in degrees:
+    Blender measures a HINGE's and a GENERIC's angular limits the other way
+    round (object1 relative to object2, measured on 5.0.1), so their range is
+    negated; linear limits and a PISTON's angle keep their sign. The
+    constraint empty itself is not written as a prim, so it neither adds a
+    stray Xform nor forces a wrapper root. A MOTOR has no UsdPhysics joint
+    (Blender's motor is a free joint whose drive is capped by an impulse per
+    step), and springs and breaking thresholds have no exact equivalent: each
+    is reported in `issues` and `warnings`, and `physics.joints` lists the
+    joints written.
 
   `collider_type` and the friction values also apply to the meshes of
   descendants that set none of their own, so metadata on an asset root makes
   all its meshes collide; rigid body and mass stay on the object that sets
   them. The result's `warnings` name a rigid body without a collider, nested
-  rigid bodies, a triangle-mesh collider on a dynamic body, and stored values
-  that are not valid numbers, which are left out. The asset root is the default
+  rigid bodies with no joint between them, a triangle-mesh collider on a
+  dynamic body, and stored values that are not valid numbers, which are left
+  out. The asset root is the default
   prim (kind `component`): the one top-level object, or an Xform named after
   the file when several objects share the top level. Blender's `/root`
   container goes, and the render materials move to `<asset root>/Looks`.
@@ -1648,16 +1672,100 @@ Behaviour worth knowing:
   unsaved mesh edits are written) and enters them again, and restores the
   selection; a SimReady asset is static, so animation is left out. Blender
   writes next to the destination and the authored layer replaces the file only
-  at the end; a `.usdz` is packaged from a `.usdc` with its textures. With `embed_metadata` (the default) the
+  at the end; a `.usdz` is packaged from a `.usdc` with its textures. With
+  `embed_metadata` (the default) the
   `simready_` properties stay as `userProperties` attributes too, and Blender's
   USD import reads them back as custom properties. The importer names an object
   merged with its single mesh after the mesh, and imports the `Looks` and
   `PhysicsMaterials` scopes as empties.
-- `validate_simready_compliance` judges sizes in real-world metres: a mesh's
-  world-space size times the scene's Unit Scale (`meters_per_unit` in the
-  result). Above 100 m or below 1 mm is an error, as the scene's units are then
-  not the ones the part was modelled in (a 0.5 m part modelled in millimetres
-  measures 500 m in a metre scene); above 20 m is a warning.
+- `apply_simready_metadata` advertises the real fields of `metadata`
+  (`semantic`, `physics`, `material`) in its input schema, `collider_type` as
+  an enum. An unknown group or field is refused with the closest valid name
+  (`physics.mass`: did you mean `mass_kg`?), and so is an invalid value; the
+  call then writes nothing. A field left out or null keeps its stored value,
+  `is_rigid_body: false` clears an earlier true, and `clear` removes stored
+  values first: a field, a group, `additional_labels` or `all`. Label keys
+  become semantics taxonomies, so they must be identifiers, and
+  `semantic_qcode` must look like `Q1420`. An additional label named after a
+  field's taxonomy (`class`, `hierarchy`, `wikidata_qcode`, or the older
+  `qcode`) sets that field, and one that disagrees with the field given in the
+  same call is refused, as it would overwrite the field's label in the USD.
+  `get_simready_metadata` returns the stored values that meet those rules as
+  `metadata`. The ones that do not (set by a script, an import or an older
+  Simul) are listed in `invalid_values` with the problem, so one bad value does
+  not fail the call.
+- `apply_simready_metadata` and `setup_simready_hierarchy` need Object Mode:
+  in Edit Mode Blender records their undo step on the mesh undo stack, which
+  holds no object changes, so the first Ctrl+Z did nothing and the second also
+  left Edit Mode. They also refuse objects linked from a library, whose changes
+  are lost when the file is reopened. Their refusals, and those of the other
+  SimReady tools, are `ValidationError`s whose `details.code` names the reason
+  (`InvalidMetadata`, `ObjectModeRequired`, `LinkedData`, `RootExists`,
+  `RootNotInvertible`, `EmptyObjectList` and so on); an unknown object is a
+  `NotFoundError` with `details.code` `object_not_found`, as in every Blender
+  tool, and a list naming several unknown objects lists them all in
+  `details.objects`.
+- `setup_simready_hierarchy` keeps every object where it is: it parents the
+  listed objects that have no listed ancestor to the root, and a listed object
+  under another listed object keeps its parent, which may be an unlisted
+  object between them (`reparented` and `kept_parent` in the result). It keeps
+  the object's matrix before constraints, and it computes it from the former
+  parent's world matrix and the parent inverse matrix: an object Blender does
+  not evaluate (in an excluded collection, or a collection or object disabled
+  in viewports) has a stale `matrix_world`, which moved such objects to the
+  origin. The transform moves into the object's own location, rotation and
+  scale; where the former parent's non-uniform scale skews it, which those
+  cannot express, the skew stays in its parent inverse matrix and `warnings`
+  says so. An object that object constraints act on keeps its location,
+  rotation and scale, and its former parent space goes into the parent inverse
+  matrix instead: Blender's local space for a constraint is relative to parent
+  world × parent inverse, so a local-space Limit Location (which moved such a
+  part 1.5 m) sees the same values and gives the same pose. A post-check still
+  warns if an evaluated pose moved. A bone or vertex parent becomes an object
+  parent in place (one with constraints is refused). It checks every name, the
+  root and the semantic labels before changing anything, and a failure
+  part-way puts the parents back and removes the root it created. An existing
+  object with the root's name is refused unless `reuse_root: true`, which
+  needs an empty that can be inverted (not zero-scale), so a retry never makes
+  `robot.001`. Root names are USD identifiers; camelCase is fine.
+  `hierarchy_path` and `prim_paths` are the prim paths `export_simready_usd`
+  writes; when two objects become the same prim name (`arm.L` and `arm_L`),
+  `warnings` says so and the export renames one.
+- `validate_simready_compliance` checks what `export_simready_usd` would
+  export: the listed objects with their descendants (`include_children`), or
+  with `object_names` null the scene's objects visible in renders, without
+  lights and cameras; `skipped_objects` names the rest. It reports
+  `compliant: false` for any issue of severity `error`; warnings never change
+  it. The rules follow NVIDIA's SimReady Robotics-Prop profile
+  (simready-foundation `fd677ad`) and Isaac Sim 5.1's asset validation; codes
+  in brackets:
+
+  | Check | Error | Warning |
+  |---|---|---|
+  | naming | | an object, material, light or camera name that is not a USD identifier (camelCase is fine); a mesh data name likewise; two siblings that become one prim name |
+  | scale | | a largest real-world size (world-space size × Unit Scale) above 100 m or below 1 mm; a Unit Scale other than 1 [UN.007] |
+  | transforms | the asset root, the prim that becomes the default prim, not the identity [VG.025]; a rigid body whose world transform is skewed, as a rotated part under a non-uniformly scaled group is [RB.009] | a scaled or mirrored part; a part skewed relative to its parent |
+  | materials | no material | an empty slot that faces use |
+  | hierarchy | | a mesh without a parent, or a root that is not an empty |
+  | metadata | no semantic label of any taxonomy on the mesh or an exported object above it [SL.001]; a stored value that breaks the rules | no collider_type on the mesh or an exported object above it |
+  | physics | a rigid body without mass or density [RB.007], without a collider, or nested in another rigid body with no joint the export writes between them [RB.012]; a rigid body constraint between exported objects that the export would drop: a MOTOR, or two objects that are parts of one rigid body | a triangle-mesh collider on a dynamic body; no rigid body at all [RB.001]; a constraint to an object the export leaves out, or between two static objects; springs, a breaking threshold, or several rotation axes limited to ranges (Blender reads them as Euler angles, PhysX as twist and swing) |
+  | geometry | degenerate (zero-area) faces [VG.014] | no UV map; n-gons |
+
+  Labels, colliders and physics count only from exported objects: an
+  unexported ancestor is written as a bare Xform without them. The default
+  prim is the top-most ancestor of the exported objects when they share one
+  (Blender writes unexported ancestors too), so a lone off-origin mesh is a root
+  error, and top-level objects that the export wraps in a new root are parts.
+  Transforms are read from the world matrices the exporter writes, so scale in
+  a parent inverse matrix counts; part rotation is not checked. Meshes are read
+  with modifiers applied and with Edit Mode's edits written back
+  (`update_from_editmode`). `severity` returns only errors or warnings, and
+  `offset` / `limit` (50 by default, at most 500) page through the issues:
+  `next_offset` is the next page's offset, null on the last. A page also stops
+  before 30 KB of issues so that it fits the result budget; `issue_count`,
+  `error_count` and `warning_count` count them all. `export_simready_usd` runs
+  every check on the objects it exports; `skip_checks` leaves checks out, so
+  that one that does not apply needs no `force`, which lets every error through.
 - Rigid bodies simulate only inside the rigid-body world's cache range
   (`rigid_body_cache` in the replies of `get_blender_rigid_body_world`,
   `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`
