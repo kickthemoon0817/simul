@@ -209,6 +209,12 @@ class Actor:
     def get_components_by_class(self, cls: Any) -> List[Component]:
         return [self.root_component]
 
+    def get_attach_parent_actor(self) -> Optional["Actor"]:
+        return None
+
+    def get_attached_actors(self) -> List["Actor"]:
+        return []
+
 
 class Editor:
     """The level, the loadable objects and the EditorActorSubsystem."""
@@ -790,6 +796,9 @@ async def test_semantic_label_lookup_returns_list_actor_entries(editor: Editor) 
             "rotation": [0.0, 90.0, 0.0],
             "scale": [1.0, 1.0, 1.0],
             "tags": ["Chair"],
+            "parent": None,
+            "children": [],
+            "child_count": 0,
         }
     ]
 
@@ -805,10 +814,19 @@ async def test_semantic_label_lookup_counts_matches_past_max_results(
             "get_unreal_actor_by_semantic_label",
             {"label": "chair", "match_mode": "contains", "max_results": 1},
         )
+        rest = await call_tool(
+            rc.settings,
+            "get_unreal_actor_by_semantic_label",
+            {"label": "chair", "match_mode": "contains", "max_results": 1, "offset": 1},
+        )
 
     assert [entry["path"] for entry in payload["actors"]] == [actors["chair"].path]
     assert payload["total_matches"] == 2
     assert payload["truncated"] is True
+    assert (payload["count"], payload["next_offset"]) == (1, 1)
+    assert "offset=1" in payload["hint"]
+    assert len(rest["actors"]) == 1 and rest["actors"][0]["path"] != actors["chair"].path
+    assert (rest["offset"], rest["next_offset"], rest["truncated"], rest["hint"]) == (1, None, False, None)
 
 
 @pytest.mark.asyncio
@@ -826,6 +844,7 @@ async def test_semantic_label_lookup_counts_matches_past_max_results(
             "alternatives inside a repeated group",
         ),
         ({"max_results": 0}, "max_results must be between 1 and 5000"),
+        ({"offset": -1}, "offset must be 0 or more"),
     ],
 )
 async def test_semantic_label_lookup_refuses_bad_input_before_any_request(
