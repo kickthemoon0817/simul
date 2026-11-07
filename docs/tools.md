@@ -751,7 +751,7 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 | Group | Tools |
 |---|---|
 | Scene and files | `get_blender_info`, `get_blender_file_info`, `summarize_blender_scene`, `list_blender_scene_objects`, `search_blender_objects`, `open_blender_file`, `save_blender_file`, `import_blender_file`, `export_blender_file` |
-| Objects | `create_blender_object`, `delete_blender_object`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `clean_blender_mesh`, `get_blender_mesh_info`, `add_blender_modifier`, `apply_blender_modifier`, `remove_blender_modifier` |
+| Objects | `create_blender_object`, `delete_blender_object`, `set_blender_object_mode`, `get_blender_object_info`, `set_blender_object_transform`, `set_blender_object_parent`, `clear_blender_object_parent`, `create_blender_mesh_from_data`, `clean_blender_mesh`, `get_blender_mesh_info`, `add_blender_modifier`, `apply_blender_modifier`, `remove_blender_modifier` |
 | Measurement | `get_blender_bounding_box`, `check_blender_object_bounds`, `get_blender_distance_between` |
 | Materials and lights | `get_blender_material_info`, `assign_blender_material`, `set_blender_light_params` |
 | Physics | `setup_blender_rigid_body`, `add_blender_rigid_body_constraint`, `get_blender_constraint_info`, `add_blender_force_field`, `get_blender_force_field_info`, `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`, `get_blender_rigid_body_world`, `set_blender_rigid_body_world` |
@@ -800,12 +800,51 @@ Behaviour worth knowing:
   child's values become relative to the parent and it moves. A parent that is
   the child itself or one of its descendants is refused (Blender ignores such
   a parent without an error).
+- `create_blender_object` puts the object in the active collection, as
+  Blender's Add menu does. When that collection, or one holding it, is
+  excluded from the view layer, hidden or disabled in viewports, the object
+  goes in the scene's own collection instead, and `warning` says so; the
+  user's active collection stays as it was. The new object is the one the add
+  operator created (an object hidden in the 3D View is not its
+  `context.active_object`), and a failed call removes it again. It stays in
+  Object Mode whatever Blender's "Enter Edit Mode" preference says, and
+  outside Object Mode it is refused before anything is added (embedded mode
+  too, where an add operator would otherwise add to the edited mesh).
+  `set_blender_object_mode` switches an object (the active one by default)
+  into a mode, `OBJECT` by default: the way back for a window left in Edit or
+  Pose Mode, where creating, deleting, importing and the other mode-sensitive
+  tools refuse to run.
+- `delete_blender_object` runs Blender's own Delete on the object alone, the
+  selection untouched: the object leaves the current scene, and stays in the
+  file while another scene links it (`remaining_scenes`, `removed_from_file`).
+  `use_global: true` deletes it from every scene (Delete Globally). The
+  operator also resets a deleted rigid body's cache: removing the object
+  directly left the cache, so after a frame jump another body took the
+  deleted one's cached positions.
+- `list_blender_scene_objects` and `search_blender_objects` return a page:
+  `count` objects from `offset`, `total` matching, and `next_offset` for the
+  next page (`null` after the last; `truncated` says whether more follow). A
+  page stops before its entries pass 30 000 bytes of JSON, so it can hold
+  fewer than `max_items`/`max_results`: the server's 40 KB result budget used
+  to cut a longer list below the count it reported. Each entry's
+  `collection` names a collection holding the object, the scene's own being
+  "Scene Collection". `object_type` matches in any case and must be one of
+  the running Blender's object types.
+- `check_blender_object_bounds` tests the object's world-space bounding box,
+  turned and scaled with the object, against the axis-aligned bounds:
+  `relation` is `inside` (`within_bounds`), `intersecting` (touching counts)
+  or `outside`, and `origin_within_bounds` tests the origin alone, which is
+  all the tool used to test. `bounds_min` must not exceed `bounds_max`.
+- `summarize_blender_scene`'s `collection_names` are the scene's top-level
+  collections. `get_blender_file_info`'s `object_count` counts the current
+  scene's objects, and `file_object_count` the file's.
 - Reads of world-space transforms (object info, distance, bounds, bounding
   box, parenting) evaluate the depsgraph first: in embedded (bpy module) mode
   Blender leaves a transform written by an earlier call out of `matrix_world`
-  until then. An add-on built before `rotation_quaternion` and
-  `keep_transform` still answers calls that leave them at their defaults, with
-  its own behaviour; the newer reply fields then come back `null`.
+  until then. An add-on built before `rotation_quaternion`, `keep_transform`,
+  `offset` and `use_global` still answers calls that leave them at their
+  defaults, with its own behaviour; the newer reply fields then come back
+  `null`.
 - `create_blender_mesh_from_data` checks everything before it creates
   anything: each vertex is exactly `[x, y, z]` finite numbers, each index is
   an integer within the vertex list, no face repeats a vertex or the vertex
