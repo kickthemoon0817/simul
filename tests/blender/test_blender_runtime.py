@@ -12,6 +12,7 @@ import pytest
 
 from simul.adapters import blender_runtime
 from simul.config import SecurityConfig, Settings
+from tests.blender.mesh_fakes import FakeRNAProp, FakeRNAProperties
 from tests.fakes import (
     FakeAction,
     FakeActionSlot,
@@ -930,15 +931,19 @@ class TestObservationTools:
     # -- get_mesh_info ----------------------------------------------------
 
     def test_get_mesh_info_basic(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Counts-only mesh info returned for a MESH object."""
+        """Mesh info counts a MESH object's base mesh and what its modifiers make of it."""
         mesh_data = SimpleNamespace(
             vertices=[None] * 8,
             edges=[None] * 12,
             polygons=[None] * 6,
+            loops=[None] * 24,
             uv_layers=[SimpleNamespace(name="UVMap")],
             shape_keys=None,
         )
         obj = FakeObject(name="Cube", object_type="MESH", visible=True, data=mesh_data)
+        obj.evaluated_get = lambda depsgraph: SimpleNamespace(  # type: ignore[attr-defined]
+            is_evaluated=True, to_mesh=lambda: mesh_data, to_mesh_clear=lambda: None
+        )
         fake_bpy = self._make_fake_bpy_with_objects([obj])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
@@ -949,6 +954,8 @@ class TestObservationTools:
         assert result["vertex_count"] == 8
         assert result["edge_count"] == 12
         assert result["face_count"] == 6
+        assert result["triangle_count"] == 12
+        assert result["evaluated_face_count"] == 6
         assert result["uv_layer_names"] == ["UVMap"]
         assert result["has_shape_keys"] is False
 
@@ -6344,13 +6351,21 @@ class FakeMaterial:
 
 
 class FakeModifier:
-    """Minimal Blender modifier mock."""
+    """Minimal Blender modifier mock with the RNA of its two level settings."""
 
     def __init__(self, name: str, mod_type: str) -> None:
         self.name = name
         self.type = mod_type
         self.levels = 1
         self.render_levels = 2
+        self.bl_rna = SimpleNamespace(
+            properties=FakeRNAProperties(
+                [
+                    FakeRNAProp("levels", "INT", hard=(0, 11)),
+                    FakeRNAProp("render_levels", "INT", hard=(0, 11)),
+                ]
+            )
+        )
 
 
 class TestSceneManipulationTools:
@@ -7805,6 +7820,9 @@ class TestCreateMeshFromData:
             def update(self) -> None:
                 pass
 
+            def validate(self, verbose: bool = False) -> bool:
+                return False
+
         def _new_mesh(name: str) -> FakeMeshData:
             mesh = FakeMeshData(name)
             created_meshes.append(mesh)
@@ -7823,21 +7841,24 @@ class TestCreateMeshFromData:
             created_objects.append(obj)
             return obj
 
+        cols = collections or {}
+
         scene_col = SimpleNamespace(
             objects=SimpleNamespace(
                 link=lambda obj: linked_objects.append(obj),
             ),
+            # The given collections belong to the scene.
+            children_recursive=list(cols.values()),
         )
-
-        cols = collections or {}
 
         fake_bpy = SimpleNamespace(
             app=SimpleNamespace(version=(4, 0, 0)),
             data=SimpleNamespace(
-                meshes=SimpleNamespace(new=_new_mesh),
+                meshes=SimpleNamespace(new=_new_mesh, remove=created_meshes.remove),
                 objects=SimpleNamespace(
                     new=_new_object,
                     get=lambda name: None,
+                    remove=lambda obj, do_unlink=True: created_objects.remove(obj),
                 ),
                 collections=SimpleNamespace(
                     get=lambda name: cols.get(name),

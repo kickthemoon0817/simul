@@ -58,6 +58,7 @@ from ..schemas.blender import (
     BlenderAddForceFieldResponse,
     BlenderAddModifierRequest,
     BlenderAddModifierResponse,
+    BlenderApplyModifierResponse,
     BlenderAssignMaterialRequest,
     BlenderAssignMaterialResponse,
     BlenderAttachWindowRequest,
@@ -75,6 +76,8 @@ from ..schemas.blender import (
     BlenderCaptureSequenceResponse,
     BlenderCaptureViewportRequest,
     BlenderCaptureViewportResponse,
+    BlenderCleanMeshRequest,
+    BlenderCleanMeshResponse,
     BlenderClearParentRequest,
     BlenderClearParentResponse,
     BlenderCreateMeshFromDataRequest,
@@ -116,12 +119,14 @@ from ..schemas.blender import (
     BlenderMaterialInfoResponse,
     BlenderMeshInfoRequest,
     BlenderMeshInfoResponse,
+    BlenderModifierTargetRequest,
     BlenderObjectInfoRequest,
     BlenderObjectInfoResponse,
     BlenderOpenFileRequest,
     BlenderOpenFileResponse,
     BlenderPlayAnimationRequest,
     BlenderPlayAnimationResponse,
+    BlenderRemoveModifierResponse,
     BlenderRigidBodyWorldResponse,
     BlenderSaveFileRequest,
     BlenderSaveFileResponse,
@@ -706,7 +711,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="get_blender_mesh_info",
-        description="Get mesh geometry counts for a Blender mesh object.",
+        description=(
+            "Get a Blender mesh object's vertex, edge, face and triangle counts: of the "
+            "stored mesh, and evaluated with the modifiers enabled in the viewport, which is "
+            "what an export writes. A mesh in Edit Mode is counted with its unsaved edits. "
+            "warnings name modifiers set differently for render, which USD export evaluates."
+        ),
         hints=READ_ONLY,
         operation="get_mesh_info",
         request=BlenderMeshInfoRequest,
@@ -939,12 +949,43 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     ),
     BlenderTool(
         name="add_blender_modifier",
-        description="Add a modifier to a Blender object.",
+        description=(
+            "Add a modifier to a Blender mesh, curve or other object with a modifier stack. "
+            "params are the modifier's settings by Blender RNA name, checked before use: an "
+            "unknown name is refused with the closest names, an enum value must be one of its "
+            "items, a number must lie within the setting's limits (Blender would clamp it "
+            "silently), and an object or collection setting takes its name, e.g. "
+            "{'object': 'Cutter'} for BOOLEAN. The reply echoes the stored settings. A refused "
+            "call leaves no modifier behind. DECIMATE is refused on a mesh with invalid geometry, "
+            "which can freeze Blender; run clean_blender_mesh first."
+        ),
         hints=ADDITIVE,
         operation="add_modifier",
         request=BlenderAddModifierRequest,
         response=BlenderAddModifierResponse,
         params={"params": Param(Dict[str, Any], {})},
+    ),
+    BlenderTool(
+        name="apply_blender_modifier",
+        description=(
+            "Apply one modifier of a Blender mesh object, baking its result into the mesh data "
+            "(for example a Decimate before export) and removing it from the stack. A modifier "
+            "below others is applied to the base mesh without them, with a warning; shared mesh "
+            "data is copied for this object first. A modifier disabled in the viewport is "
+            "refused, as Blender would drop it unapplied. Requires Object Mode."
+        ),
+        hints=DESTRUCTIVE,
+        operation="apply_modifier",
+        request=BlenderModifierTargetRequest,
+        response=BlenderApplyModifierResponse,
+    ),
+    BlenderTool(
+        name="remove_blender_modifier",
+        description="Remove one modifier from a Blender object's stack without applying it.",
+        hints=DESTRUCTIVE,
+        operation="remove_modifier",
+        request=BlenderModifierTargetRequest,
+        response=BlenderRemoveModifierResponse,
     ),
     BlenderTool(
         name="set_blender_light_params",
@@ -1228,7 +1269,12 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="create_blender_mesh_from_data",
         description=(
-            "Create a mesh object from raw vertex, edge, and face data. Use for procedural geometry."
+            "Create a mesh object from raw vertex, edge, and face data. Use for procedural "
+            "geometry. Each vertex is exactly [x, y, z] finite numbers; a face repeating a "
+            "vertex or another face's vertex set, an edge joining a vertex to itself or "
+            "repeating another, and a collection outside the current scene are refused before "
+            "anything is created. The mesh is validated, and a failed call leaves no mesh or "
+            "object behind."
         ),
         hints=ADDITIVE,
         operation="create_mesh_from_data",
@@ -1238,6 +1284,21 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "edges": Param(List[List[int]], []),
             "faces": Param(List[List[int]], []),
         },
+    ),
+    BlenderTool(
+        name="clean_blender_mesh",
+        description=(
+            "Repair a Blender mesh object's data. Always validates it, removing faces that "
+            "repeat a vertex and duplicate faces or edges (geometry that can freeze Decimate); "
+            "then optionally merges vertices within merge_distance, dissolves edges and faces "
+            "smaller than dissolve_degenerate_distance, and recalculates normals to point "
+            "outside. Reports the counts before and after. Shared mesh data changes for every "
+            "object using it. Requires Object Mode."
+        ),
+        hints=OVERWRITING,
+        operation="clean_mesh",
+        request=BlenderCleanMeshRequest,
+        response=BlenderCleanMeshResponse,
     ),
     # -- SimReady asset format -----------------------------------------------
     BlenderTool(

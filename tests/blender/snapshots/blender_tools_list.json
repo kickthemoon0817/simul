@@ -26,6 +26,8 @@
       "clear_blender_object_parent",
       "assign_blender_material",
       "add_blender_modifier",
+      "apply_blender_modifier",
+      "remove_blender_modifier",
       "set_blender_light_params",
       "open_blender_file",
       "save_blender_file",
@@ -52,6 +54,7 @@
       "set_blender_rigid_body_world",
       "execute_blender_script",
       "create_blender_mesh_from_data",
+      "clean_blender_mesh",
       "apply_simready_metadata",
       "get_simready_metadata",
       "validate_simready_compliance",
@@ -95,6 +98,8 @@
       "clear_blender_object_parent",
       "assign_blender_material",
       "add_blender_modifier",
+      "apply_blender_modifier",
+      "remove_blender_modifier",
       "set_blender_light_params",
       "open_blender_file",
       "save_blender_file",
@@ -121,6 +126,7 @@
       "set_blender_rigid_body_world",
       "execute_blender_script",
       "create_blender_mesh_from_data",
+      "clean_blender_mesh",
       "apply_simready_metadata",
       "get_simready_metadata",
       "validate_simready_compliance",
@@ -164,6 +170,8 @@
       "clear_blender_object_parent",
       "assign_blender_material",
       "add_blender_modifier",
+      "apply_blender_modifier",
+      "remove_blender_modifier",
       "set_blender_light_params",
       "open_blender_file",
       "save_blender_file",
@@ -189,6 +197,7 @@
       "get_blender_rigid_body_world",
       "set_blender_rigid_body_world",
       "create_blender_mesh_from_data",
+      "clean_blender_mesh",
       "apply_simready_metadata",
       "get_simready_metadata",
       "validate_simready_compliance",
@@ -319,7 +328,7 @@
     "get_blender_mesh_info": {
       "name": "get_blender_mesh_info",
       "title": "Get Blender Mesh Info",
-      "description": "Get mesh geometry counts for a Blender mesh object.",
+      "description": "Get a Blender mesh object's vertex, edge, face and triangle counts: of the stored mesh, and evaluated with the modifiers enabled in the viewport, which is what an export writes. A mesh in Edit Mode is counted with its unsaved edits. warnings name modifiers set differently for render, which USD export evaluates.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -752,7 +761,7 @@
     "add_blender_modifier": {
       "name": "add_blender_modifier",
       "title": "Add Blender Modifier",
-      "description": "Add a modifier to a Blender object.",
+      "description": "Add a modifier to a Blender mesh, curve or other object with a modifier stack. params are the modifier's settings by Blender RNA name, checked before use: an unknown name is refused with the closest names, an enum value must be one of its items, a number must lie within the setting's limits (Blender would clamp it silently), and an object or collection setting takes its name, e.g. {'object': 'Cutter'} for BOOLEAN. The reply echoes the stored settings. A refused call leaves no modifier behind. DECIMATE is refused on a mesh with invalid geometry, which can freeze Blender; run clean_blender_mesh first.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -767,13 +776,45 @@
           "params": {
             "additionalProperties": true,
             "default": {},
-            "description": "Modifier-specific parameters to set.",
+            "description": "Modifier settings by RNA name, e.g. {\"ratio\": 0.5} for DECIMATE or {\"object\": \"Cutter\"} for BOOLEAN.",
             "type": "object"
           }
         },
         "required": ["object_name", "modifier_type"]
       },
       "annotations": {"readOnlyHint": false},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "apply_blender_modifier": {
+      "name": "apply_blender_modifier",
+      "title": "Apply Blender Modifier",
+      "description": "Apply one modifier of a Blender mesh object, baking its result into the mesh data (for example a Decimate before export) and removing it from the stack. A modifier below others is applied to the base mesh without them, with a warning; shared mesh data is copied for this object first. A modifier disabled in the viewport is refused, as Blender would drop it unapplied. Requires Object Mode.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "object_name": {"description": "Mesh object holding the modifier.", "type": "string"},
+          "modifier_name": {"description": "Name of the modifier to apply.", "type": "string"}
+        },
+        "required": ["object_name", "modifier_name"]
+      },
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "remove_blender_modifier": {
+      "name": "remove_blender_modifier",
+      "title": "Remove Blender Modifier",
+      "description": "Remove one modifier from a Blender object's stack without applying it.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "object_name": {"description": "Object holding the modifier.", "type": "string"},
+          "modifier_name": {"description": "Name of the modifier to remove.", "type": "string"}
+        },
+        "required": ["object_name", "modifier_name"]
+      },
+      "annotations": {"readOnlyHint": false, "destructiveHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "set_blender_light_params": {
@@ -1373,26 +1414,26 @@
     "create_blender_mesh_from_data": {
       "name": "create_blender_mesh_from_data",
       "title": "Create Blender Mesh From Data",
-      "description": "Create a mesh object from raw vertex, edge, and face data. Use for procedural geometry.",
+      "description": "Create a mesh object from raw vertex, edge, and face data. Use for procedural geometry. Each vertex is exactly [x, y, z] finite numbers; a face repeating a vertex or another face's vertex set, an edge joining a vertex to itself or repeating another, and a collection outside the current scene are refused before anything is created. The mesh is validated, and a failed call leaves no mesh or object behind.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "name": {"description": "Desired object name.", "type": "string"},
           "vertices": {
-            "description": "List of [x, y, z] vertex positions.",
+            "description": "Vertex positions, each exactly [x, y, z] finite numbers.",
             "items": {"items": {"type": "number"}, "type": "array"},
             "type": "array"
           },
           "edges": {
             "default": [],
-            "description": "List of [v0, v1] edge index pairs.",
+            "description": "Loose edges as [v0, v1] pairs of two different vertices; face edges are made from the faces.",
             "items": {"items": {"type": "integer"}, "type": "array"},
             "type": "array"
           },
           "faces": {
             "default": [],
-            "description": "List of vertex-index lists per face.",
+            "description": "Faces as lists of three or more vertex indices, each vertex once and each vertex set once.",
             "items": {"items": {"type": "integer"}, "type": "array"},
             "type": "array"
           },
@@ -1404,12 +1445,42 @@
           "collection_name": {
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": null,
-            "description": "Target collection (scene collection if None)."
+            "description": "Target collection in the current scene (the scene collection if None)."
           }
         },
         "required": ["name", "vertices"]
       },
       "annotations": {"readOnlyHint": false},
+      "_meta": {"fastmcp": {"tags": []}}
+    },
+    "clean_blender_mesh": {
+      "name": "clean_blender_mesh",
+      "title": "Clean Blender Mesh",
+      "description": "Repair a Blender mesh object's data. Always validates it, removing faces that repeat a vertex and duplicate faces or edges (geometry that can freeze Decimate); then optionally merges vertices within merge_distance, dissolves edges and faces smaller than dissolve_degenerate_distance, and recalculates normals to point outside. Reports the counts before and after. Shared mesh data changes for every object using it. Requires Object Mode.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "object_name": {"description": "Mesh object whose data to clean.", "type": "string"},
+          "merge_distance": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Merge vertices within this distance; None skips it."
+          },
+          "dissolve_degenerate_distance": {
+            "anyOf": [{"type": "number"}, {"type": "null"}],
+            "default": null,
+            "description": "Dissolve edges and faces smaller than this; None skips it."
+          },
+          "recalculate_normals": {
+            "default": false,
+            "description": "Make face normals point consistently outside.",
+            "type": "boolean"
+          }
+        },
+        "required": ["object_name"]
+      },
+      "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true},
       "_meta": {"fastmcp": {"tags": []}}
     },
     "apply_simready_metadata": {

@@ -1,6 +1,8 @@
 # SECURITY: The bridge extension socket accepts TCP connections WITHOUT
-# authentication. Isolation here comes from the *publish* address, not the
-# bind address:
+# authentication unless it is given a token (khemoo.simul require_auth /
+# auth_token, or a 6.x python_server with require_auth, whose token it then
+# accepts; see docs/isaac-sim.md "Security model"). Isolation here comes from
+# the *publish* address, not the bind address:
 #
 #   - Inside the container the bridge binds 0.0.0.0. Docker forwards a
 #     published port to the container's network interface, never to its
@@ -64,12 +66,15 @@ services:
       # whenever the host dir is overridden, and the socket would silently
       # never appear.
       #
-      # The socket is chmod 0666, so any local user on the host can reach it,
-      # same as the 127.0.0.1 TCP publishes below: the bridge itself is
-      # unauthenticated either way, and the boundary is the mode of the
+      # The bridge creates its socket 0600 by default, which the host user
+      # cannot connect to while the bridge runs as container root, so this
+      # file opts into 0666: any local user on the host can then reach it,
+      # same as the 127.0.0.1 TCP publishes below. Without a token the bridge
+      # is unauthenticated either way, and the boundary is the mode of the
       # directory the volume points at. The TCP publishes stay for the VS Code
       # fallback; remove them only if that trade is understood.
       - --/exts/khemoo.simul/socket_path=/tmp/simul/bridge.sock
+      - --/exts/khemoo.simul/socket_mode=0666
       - --/exts/${ISAAC_PYTHON_SERVER_EXT:-isaacsim.code_editor.vscode}/host=${ISAAC_BIND_HOST:-0.0.0.0}
       - --/exts/${ISAAC_PYTHON_SERVER_EXT:-isaacsim.code_editor.vscode}/port=${ISAAC_VSCODE_PORT:-8226}
     environment:
