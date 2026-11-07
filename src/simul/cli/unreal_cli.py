@@ -32,6 +32,8 @@ from simul.adapters.unreal_setup import (
     resolve_launch_argv,
 )
 from simul.cli.output import (
+    PORT_NUMBER,
+    TIMEOUT_SECONDS,
     console,
     emit,
     emit_error,
@@ -151,10 +153,11 @@ def _vector_option(value: Optional[str], option: str, axes: str) -> Optional[Lis
     return vector
 
 
-# Common options
+# Common options. A bad port or timeout exits 2 while the command line is
+# parsed (PORT_NUMBER, TIMEOUT_SECONDS).
 _host_opt = typer.Option(None, "--host", "-H", help="Remote Control API host")
-_port_opt = typer.Option(None, "--port", "-p", help="Remote Control API port")
-_timeout_opt = typer.Option(None, "--timeout", "-t", help="HTTP timeout in seconds")
+_port_opt = typer.Option(None, "--port", "-p", click_type=PORT_NUMBER, help="Remote Control API port")
+_timeout_opt = typer.Option(None, "--timeout", "-t", click_type=TIMEOUT_SECONDS, help="HTTP timeout in seconds")
 
 
 async def _attached_call(method: str, **kwargs: Any) -> Dict[str, Any]:
@@ -175,7 +178,7 @@ async def _attached_call(method: str, **kwargs: Any) -> Dict[str, Any]:
 def instances(
     host: Optional[str] = _host_opt,
     port: Optional[int] = typer.Option(
-        None, "--port", "-p", help="Probe only this Remote Control port"
+        None, "--port", "-p", click_type=PORT_NUMBER, help="Probe only this Remote Control port"
     ),
     scan: bool = typer.Option(
         True,
@@ -929,7 +932,7 @@ def _fail_launch(error: str) -> NoReturn:
 def setup(
     uproject: Path = typer.Argument(..., help="Path to the .uproject file"),
     port: int = typer.Option(
-        30010, "--port", "-p", help="Remote Control HTTP port to configure"
+        30010, "--port", "-p", click_type=PORT_NUMBER, help="Remote Control HTTP port to configure"
     ),
     engine_path: Optional[Path] = typer.Option(
         None,
@@ -955,6 +958,7 @@ def setup(
     websocket_port: Optional[int] = typer.Option(
         None,
         "--websocket-port",
+        click_type=PORT_NUMBER,
         help=(
             "Override RemoteControlWebSocketServerPort. Leave unset to keep "
             "UE's default (30020). Use this when running multiple UE editors "
@@ -1017,6 +1021,7 @@ def setup(
     wait_timeout: float = typer.Option(
         90.0,
         "--wait-timeout",
+        click_type=TIMEOUT_SECONDS,
         help="Seconds to wait for Remote Control to accept connections",
     ),
     poll_interval: float = typer.Option(
