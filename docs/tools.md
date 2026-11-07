@@ -420,7 +420,7 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 | Group | Tools |
 |---|---|
 | Engine and scene | `get_unreal_engine_info`, `get_unreal_loaded_map`, `summarize_unreal_scene`, `query_unreal_scene_graph`, `analyze_unreal_scene_for_robotics`, `get_unreal_viewport_info` |
-| Actors | `list_unreal_actors`, `get_unreal_actor_info`, `describe_unreal_object`, `get_unreal_actor_by_semantic_label`, `get_unreal_actor_thumbnail`, `spawn_unreal_actor`, `delete_unreal_actor`, `set_unreal_actor_transform`, `set_unreal_actor_property`, `set_unreal_actor_visibility`, `set_unreal_actor_parent`, `add_unreal_component`, `focus_unreal_on_actor` |
+| Actors | `list_unreal_actors`, `get_unreal_actor_info`, `list_unreal_actor_components`, `describe_unreal_object`, `get_unreal_actor_by_semantic_label`, `get_unreal_actor_thumbnail`, `spawn_unreal_actor`, `delete_unreal_actor`, `set_unreal_actor_transform`, `set_unreal_actor_property`, `set_unreal_actor_visibility`, `set_unreal_actor_parent`, `add_unreal_component`, `focus_unreal_on_actor` |
 | Assets | `search_unreal_assets` |
 | Camera, lights, rendering | `set_unreal_camera_view`, `set_unreal_light_params`, `set_unreal_render_settings` |
 | Materials | `get_unreal_material_info`, `assign_unreal_material`, `create_unreal_material_instance`, `set_unreal_material_params` |
@@ -432,6 +432,39 @@ Also set with `unreal.tool_surface: full` or `UNREAL__TOOL_SURFACE=full`.
 
 Behaviour worth knowing:
 
+- The scene reads go through the editor world, one page at a time.
+  `list_unreal_actors`, `get_unreal_actor_by_semantic_label`,
+  `list_unreal_actor_components` and `query_unreal_scene_graph` count every
+  match (`total`; `total_matches` for the label search) and return the page
+  from `offset`: up to `max_results` entries, stopping earlier rather than go
+  past 30,000 characters, so a reply always fits the 40 KB result budget
+  untrimmed. `count` is what came back, `next_offset` is where the next page
+  starts (`null` at the end), and `truncated` and `hint` say when more is left.
+  At 5,000 actors a page of actors holds about 80, in about 0.2 s.
+  `list_unreal_actors` filters by class (name, as in `StaticMeshActor` or
+  `BP_Door_C`, or path; `include_subclasses` also keeps derived classes, so
+  `Light` keeps point, spot and Blueprint lights), tag and label (text the
+  label contains, ignoring case). A class `include_subclasses` cannot resolve
+  (a Blueprint class is found by its path, or by its name when an actor of
+  that class is in the level) is matched by name only, with a `warning`.
+  Actor entries carry the attachment hierarchy: `parent` (the actor the root
+  component is attached to), `children` (the first 20 attached actors;
+  `get_unreal_actor_info` names 200) and `child_count`.
+- `query_unreal_scene_graph` returns the attachment hierarchy as a tree:
+  the level, whose children are the actors attached to nothing, or the actor
+  at `root_path`, down `max_depth` levels. The page holds the root's
+  children from `offset`, each with its subtree; an actor whose children lie
+  deeper has `children_truncated`, and a subtree too large for one page is
+  drawn shallower and named in `depth_limited` (query it with its actor as
+  `root_path`). `total_actors` and `total_depth` describe the whole tree. A
+  `class_filter` keeps the matching actors and the actors above them, which
+  carry `matches_filter: false`; `include_components` adds each actor's
+  components (name, class, root flag, the component it is attached to).
+- `list_unreal_actor_components` lists an actor's components, editor-only
+  ones included: class, root and editor-only flags, and for scene components
+  the component they are attached to (its path when it belongs to another
+  actor), world location, mobility and visibility; primitive components add
+  their world bounds (box center and half-size, sphere radius, in cm).
 - A failed call names its cause with one `error_type` from the set the
   backends share:
   - `ConnectionError`: nothing answered at the Remote Control endpoint, or
@@ -808,6 +841,7 @@ Behaviour worth knowing:
     loads the parent material and saves the new instance through Unreal's
     editor asset library, which loads, finds and saves no assets during PIE.
   - `list_unreal_actors`, `get_unreal_actor_by_semantic_label`,
+    `query_unreal_scene_graph`, `list_unreal_actor_components`,
     `summarize_unreal_scene`, `analyze_unreal_scene_for_robotics`,
     `get_unreal_actor_info`, `get_unreal_loaded_map` and
     `get_unreal_engine_info` report `pie_active: true` and read the editor
