@@ -16,7 +16,7 @@ unsaved work, or fall back to an embedded scene when the editor is unavailable.
 simul blender install-bridge
 ```
 
-This builds `~/.simul/blender/simul_blender_bridge.zip`. In the **existing
+This builds `$SIMUL_HOME/blender/simul_blender_bridge.zip` (`SIMUL_HOME` defaults to `~/.simul`; see [configuration.md](configuration.md#state-directory-simul_home)). In the **existing
 Blender window**, open Preferences → Add-ons → Install from Disk, select the
 ZIP, and enable **Simul Blender Bridge**. No restart or scene reload is
 needed. The bridge must be enabled inside the process to control its memory;
@@ -177,11 +177,30 @@ context, not at the virtual pointer as if it were a physical mouse.
 
 `capture_blender_viewport` returns two content blocks: the JPEG as an MCP image
 content block (`mimeType: image/jpeg`), then a JSON text block with `success`,
-`width`, `height`, `engine`, `capture_method`, `format` and
+`width`, `height`, `engine`, `capture_method`, `camera_name`, `format` and
 `image_attached: true`. The JSON carries no `image_base64`; a client that only
 logs text or structured results has to read the image block to get the pixels.
-`capture_blender_viewport_sequence` is different: its frames stay inline in the
-JSON as `frames: [{frame, image_base64}, ...]`, with no image blocks.
+
+`capture_blender_viewport_sequence` writes its frames to JPEG files instead and
+returns their paths: `frames: [{frame, file_path}, ...]`, `output_dir`, `width`
+and `height`, with no image blocks. Inline frames did not fit: five 512 px frames
+exceeded the server's 40 KB result budget and came back as one. `output_dir`
+must be inside the sandbox; by default each call gets a new
+`sequence-<time>-<id>` folder in the capture directory (`captures/` under a
+writable allowed root). Frames are captured on Blender's main thread, so one call
+captures at most `max_frames` (default 50, at most 100) and starts no frame after
+10 seconds; `complete: false` and `next_start_frame` then say where to continue,
+and `stopped_by` says which limit applied. An `end_frame` before `start_frame` is
+refused. The current frame is restored afterwards.
+
+Both tools take `camera_name` to capture through that camera without changing
+the scene camera or the user's view. A render renders through it, and the
+scene camera is restored afterwards. A viewport capture draws the 3D View's
+shading and overlays from the camera's evaluated pose and lens
+(`capture_method: viewport_camera`), keeping the render's aspect ratio inside
+`width` x `height`. An external engine's Rendered view exists only on screen and
+cannot be drawn through another camera, so that case fails with an error that
+suggests `method: "render"`.
 
 What the image shows depends on the mode and on `method` (`auto` by default);
 `capture_method` in the result names the path taken:
@@ -293,8 +312,11 @@ same envelope. The stale attachment file is left in place; attach again or run
 `simul blender detach`.
 
 Object-creation and other mode-sensitive granular operations refuse to run
-in Edit/Pose Mode rather than unexpectedly editing the active mesh. Scripts
-remain responsible for their own operator context and mode changes.
+in Edit/Pose Mode rather than unexpectedly editing the active mesh.
+`set_blender_object_mode` (default `OBJECT`) returns the window to Object Mode
+without a script; `create_blender_object` itself never leaves it in Edit Mode,
+whatever Blender's "Enter Edit Mode" preference says. Scripts remain
+responsible for their own operator context and mode changes.
 
 Operations and scripts run inside a `temp_override` of the attached window and
 its 3D View, so exporters (`bpy.ops.export_scene.gltf`) and
@@ -321,6 +343,8 @@ script can make the GUI temporarily unresponsive. The client timeout limits
 waiting, not execution: an operation already started cannot safely be stopped.
 Its outcome is unknown after a timeout, and Simul never automatically retries it.
 Requests whose deadlines expired before execution are refused.
+`bake_blender_simulation` refuses a bake likely to outlast the timeout unless
+`allow_long_bake` is set; see [tools.md](tools.md).
 
 The transport uses a per-instance token in owner-only discovery/attachment
 files. It accepts loopback connections only. Normal filesystem sandbox settings
@@ -339,10 +363,10 @@ Disable the add-on in Blender to stop its listener.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BLENDER__MODE` | `embedded` | Choose local bpy or an attached editor |
-| `BLENDER__DISCOVERY_DIR` | `~/.simul/blender` | Directory searched by the CLI |
-| `BLENDER__ATTACHMENT_PATH` | `~/.simul/blender/attachment.json` | Selection used by this client/server |
+| `BLENDER__DISCOVERY_DIR` | `$SIMUL_HOME/blender` (`~/.simul/blender`) | Directory searched by the CLI |
+| `BLENDER__ATTACHMENT_PATH` | `$SIMUL_HOME/blender/attachment.json` | Selection used by this client/server |
 | `BLENDER__CONNECTION_TIMEOUT` | `30` | Maximum seconds to wait per operation |
-| `SIMUL_BLENDER_DISCOVERY_DIR` | `~/.simul/blender` | Override discovery location in Blender's environment |
+| `SIMUL_BLENDER_DISCOVERY_DIR` | `$SIMUL_HOME/blender` (`~/.simul/blender`) | Override discovery location in Blender's environment; Blender must otherwise see the server's `SIMUL_HOME` |
 
 Use distinct attachment paths for independent MCP servers controlling different
 windows. Set the same path on each server and the CLI used to select its target.
@@ -358,7 +382,10 @@ user's undo and redo take back one at a time and that make quitting ask to
 save, a world-space
 bounding box, rotating a quaternion object (as glTF imports store them), local and
 world transforms in object info, parenting that keeps the child in place and refuses
-a parent loop, camera focus that keeps the whole object in the frame and clip range
+a parent loop, leaving Edit Mode with `set_blender_object_mode`, creation under the
+Enter Edit Mode preference and into a collection disabled in viewports, a bounds check
+of the whole bounding box, an accurate listing page, a delete that leaves another
+scene's link, camera focus that keeps the whole object in the frame and clip range
 (a 60 m cube included, and a camera parented to a moved rig with a quaternion
 rotation), world-space camera placement, a camera whose Track To constraint
 overrides focus and placement (reported with the evaluated pose and the

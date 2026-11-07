@@ -197,6 +197,8 @@ class TestTransports:
         assert instance.mcp.run_calls == [
             {
                 "transport": "http",
+                # FastMCP's banner checks PyPI on every start; simul prints its own.
+                "show_banner": False,
                 "host": instance.settings.server.host,
                 "port": instance.settings.server.port,
                 # The DNS-rebinding guard is on by default (tests/mcp/test_http_security.py).
@@ -211,7 +213,7 @@ class TestTransports:
 
         asyncio.run(instance.run("stdio"))
 
-        assert instance.mcp.run_calls == [{"transport": "stdio"}]
+        assert instance.mcp.run_calls == [{"transport": "stdio", "show_banner": False}]
 
     def test_unknown_transport_is_refused_before_serving(self, fake_fastmcp: Any) -> None:
         instance = server_module.SimulMCPServer(settings=Settings(), backends={"isaac"})
@@ -244,7 +246,7 @@ class TestCli:
 
     def test_server_refuses_unknown_transport(self, captured: List[Dict[str, Any]]) -> None:
         result = runner.invoke(app, ["server", "--transport", "grpc"])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert "stdio, http, sse" in result.output
         assert captured == []
 
@@ -254,7 +256,7 @@ class TestCli:
         assert captured[-1]["backends"] == {"usd", "isaac"}
 
         result = runner.invoke(app, ["server", "--backends", "usd,houdini"])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert "houdini" in result.output
         assert len(captured) == 1
 

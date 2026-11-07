@@ -12,7 +12,8 @@ encoded here as tests before the implementation existed:
 
 * the container runs as root, so the socket file must be connectable
   (``connect(2)`` requires *write* permission on the socket inode) by the
-  ordinary user on the host;
+  ordinary user on the host; the Compose file opts into that mode, since
+  outside a container the socket stays owner-only;
 * a socket path is only trusted from a discovery file when it sits inside the
   discovery directory — the same boundary that already rejects non-loopback
   hosts.
@@ -61,12 +62,13 @@ async def _ping_handler(request: Any) -> BridgeResponse:
     return BridgeResponse.success(request.request_id, {"reachable": True, "via": "uds"})
 
 
-def _lifecycle(sock_dir: Path) -> BridgeServerLifecycle:
+def _lifecycle(sock_dir: Path, **kwargs: Any) -> BridgeServerLifecycle:
     return BridgeServerLifecycle(
         host="127.0.0.1",
         port=0,
         request_handler=_ping_handler,
         socket_path=str(sock_dir / "bridge.sock"),
+        **kwargs,
     )
 
 
@@ -134,25 +136,47 @@ def test_tcp_still_serves_alongside_the_socket(sock_dir: Path) -> None:
     assert asyncio.run(_exercise())["status"] == "ok"
 
 
-def test_socket_file_is_connectable_by_other_users(sock_dir: Path) -> None:
-    """connect(2) on a Unix socket needs write permission on the inode.
-
-    In the container the bridge runs as root (#120), so a default-mode socket
-    on the shared volume would be one more root-owned file the host user cannot
-    use — the same failure as the 0600 discovery file, one layer down.
-    """
-
+def _socket_mode_after_start(sock_dir: Path, **kwargs: Any) -> int:
     async def _exercise() -> int:
-        lifecycle = _lifecycle(sock_dir)
+        lifecycle = _lifecycle(sock_dir, **kwargs)
         await lifecycle.start()
         try:
             return stat.S_IMODE(os.stat(sock_dir / "bridge.sock").st_mode)
         finally:
             await lifecycle.stop()
 
-    mode = asyncio.run(_exercise())
+    return asyncio.run(_exercise())
+
+
+def test_socket_file_is_owner_only_by_default(sock_dir: Path) -> None:
+    """connect(2) on a Unix socket needs write permission on the inode.
+
+    The socket runs Python inside Isaac Sim for whoever can connect, so by
+    default only the bridge's own user may; a world-writable socket handed
+    every local user that ability.
+    """
+    mode = _socket_mode_after_start(sock_dir)
+
+    assert mode == 0o600, f"socket mode {mode:o}"
+
+
+def test_container_opts_into_a_socket_other_users_can_connect_to(sock_dir: Path) -> None:
+    """In the container the bridge runs as root (#120) and the host user connects.
+
+    The Compose file passes socket_mode=0666 for that; a root-owned 0600 socket
+    on the shared volume would be unusable from the host, the 0600
+    discovery-file failure one layer down.
+    """
+    mode = _socket_mode_after_start(sock_dir, socket_mode=0o666)
 
     assert mode & stat.S_IWOTH, f"socket mode {mode:o}: host user cannot connect"
+
+
+def test_compose_file_opts_into_the_shared_socket_mode() -> None:
+    compose = (Path(__file__).resolve().parents[2] / "compose.isaac-sim.yml").read_text()
+
+    assert "--/exts/khemoo.simul/socket_path=/tmp/simul/bridge.sock" in compose
+    assert "--/exts/khemoo.simul/socket_mode=0666" in compose
 
 
 def test_stale_socket_file_is_replaced_on_start(sock_dir: Path) -> None:

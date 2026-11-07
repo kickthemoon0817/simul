@@ -523,7 +523,7 @@ def _sandboxed_tools(sandbox: Any) -> Tuple[IsaacTools, List[str]]:
 
     captured: List[str] = []
 
-    def _record(code: str) -> ScriptResult:
+    def _record(code: str, **_kwargs: Any) -> ScriptResult:
         captured.append(code)
         return ScriptResult(success=True, output=json.dumps({"ok": True}))
 
