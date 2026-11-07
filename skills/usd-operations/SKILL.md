@@ -68,7 +68,14 @@ mcp__simul__get_prim_info
   prim_path: "/World/Robot/base_link"
 ```
 
-Returns type, attributes (with values), children, and applied schemas.
+Returns type, applied API schemas, bounding box, transform, children, attributes, relationships and metadata.
+
+- Each attribute is `{ "type": "point3f", "value": [0, 0, 0.2], "authored": true }`. `authored: false` means the value is the schema fallback, not something the file sets.
+- Values are plain JSON: vectors are lists, quaternions `[w, x, y, z]`, matrices lists of rows, and an infinite or NaN float the string `"Infinity"`, `"-Infinity"` or `"NaN"`.
+- Arrays carry `length` and only their first `array_preview` elements (default 16), with `truncated: true` when cut.
+- Narrow a large prim with `attribute_filter: ["physics:*"]`, and read animated values with `time_code`.
+- `relationships` holds `{targets, authored}` per relationship: joint `physics:body0`/`body1`, `material:binding`, `physics:filteredPairs`.
+- `metadata` holds `specifier`, `instanceable`, `composition` (references, payloads, inherits and specializes, each with `resolved`), `variant_sets`, `opinion_layers` and other authored metadata.
 
 ### 4. Search for Prims
 

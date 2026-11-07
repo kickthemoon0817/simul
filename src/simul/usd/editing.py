@@ -25,7 +25,7 @@ from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tupl
 
 from pxr import Pcp
 
-from . import lookup, values
+from . import coerce, lookup
 from ._pxr import Kind, Sdf, Tf, Usd, UsdGeom
 from .timecode import resolve_time_code
 
@@ -510,8 +510,8 @@ class _Planner:
                 self.reject(name, "attribute_types names an attribute that is not in attributes")
                 continue
             try:
-                self.requested[name] = values.parse_type_name(text)
-            except values.ValueProblem as problem:
+                self.requested[name] = coerce.parse_type_name(text)
+            except coerce.ValueProblem as problem:
                 self.reject(name, str(problem))
 
     def reject(self, name: Any, reason: str) -> None:
@@ -525,7 +525,7 @@ class _Planner:
                 continue
             try:
                 write = self._plan_one(name, value)
-            except (_Problem, values.ValueProblem) as problem:
+            except (_Problem, coerce.ValueProblem) as problem:
                 self.reject(name, str(problem))
                 continue
             (metadata if write.kind == "metadata" else properties).append(write)
@@ -576,13 +576,13 @@ class _Planner:
                 "prim metadata, not an attribute; these tools set only the "
                 f"{', '.join(SETTABLE_METADATA)} metadata"
             )
-        op = values.parse_xform_op_name(name)
+        op = coerce.parse_xform_op_name(name)
         if op is not None:
             return self._plan_new_op(name, value, op, requested)
-        type_name = requested or values.infer_type(value)
+        type_name = requested or coerce.infer_type(value)
         if type_name is None:
             if value is None or isinstance(value, Mapping):
-                values.coerce(value, Sdf.ValueTypeNames.String)  # raises with the reason for these
+                coerce.coerce(value, Sdf.ValueTypeNames.String)  # raises with the reason for these
             raise _Problem(
                 f"cannot infer a USD type for a new attribute from {describe_value(value)}; name one "
                 f'with attribute_types, for example {{"{name}": "float3[]"}}'
@@ -627,13 +627,13 @@ class _Planner:
             name, value, type_name, attribute.GetMetadata("allowedTokens"), attribute.GetVariability()
         )
         try:
-            op = values.parse_xform_op_name(name) if self.xformable else None
-        except values.ValueProblem:
+            op = coerce.parse_xform_op_name(name) if self.xformable else None
+        except coerce.ValueProblem:
             op = None  # an existing attribute in the xformOp namespace that is not an op
         if op is not None:
             try:
-                values.xform_op_precision(op[0], type_name)
-            except values.ValueProblem as problem:
+                coerce.xform_op_precision(op[0], type_name)
+            except coerce.ValueProblem as problem:
                 raise _Problem(
                     f"exists but cannot drive the transform: {problem}; write a new op "
                     f"name such as xformOp:{op[0]}:offset instead"
@@ -652,8 +652,8 @@ class _Planner:
         op_name, suffix = op
         if not self.xformable:
             raise _Problem("a transform op, but this prim's type is not xformable")
-        precision = values.xform_op_precision(op_name, requested)
-        type_name = values.xform_op_value_type(op_name, precision)
+        precision = coerce.xform_op_precision(op_name, requested)
+        type_name = coerce.xform_op_value_type(op_name, precision)
         write = self._plan_value(name, value, type_name, None, Sdf.VariabilityVarying)
         write.create = True
         write.xform_op = (op_name, precision, suffix)
@@ -669,7 +669,7 @@ class _Planner:
         allowed_tokens: Optional[Sequence[str]],
         variability: Any,
     ) -> PlannedWrite:
-        converted = values.coerce(value, type_name)
+        converted = coerce.coerce(value, type_name)
         tokens = [str(token) for token in allowed_tokens or ()]
         if tokens and type_name.scalarType == Sdf.ValueTypeNames.Token:
             items = list(converted) if type_name.isArray else [converted]
@@ -685,15 +685,15 @@ class _Planner:
             raise _Problem("xformOpOrder applies to xformable prims only")
         for index, raw in enumerate(order):
             entry = str(raw)
-            if entry == values.RESET_XFORM_STACK:
+            if entry == coerce.RESET_XFORM_STACK:
                 if index:
-                    raise _Problem(f"{values.RESET_XFORM_STACK} may only come first")
+                    raise _Problem(f"{coerce.RESET_XFORM_STACK} may only come first")
                 continue
-            op_name = entry[len(values.INVERT_PREFIX):] if entry.startswith(values.INVERT_PREFIX) else entry
+            op_name = entry[len(coerce.INVERT_PREFIX):] if entry.startswith(coerce.INVERT_PREFIX) else entry
             try:
-                if values.parse_xform_op_name(op_name) is None:
-                    raise values.ValueProblem(f"{entry!r} is not a transform op name")
-            except values.ValueProblem as problem:
+                if coerce.parse_xform_op_name(op_name) is None:
+                    raise coerce.ValueProblem(f"{entry!r} is not a transform op name")
+            except coerce.ValueProblem as problem:
                 raise _Problem(f"xformOpOrder entry {index}: {problem}") from None
             exists = self.prim is not None and bool(self.prim.GetAttribute(op_name))
             if not exists and op_name not in self.attributes:
@@ -723,7 +723,7 @@ def plan_writes(
     added to ``xformOpOrder``; or a new custom attribute typed by
     ``attribute_types`` or inferred from the value. Other prim metadata keys
     are refused, since writing them as attributes would silently do nothing.
-    Values are converted to the resolved type (see :mod:`simul.usd.values`).
+    Values are converted to the resolved type (see :mod:`simul.usd.coerce`).
 
     Args:
         prim: The existing prim, or None when it is about to be created.
@@ -748,7 +748,7 @@ def plan_writes(
     """
     if time_code is not None:
         try:
-            if not values.is_finite_time(time_code):
+            if not coerce.is_finite_time(time_code):
                 raise ValueError(f"time_code must be a finite number, got {time_code!r}")
             resolve_time_code(time_code)  # the read tools' rule, so both refuse the same values
         except (TypeError, ValueError) as exc:
@@ -790,7 +790,7 @@ def _write_attribute(prim: Usd.Prim, write: PlannedWrite) -> None:
     if write.xform_op is not None:
         op_name, precision, suffix = write.xform_op
         if write.append_to_op_order:
-            op = UsdGeom.Xformable(prim).AddXformOp(values.xform_op_type(op_name), precision, suffix)
+            op = UsdGeom.Xformable(prim).AddXformOp(coerce.xform_op_type(op_name), precision, suffix)
             attr = op.GetAttr() if op else None
         else:
             attr = prim.CreateAttribute(write.name, write.type_name, False)

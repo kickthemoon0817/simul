@@ -12,6 +12,16 @@ Every tool returns a JSON object. Failures carry `success: false` and an
 error type such as `NotRunning`, `RefusedOperation` or
 `UnsupportedOperation`.
 
+Results are strict JSON: a non-finite float is sent as the string
+`"Infinity"`, `"-Infinity"` or `"NaN"`, never as a bare token. Each result
+is held to a 40 KB budget by trimming its largest top-level list, with
+`truncated` and a `truncation` notice. When that list is a page, its
+`next_offset` (and a `count` or `returned` that counted the page) are
+rewritten to match the items kept, so following `next_offset` skips
+nothing. Above a 400 KB hard limit the field carrying the excess is cut at
+any depth: a string becomes a `truncated_field` marker, and a list or
+mapping keeps its prefix and is named in `truncated_fields`.
+
 ## Headless USD
 
 No running application needed. File arguments must be inside the sandbox
@@ -34,6 +44,17 @@ No running application needed. File arguments must be inside the sandbox
   names the purposes left out that do hold geometry. `world_space: false`
   bounds the prim in its own space (its descendants' transforms apply, its
   own does not), and `time_code` evaluates animated transforms.
+- **Prim info.** `get_prim_info` returns each attribute as
+  `{type, value, authored}` (`authored: false` is a schema fallback), each
+  relationship as `{targets, authored}`, applied API schemas, and metadata:
+  specifier, instanceable, composition arcs with `resolved`, variant sets
+  and selections, the layers holding opinions, and other authored metadata.
+  An array attribute carries its `length` and first `array_preview`
+  elements (default 16, up to 10000), so a million-point mesh costs a few
+  KB; `attribute_filter` takes glob patterns, `time_code` reads animated
+  values.
+- **JSON values.** Vectors are lists, quaternions `[w, x, y, z]`, matrices
+  lists of rows, asset paths their authored string.
 - **Lookups.** A `stage_id` that is not loaded, or a prim path with no prim,
   is a `NotFoundError`; a relative, malformed or property path is a
   `ValidationError`.
@@ -146,6 +167,12 @@ Notes:
 - `execute_isaac_script` scripts should follow the scripting reference served
   as the `simul://isaac-sim/skills` resource. Isaac Sim 6.0 deprecates
   `isaacsim.core.{api,prims,utils}` and removes the `omni.isaac.*` shims.
+- `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
+  return `ClaimStoreError` when the claim could not be saved. Calling
+  `claim_isaac_instance` again with the same `agent_id` after a reconnect or
+  a server restart takes the orphaned claim over; `release_isaac_instance`
+  with that `agent_id` releases it. See
+  [configuration.md](configuration.md#multi-agent-claims).
 
 ## Unreal Engine
 
@@ -209,6 +236,46 @@ Behaviour worth knowing:
   values that did apply stay written, as with lights. `applied` holds the
   values read back (scalars and colors as the 32-bit floats Unreal stores)
   and `params_set` counts them. The instance is left unsaved.
+- `enable_unreal_physics`, `set_unreal_physics_params` and
+  `set_unreal_collision` edit the actor's primitive component (its root, else
+  its only one) the way the Details panel does: in one undoable editor
+  transaction that marks the map dirty, so Save All writes the edit and one
+  Undo reverts that call alone. Each reply is the body read back:
+  `physics_mode` (`simulated`, `kinematic`, `static` for a body that is not
+  Movable, `none` without physics collision), mobility, collision mode and
+  preset, `mass_kg` (the mass Unreal computes) and the mass override, gravity
+  and damping, the attach parent and a `warning`.
+  - `enable_unreal_physics` makes the body simulate (`enable` true), makes it
+    kinematic (`kinematic` true: physics collision on, so simulated bodies hit
+    it, but moved only by its transform) or turns physics off (`enable`
+    false; collision and mobility kept). Unreal accepts the simulate flag on
+    any body and reads it back as simulating even when the body never moves,
+    so the tool checks first and refuses, with nothing changed, a body that
+    cannot take the mode: `error_type: "IncompatibleBody"`, each reason in
+    `details.problems` (`NOT_MOVABLE`, `NO_PHYSICS_COLLISION` for NoCollision
+    or a query-only preset such as OverlapAll, `NO_GEOMETRY` for a
+    StaticMeshActor without a mesh, `NO_SIMPLE_COLLISION`,
+    `COMPLEX_AS_SIMPLE` for a simulated mesh that uses its render triangles
+    as simple collision, `ATTACHED`). A Static or Stationary body is made
+    Movable (`mobility_changed_from`) unless `make_movable` is false.
+  - Unreal detaches a body from its parent when it starts simulating, keeping
+    its world transform, and turning physics off does not reattach it. An
+    attached body is refused unless `allow_detach` is true; it is then
+    detached in the same transaction, so Undo reattaches it, and the reply
+    names the parent in `detached_from`.
+  - `set_unreal_physics_params` takes a mass from 0.001 kg (Unreal's least)
+    to 1e9 kg and damping from 0 to 1e6, and reads every value back
+    (`applied`, `params_set`; `PhysicsParamsNotApplied` names one that reads
+    back different). A Static body keeps the values but has no mass
+    (`mass_kg` 0) and never simulates until it is Movable; the `warning`
+    says so. With no parameter it only reads the body.
+  - `set_unreal_collision` checks a preset before writing (an unknown one
+    changes nothing) and, when it sets `collision_enabled` on a static mesh,
+    clears the mesh's Use Default Collision flag as a preset does; with the
+    flag left set, Unreal put the mesh's own collision back in the running
+    simulation and after the map reloaded.
+  - A path in a running simulation's world (`UEDPIE_<n>_<map>`) edits that
+    play copy, which is neither undoable nor saved (`world: "simulation"`).
 - USD import and export need the optional **USDImporter** plugin enabled when
   the editor starts. They use `AssetImportTask` and `LevelExporterUSD`;
   `get_unreal_interchange_info` reports whether the plugin is available.
@@ -330,7 +397,11 @@ Behaviour worth knowing:
     report mesh collision during PIE.
   - Editing actors already in the level by path (transform, lights, collision,
     physics settings, visibility, materials) keeps working and changes the
-    editor world.
+    editor world, which the running simulation does not see: it takes effect
+    the next time the simulation starts, and a physics or collision edit says
+    so in its `warning`. A physics or collision edit given the actor's path
+    in the simulation's world (`UEDPIE_<n>_<map>`) changes the running copy
+    instead, which is neither undoable nor saved.
   - `set_unreal_material_params` edits the material instance asset, which the
     running game uses too: an edit made during PIE shows in the game and stays
     after PIE stops.
@@ -387,6 +458,16 @@ registers only `THIN_BLENDER_TOOLS` from `src/simul/tool_surfaces.py`.
 
 Behaviour worth knowing:
 
+- In attached mode each call that changes the document is one Blender undo
+  step named `simul: <tool>`, and marks the file modified: the user's Ctrl+Z
+  takes back the last agent operation only, and quitting asks to save. Reads,
+  captures, saves, exports, playback and editor-only `control_blender_ui`
+  actions record no step. Details:
+  [blender-attachment.md](blender-attachment.md#undo-and-unsaved-changes).
+- `open_blender_file` refuses with `UnsavedChangesError` while the open file has
+  unsaved changes; save them with `save_blender_file`, or pass
+  `discard_unsaved: true`. Headless (embedded) Blender does not track unsaved
+  changes, so there it opens without the check.
 - `capture_blender_viewport` captures the 3D View the user sees in attached
   mode and needs no camera; `method: "render"` renders through the scene camera,
   or a temporary one when the scene has none. Embedded (headless) mode has no 3D
@@ -543,7 +624,9 @@ Behaviour worth knowing:
   per control or other non-ASCII character and 12 per emoji. So output is also
   cut at 300 000 bytes of JSON, which printable ASCII never reaches but heavily
   non-ASCII output can, with the same report. Write larger results to a file
-  and return its path.
+  and return its path. Anything the script raises, `SystemExit` from
+  `sys.exit()` and `KeyboardInterrupt` included, comes back in `error`; it
+  never ends Blender.
 
 ## Server
 
