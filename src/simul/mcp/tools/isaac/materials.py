@@ -4,6 +4,7 @@ import json
 import textwrap
 from typing import Any, Dict, Optional
 
+from ...schemas.common import ErrorResponse
 from ._shared import (
     BIND_MATERIAL_CORE,
     DEFINE_MATERIAL_CORE,
@@ -12,6 +13,227 @@ from ._shared import (
     _pyval,
 )
 from .._meta import tool_meta
+
+# The inputs of the two surface shaders simul creates, with the Sdf value type
+# each is declared with: OmniPBR.mdl's parameters (MDL enums are int inputs in
+# USD) and the UsdPreviewSurface specification. An input that does not exist
+# on the shader yet is created with this type; a name missing from the table
+# is a typo far more often than a real input, so it is refused.
+OMNIPBR_INPUTS: Dict[str, str] = {
+    "diffuse_color_constant": "Color3f",
+    "diffuse_texture": "Asset",
+    "albedo_desaturation": "Float",
+    "albedo_add": "Float",
+    "albedo_brightness": "Float",
+    "diffuse_tint": "Color3f",
+    "reflection_roughness_constant": "Float",
+    "reflection_roughness_texture_influence": "Float",
+    "reflectionroughness_texture": "Asset",
+    "metallic_constant": "Float",
+    "metallic_texture_influence": "Float",
+    "metallic_texture": "Asset",
+    "specular_level": "Float",
+    "enable_ORM_texture": "Bool",
+    "ORM_texture": "Asset",
+    "ao_to_diffuse": "Float",
+    "ao_texture": "Asset",
+    "enable_emission": "Bool",
+    "emissive_color": "Color3f",
+    "emissive_color_texture": "Asset",
+    "emissive_mask_texture": "Asset",
+    "emissive_intensity": "Float",
+    "enable_opacity": "Bool",
+    "enable_opacity_texture": "Bool",
+    "opacity_constant": "Float",
+    "opacity_texture": "Asset",
+    "opacity_mode": "Int",
+    "opacity_threshold": "Float",
+    "bump_factor": "Float",
+    "normalmap_texture": "Asset",
+    "detail_bump_factor": "Float",
+    "detail_normalmap_texture": "Asset",
+    "flip_tangent_u": "Bool",
+    "flip_tangent_v": "Bool",
+    "project_uvw": "Bool",
+    "world_or_object": "Bool",
+    "uv_space_index": "Int",
+    "texture_translate": "Float2",
+    "texture_rotate": "Float",
+    "texture_scale": "Float2",
+    "detail_texture_translate": "Float2",
+    "detail_texture_rotate": "Float",
+    "detail_texture_scale": "Float2",
+}
+
+USD_PREVIEW_SURFACE_INPUTS: Dict[str, str] = {
+    "diffuseColor": "Color3f",
+    "emissiveColor": "Color3f",
+    "useSpecularWorkflow": "Int",
+    "specularColor": "Color3f",
+    "metallic": "Float",
+    "roughness": "Float",
+    "clearcoat": "Float",
+    "clearcoatRoughness": "Float",
+    "opacity": "Float",
+    "opacityMode": "Token",
+    "opacityThreshold": "Float",
+    "ior": "Float",
+    "normal": "Normal3f",
+    "displacement": "Float",
+    "occlusion": "Float",
+}
+
+# Sets one surface-shader input with the value converted to the input's type.
+# Defines _set_material_input(stage, material_path, name, value, allow_unknown).
+SET_MATERIAL_INPUT_CORE = """\
+    import difflib
+
+    KNOWN_INPUTS = {"OmniPBR": OMNIPBR_INPUTS, "UsdPreviewSurface": USD_PREVIEW_SURFACE_INPUTS}
+    IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".exr", ".hdr", ".tga", ".tif", ".tiff", ".bmp", ".dds", ".ktx")
+    VECTOR_TYPES = {
+        "float2": (Gf.Vec2f, 2), "double2": (Gf.Vec2d, 2), "texcoord2f": (Gf.Vec2f, 2),
+        "float3": (Gf.Vec3f, 3), "color3f": (Gf.Vec3f, 3), "normal3f": (Gf.Vec3f, 3),
+        "vector3f": (Gf.Vec3f, 3), "point3f": (Gf.Vec3f, 3),
+        "double3": (Gf.Vec3d, 3), "color3d": (Gf.Vec3d, 3),
+        "float4": (Gf.Vec4f, 4), "color4f": (Gf.Vec4f, 4), "double4": (Gf.Vec4d, 4),
+    }
+
+    def _shader_kind(shader):
+        sub_id = shader.GetPrim().GetAttribute("info:mdl:sourceAsset:subIdentifier")
+        if sub_id and sub_id.Get():
+            return str(sub_id.Get())
+        shader_id = shader.GetIdAttr().Get()
+        return str(shader_id) if shader_id else None
+
+    def _inferred_type(name, value):
+        # Only for an input no table knows: bool before int, since a bool is
+        # an int in Python, and a path-looking string is an asset.
+        if isinstance(value, bool):
+            return "Bool"
+        if isinstance(value, int):
+            return "Int"
+        if isinstance(value, float):
+            return "Float"
+        if isinstance(value, str):
+            lowered = name.lower()
+            if lowered.endswith("texture") or lowered.endswith("_file") or value.lower().endswith(IMAGE_SUFFIXES):
+                return "Asset"
+            return "String"
+        if isinstance(value, list) and len(value) in (2, 3, 4):
+            return {2: "Float2", 3: "Color3f", 4: "Float4"}[len(value)]
+        return None
+
+    def _coerce(value, type_name):
+        kind = type_name.lower()
+        number = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if kind == "bool":
+            if isinstance(value, bool):
+                return value
+            if number and value in (0, 1):
+                return bool(value)
+            raise ValueError("expects true or false")
+        if kind in ("int", "uint", "uchar", "int64", "uint64"):
+            if number and float(value).is_integer():
+                return int(value)
+            raise ValueError("expects an integer")
+        if kind in ("float", "double", "half"):
+            if number:
+                return float(value)
+            raise ValueError("expects a number")
+        if kind == "asset":
+            if isinstance(value, str):
+                return Sdf.AssetPath(value)
+            raise ValueError("expects a file path or URL")
+        if kind in ("string", "token"):
+            if isinstance(value, str):
+                return value
+            raise ValueError("expects a string")
+        if kind in VECTOR_TYPES:
+            vector, size = VECTOR_TYPES[kind]
+            if (
+                isinstance(value, list) and len(value) == size
+                and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in value)
+            ):
+                return vector(*[float(c) for c in value])
+            raise ValueError("expects a list of " + str(size) + " numbers")
+        raise ValueError("has a type this tool does not set; use set_isaac_prim_attribute")
+
+    def _jsonable(value):
+        if isinstance(value, Sdf.AssetPath):
+            return value.path
+        if hasattr(value, "__len__") and not isinstance(value, str):
+            return [float(c) for c in value]
+        return value
+
+    def _set_material_input(stage, material_path, name, value, allow_unknown):
+        prim = stage.GetPrimAtPath(material_path)
+        if not prim.IsValid() or not prim.IsA(UsdShade.Material):
+            return {"error": "Material not found: " + material_path}
+        material = UsdShade.Material(prim)
+        source = material.ComputeSurfaceSource()
+        shader = source[0] if source else None
+        if not shader:
+            source = material.ComputeSurfaceSource("mdl")
+            shader = source[0] if source else None
+        if not shader:
+            return {"error": "No surface shader found on material " + material_path}
+        if name.startswith("inputs:"):
+            name = name[len("inputs:"):]
+        kind = _shader_kind(shader)
+        known = KNOWN_INPUTS.get(kind)
+        result = {
+            "material_path": material_path,
+            "shader_path": str(shader.GetPath()),
+            "shader_type": kind,
+            "property_name": name,
+        }
+        shader_input = shader.GetInput(name)
+        created = False
+        if shader_input and shader_input.GetAttr().IsValid():
+            type_name = str(shader_input.GetTypeName())
+        else:
+            if known is not None and name in known:
+                type_name = known[name]
+            elif known is not None and not allow_unknown:
+                close = difflib.get_close_matches(name, list(known), n=3, cutoff=0.5)
+                message = (
+                    name + " is not an input of " + kind + "; setting it would create an input "
+                    "the shader never reads"
+                )
+                if close:
+                    message += ". Did you mean: " + ", ".join(close) + "?"
+                message += " Pass allow_unknown_input=true to create it anyway."
+                result["error"] = message
+                result["known_inputs"] = sorted(known)
+                return result
+            else:
+                type_name = _inferred_type(name, value)
+                if type_name is None:
+                    result["error"] = "Cannot infer an input type for value " + json.dumps(value)
+                    return result
+                result["warning"] = (
+                    "Created input " + name + " as " + type_name + ", inferred from the value: "
+                    + ("it is not a known " + kind + " input" if known is not None
+                       else "no input list is known for shader type " + str(kind))
+                )
+            shader_input = shader.CreateInput(name, getattr(Sdf.ValueTypeNames, type_name))
+            created = True
+            type_name = str(shader_input.GetTypeName())
+        try:
+            coerced = _coerce(value, type_name)
+        except ValueError as exc:
+            if created:
+                shader.GetPrim().RemoveProperty(shader_input.GetAttr().GetName())
+            result["error"] = "Input " + name + " (" + type_name + ") " + str(exc) + "; got " + json.dumps(value)
+            return result
+        if not shader_input.Set(coerced):
+            result["error"] = "USD refused the value for input " + name + " (" + type_name + ")"
+            return result
+        result["input_type"] = type_name
+        result["created"] = created
+        result["value_set"] = _jsonable(shader_input.Get())
+        return result
+"""
 
 
 class MaterialsMixin:
@@ -214,8 +436,13 @@ class MaterialsMixin:
     @tool_meta(
         name="set_isaac_material_property",
         description=(
-            "Set an input property on a material's surface shader (e.g. "
-            "diffuse_color_constant, metallic_constant, roughness_constant)."
+            "Set an input on a material's surface shader, typed the way the shader declares "
+            "it: an existing input keeps its type; a new one takes the OmniPBR or "
+            "UsdPreviewSurface type (texture paths become assets, flags bools, enums ints). "
+            "A name that is not an input of a known shader is refused with suggestions "
+            "(OmniPBR roughness is reflection_roughness_constant, color "
+            "diffuse_color_constant, texture diffuse_texture). Returns the input's type and "
+            "the value read back."
         ),
         read_only=False,
         destructive=True,
@@ -226,72 +453,53 @@ class MaterialsMixin:
         material_path: str,
         property_name: str,
         value: Any,
+        allow_unknown_input: bool = False,
     ) -> Dict[str, Any]:
         """
-        Set an input property on a material's surface shader.
+        Set an input on a material's surface shader.
 
         Args:
             material_path: USD path of the Material prim.
-            property_name: Name of the shader input (e.g. "diffuseColor").
-            value: Value to set. Lists become Gf.Vec3f for 3-element arrays.
+            property_name: Shader input name, with or without the "inputs:"
+                prefix: "reflection_roughness_constant" or "diffuse_texture"
+                on OmniPBR, "roughness" or "diffuseColor" on
+                UsdPreviewSurface.
+            value: The value: a number, a bool, a string (a file path for a
+                texture input), or a list of 2-4 numbers for a vector or
+                color. It must fit the input's type.
+            allow_unknown_input: Create an input that is not one of the known
+                OmniPBR / UsdPreviewSurface inputs, with a type inferred from
+                the value. Off by default, because a misspelt name creates an
+                input the shader never reads.
 
         Returns:
-            Dict confirming the property was set.
+            Dict with the shader type, ``input_type``, ``created`` (whether
+            the input was new) and ``value_set`` as read back, or an error
+            naming the expected type or the closest known input names.
         """
-        _mat_path = _pyval(material_path)
-        _prop_name = _pyval(property_name)
-        _val_str = _pyval(json.dumps(value))
-        script = textwrap.dedent(f"""\
+        if not property_name or not property_name.strip():
+            return ErrorResponse(error="property_name is empty", error_type="ValueError").model_dump()
+        script = _compose_script(
+            """\
             import json
             import omni.usd
-            from pxr import UsdShade, Sdf, Gf
-
+            from pxr import Gf, Sdf, UsdShade
+            """,
+            f"OMNIPBR_INPUTS = {_pyval(OMNIPBR_INPUTS)}\n"
+            f"USD_PREVIEW_SURFACE_INPUTS = {_pyval(USD_PREVIEW_SURFACE_INPUTS)}\n",
+            SET_MATERIAL_INPUT_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                prim = stage.GetPrimAtPath({_mat_path})
-                if not prim.IsValid() or not prim.IsA(UsdShade.Material):
-                    print(json.dumps({{"error": "Material not found: " + {_mat_path}}}))
-                else:
-                    mat = UsdShade.Material(prim)
-                    # Try default render context, then MDL
-                    shader_result = mat.ComputeSurfaceSource()
-                    shader_obj = shader_result[0] if shader_result else None
-                    if not shader_obj:
-                        shader_result = mat.ComputeSurfaceSource("mdl")
-                        shader_obj = shader_result[0] if shader_result else None
-                    if not shader_obj:
-                        print(json.dumps({{"error": "No surface shader found on material"}}))
-                    else:
-                        val = json.loads({_val_str})
-                        prop_name = {_prop_name}
-                        inp = shader_obj.GetInput(prop_name)
-                        if not inp or not inp.GetAttr().IsValid():
-                            # Create the input for MDL shaders
-                            if isinstance(val, list) and len(val) == 3:
-                                inp = shader_obj.CreateInput(prop_name, Sdf.ValueTypeNames.Color3f)
-                            elif isinstance(val, list) and len(val) == 4:
-                                inp = shader_obj.CreateInput(prop_name, Sdf.ValueTypeNames.Float4)
-                            elif isinstance(val, (int, float)):
-                                inp = shader_obj.CreateInput(prop_name, Sdf.ValueTypeNames.Float)
-                            elif isinstance(val, bool):
-                                inp = shader_obj.CreateInput(prop_name, Sdf.ValueTypeNames.Bool)
-                            elif isinstance(val, str):
-                                inp = shader_obj.CreateInput(prop_name, Sdf.ValueTypeNames.String)
-                            else:
-                                inp = shader_obj.CreateInput(prop_name, Sdf.ValueTypeNames.Float)
-                        if isinstance(val, list) and len(val) == 3:
-                            val = Gf.Vec3f(*val)
-                        elif isinstance(val, list) and len(val) == 4:
-                            val = Gf.Vec4f(*val)
-                        inp.Set(val)
-                        print(json.dumps({{
-                            "material_path": {_mat_path},
-                            "property_name": prop_name,
-                            "value_set": str(val),
-                        }}))
-        """)
+                value = json.loads({_pyval(json.dumps(value))})
+                print(json.dumps(_set_material_input(
+                    stage, {_pyval(material_path)}, {_pyval(property_name.strip())}, value,
+                    {_pyval(bool(allow_unknown_input))}
+                )))
+            """,
+        )
         return await self._execute_json_script(script)
 
     @tool_meta(
@@ -348,4 +556,3 @@ class MaterialsMixin:
             """,
         )
         return await self._execute_json_script(script)
-

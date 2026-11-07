@@ -66,7 +66,13 @@ default `true`). When `false`, the server does not register
 Unreal's `call_unreal_actor_function` and `batch_unreal_operations`
 dispatchers, and `simul isaac exec` / `simul unreal exec` return a
 `ScriptExecutionDisabled` error. The fixed granular tools, including
-`control_unreal_ui`, keep working.
+`control_unreal_ui`, keep working. The OmniGraph tools close the
+script-node route to the same code path: `create_isaac_graph_node` refuses
+node types with `script` in their name (such as
+`omni.graph.scriptnode.ScriptNode`), `set_isaac_graph_node_values` refuses
+script attributes and any write to a script-capable node, and
+`enable_isaac_extension` refuses `omni.graph.scriptnode` and
+`omni.kit.scripting`, all with `ScriptExecutionDisabled`.
 
 This is the only switch that removes the agent-authored code surface. The
 Isaac bridge extension's `allow_unsafe_execution` setting (and
@@ -98,7 +104,12 @@ your data. Each refusal is a structured `RefusedOperation` error:
   `isaacsim.code_editor.vscode`).
 - `set_isaac_carb_settings` refuses keys under `/exts/khemoo.simul/` and
   `/exts/isaacsim.code_editor.python_server/`.
-- `save_isaac_stage` needs `overwrite=true` to replace an existing file.
+- `save_isaac_stage` needs `overwrite=true` to replace an existing file, and
+  for any URL target (a remote file's existence cannot be checked first). It
+  refuses while the timeline is playing or paused unless
+  `allow_while_playing=true`, since the stage then holds simulated poses. An
+  in-place save checks the stage's file and every dirty layer it writes
+  against the write sandbox.
 - `new_isaac_stage` and `open_isaac_stage` need `discard_unsaved=true` when
   the current stage has unsaved edits.
 

@@ -474,7 +474,9 @@ class DiagnosticsMixin:
     @tool_meta(
         name="disable_isaac_extension",
         description=(
-            "Disable an extension immediately in the running Isaac Sim instance. Refuses the transport "
+            "Disable an extension immediately in the running Isaac Sim instance, and fail when "
+            "it is still enabled afterwards (an enabled extension depending on it keeps it "
+            "loaded). Refuses the transport "
             "extensions simul speaks through (khemoo.simul, "
             "isaacsim.code_editor.python_server, isaacsim.code_editor.vscode)."
         ),
@@ -522,12 +524,23 @@ class DiagnosticsMixin:
                 ename = ext.get("name", "")
                 if ext_id in (eid, ename) or bare_query == ename:
                     found = True
-                    print(json.dumps({{
+                    enabled = bool(ext.get("enabled", False))
+                    payload = {{
                         "extension_id": eid or ename,
                         "name": ename,
-                        "enabled": ext.get("enabled", False),
+                        "enabled": enabled,
                         "version": ext.get("version", ""),
-                    }}))
+                    }}
+                    if enabled:
+                        # The manager keeps an extension that another enabled
+                        # one depends on; without an explicit failure the
+                        # envelope would report success for a no-op.
+                        payload["success"] = False
+                        payload["error"] = (
+                            "Extension is still enabled: " + (eid or ename)
+                            + " (an enabled extension may depend on it; check the Kit log)"
+                        )
+                    print(json.dumps(payload))
                     break
 
             if not found:

@@ -2,9 +2,9 @@
 
 ## URDF Import Notes
 
-### What `import_isaac_asset` Does for URDF
+### What the URDF Importer Does
 
-When `asset_type: "urdf"` is used, the Isaac Sim URDF importer:
+`import_isaac_asset` references USD layers only, so a URDF goes through the Isaac Sim URDF importer first (see "Converting URDF to USD" below). The importer:
 1. Parses the URDF XML and resolves mesh paths relative to the URDF file location
 2. Creates a USD stage with Xform prims for each link
 3. Creates UsdPhysics joints between links
@@ -53,9 +53,9 @@ print(json.dumps({"articulation_root_added": robot_root_path}))
 ### Difference Between import_isaac_asset and add_isaac_reference
 
 `import_isaac_asset`:
-- Creates the prim and populates it in one step
+- Creates a new prim and references the asset in one step (an occupied target path gets a `_N` suffix)
 - Best for first-time placement
-- Handles URDF conversion internally
+- Corrects an authored metersPerUnit / upAxis mismatch with `unitsResolve` xform ops
 
 `add_isaac_reference`:
 - Attaches a USD file as a composition arc (reference) on an existing prim
@@ -105,7 +105,7 @@ result, prim_path = importer.import_robot_to_stage(urdf_path, output_dir + "my_r
 print(json.dumps({"success": result, "prim_path": prim_path}))
 ```
 
-After conversion, use `import_isaac_asset` with `asset_type: "usd"` on the generated USD file for subsequent imports.
+After conversion, use `import_isaac_asset` with the generated USD file as `asset_path`.
 
 ## Post-Import Checklist
 

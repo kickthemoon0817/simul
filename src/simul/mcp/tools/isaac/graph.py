@@ -3,11 +3,71 @@
 import textwrap
 from typing import Any, Dict, Optional
 
+from ...schemas.common import ErrorResponse
 from ._shared import (
     DEFAULT_MAX_RESULTS,
     _pyval,
 )
 from .._meta import tool_meta
+
+# A node type or attribute whose name contains this runs Python supplied as
+# data: omni.graph.scriptnode.ScriptNode executes its inputs:script (or the
+# file named by inputs:scriptPath) every time the graph evaluates. With
+# security.allow_script_execution off, such a node would be execute_isaac_script
+# by another name, so the graph tools refuse to create one or write to one.
+# The match is deliberately broad: refusing a harmless "script"-named node
+# costs one call, admitting a script node costs the setting.
+SCRIPT_CAPABLE_NODE_HINT = "script"
+
+# Extensions whose only purpose is running Python attached to the stage.
+# omni.graph.scriptnode is already enabled in Isaac Sim's own .kit, so the
+# node guard above is the one that matters; this keeps the refusal coherent.
+SCRIPT_EXTENSIONS: frozenset[str] = frozenset({"omni.graph.scriptnode", "omni.kit.scripting"})
+
+
+def is_script_capable_node_type(node_type: str) -> bool:
+    """Return True for an OmniGraph node type that can run Python given as data.
+
+    Args:
+        node_type: Node type ID, e.g. ``omni.graph.scriptnode.ScriptNode``.
+
+    Returns:
+        Whether creating or editing a node of this type amounts to running
+        agent-authored code.
+    """
+    return SCRIPT_CAPABLE_NODE_HINT in node_type.lower()
+
+
+def is_script_attribute(attribute_name: str) -> bool:
+    """Return True for a node attribute that carries code or a path to code.
+
+    Args:
+        attribute_name: Attribute name, e.g. ``inputs:script``.
+
+    Returns:
+        Whether writing this attribute can change the Python a node runs.
+    """
+    return SCRIPT_CAPABLE_NODE_HINT in attribute_name.lower()
+
+
+def _script_execution_refusal(message: str, **details: Any) -> Dict[str, Any]:
+    """Return the envelope for an operation that would run agent-authored Python.
+
+    Args:
+        message: What was refused.
+        **details: Structured context for the caller.
+
+    Returns:
+        An ErrorResponse dict with ``error_type`` ``ScriptExecutionDisabled``.
+    """
+    return ErrorResponse(
+        error=(
+            message + " Script execution is disabled by security.allow_script_execution; "
+            "set SECURITY__ALLOW_SCRIPT_EXECUTION=true to allow it."
+        ),
+        error_type="ScriptExecutionDisabled",
+        details=details or None,
+    ).model_dump()
 
 
 class OmniGraphMixin:
@@ -145,7 +205,10 @@ class OmniGraphMixin:
             "path, and node type ID. Use list_isaac_graph_node_types to discover available "
             "node types. Common types include omni.graph.nodes.OnPlaybackTick, "
             "omni.graph.nodes.ReadVariable, "
-            "isaacsim.core.nodes.IsaacArticulationController."
+            "isaacsim.core.nodes.IsaacArticulationController. With "
+            "security.allow_script_execution off, node types that run Python given as data "
+            "(any type with 'script' in its name, such as omni.graph.scriptnode.ScriptNode) "
+            "are refused."
         ),
         read_only=False,
     )
@@ -165,8 +228,15 @@ class OmniGraphMixin:
                        (e.g. "omni.graph.nodes.OnPlaybackTick").
 
         Returns:
-            Dict with created node path and type.
+            Dict with created node path and type, or a
+            ScriptExecutionDisabled error for a script-capable node type
+            while script execution is off.
         """
+        if not self.settings.security.allow_script_execution and is_script_capable_node_type(node_type):
+            return _script_execution_refusal(
+                f"Refusing to create {node_type!r}: a script node runs the Python in its inputs.",
+                node_type=node_type,
+            )
         _graph_path = _pyval(graph_path)
         _node_path = _pyval(node_path)
         _node_type = _pyval(node_type)
@@ -244,7 +314,10 @@ class OmniGraphMixin:
             "Set attribute values on an OmniGraph node. Pass a dict of attribute names to "
             "values. Attribute names should include the namespace prefix (e.g. "
             "'inputs:velocity', 'inputs:enabled'). Use get_isaac_graph_nodes to discover "
-            "attribute names first."
+            "attribute names first. Every attribute is attempted; the call fails "
+            "(success=false) when any of them failed, with the ones that were set under "
+            "'applied' and the failures under 'errors'. With security.allow_script_execution "
+            "off, script attributes and script-capable nodes are refused."
         ),
         read_only=False,
         destructive=True,
@@ -261,11 +334,24 @@ class OmniGraphMixin:
         Args:
             node_path: USD path to the node.
             values: Dict mapping attribute names to values
-                    (e.g. {{"inputs:velocity": 1.5, "inputs:enabled": true}}).
+                    (e.g. {"inputs:velocity": 1.5, "inputs:enabled": true}).
 
         Returns:
-            Dict with applied values.
+            Dict with ``applied`` and ``count``. When any attribute failed,
+            ``success`` is false, ``error`` names the failed attributes and
+            ``errors`` holds each one's message; the attributes in
+            ``applied`` were still set.
         """
+        if not values:
+            return ErrorResponse(error="values is empty; nothing to set", error_type="ValueError").model_dump()
+        guard = not self.settings.security.allow_script_execution
+        script_attributes = sorted(name for name in values if is_script_attribute(name))
+        if guard and script_attributes:
+            return _script_execution_refusal(
+                "Refusing to write " + ", ".join(script_attributes)
+                + ": a script attribute holds Python the node runs. Nothing was set.",
+                attributes=script_attributes,
+            )
         _node_path = _pyval(node_path)
         _values = _pyval(values)
         script = textwrap.dedent(f"""\
@@ -274,24 +360,40 @@ class OmniGraphMixin:
 
             node_path = {_node_path}
             values = {_values}
+            guard = {_pyval(guard)}
             applied = {{}}
             errors = {{}}
 
             try:
+                node = og.Controller.node(node_path)
+            except Exception:
+                node = None
+            if node is None or not node.is_valid():
+                print(json.dumps({{"error": "Node not found: " + node_path}}))
+            elif guard and {_pyval(SCRIPT_CAPABLE_NODE_HINT)} in node.get_type_name().lower():
+                print(json.dumps({{
+                    "error": "Refusing to edit " + node_path + ", a " + node.get_type_name()
+                             + " node, which runs Python given as data. Script execution is disabled "
+                             "by security.allow_script_execution; nothing was set.",
+                    "error_type": "ScriptExecutionDisabled",
+                    "node_type": node.get_type_name(),
+                }}))
+            else:
                 for attr_name, val in values.items():
                     try:
-                        og.Controller.set(
-                            og.Controller.attribute(attr_name, node_path),
-                            val
-                        )
+                        og.Controller.set(og.Controller.attribute(attr_name, node_path), val)
                         applied[attr_name] = val
                     except Exception as e:
                         errors[attr_name] = str(e)
-            except Exception as e:
-                print(json.dumps({{"error": str(e)}}))
-            else:
-                result = {{"applied": applied, "count": len(applied)}}
+                result = {{"node_path": node_path, "applied": applied, "count": len(applied)}}
                 if errors:
+                    # The envelope rule reads only error / *_error keys, so a
+                    # dict of per-attribute failures alone would read as success.
+                    result["success"] = False
+                    result["error"] = (
+                        "Failed to set " + str(len(errors)) + " of " + str(len(values))
+                        + " attribute(s): " + ", ".join(sorted(errors))
+                    )
                     result["errors"] = errors
                 print(json.dumps(result))
         """)
@@ -388,4 +490,3 @@ class OmniGraphMixin:
                     print(json.dumps({{"error": str(e)}}))
         """)
         return await self._execute_json_script(script)
-

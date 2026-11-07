@@ -7,6 +7,7 @@ from ._shared import (
     PROTECTED_CARB_SETTING_PREFIXES,
     _pyval,
 )
+from .graph import SCRIPT_EXTENSIONS, _script_execution_refusal
 from .._meta import tool_meta
 
 
@@ -109,7 +110,9 @@ class SystemMixin:
     @tool_meta(
         name="enable_isaac_extension",
         description=(
-            "Enable an extension immediately in the running Isaac Sim instance."
+            "Enable an extension immediately in the running Isaac Sim instance. With "
+            "security.allow_script_execution off, the extensions that run Python attached to "
+            "the stage (omni.graph.scriptnode, omni.kit.scripting) are refused."
         ),
         read_only=False,
         idempotent=True,
@@ -124,8 +127,16 @@ class SystemMixin:
                 (e.g. "omni.physx-107.3.7").
 
         Returns:
-            Dict with success status and extension info after enabling.
+            Dict with success status and extension info after enabling, or a
+            ScriptExecutionDisabled error for a script extension while
+            script execution is off.
         """
+        bare_name = extension_id.rsplit("-", 1)[0] if "-" in extension_id else extension_id
+        if not self.settings.security.allow_script_execution and bare_name in SCRIPT_EXTENSIONS:
+            return _script_execution_refusal(
+                f"Refusing to enable {extension_id!r}: it runs Python attached to the stage.",
+                extension_id=extension_id,
+            )
         _ext_id = _pyval(extension_id)
         script = textwrap.dedent(f"""\
             import json
@@ -278,4 +289,3 @@ class SystemMixin:
             print(json.dumps({{"applied": applied, "count": len(applied)}}))
         """)
         return await self._execute_json_script(script)
-

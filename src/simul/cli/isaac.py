@@ -1453,11 +1453,19 @@ def open_stage(
 @app.command("save-stage")
 def save_stage(
     file_path: Optional[str] = typer.Argument(None, help="Path to save USD file (omit for in-place save)"),
+    overwrite: bool = typer.Option(
+        False, "--overwrite", help="Replace an existing file at FILE_PATH (required for URL targets)"
+    ),
+    allow_while_playing: bool = typer.Option(
+        False, "--allow-while-playing", help="Save even while the simulation is playing or paused"
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
     """Save the current stage to a USD file."""
-    result = _run(_tools(host, port).save_isaac_stage(file_path=file_path))
+    result = _run(_tools(host, port).save_isaac_stage(
+        file_path=file_path, overwrite=overwrite, allow_while_playing=allow_while_playing
+    ))
     if is_json_mode():
         emit(result)
         return

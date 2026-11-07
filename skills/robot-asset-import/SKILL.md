@@ -6,12 +6,12 @@ version: 0.1.0
 
 # Robot and Asset Import
 
-This skill teaches you how to bring external 3D assets — robots, environments, props — into a live Isaac Sim 5.1.0 scene. Supported formats are USD and URDF. Assets can come from local disk, Nucleus server, or the Isaac Sim built-in asset library.
+This skill teaches you how to bring external 3D assets — robots, environments, props — into a live Isaac Sim scene. The import tools reference USD layers (`.usd`, `.usda`, `.usdc`, `.usdz`); convert URDF, OBJ, FBX and glTF to USD first (URDF: `references/urdf-usd-workflow.md`). Assets can come from local disk, Nucleus server, or the Isaac Sim built-in asset library.
 
 ## Tool Chain Overview
 
 ```
-import_isaac_asset            (USD or URDF from file path)
+import_isaac_asset            (USD from a file path or URL, onto a new prim)
     OR
 add_isaac_reference           (attach USD as a reference on an existing prim)
 
@@ -29,18 +29,17 @@ Use `import_isaac_asset` when you have a file path (local or Nucleus) and want t
 
 ```
 mcp__simul__import_isaac_asset
-  file_path: "/home/user/assets/franka.usd"
-  prim_path: "/World/Robot"
-  asset_type: "usd"
+  asset_path: "/home/user/assets/franka.usd"
+  target_path: "/World/Robot"
 ```
 
-For URDF files:
-```
-mcp__simul__import_isaac_asset
-  file_path: "/home/user/robots/my_robot.urdf"
-  prim_path: "/World/MyRobot"
-  asset_type: "urdf"
-```
+What the result tells you:
+
+- `target_path` is where the asset landed. An import never merges into an existing prim: when `/World/Robot` is taken it goes to `/World/Robot_1` (`renamed: true`).
+- `referenced_prim` is the asset prim that was referenced: its defaultPrim, or its first root prim when it has none (with a `warning`). Pass `asset_prim_path` to pick another. A reference that composes nothing fails and leaves nothing behind.
+- `units` compares the asset's metersPerUnit and upAxis with the stage's. When the asset authors different ones, the import adds `xformOp:scale:unitsResolve` / `xformOp:rotateX:unitsResolve` to the new prim (`correct_units: false` only reports it). An asset that does not author its units is not guessed at.
+
+For URDF files, convert to USD first (`references/urdf-usd-workflow.md`), then import the USD.
 
 **Asset path formats:**
 
@@ -122,25 +121,24 @@ Returns joint names, types (revolute/prismatic/fixed), limits, and current posit
 ### Franka Panda from Nucleus
 ```
 mcp__simul__import_isaac_asset
-  file_path: "omniverse://localhost/NVIDIA/Assets/Isaac/4.2/Isaac/Robots/Franka/franka.usd"
-  prim_path: "/World/Franka"
-  asset_type: "usd"
+  asset_path: "omniverse://localhost/NVIDIA/Assets/Isaac/4.2/Isaac/Robots/Franka/franka.usd"
+  target_path: "/World/Franka"
 ```
 
 ### Warehouse Environment
 ```
 mcp__simul__import_isaac_asset
-  file_path: "omniverse://localhost/NVIDIA/Assets/Isaac/4.2/Isaac/Environments/Simple_Warehouse/warehouse.usd"
-  prim_path: "/World/Environment"
-  asset_type: "usd"
+  asset_path: "omniverse://localhost/NVIDIA/Assets/Isaac/4.2/Isaac/Environments/Simple_Warehouse/warehouse.usd"
+  target_path: "/World/Environment"
 ```
 
 ### Local URDF Robot
+
+Convert it to USD (`references/urdf-usd-workflow.md`), then:
 ```
 mcp__simul__import_isaac_asset
-  file_path: "/home/user/my_robot/urdf/my_robot.urdf"
-  prim_path: "/World/MyRobot"
-  asset_type: "urdf"
+  asset_path: "/home/user/my_robot/usd/my_robot.usd"
+  target_path: "/World/MyRobot"
 ```
 
 Then position it above the ground plane:
@@ -156,7 +154,7 @@ mcp__simul__set_isaac_prim_transform
 
 | User Intent | Tool to Use |
 |---|---|
-| "Import robot from file" | `import_isaac_asset` with `asset_type: "usd"` or `"urdf"` |
+| "Import robot from file" | `import_isaac_asset` with a USD `asset_path` (convert URDF first) |
 | "Add Nucleus asset" | `import_isaac_asset` with Nucleus path |
 | "Attach USD as reference" | `add_isaac_reference` |
 | "Did the import work?" | `get_isaac_prim_detail` with `aspects=["info"]` |
@@ -166,8 +164,8 @@ mcp__simul__set_isaac_prim_transform
 
 ## Common Pitfalls
 
-- **Prim path already exists**: If the prim path is occupied, `import_isaac_asset` may overwrite or fail. Check with `get_isaac_prim_detail` with `aspects=["info"]` first and use a unique path.
+- **Prim path already exists**: `import_isaac_asset` never merges into an occupied prim; it imports to the first free `<target_path>_N` and reports the path it used. Read `target_path` from the result before addressing the asset.
 - **Nucleus server not running**: Nucleus paths (`omniverse://localhost/...`) require the Nucleus service to be active. Local file paths (`/home/...`) work without Nucleus.
-- **URDF scale mismatch**: URDF robots that appear oversized likely need `scale: [0.01, 0.01, 0.01]`.
+- **Scale or up-axis mismatch**: check `units` in the import result. A USD asset that authors centimetres or Y-up is corrected automatically; one that authors nothing is left as is. If it still appears 100x too large, its file is in centimetres without saying so: scale the prim by 0.01 with `set_isaac_prim_transform`.
 - **No articulation joints found**: The URDF import may not have created an ArticulationRoot automatically. See `references/urdf-usd-workflow.md` for the script to add one.
 - **Checking the wrong prim**: `get_isaac_prim_detail` with `aspects=["joint"]` on a non-root prim may return incomplete results. Use the root prim path returned by `get_isaac_subtree`.
