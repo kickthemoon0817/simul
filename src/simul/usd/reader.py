@@ -117,9 +117,10 @@ def animation_range(stage: Usd.Stage) -> Dict[str, Any]:
     applied).
 
     Returns:
-        ``has_animation``, ``authored_time_range`` (the root layer sets a
-        start/end) and ``time_sample_range`` (``[first, last]`` sample time,
-        or None when nothing is sampled).
+        ``has_animation`` (an authored range or samples spanning more than one
+        time), ``authored_time_range`` (the root layer sets a start/end) and
+        ``time_sample_range`` (``[first, last]`` sample time, or None when
+        nothing is sampled).
     """
     authored = bool(stage.HasAuthoredTimeCodeRange())
     first: Optional[float] = None
@@ -132,8 +133,10 @@ def animation_range(stage: Usd.Stage) -> Dict[str, Any]:
             last = high if last is None else max(last, high)
     sampled = [float(first), float(last)] if first is not None else None
     ranged = authored and stage.GetEndTimeCode() > stage.GetStartTimeCode()
+    # Samples at a single time are a pose, not motion: they need a span.
+    moving = sampled is not None and sampled[1] > sampled[0]
     return {
-        "has_animation": ranged or sampled is not None,
+        "has_animation": ranged or moving,
         "authored_time_range": authored,
         "time_sample_range": sampled,
     }

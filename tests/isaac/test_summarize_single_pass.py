@@ -96,7 +96,8 @@ def _reference_passes(summarizer: SceneSummarizer, stage: Usd.Stage) -> Dict[str
     stats = {
         'total_meshes': 0, 'total_vertices': 0, 'total_faces': 0,
         'meshes_with_normals': 0, 'meshes_with_uvs': 0, 'meshes_with_colors': 0,
-        'closed_meshes': 0, 'invalid_topology_meshes': 0, 'instanced_meshes': 0,
+        'closed_meshes': 0, 'invalid_topology_meshes': 0, 'meshes_measured_at_first_sample': 0,
+        'instanced_meshes': 0,
         'total_surface_area': 0.0, 'total_volume': 0.0,
     }
     for prim in stage.Traverse():

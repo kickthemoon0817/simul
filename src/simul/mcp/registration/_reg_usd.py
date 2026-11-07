@@ -80,7 +80,8 @@ def _loaded_stage(session: "HeadlessUSDSession", stage_id: str) -> Any:
     if stage is None:
         raise USDLookupError(
             f"Stage not loaded: {stage_id!r}. Load the file with load_usd_file "
-            "and pass the stage_id it returns."
+            "and pass the stage_id it returns.",
+            stage_id=stage_id,
         )
     return stage
 
@@ -621,6 +622,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                         f"{prim.GetTypeName() or 'typeless prim'}, not a Mesh"
                     ),
                     error_type="NotFoundError",
+                    details={"prim_path": input_data.prim_path, "prim_type": prim.GetTypeName()},
                 ).model_dump()
             info = MeshOperations().get_mesh_statistics(prim, input_data.time_code)
             return MeshInfo(**mesh_info_to_dict(info)).model_dump()
@@ -965,12 +967,15 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "Summarise a USD stage in one call: prim counts by type (instance "
             "proxies included; '(typeless)' for prims without a type), the scene "
             "bounds and size in stage units and in metres, mesh totals (vertices, "
-            "faces, normals, UVs, closed meshes, surface area, volume; instanced "
-            "meshes counted per instance), materials, root prims, and animation: "
-            "detected from time samples even without an authored time range, with "
-            "its duration in seconds. warnings flags layers whose upAxis or "
-            "metersPerUnit differs from the stage's (USD does not rescale them). "
-            "format text adds a short digest."
+            "faces, normals, UVs, closed meshes; surface area and volume summed in "
+            "each mesh's own space, before transforms; instanced meshes counted per "
+            "instance; a deforming mesh with time-sampled points measured at its "
+            "first sample), materials, root prims, and animation: detected from "
+            "time samples spanning more than one time even without an authored "
+            "time range, with its duration in seconds. warnings groups the layers "
+            "whose upAxis or metersPerUnit differs from the stage's (USD does not "
+            "rescale them), with a count and example layers per group. format "
+            "text adds a short digest."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False

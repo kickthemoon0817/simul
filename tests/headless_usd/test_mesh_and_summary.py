@@ -12,6 +12,7 @@ keyed typeless prims as "".
 from __future__ import annotations
 
 import itertools
+import json
 import math
 import random
 import time
@@ -128,6 +129,30 @@ class TestMeshInfo:
         assert len(subset["indices"]) == 16
         assert subset["indices_truncated"] is True
 
+    def test_deforming_mesh_is_not_measured_rather_than_invalid(self, usd_tools, mesh_stage: str) -> None:
+        """Point-cached points have no value at the default time; that is not bad topology."""
+        info = _mesh_info(usd_tools, mesh_stage, "/World/Deforming")
+
+        assert info["measured"] is False
+        assert info["topology_valid"] is None
+        assert info["is_closed"] is None
+        assert info["surface_area"] is None
+        assert info["sampled_time_range"] == [0.0, 100.0]
+        assert "time_code" in info["note"]
+
+    def test_hole_faces_are_open_and_add_no_area(self, usd_tools, tmp_path: Path) -> None:
+        stage = Usd.Stage.CreateNew(str(tmp_path / "hole.usda"))
+        cube = _mesh(stage, "/Cube", CUBE_POINTS, CUBE_FACES)
+        cube.GetHoleIndicesAttr().Set([0])
+        stage.GetRootLayer().Save()
+        stage_id = usd_tools.load(tmp_path / "hole.usda")
+
+        info = _mesh_info(usd_tools, stage_id, "/Cube")
+
+        assert info["is_closed"] is False
+        assert info["surface_area"] == pytest.approx(20.0)
+        assert info["volume"] is None
+
     def test_non_mesh_is_named(self, usd_tools, mesh_stage: str) -> None:
         payload = usd_tools.call("get_mesh_info", stage_id=mesh_stage, prim_path="/World/NotAMesh")
 
@@ -161,7 +186,7 @@ class TestMeshInfo:
 
 
 def _brute_force(points, counts, indices) -> Tuple[bool, float, float]:
-    """The per-face reference: closedness, fan-triangle area and signed-volume sum."""
+    """The per-face reference: closedness, Newell area and fan signed-volume sum."""
     edges = {}
     area = volume = 0.0
     offset = 0
@@ -169,14 +194,16 @@ def _brute_force(points, counts, indices) -> Tuple[bool, float, float]:
     for count in counts:
         face = indices[offset:offset + count]
         offset += count
+        vector = np.zeros(3)
         for i, a in enumerate(face):
             b = face[(i + 1) % count]
+            vector += np.cross(pts[a], pts[b])
             if a != b:
                 key = (min(a, b), max(a, b))
                 edges[key] = edges.get(key, 0) + 1
+        area += 0.5 * np.linalg.norm(vector)
         for i in range(1, count - 1):
             v0, v1, v2 = pts[face[0]], pts[face[i]], pts[face[i + 1]]
-            area += 0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0))
             volume += np.dot(v0, np.cross(v1, v2)) / 6.0
     closed = bool(edges) and all(uses == 2 for uses in edges.values())
     return closed, area, abs(volume)
@@ -208,6 +235,12 @@ def _arrays(points, counts, indices):
         np.asarray(counts, dtype=np.int32),
         np.asarray(indices, dtype=np.int32),
     )
+
+
+def _holed_arrays(points, counts, indices, holes):
+    arrays = _arrays(points, counts, indices)
+    arrays.holes = np.asarray(holes, dtype=np.int64)
+    return arrays
 
 
 class TestVectorisedGeometry:
@@ -243,6 +276,33 @@ class TestVectorisedGeometry:
         assert stats[0].surface_area is None and stats[0].bbox is not None
         assert stats[1].volume == pytest.approx(8.0)
         assert stats[3].bbox is None and stats[3].surface_area == 0.0 and stats[3].is_closed is False
+
+    def test_concave_polygon_area_is_exact(self) -> None:
+        """An L-shaped hexagon has area 3; summing its fan triangles' magnitudes gives 4."""
+        l_shape = [(0, 0, 0), (2, 0, 0), (2, 1, 0), (1, 1, 0), (1, 2, 0), (0, 2, 0)]
+        regular = [(math.cos(k * math.pi / 3), math.sin(k * math.pi / 3), 0) for k in range(6)]
+
+        stats = geometry_statistics([_arrays(l_shape, [6], list(range(6))), _arrays(regular, [6], list(range(6)))])
+        alone = geometry_statistics([_arrays(l_shape, [6], list(range(6)))])[0]
+
+        assert stats[0].surface_area == pytest.approx(3.0)
+        assert alone.surface_area == pytest.approx(3.0)
+        assert stats[1].surface_area == pytest.approx(3 * math.sqrt(3) / 2)
+
+    def test_hole_faces_are_left_out(self) -> None:
+        cube = [i for face in CUBE_FACES for i in face]
+        holed = _holed_arrays(CUBE_POINTS, [4] * 6, cube, [0])
+
+        alone = geometry_statistics([holed])[0]
+        batch = geometry_statistics([holed, _arrays(CUBE_POINTS, [4] * 6, cube)])
+        bad = geometry_statistics([_holed_arrays(CUBE_POINTS, [4] * 6, cube, [6])])[0]
+
+        assert alone.is_closed is False and batch[0].is_closed is False
+        assert alone.surface_area == pytest.approx(20.0)
+        assert batch[0].surface_area == pytest.approx(20.0)
+        assert alone.volume is None
+        assert batch[1].is_closed is True and batch[1].surface_area == pytest.approx(24.0)
+        assert bad.topology_valid is False
 
     def test_volume_far_from_the_origin(self) -> None:
         shifted = [(x + 1e5, y + 1e5, z + 1e5) for x, y, z in CUBE_POINTS]
@@ -330,7 +390,8 @@ class TestSummary:
         codes = sorted(warning["code"] for warning in warnings)
         assert codes == ["MetersPerUnitMismatch", "UpAxisMismatch"]
         mpu = next(w for w in warnings if w["code"] == "MetersPerUnitMismatch")
-        assert mpu["layer"].endswith("asset.usda")
+        assert mpu["layer_count"] == 1
+        assert mpu["layers"][0].endswith("asset.usda")
         assert "100x smaller" in mpu["message"]
         assert "Warning: asset.usda authors metersPerUnit 1" in summary["digest"]
 
@@ -368,6 +429,73 @@ class TestSummary:
 
         assert animation["source"] == "authored_range"
         assert animation["duration_seconds"] == pytest.approx(2.0)
+
+    def test_a_single_sample_is_not_animation(self, usd_tools, tmp_path: Path) -> None:
+        stage = Usd.Stage.CreateNew(str(tmp_path / "pose.usda"))
+        UsdGeom.Xform.Define(stage, "/World").AddTranslateOp().Set(Gf.Vec3d(1, 0, 0), 1)
+        stage.GetRootLayer().Save()
+        loaded = usd_tools.call("load_usd_file", file_path=str(tmp_path / "pose.usda"))
+
+        summary = usd_tools.call("summarize_scene", stage_id=loaded["stage_id"], format="text")
+
+        assert loaded["has_animation"] is False
+        assert summary["summary"]["animation_info"]["has_animation"] is False
+        assert summary["summary"]["animation_info"]["time_sample_range"] == [1.0, 1.0]
+        assert "Animation" not in summary["digest"]
+
+    def test_deforming_meshes_are_measured_at_their_first_sample(self, usd_tools, tmp_path: Path) -> None:
+        stage = Usd.Stage.CreateNew(str(tmp_path / "cloth.usda"))
+        for index in range(3):
+            cloth = UsdGeom.Mesh.Define(stage, f"/Cloth_{index}")
+            cloth.GetFaceVertexCountsAttr().Set([4])
+            cloth.GetFaceVertexIndicesAttr().Set([0, 1, 2, 3])
+            square = [Gf.Vec3f(0, 0, 0), Gf.Vec3f(1, 0, 0), Gf.Vec3f(1, 1, 0), Gf.Vec3f(0, 1, 0)]
+            cloth.GetPointsAttr().Set(square, 1)
+            cloth.GetPointsAttr().Set([p * 2 for p in square], 48)
+        stage.GetRootLayer().Save()
+        stage_id = usd_tools.load(tmp_path / "cloth.usda")
+
+        summary = usd_tools.call("summarize_scene", stage_id=stage_id, format="text")
+        meshes = summary["summary"]["mesh_statistics"]
+
+        assert meshes["invalid_topology_meshes"] == 0
+        assert meshes["meshes_measured_at_first_sample"] == 3
+        assert meshes["total_vertices"] == 12
+        assert meshes["total_surface_area"] == pytest.approx(3.0)
+        assert "3 deforming, measured at their first time sample" in summary["digest"]
+
+    def test_many_mismatched_layers_make_one_warning_per_group(self, usd_tools, tmp_path: Path) -> None:
+        """2000 metre assets in a centimetre stage used to cost a warning (and digest line) each."""
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        stage = Usd.Stage.CreateNew(str(tmp_path / "many.usda"))
+        UsdGeom.SetStageMetersPerUnit(stage, 0.01)
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
+        UsdGeom.Xform.Define(stage, "/World")
+        for index in range(300):
+            layer = Sdf.Layer.CreateNew(str(assets / f"a{index:03d}.usda"))
+            layer.pseudoRoot.SetInfo("metersPerUnit", 1.0)
+            layer.pseudoRoot.SetInfo("upAxis", "Z")
+            spec = Sdf.CreatePrimInLayer(layer, "/A")
+            spec.specifier = Sdf.SpecifierDef
+            layer.defaultPrim = "A"
+            layer.Save()
+            stage.DefinePrim(f"/World/R{index}").GetReferences().AddReference(f"./assets/a{index:03d}.usda")
+        stage.GetRootLayer().Save()
+        stage_id = usd_tools.load(tmp_path / "many.usda")
+
+        for fmt in ("json", "text"):
+            text = usd_tools.text("summarize_scene", {"stage_id": stage_id, "format": fmt})
+            payload = json.loads(text)
+            warnings = payload["summary"]["warnings"]
+
+            assert len(text) < 20_000, (fmt, len(text))
+            assert "truncated" not in payload and "oversized_bytes" not in payload
+            assert [w["code"] for w in warnings] == ["MetersPerUnitMismatch", "UpAxisMismatch"]
+            assert all(w["layer_count"] == 300 and len(w["layers"]) == 5 for w in warnings)
+            assert "300 layers (a000.usda, a001.usda" in warnings[0]["message"]
+            assert "and 295 more" in warnings[0]["message"]
+        assert payload["digest"].count("Warning:") == 2
 
     def test_still_stage_has_no_animation(self, usd_tools, tmp_path: Path) -> None:
         stage = Usd.Stage.CreateNew(str(tmp_path / "still.usda"))

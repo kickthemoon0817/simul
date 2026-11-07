@@ -34,6 +34,7 @@ from .mesh_ops import (
     geometry_statistics,
     mesh_attributes,
     read_mesh_arrays,
+    unsampled_topology,
 )
 from .reader import USDReader, USDStageInfo
 from .search import iter_prims
@@ -48,6 +49,10 @@ _BATCH_INDICES = 4_000_000
 
 # How many root prim paths a summary lists (the count is exact).
 _LISTED_PATHS = 50
+
+# Unit warnings: example layers per group, and groups listed.
+_EXAMPLE_LAYERS = 5
+_MAX_WARNING_GROUPS = 10
 
 
 @dataclass
@@ -103,6 +108,11 @@ class SceneSummary:
     warnings: List[Dict[str, Any]] = field(default_factory=list)
 
 
+def _layer_list(names: List[str], total: int) -> str:
+    shown = ", ".join(names)
+    return shown if total <= len(names) else f"{shown} and {total - len(names)} more"
+
+
 def unit_warnings(stage: Usd.Stage) -> List[Dict[str, Any]]:
     """Warn about layers whose authored ``upAxis`` or ``metersPerUnit`` differs from the stage's.
 
@@ -110,12 +120,26 @@ def unit_warnings(stage: Usd.Stage) -> List[Dict[str, Any]]:
     sublayer authored in other units keeps its numbers, so a robot modelled in
     metres inside a centimetre stage is a hundred times too small, and a
     Z-up asset in a Y-up stage lies on its side.
+
+    Layers are grouped by mismatch and value: a stage referencing two
+    thousand metre assets gets one warning with ``layer_count`` 2000 and a
+    few example ``layers``, not two thousand, so the summary stays small.
+    At most ``_MAX_WARNING_GROUPS`` groups are listed; a final
+    ``MoreUnitMismatches`` entry counts the rest.
     """
     stage_up = str(UsdGeom.GetStageUpAxis(stage))
     stage_mpu = float(UsdGeom.GetStageMetersPerUnit(stage))
     session = stage.GetSessionLayer()
     skip = {stage.GetRootLayer().identifier, session.identifier if session else None}
-    warnings: List[Dict[str, Any]] = []
+    groups: Dict[Tuple[str, Any], Dict[str, Any]] = {}
+
+    def note(code: str, value: Any, layer: Any) -> None:
+        group = groups.setdefault((code, value), {"count": 0, "layers": [], "names": []})
+        group["count"] += 1
+        if len(group["layers"]) < _EXAMPLE_LAYERS:
+            group["layers"].append(layer.identifier)
+            group["names"].append(layer.GetDisplayName())
+
     for layer in sorted(stage.GetUsedLayers(), key=lambda used: used.identifier):
         if layer.identifier in skip:
             continue
@@ -123,31 +147,49 @@ def unit_warnings(stage: Usd.Stage) -> List[Dict[str, Any]]:
         if info.HasInfo("metersPerUnit"):
             layer_mpu = float(info.GetInfo("metersPerUnit"))
             if not math.isclose(layer_mpu, stage_mpu, rel_tol=1e-9):
-                factor = layer_mpu / stage_mpu
-                look = f"{factor:g}x smaller" if factor > 1 else f"{1 / factor:g}x larger"
-                warnings.append({
-                    "code": "MetersPerUnitMismatch",
-                    "layer": layer.identifier,
-                    "layer_value": layer_mpu,
-                    "stage_value": stage_mpu,
-                    "message": (
-                        f"{layer.GetDisplayName()} authors metersPerUnit {layer_mpu:g} but the stage uses "
-                        f"{stage_mpu:g}; USD does not rescale it, so its geometry appears {look} than modelled."
-                    ),
-                })
+                note("MetersPerUnitMismatch", layer_mpu, layer)
         if info.HasInfo("upAxis"):
             layer_up = str(info.GetInfo("upAxis"))
             if layer_up != stage_up:
-                warnings.append({
-                    "code": "UpAxisMismatch",
-                    "layer": layer.identifier,
-                    "layer_value": layer_up,
-                    "stage_value": stage_up,
-                    "message": (
-                        f"{layer.GetDisplayName()} is {layer_up}-up but the stage is {stage_up}-up; "
-                        "USD does not reorient it."
-                    ),
-                })
+                note("UpAxisMismatch", layer_up, layer)
+
+    warnings: List[Dict[str, Any]] = []
+    for (code, value), group in groups.items():
+        count = group["count"]
+        names = _layer_list(group["names"], count)
+        subject = names if count == 1 else f"{count} layers ({names})"
+        if code == "MetersPerUnitMismatch":
+            factor = value / stage_mpu
+            look = f"{factor:g}x smaller" if factor > 1 else f"{1 / factor:g}x larger"
+            message = (
+                f"{subject} {'authors' if count == 1 else 'author'} metersPerUnit {value:g} but the stage "
+                f"uses {stage_mpu:g}; USD does not rescale {'it' if count == 1 else 'them'}, so the "
+                f"geometry appears {look} than modelled."
+            )
+            stage_value: Any = stage_mpu
+        else:
+            message = (
+                f"{subject} {'is' if count == 1 else 'are'} {value}-up but the stage is {stage_up}-up; "
+                f"USD does not reorient {'it' if count == 1 else 'them'}."
+            )
+            stage_value = stage_up
+        warnings.append({
+            "code": code,
+            "layer_value": value,
+            "stage_value": stage_value,
+            "layer_count": count,
+            "layers": group["layers"],
+            "message": message,
+        })
+    if len(warnings) > _MAX_WARNING_GROUPS:
+        rest = warnings[_MAX_WARNING_GROUPS:]
+        warnings = warnings[:_MAX_WARNING_GROUPS]
+        warnings.append({
+            "code": "MoreUnitMismatches",
+            "group_count": len(rest),
+            "layer_count": sum(entry["layer_count"] for entry in rest),
+            "message": f"{len(rest)} more groups of layers disagree with the stage's units or up axis.",
+        })
     return warnings
 
 
@@ -309,6 +351,7 @@ class SceneSummarizer(LoggerMixin):
             'meshes_with_colors': 0,
             'closed_meshes': 0,
             'invalid_topology_meshes': 0,
+            'meshes_measured_at_first_sample': 0,
             'instanced_meshes': 0,
             'total_surface_area': 0.0,
             'total_volume': 0.0
@@ -398,7 +441,15 @@ class SceneSummarizer(LoggerMixin):
             batch.clear()
 
         for prim, uses in meshes:
-            arrays = read_mesh_arrays(UsdGeom.Mesh(prim))
+            mesh = UsdGeom.Mesh(prim)
+            arrays = read_mesh_arrays(mesh)
+            if not (len(arrays.points) and len(arrays.counts) and len(arrays.indices)):
+                # A deforming mesh may have points only as time samples; at the
+                # default time it has none, which is not invalid topology.
+                unsampled = unsampled_topology(mesh)
+                if unsampled:
+                    arrays = read_mesh_arrays(mesh, min(span[0] for span in unsampled.values()))
+                    stats['meshes_measured_at_first_sample'] += uses
             batch.append((prim, uses, arrays))
             batch_indices += len(arrays.indices)
             if batch_indices >= _BATCH_INDICES:
@@ -421,7 +472,7 @@ class SceneSummarizer(LoggerMixin):
         source: Optional[str] = None
         if stage_info.authored_time_range and stage_info.end_time_code > stage_info.start_time_code:
             first, last, source = stage_info.start_time_code, stage_info.end_time_code, "authored_range"
-        elif stage_info.time_sample_range is not None:
+        elif stage_info.time_sample_range is not None and stage_info.has_animation:
             first, last = stage_info.time_sample_range
             source = "time_samples"
         span = (last - first) if first is not None and last is not None else 0.0
@@ -505,9 +556,13 @@ def generate_scene_digest(summary: SceneSummary) -> str:
 
     if summary.mesh_statistics and summary.mesh_statistics.get('total_meshes', 0) > 0:
         mesh_stats = summary.mesh_statistics
-        digest_parts.append(f"Meshes: {mesh_stats['total_meshes']} total, "
-                            f"{mesh_stats['total_vertices']} vertices, "
-                            f"{mesh_stats['total_faces']} faces")
+        line = (f"Meshes: {mesh_stats['total_meshes']} total, "
+                f"{mesh_stats['total_vertices']} vertices, "
+                f"{mesh_stats['total_faces']} faces")
+        if mesh_stats.get('meshes_measured_at_first_sample'):
+            line += (f" ({mesh_stats['meshes_measured_at_first_sample']} deforming, "
+                     "measured at their first time sample)")
+        digest_parts.append(line)
 
     if summary.materials:
         digest_parts.append(f"Materials: {len(summary.materials)}")

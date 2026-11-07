@@ -271,8 +271,12 @@ class MeshInfo(BaseModel):
     has_colors: bool = Field(..., description="Whether mesh has vertex colors")
     has_tangents: bool = Field(..., description="Whether mesh has tangents")
     subdivision_scheme: str = Field(..., description="Subdivision scheme")
-    topology_valid: bool = Field(..., description="Whether topology is valid")
-    is_closed: bool = Field(..., description="Whether mesh is watertight")
+    topology_valid: Optional[bool] = Field(
+        ..., description="Whether topology is valid; None when the mesh was not measured"
+    )
+    is_closed: Optional[bool] = Field(
+        ..., description="Whether mesh is watertight; None when the mesh was not measured"
+    )
     surface_area: Optional[float] = Field(
         ..., description="Surface area in the mesh's own space (before transforms); None for invalid topology"
     )
@@ -296,6 +300,17 @@ class MeshInfo(BaseModel):
         ),
     )
     points_time_samples: int = Field(0, description="Time samples on points (deforming mesh)")
+    measured: bool = Field(
+        True,
+        description=(
+            "False when points or topology exist only as time samples and none "
+            "applies at time_code; pass a time_code in sampled_time_range"
+        ),
+    )
+    sampled_time_range: Optional[List[float]] = Field(
+        None, description="[first, last] sample time of an unmeasured mesh's topology"
+    )
+    note: Optional[str] = Field(None, description="Why the mesh was not measured")
     time_code: Optional[float] = Field(
         None, description="Time code read; None for the default time"
     )
