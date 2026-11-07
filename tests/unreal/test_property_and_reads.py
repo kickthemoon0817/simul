@@ -642,4 +642,5 @@ async def test_list_actors_defaults_to_max_actors() -> None:
         await session.list_actors()
         await session.list_actors(max_results=9)
 
-    assert "if len(actors) == 7:" in scripts[0] and "if len(actors) == 9:" in scripts[1]
+    # The page size the paged listing script receives in its args.
+    assert "'max_results': 7," in scripts[0] and "'max_results': 9," in scripts[1]

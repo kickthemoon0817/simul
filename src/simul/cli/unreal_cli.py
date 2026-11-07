@@ -380,36 +380,37 @@ def list_actors(
     actor_class: Optional[str] = typer.Option(None, "--class", "-c", help="Filter by actor class"),
     tag: Optional[str] = typer.Option(None, "--tag", help="Filter by actor tag"),
     limit: Optional[int] = typer.Option(
-        None, "--limit", "-n", help="Max actors to return (default: unreal.max_actors, 200)"
+        None, "--limit", "-n", help="Max actors in the page (default: unreal.max_actors, 200)"
     ),
+    offset: int = typer.Option(0, "--offset", help="Matching actors to skip (the previous page's next_offset)"),
+    label: Optional[str] = typer.Option(None, "--label", help="Keep actors whose label contains this text"),
+    subclasses: bool = typer.Option(False, "--subclasses", help="Also match classes derived from --class"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """List actors in the current level."""
+    """List actors in the current level, one page at a time."""
     session = _session(host, port)
     result = _run(session.list_actors(
         class_filter=actor_class,
         tag_filter=tag,
         max_results=limit,
+        offset=offset,
+        label_filter=label,
+        include_subclasses=subclasses,
     ), session)
     if is_json_mode():
         emit(result)
         return
     actors = result.get("actors", [])
-    table = Table(title=f"Actors ({len(actors)})")
+    table = Table(title=f"Actors ({len(actors)} of {result.get('total', len(actors))} from {offset})")
     table.add_column("Path", style="cyan")
     table.add_column("Class")
     table.add_column("Label")
     for a in actors:
-        if isinstance(a, dict):
-            table.add_row(
-                a.get("path", "?"),
-                a.get("class", "?"),
-                a.get("label", ""),
-            )
-        else:
-            table.add_row(str(a), "", "")
+        table.add_row(a.get("path", "?"), a.get("class_name", "?"), a.get("name", ""))
     console.print(table)
+    if result.get("hint"):
+        console.print(result["hint"])
 
 
 # ---------------------------------------------------------------------------
@@ -789,14 +790,24 @@ def list_materials(
 def scene_graph(
     root: Optional[str] = typer.Option(None, "--root", "-r", help="Root actor path"),
     depth: int = typer.Option(3, "--depth", "-d", help="Max traversal depth"),
+    components: bool = typer.Option(False, "--components", help="Include each actor's components"),
+    actor_class: Optional[str] = typer.Option(None, "--class", "-c", help="Keep actors of this class"),
+    subclasses: bool = typer.Option(False, "--subclasses", help="Also match classes derived from --class"),
+    offset: int = typer.Option(0, "--offset", help="Root children to skip (the previous page's next_offset)"),
+    limit: int = typer.Option(100, "--limit", "-n", help="Max root children in the page"),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
-    """Query the Unreal scene graph hierarchy."""
+    """Read the level's attachment hierarchy, one page of the root's children at a time."""
     session = _session(host, port)
     result = _run(session.query_scene_graph(
         root_path=root,
         max_depth=depth,
+        include_components=components,
+        class_filter=actor_class,
+        include_subclasses=subclasses,
+        offset=offset,
+        max_results=limit,
     ), session)
     if is_json_mode():
         emit(result)

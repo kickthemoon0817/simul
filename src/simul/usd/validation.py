@@ -31,10 +31,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set, Tuple
 
+from pxr import Ar
+
+from ..utils.paths import PathPolicy
 from ._pxr import Sdf, Tf, Usd, UsdGeom
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..config import USDConfig
+    from .sandbox import CompositionSandbox
 
 ERROR = "error"
 WARNING = "warning"
@@ -110,7 +114,7 @@ class USDLoadError(Exception):
     ``details.reason`` set to one of ``FileNotFound``, ``NotAFile``,
     ``UnsupportedExtension``, ``PermissionDenied``, ``Unreadable``,
     ``EmptyFile``, ``FileTooLarge``, ``ParseError``, ``CorruptFile``,
-    ``UnknownFormat`` or ``OpenFailed``.
+    ``UnknownFormat``, ``UnsupportedURL`` or ``OpenFailed``.
     """
 
     error_type = "LoadError"
@@ -236,6 +240,45 @@ def check_usd_file(file_path: str, usd_config: "USDConfig") -> FileFacts:
     return FileFacts(size=info.st_size, head=head)
 
 
+def url_scheme(path: str) -> Optional[str]:
+    """The lower-cased scheme of a URL other than ``file://``, or None for a local path."""
+    scheme = PathPolicy.url_scheme(path)
+    return None if scheme in (None, "file") else scheme
+
+
+def resolver_uri_schemes() -> Set[str]:
+    """URI schemes an installed asset resolver handles; usd-core registers none."""
+    try:
+        return {scheme.lower() for scheme in Ar.GetRegisteredURISchemes()}
+    except Exception:  # pragma: no cover - an Ar without URI resolvers
+        return set()
+
+
+def check_usd_url(url: str) -> None:
+    """Refuse a URL no installed asset resolver can open.
+
+    pxr opens a URL only through an asset resolver registered for its scheme
+    (Omniverse's for ``omniverse://``). usd-core ships the filesystem resolver
+    alone, so such a URL passed the sandbox's scheme allowlist and then failed
+    with a generic error.
+
+    Raises:
+        USDLoadError: ``UnsupportedURL`` naming the scheme and the remedy.
+    """
+    scheme = url_scheme(url) or ""
+    registered = resolver_uri_schemes()
+    if scheme in registered:
+        return
+    raise USDLoadError(
+        url,
+        "UnsupportedURL",
+        f"no asset resolver for {scheme}:// URLs is installed in this server "
+        f"(registered URI schemes: {', '.join(sorted(registered)) or 'none'}); the headless "
+        "USD tools open local files",
+        hint="Copy the asset to a directory under security.allowed_paths and pass its local path.",
+    )
+
+
 def content_hint(file_path: str, head: bytes) -> Optional[str]:
     """Name a mismatch between a file's extension and the bytes it holds.
 
@@ -244,8 +287,11 @@ def content_hint(file_path: str, head: bytes) -> Optional[str]:
         head: The file's first bytes.
 
     Returns:
-        A sentence saying what the file really holds, or None.
+        A sentence saying what the file really holds, or None (also when no
+        bytes were read, as for a URL).
     """
+    if not head:
+        return None
     suffix = Path(file_path).suffix.lower()
     if head.startswith(b"#usda"):
         if suffix in (".usdc", ".usdz"):
@@ -775,33 +821,47 @@ def _file_size(file_path: str) -> int:
     return info.st_size if stat.S_ISREG(info.st_mode) else 0
 
 
-def validate_usd_file(file_path: str, usd_config: "USDConfig") -> ValidationReport:
+def validate_usd_file(
+    file_path: str, usd_config: "USDConfig", sandbox: Optional["CompositionSandbox"] = None
+) -> ValidationReport:
     """Open a USD file the way the loader does and report every problem found.
 
     Args:
         file_path: Absolute path of the file. The MCP tool passes the path the
             sandbox resolved; the CLI passes the resolved argument.
         usd_config: The ``usd`` settings shared with the loader.
+        sandbox: Holds every layer and asset the stage draws on to the file
+            sandbox, as the loader does; None (the CLI) checks nothing beyond
+            the file.
 
     Returns:
         The report. ``can_read`` says whether pxr opened the file (and so
         whether ``load_usd_file`` can); ``is_valid`` additionally needs no
         error-severity issue.
+
+    Raises:
+        SandboxDenied: The file's composition reaches outside the sandbox.
     """
+    remote = url_scheme(file_path) is not None
     report = ValidationReport(
         file_path=file_path,
-        file_size=_file_size(file_path),
+        file_size=0 if remote else _file_size(file_path),
         format=Path(file_path).suffix.lower().lstrip("."),
     )
     try:
-        facts = check_usd_file(file_path, usd_config)
-        root_layer = open_root_layer(file_path, facts.head)
+        if remote:
+            check_usd_url(file_path)
+            root_layer = open_root_layer(file_path)
+        else:
+            facts = check_usd_file(file_path, usd_config)
+            root_layer = open_root_layer(file_path, facts.head)
     except USDLoadError as exc:
         report.issues.append(exc.to_issue())
         return report
 
     file_format = root_layer.GetFileFormat()
     report.layer_format = file_format.formatId
+    walked = sandbox.check_layers(root_layer) if sandbox is not None else []
     try:
         stage = Usd.Stage.Open(root_layer, Usd.Stage.LoadAll)
     except Tf.ErrorException as exc:
@@ -820,6 +880,9 @@ def validate_usd_file(file_path: str, usd_config: "USDConfig") -> ValidationRepo
         )
         return report
 
+    if sandbox is not None:
+        sandbox.check_stage(stage)
+    del walked
     report.can_read = True
     default_prim = stage.GetDefaultPrim()
     report.default_prim = str(default_prim.GetPath()) if default_prim else None
@@ -850,13 +913,16 @@ __all__ = [
     "ValidationIssue",
     "ValidationReport",
     "check_usd_file",
+    "check_usd_url",
     "composition_issues",
     "compliance_issues",
     "content_hint",
     "metadata_issues",
     "open_root_layer",
     "physics_issues",
+    "resolver_uri_schemes",
     "tf_error_messages",
     "unsaved_edit_issues",
+    "url_scheme",
     "validate_usd_file",
 ]
