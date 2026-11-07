@@ -145,12 +145,15 @@ class SceneCaptureComponent2D(Component):
 
 
 class Actor:
-    def __init__(self, path: str, label: str) -> None:
-        self.path, self.label = path, label
+    def __init__(self, path: str, label: str, world: Any = None) -> None:
+        self.path, self.label, self.world = path, label, world
         self.components: List[Component] = []
 
     def get_path_name(self) -> str:
         return self.path
+
+    def get_world(self) -> Any:
+        return self.world
 
     def get_actor_label(self) -> str:
         return self.label
@@ -224,19 +227,21 @@ class Editor:
 
     def place_cameras(self, world: str = WORLD) -> Dict[str, Actor]:
         made = {}
+        # actor_at accepts an actor of the editor world only (UE-2's live-actor check).
+        owner = self.editor_world if world == WORLD else self.game_world
         for name, component in (
             ("Camera", lambda a: CameraComponent(a, Vector(-200, 0, 150), Rotator(-10, 0, 0))),
             ("Square", lambda a: CameraComponent(a, Vector(0, 0, 0), Rotator(), aspect=1.7777778)),
             ("Ortho", lambda a: CameraComponent(a, Vector(0, 0, 900), Rotator(-90, 0, 0), ortho=True)),
             ("Cine", lambda a: CineCameraComponent(a, Vector(300, -600, 150), Rotator(-10, 90, 0))),
         ):
-            actor = Actor(world + ":PersistentLevel." + name, name)
+            actor = Actor(world + ":PersistentLevel." + name, name, owner)
             actor.components.append(component(actor))
             made[name] = self.actors[actor.path] = actor
-        sensor = Actor(world + ":PersistentLevel.TopCapture", "TopCapture")
+        sensor = Actor(world + ":PersistentLevel.TopCapture", "TopCapture", owner)
         sensor.components.append(SceneCaptureComponent2D(sensor, Vector(300, 0, 600), Rotator(-89, 0, 0), self))
         made["TopCapture"] = self.actors[sensor.path] = sensor
-        crate = Actor(world + ":PersistentLevel.Crate", "Crate")
+        crate = Actor(world + ":PersistentLevel.Crate", "Crate", owner)
         made["Crate"] = self.actors[crate.path] = crate
         return made
 
@@ -358,7 +363,10 @@ class Editor:
                 get_player_controller=lambda world, index: object() if world is editor.game_world else None,
                 get_player_camera_manager=camera_manager,
             ),
-            SystemLibrary=SimpleNamespace(execute_console_command=editor.execute_console_command),
+            SystemLibrary=SimpleNamespace(
+                execute_console_command=editor.execute_console_command,
+                is_valid=lambda obj: obj is not None,
+            ),
             Paths=SimpleNamespace(
                 project_saved_dir=lambda: str(editor.saved),
                 screen_shot_dir=lambda: str(editor.shots) + "/",

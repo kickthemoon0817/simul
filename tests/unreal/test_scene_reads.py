@@ -170,6 +170,11 @@ class Actor:
         self.attached: List[Actor] = []
         self.root_component = PrimitiveComponent(self, "Root", STATIC_MESH_COMPONENT_CLASS)
         self.components: List[ActorComponent] = [self.root_component]
+        # The world the actor belongs to: the editor world once added to the level.
+        self.world: Any = None
+
+    def get_world(self) -> Any:
+        return self.world
 
     def attach_to(self, parent: "Actor") -> "Actor":
         self.parent = parent
@@ -243,6 +248,8 @@ class Editor:
         self.library_loaded: set = set()
 
     def add(self, *actors: Actor) -> List[Actor]:
+        for actor in actors:
+            actor.world = self.world
         self.actors.extend(actors)
         return list(actors)
 
@@ -330,6 +337,8 @@ class Editor:
                 "layers": SimpleNamespace(get_world=lambda: self.world),
             }[name],
             load_object=self.load_object,
+            # actor_at finds actors among loaded objects (find_object), never loading one.
+            find_object=self.load_object,
             load_class=self.load_class,
             Box=lambda min, max: SimpleNamespace(min=min, max=max),
             Vector=Vector,
@@ -337,11 +346,12 @@ class Editor:
             WorldPartitionBlueprintLibrary=self.world_partition(),
             MathLibrary=SimpleNamespace(class_is_child_of=class_is_child_of),
             SystemLibrary=SimpleNamespace(
+                is_valid=lambda obj: obj is not None,
                 get_component_bounds=lambda component: (
                     component.get_world_location(),
                     Vector(50.0, 50.0, 50.0),
                     86.6,
-                )
+                ),
             ),
         )
 

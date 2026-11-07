@@ -112,6 +112,7 @@ lifecycle.
 | `ping` | Check connectivity |
 | `runtime-info` | Transport, bridge state (`busy`, `current_action`) and runtime diagnostics |
 | `interrupt` | Stop the script the bridge is running |
+| `claims [--port N] [--agent ID] [--clear]` | List the instance claims the MCP servers on this machine hold, or clear them ([configuration.md](configuration.md#multi-agent-claims)) |
 | `bridge-capabilities` / `bridge-config` | Read the bridge's capability envelope or settings |
 | `bridge-set-unsafe --enable/--disable [--restart]` | Toggle the bridge's raw `execute_script` action (not a security boundary; see [configuration.md](configuration.md#security)) |
 
@@ -219,7 +220,7 @@ Headless commands; no application needs to be running.
 | Command | Purpose |
 |---|---|
 | `info FILE` | Stage metadata, prim counts and mesh statistics |
-| `validate FILE` | Validate a USD file without fully loading it |
+| `validate FILE` | Open the file with pxr and list its issues; exits 1 when it is invalid (see [tools.md](tools.md#headless-usd)) |
 | `summary FILE [--format text\|json]` | Scene summary |
 
 The CLI reads any path you give it. The equivalent MCP tools only accept

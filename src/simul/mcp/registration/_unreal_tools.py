@@ -281,6 +281,16 @@ def _focus_view(request: Any) -> Optional[str]:
     return focus_view_error(request.fov, request.aspect_ratio)
 
 
+def _parent_or_detach(request: Any) -> Optional[str]:
+    """Attaching names the parent and detaching says so; one of the two, never both."""
+    if bool(request.parent_path) == bool(request.detach):
+        return (
+            "Pass parent_path to attach the actor, or detach=true to detach it from its parent"
+            + (", not both" if request.detach else "")
+        )
+    return None
+
+
 def _camera_arguments(request: Any) -> Dict[str, Any]:
     """The location and rotation triples; None for a group left unchanged."""
     arguments: Dict[str, Any] = {}
@@ -596,8 +606,10 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     UnrealTool(
         name="get_unreal_actor_info",
         description=(
-            "Get detailed information about a specific actor including transform, components, tags "
-            "and attachment (parent and children)."
+            "Get detailed information about a specific actor including transform, components, tags and "
+            "attachment (parent and children). The path must name a live actor of the level open in the "
+            "editor; a deleted actor, or one of a map that is not open, is not found, and no map is loaded "
+            "to look for it."
         ),
         response=UnrealGetActorInfoResponse,
         read_only=True,
@@ -950,26 +962,76 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_actor_parent",
-        description="Attach an actor to a parent actor or detach it.",
+        description=(
+            "Attach an actor to a parent actor (parent_path), or detach it from its parent (detach=true with an "
+            "empty parent_path). The actor keeps its world transform, the change is one undoable editor transaction, "
+            "and the parent is read back: parent_path is the parent afterwards (null once detached), with "
+            "previous_parent_path and changed. Attaching an actor to itself or under one of its own children, or a "
+            "Static actor under a parent that is not Static, is refused with the reason, as is a path that names no "
+            "actor of the level open in the editor."
+        ),
         response=UnrealSetActorParentResponse,
         read_only=False,
         destructive=True,
         method="set_actor_parent",
         params=(
-            ToolParam("actor_path", str),
-            ToolParam("parent_path", str, "", convert=_optional_text),
+            ToolParam("actor_path", str, description="Full path of the actor to attach or detach."),
+            ToolParam(
+                "parent_path",
+                str,
+                description="Full path of the actor to attach it to; an empty string together with detach=true.",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "detach",
+                bool,
+                False,
+                description="Detach the actor from its parent instead, keeping its world transform.",
+            ),
         ),
+        check=_parent_or_detach,
     ),
     UnrealTool(
         name="add_unreal_component",
-        description="Add a component to an Unreal actor.",
+        description=(
+            "Add an instance component to an actor in the level, as the editor's Add Component button does, in one "
+            "undoable editor transaction. A scene component attaches under parent_component or the root component. "
+            "Returns the component read back: component_path, component_name, component_class, parent_component and "
+            "is_root. Abstract classes and names already used inside the actor are refused."
+        ),
         response=UnrealAddComponentResponse,
         read_only=False,
         method="add_component",
         params=(
-            ToolParam("actor_path", str),
-            ToolParam("component_class", str),
-            ToolParam("component_name", str, "", convert=_optional_text),
+            ToolParam("actor_path", str, description="Full path of the actor."),
+            ToolParam(
+                "component_class",
+                str,
+                description=(
+                    "Component class: a native class name such as PointLightComponent, or a class path such as "
+                    "/Script/Engine.PointLightComponent or a Blueprint component's /Game/BP_Lamp.BP_Lamp_C."
+                ),
+            ),
+            ToolParam(
+                "component_name",
+                str,
+                "",
+                description=(
+                    "Name of the new component, unique inside the actor, without spaces or punctuation such as "
+                    ". : / ( ); empty lets Unreal name it after its class."
+                ),
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "parent_component",
+                str,
+                "",
+                description=(
+                    "Name of the actor's scene component to attach the new one under (get_unreal_actor_info lists "
+                    "the components); empty attaches it under the root component. Scene components only."
+                ),
+                convert=_optional_text,
+            ),
         ),
     ),
     UnrealTool(
@@ -1102,7 +1164,15 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_render_settings",
-        description="Set rendering or post-process settings via console command.",
+        description=(
+            "Set one numeric rendering console variable (r.* or sg.*, e.g. r.ScreenPercentage 75) and "
+            "read it back. applied is true only when the variable holds the value afterwards. A "
+            "variable Unreal does not have fails with NotFoundError and changes nothing; a value "
+            "Unreal did not take (a read-only variable such as r.RayTracing, which only startup "
+            "config sets, or one it limits) fails with RenderSettingNotApplied, giving value and "
+            "previous_value. Post-process settings live on PostProcessVolume actors, not in console "
+            "variables, so this tool does not change them."
+        ),
         response=UnrealSetRenderSettingsResponse,
         read_only=False,
         idempotent=True,
@@ -1136,7 +1206,15 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="enable_unreal_physics",
-        description="Enable or disable physics simulation on an actor.",
+        description=(
+            "Make an actor's body simulate physics (falls, takes forces), make it kinematic (physics "
+            "collision, moved only by its transform), or turn physics off, in one undoable editor "
+            "transaction that marks the map dirty. A Static body is made Movable unless make_movable "
+            "is false; a body without physics collision or simple collision geometry is refused "
+            "(IncompatibleBody, with the reasons). Unreal detaches a simulated body from its parent, "
+            "so an attached one needs allow_detach. Returns the body read back: physics_mode, "
+            "mobility, collision and mass."
+        ),
         response=UnrealEnablePhysicsResponse,
         read_only=False,
         idempotent=True,
@@ -1144,15 +1222,52 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         method="enable_physics",
         params=(
             ToolParam("actor_path", str),
-            ToolParam("enable", bool, True),
-            ToolParam("simulate_physics", bool, True),
+            ToolParam(
+                "enable",
+                bool,
+                True,
+                description=(
+                    "True makes the body physical: simulated, or kinematic with kinematic true. False "
+                    "stops it simulating, keeping its collision and mobility."
+                ),
+            ),
+            ToolParam(
+                "kinematic",
+                bool,
+                False,
+                description=(
+                    "With enable true, make the body kinematic instead of simulated: it keeps physics "
+                    "collision, so simulated bodies hit it, but is not simulated and moves only when "
+                    "its transform is set."
+                ),
+            ),
+            ToolParam(
+                "make_movable",
+                bool,
+                True,
+                description=(
+                    "Make a Static or Stationary body Movable, which simulation and kinematic movement "
+                    "need (reported as mobility_changed_from); false refuses such a body instead."
+                ),
+            ),
+            ToolParam(
+                "allow_detach",
+                bool,
+                False,
+                description=(
+                    "Let a body attached to a parent be detached from it as it starts simulating, "
+                    "keeping its world transform, as Unreal does (reported as detached_from; Undo "
+                    "reattaches it, turning physics off does not). False refuses an attached body."
+                ),
+            ),
         ),
     ),
     UnrealTool(
         name="set_unreal_collision",
         description=(
-            "Set an actor's collision preset and/or enable or disable its collision; "
-            "what is left out is kept. Returns the state read back."
+            "Set an actor's collision preset and/or enable or disable its collision, in one undoable "
+            "editor transaction that marks the map dirty; what is left out is kept and an unknown "
+            "preset changes nothing. Returns the state read back."
         ),
         response=UnrealSetCollisionResponse,
         read_only=False,
@@ -1184,7 +1299,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_physics_params",
-        description="Set physics body parameters (mass, damping, gravity) on an actor.",
+        description=(
+            "Set physics body parameters (mass in kg, linear and angular damping, gravity) on an actor "
+            "in one undoable editor transaction that marks the map dirty, and read them back; a "
+            "parameter left out is kept. A Static body keeps the values but has no mass until it is "
+            "Movable (see warning)."
+        ),
         response=UnrealSetPhysicsParamsResponse,
         read_only=False,
         idempotent=True,
@@ -1296,13 +1416,27 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     # -- Advanced agent tools ------------------------------------------------------
     UnrealTool(
         name="batch_unreal_operations",
-        description="Execute multiple Remote Control operations in one HTTP call.",
+        description=(
+            "Execute several Remote Control requests in one HTTP call, in order. Each result is "
+            "Remote Control's answer (RequestId, ResponseCode, ResponseBody); a failed one also has "
+            "error and error_type. Operations without a RequestId are numbered for you."
+        ),
         response=UnrealBatchOperationsResponse,
         read_only=False,
         destructive=True,
         script=True,
         method="batch_operations",
-        params=(ToolParam("operations", str, convert=json.loads),),
+        params=(
+            ToolParam(
+                "operations",
+                str,
+                description=(
+                    'JSON array of operations: [{"URL": "/remote/object/call", "Verb": "PUT", '
+                    '"Body": {"objectPath": "...", "functionName": "..."}, "RequestId": 1}]. '
+                    "RequestId is optional and must be a unique integer."
+                ),
+            ),
+        ),
     ),
     UnrealTool(
         name="query_unreal_scene_graph",

@@ -198,6 +198,7 @@ HEADLESS_USD_TOOLS: frozenset[str] = frozenset({
     "search_prims",
     "get_bounding_box",
     "summarize_scene",
+    "get_prim_subtree",
 })
 META_TOOLS: frozenset[str] = frozenset({"get_tool_usage_stats"})
 
