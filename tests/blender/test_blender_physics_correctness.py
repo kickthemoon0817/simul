@@ -1,4 +1,4 @@
-"""Physics sampling, bake dispatch and SimReady export against a stand-in bpy.
+"""Physics sampling, bake dispatch and SimReady validation against a stand-in bpy.
 
 Each case pins a behaviour that real Blender 5.0 exposed: rigid bodies only
 move in the evaluated world matrix, the positional context-override dict is
@@ -56,9 +56,11 @@ def _fake_bpy(
 ) -> SimpleNamespace:
     calls: Dict[str, Any] = {"frames": [], "overrides": [], "ops": []}
     scene = SimpleNamespace(
+        name="Scene",
         frame_current=1,
         frame_subframe=0.0,
         frame_start=1,
+        frame_end=250,
         render=SimpleNamespace(fps=10, fps_base=1.0),
         rigidbody_world=rigidbody_world,
         objects=_Objects({o.name: o for o in objects}),
@@ -85,14 +87,19 @@ def _fake_bpy(
         calls["overrides"].append(kwargs)
         yield
 
-    def op(name: str) -> Any:
+    def op(name: str, then: Any = None) -> Any:
         def run(*args: Any, **kwargs: Any) -> set:
             if args:
                 raise TypeError("1-2 args execution context is supported")
             calls["ops"].append((name, kwargs))
+            if then is not None:
+                then(calls["overrides"][-1])
             return {"FINISHED"}
 
         return run
+
+    def mark_baked(baked: bool) -> Any:
+        return lambda override: setattr(override["point_cache"], "is_baked", baked)
 
     usd_export = op("wm.usd_export")
     usd_export.get_rna_type = lambda: SimpleNamespace(
@@ -110,7 +117,11 @@ def _fake_bpy(
             evaluated_depsgraph_get=lambda: "depsgraph",
         ),
         ops=SimpleNamespace(
-            ptcache=SimpleNamespace(bake=op("ptcache.bake"), free_bake=op("ptcache.free_bake")),
+            ptcache=SimpleNamespace(
+                bake=op("ptcache.bake"),
+                bake_from_cache=op("ptcache.bake_from_cache", mark_baked(True)),
+                free_bake=op("ptcache.free_bake", mark_baked(False)),
+            ),
             wm=SimpleNamespace(usd_export=usd_export),
         ),
     )
@@ -126,11 +137,14 @@ def install(monkeypatch: pytest.MonkeyPatch, mathutils: Any) -> Any:
     return _install
 
 
-def _rigidbody_world(baked: bool = False, info: str = "") -> SimpleNamespace:
-    """A rigid-body world of one body whose cache holds what ``info`` says (nothing by default)."""
+def _rigidbody_world(
+    baked: bool = False, *bodies: Any, info: str = ""
+) -> SimpleNamespace:
+    """A rigid-body world of ``bodies``, its cache holding what ``info`` says (nothing by default)."""
     return SimpleNamespace(
         enabled=True,
-        collection=SimpleNamespace(all_objects=["faller"]),
+        time_scale=1.0,
+        collection=SimpleNamespace(name="RigidBodyWorld", all_objects=list(bodies)),
         point_cache=SimpleNamespace(
             frame_start=1, frame_end=250, is_baked=baked, is_outdated=False, info=info
         ),
@@ -168,8 +182,13 @@ def test_trajectory_jumps_straight_to_samples_without_a_live_simulation(install:
 
 
 def test_physics_state_reports_world_pose_not_authored_location(install: Any) -> None:
-    body = _object("faller", rigid_body=SimpleNamespace(type="ACTIVE", mass=2.0, collision_shape="BOX"))
-    fake = _fake_bpy([body], _rigidbody_world(), _falling(range(0, 40)))
+    body = _object(
+        "faller",
+        rigid_body=SimpleNamespace(
+            type="ACTIVE", mass=2.0, collision_shape="BOX", kinematic=False, enabled=True
+        ),
+    )
+    fake = _fake_bpy([body], _rigidbody_world(False, body), _falling(range(0, 40)))
     fake.context.scene.frame_current = 31
     session = install(fake)
 
@@ -177,6 +196,8 @@ def test_physics_state_reports_world_pose_not_authored_location(install: Any) ->
 
     assert state["location"] == [0.0, 0.0, -5.0]
     assert state["rotation_euler"] == pytest.approx([3.1, 0.0, 0.0])
+    # An unbaked simulation is stepped from its cache start to the frame first.
+    assert fake.calls["frames"] == list(range(1, 32))
 
 
 def test_bake_and_free_bake_use_temp_override(install: Any) -> None:
@@ -187,10 +208,15 @@ def test_bake_and_free_bake_use_temp_override(install: Any) -> None:
     session.bake_simulation(1, 20)
     session.free_bake()
 
-    assert [name for name, _ in fake.calls["ops"]] == ["ptcache.bake", "ptcache.free_bake"]
-    assert fake.calls["ops"][0][1] == {"bake": True}
+    assert [name for name, _ in fake.calls["ops"]] == [
+        "ptcache.bake_from_cache",
+        "ptcache.free_bake",
+    ]
     assert [o["point_cache"] for o in fake.calls["overrides"]] == [world.point_cache] * 2
-    assert world.point_cache.frame_end == 20
+    # The bake stepped every frame of its range, then returned to frame 1.
+    assert fake.calls["frames"] == list(range(1, 21)) + [1]
+    # Freed, the cache covers the scene range again.
+    assert (world.point_cache.frame_start, world.point_cache.frame_end) == (1, 250)
 
 
 def _default_scene() -> List[Any]:
@@ -199,22 +225,6 @@ def _default_scene() -> List[Any]:
         _object("Camera", "CAMERA", data=SimpleNamespace(lens=50.0)),
         _object("Light", "LIGHT", data=SimpleNamespace(energy=1000.0)),
     ]
-
-
-@pytest.mark.parametrize("embed", [True, False])
-def test_simready_export_validates_meshes_and_forwards_embed_metadata(
-    install: Any, embed: bool
-) -> None:
-    fake = _fake_bpy(_default_scene())
-    session = install(fake)
-
-    result = session.export_simready_usd("/tmp/simul-work/asset.usda", embed_metadata=embed)
-
-    assert {i["object_name"] for i in result["issues"]} <= {"box"}
-    assert not [i for i in result["issues"] if i["message"] == "No material assigned"]
-    name, kwargs = fake.calls["ops"][-1]
-    assert name == "wm.usd_export"
-    assert kwargs["export_custom_properties"] is embed
 
 
 def test_validation_skips_material_check_for_objects_without_slots(install: Any) -> None:
@@ -229,13 +239,5 @@ def test_validation_skips_material_check_for_objects_without_slots(install: Any)
     assert result["issues"] == []
 
 
-def test_export_drops_options_the_operator_does_not_define(install: Any) -> None:
-    fake = _fake_bpy(_default_scene())
-    fake.ops.wm.usd_export.get_rna_type = lambda: SimpleNamespace(
-        properties={"filepath": 0, "selected_objects_only": 0}
-    )
-    session = install(fake)
-
-    session.export_simready_usd("/tmp/simul-work/asset.usda", validate_before_export=False)
-
-    assert "export_custom_properties" not in fake.calls["ops"][-1][1]
+# export_simready_usd is covered against a Blender-like exporter, with the
+# written file checked through pxr, in test_simready_export.py.

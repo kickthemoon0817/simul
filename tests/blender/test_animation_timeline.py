@@ -31,11 +31,13 @@ from simul.mcp.schemas.blender import (
     BlenderPlayAnimationRequest,
     BlenderPlaybackAction,
     BlenderSetFrameRangeRequest,
+    BlenderSetFrameRequest,
 )
 from simul.utils.paths import PathPolicy
 from tests.fakes import (
     FakeDepsgraph,
     FakeEuler,
+    FakeMatrix,
     FakePlayback,
     FakeTransformObject,
     FakeVector,
@@ -264,6 +266,19 @@ class TestPlayback:
         assert handlers.animation_playback_post == expected
         assert getattr(blender_runtime._forget_playback, "_bpy_persistent", False)
 
+    def test_the_handlers_go_when_playback_is_no_longer_watched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The handlers are persistent; the add-on's unregister removes them."""
+        session, _, playback = _blender(monkeypatch)
+        session.play_animation("play")
+
+        blender_runtime.stop_watching_playback()
+
+        assert playback.handlers.animation_playback_pre == []
+        assert playback.handlers.animation_playback_post == []
+        assert blender_runtime._playback == {}
+
     def test_refuses_an_unknown_action(self, monkeypatch: pytest.MonkeyPatch) -> None:
         session, _, playback = _blender(monkeypatch)
         with pytest.raises(ValueError, match="Invalid action 'toggle'"):
@@ -288,7 +303,9 @@ class TestFrames:
         """Blender allows frame_start == frame_end; the tool refused it."""
         session, scene, _ = _blender(monkeypatch)
 
-        assert session.set_frame_range(10, 10) == {"frame_start": 10, "frame_end": 10}
+        result = session.set_frame_range(10, 10)
+
+        assert (result["frame_start"], result["frame_end"]) == (10, 10)
         assert (scene.frame_start, scene.frame_end) == (10, 10)
 
     @pytest.mark.parametrize(
@@ -490,6 +507,28 @@ class TestTrajectory:
 
         assert frames == []
 
+    def test_a_sheared_child_reports_the_rotation_get_object_info_reports(
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
+    ) -> None:
+        """Under a parent scaled (3, 1, 1), a child turned 30 degrees about Z read 0.190 rad."""
+        parent = FakeTransformObject("Parent", scale=(3.0, 1.0, 1.0))
+        child = FakeTransformObject(
+            "Link", parent=parent, rotation_euler=(0.0, 0.0, math.radians(30))
+        )
+        child.matrix_parent_inverse = FakeMatrix.Identity(4)
+        session, _ = _trajectory(monkeypatch, child, lambda frame: None)
+
+        (point,) = session.get_object_trajectory("Link", 1, 1)["points"]
+
+        reference = blender_runtime.world_transform(child)
+        assert point["rotation_euler"] == pytest.approx(
+            reference["world_rotation_euler"], abs=1e-6
+        )
+        assert point["rotation_euler"][2] == pytest.approx(math.radians(30), abs=1e-6)
+        assert point["rotation_quaternion"] == pytest.approx(
+            reference["world_rotation_quaternion"], abs=1e-6
+        )
+
     def test_restores_the_frame_and_subframe(
         self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
@@ -515,6 +554,20 @@ class TestDeclarations:
             BlenderGetTrajectoryRequest(object_name="Cube", start_frame=9, end_frame=5)
         assert BlenderGetTrajectoryRequest(
             object_name="Cube", start_frame=5, end_frame=5
+        )
+
+    def test_frame_requests_refuse_what_blender_would_clamp(self) -> None:
+        assert BlenderSetFrameRequest(frame=-1_048_574).frame == -1_048_574
+        for frame in (-1_048_575, 1_048_575):
+            with pytest.raises(ValidationError):
+                BlenderSetFrameRequest(frame=frame)
+        with pytest.raises(ValidationError):
+            BlenderSetFrameRangeRequest(frame_start=-1, frame_end=10)
+        with pytest.raises(ValidationError):
+            BlenderSetFrameRangeRequest(frame_start=1, frame_end=1_048_575)
+        assert (blender_runtime.FRAME_LIMIT, blender_runtime.SCENE_FRAME_MIN) == (
+            1_048_574,
+            0,
         )
 
     def test_range_request_allows_one_frame(self) -> None:

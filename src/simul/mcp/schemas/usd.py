@@ -214,24 +214,42 @@ class MeshInfoRequest(BaseModel):
 
 class PrimCreateRequest(BaseModel):
     stage_id: str = Field(..., description="Stage identifier", min_length=1)
-    prim_path: str = Field(..., description="Prim path", min_length=1)
-    prim_type: str = Field(..., description="USD prim type", min_length=1)
+    prim_path: str = Field(..., description="Absolute prim path", min_length=1)
+    prim_type: str = Field(..., description="Concrete USD prim type", min_length=1)
     attributes: Dict[str, Any] = Field(
         default_factory=dict, description="Attribute values"
+    )
+    redefine_existing: bool = Field(
+        False, description="Allow re-typing a prim that already exists"
+    )
+    attribute_types: Dict[str, str] = Field(
+        default_factory=dict, description="USD value type per new attribute name"
+    )
+    time_code: Optional[float] = Field(
+        None, description="Write values as time samples at this time", allow_inf_nan=False
     )
 
 
 class PrimUpdateRequest(BaseModel):
     stage_id: str = Field(..., description="Stage identifier", min_length=1)
-    prim_path: str = Field(..., description="Prim path", min_length=1)
+    prim_path: str = Field(..., description="Absolute prim path", min_length=1)
     attributes: Dict[str, Any] = Field(
         default_factory=dict, description="Attribute values"
+    )
+    attribute_types: Dict[str, str] = Field(
+        default_factory=dict, description="USD value type per new attribute name"
+    )
+    time_code: Optional[float] = Field(
+        None, description="Write values as time samples at this time", allow_inf_nan=False
     )
 
 
 class PrimDeleteRequest(BaseModel):
     stage_id: str = Field(..., description="Stage identifier", min_length=1)
-    prim_path: str = Field(..., description="Prim path", min_length=1)
+    prim_path: str = Field(..., description="Absolute prim path", min_length=1)
+    allow_root_delete: bool = Field(
+        False, description="Permit deleting the stage's default prim"
+    )
 
 
 class MeshInfo(BaseModel):
@@ -281,6 +299,15 @@ class PrimActionResponse(BaseModel):
     stage_id: str = Field(..., description="Stage identifier")
     prim_path: str = Field(..., description="Prim path")
     message: str = Field(..., description="Status message")
+    changed: Optional[List[str]] = Field(
+        None, description="Attributes, relationships and metadata the edit wrote"
+    )
+    created_attributes: Optional[Dict[str, str]] = Field(
+        None, description="New attributes the edit created, with their USD value types"
+    )
+    time_code: Optional[float] = Field(
+        None, description="Time code the values were written at; null for defaults"
+    )
 
 
 class SceneSummaryRequest(BaseModel):

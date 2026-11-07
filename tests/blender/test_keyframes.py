@@ -273,6 +273,7 @@ class Object:
         "props",
         "paths",
         "pose",
+        "tags",
     )
 
     def __init__(
@@ -292,6 +293,36 @@ class Object:
         self.paths: Dict[str, Any] = {}
         # An armature's pose: ``bones.get(name)`` finds a pose bone.
         self.pose: Any = None
+        # The refresh sets of update_tag calls the next evaluation applies.
+        self.tags: List[set] = []
+
+    def update_tag(self, refresh: Any = ()) -> None:
+        self.tags.append(set(refresh))
+
+    def evaluate_animation(self, frame: float) -> None:
+        """Write each channel's value at ``frame`` to its property, as Blender's
+        animation evaluation does for a tagged ID (constant between keys here)."""
+        for fcurve in self.fcurves:
+            keys = sorted(fcurve.keyframe_points, key=lambda k: k.co[0])
+            if not keys:
+                continue
+            before = [k for k in keys if k.co[0] <= frame]
+            value = (before[-1] if before else keys[0]).co[1]
+            self._write(fcurve.data_path, fcurve.array_index, value)
+
+    def _write(self, data_path: str, index: int, value: float) -> None:
+        if data_path.startswith('["'):
+            key = data_path[2:-2]
+            current = self.props[key]
+            self.props[key] = int(value) if isinstance(current, int) else value
+            return
+        owner_path, _, name = data_path.rpartition(".")
+        owner = self.path_resolve(owner_path) if owner_path else self
+        current = getattr(owner, name)
+        if isinstance(current, list):
+            current[index] = value
+        else:
+            setattr(owner, name, value)
 
     def keys(self) -> List[str]:
         return list(self.props)
@@ -400,9 +431,20 @@ def session_on(
     setattr(bpy_extras, "anim_utils", anim_utils)
     monkeypatch.setitem(sys.modules, "bpy_extras", bpy_extras)
     monkeypatch.setitem(sys.modules, "bpy_extras.anim_utils", anim_utils)
+    scene = SimpleNamespace(frame_current=1)
+
+    def evaluated_depsgraph_get() -> None:
+        """Evaluate what update_tag tagged, as bpy's call does on the active depsgraph."""
+        for obj in objects:
+            if any("TIME" in refresh for refresh in obj.tags):
+                obj.evaluate_animation(scene.frame_current)
+            obj.tags.clear()
+
     fake_bpy = SimpleNamespace(
         app=SimpleNamespace(version=version),
-        context=SimpleNamespace(scene=SimpleNamespace(frame_current=1)),
+        context=SimpleNamespace(
+            scene=scene, evaluated_depsgraph_get=evaluated_depsgraph_get
+        ),
         data=SimpleNamespace(objects={obj.name: obj for obj in objects}),
     )
     monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -673,10 +715,15 @@ class TestInsertKeyframe:
         assert ball.calls == [("keyframe_insert", "location", 2, 10, "KEYFRAME")]
 
     @every_version
-    def test_keys_a_given_value_and_leaves_the_property_as_it_was(
+    def test_keys_a_given_value_and_shows_what_the_animation_gives(
         self, monkeypatch: pytest.MonkeyPatch, version: Version
     ) -> None:
-        """Keying a value at another frame keyed the current one: there was no value."""
+        """Keying a value at another frame keyed the current one: there was no value.
+
+        A GUI Blender 5.0.1 showed a first key at once and a later one only
+        after a frame change, background Blender neither; the call has Blender
+        evaluate the animation either way.
+        """
         ball = keyed_ball(version)
         ball.location = [1.0, 2.0, 3.0]
         session = session_on(monkeypatch, version, ball)
@@ -694,8 +741,37 @@ class TestInsertKeyframe:
             ("location", 1, 1, [10, 10]),
             ("location", 2, 1, [10, 10]),
         ]
-        # The frame shown is 1: the property still shows its value there.
-        assert ball.location == [1.0, 2.0, 3.0]
+        # Each channel has the one key, so its animation holds that value on frame 1.
+        assert ball.location == [4.0, 5.0, 6.0]
+        assert ball.tags == []
+
+    def test_a_key_between_keys_leaves_the_animations_value_on_the_current_frame(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blender showed the restored value until the next frame change, not its animation."""
+        curve = FCurve("location", 0, 1, 30)
+        ball = keyed_ball(BLENDER_5_0, curve)
+        ball.location = [7.0, 0.0, 0.0]
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        session.insert_keyframe("Ball", "location", 20, index=0, value=10.0)
+
+        assert [k.co for k in curve.keyframe_points] == [[1, 0.0], [20, 10.0], [30, 0.0]]
+        # Frame 1 is on the first key, 0.
+        assert ball.location == [0.0, 0.0, 0.0]
+
+    def test_keying_the_current_value_leaves_evaluation_to_blender(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without value it is Blender's I key: nothing more is evaluated."""
+        ball = keyed_ball(BLENDER_5_0, FCurve("location", 0, 1, 30))
+        ball.location = [7.0, 0.0, 0.0]
+        session = session_on(monkeypatch, BLENDER_5_0, ball)
+
+        session.insert_keyframe("Ball", "location", 20, index=0)
+
+        assert ball.location == [7.0, 0.0, 0.0]
+        assert ball.tags == []
 
     def test_a_given_value_on_the_current_frame_is_what_the_property_shows(
         self, monkeypatch: pytest.MonkeyPatch
@@ -720,7 +796,7 @@ class TestInsertKeyframe:
         assert [(k["array_index"], k["value"]) for k in result["keyframes"]] == [
             (1, -2.5)
         ]
-        assert ball.location == [1.0, 2.0, 3.0]
+        assert ball.location == [1.0, -2.5, 3.0]
 
     def test_sets_interpolation_and_key_type(
         self, monkeypatch: pytest.MonkeyPatch
@@ -792,8 +868,9 @@ class TestInsertKeyframe:
 
         assert [k["value"] for k in custom["keyframes"]] == [3.0]
         assert [k["value"] for k in posed["keyframes"]] == [0.1, 0.2, 0.3]
-        assert ball.props["gear"] == 2
-        assert bone.rotation_euler == [0.0, 0.0, 0.0]
+        # Their only keys: the animation holds those values on the current frame.
+        assert ball.props["gear"] == 3
+        assert bone.rotation_euler == [0.1, 0.2, 0.3]
         with pytest.raises(ValueError, match="not a whole number"):
             session.insert_keyframe("Ball", '["gear"]', 6, value=2.5)
         with pytest.raises(ValueError, match="could not be resolved"):

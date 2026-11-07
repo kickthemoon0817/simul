@@ -12,6 +12,7 @@ import pytest
 
 from simul.adapters import blender_runtime
 from simul.config import SecurityConfig, Settings
+from tests.blender.mesh_fakes import FakeRNAProp, FakeRNAProperties
 from tests.fakes import (
     FakeAction,
     FakeActionSlot,
@@ -35,6 +36,7 @@ from tests.fakes import (
     axis_angle_matrix,
     euler_matrix,
     fake_app_handlers,
+    fake_bpy_types,
     matrix_euler,
     matrix_quaternion,
 )
@@ -591,12 +593,17 @@ class FakeObject:
         self.constraints = constraints or []
         self.material_slots = material_slots or []
         self.matrix_world = matrix_world or FakeMatrix.Translation(location)
-        self.bound_box = bound_box or []
+        # Blender gives an object without geometry eight corners at its origin.
+        self.bound_box = bound_box or [FakePropArray((0.0, 0.0, 0.0))] * 8
         self.data = data
+        self.users_collection: List[Any] = []
 
     def visible_get(self) -> bool:
         """Mirror Blender visible_get behavior."""
         return self._visible
+
+    def as_pointer(self) -> int:
+        return id(self)
 
 
 class TestBlenderRuntimeSession:
@@ -652,6 +659,9 @@ class TestBlenderRuntimeSession:
                 background=True,
             ),
             data=fake_data,
+            context=SimpleNamespace(
+                scene=SimpleNamespace(collection=FakeCollection("Scene Collection"))
+            ),
         )
 
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -851,7 +861,12 @@ class TestObservationTools:
             def keys(self) -> list:
                 return col_names
 
+        # The collections given are the scene's top-level ones.
+        scene_collection = FakeCollection(
+            "Scene Collection", children=[FakeCollection(name) for name in col_names]
+        )
         scene = SimpleNamespace(
+            collection=scene_collection,
             camera=scene_camera,
             frame_current=frame_current,
             frame_start=frame_start,
@@ -873,6 +888,7 @@ class TestObservationTools:
             ),
             # Real bpy always has it; world-space reads evaluate transforms first.
             context=SimpleNamespace(scene=scene, evaluated_depsgraph_get=lambda: "depsgraph"),
+            types=fake_bpy_types(),
         )
 
     # -- get_object_info --------------------------------------------------
@@ -932,15 +948,19 @@ class TestObservationTools:
     # -- get_mesh_info ----------------------------------------------------
 
     def test_get_mesh_info_basic(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Counts-only mesh info returned for a MESH object."""
+        """Mesh info counts a MESH object's base mesh and what its modifiers make of it."""
         mesh_data = SimpleNamespace(
             vertices=[None] * 8,
             edges=[None] * 12,
             polygons=[None] * 6,
+            loops=[None] * 24,
             uv_layers=[SimpleNamespace(name="UVMap")],
             shape_keys=None,
         )
         obj = FakeObject(name="Cube", object_type="MESH", visible=True, data=mesh_data)
+        obj.evaluated_get = lambda depsgraph: SimpleNamespace(  # type: ignore[attr-defined]
+            is_evaluated=True, to_mesh=lambda: mesh_data, to_mesh_clear=lambda: None
+        )
         fake_bpy = self._make_fake_bpy_with_objects([obj])
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
@@ -951,6 +971,8 @@ class TestObservationTools:
         assert result["vertex_count"] == 8
         assert result["edge_count"] == 12
         assert result["face_count"] == 6
+        assert result["triangle_count"] == 12
+        assert result["evaluated_face_count"] == 6
         assert result["uv_layer_names"] == ["UVMap"]
         assert result["has_shape_keys"] is False
 
@@ -1331,7 +1353,7 @@ class TestObservationTools:
     # -- is_object_within_bounds ------------------------------------------
 
     def test_is_object_within_bounds_inside(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
         """Object inside bounds returns within_bounds=True."""
         obj = FakeObject(
@@ -1352,7 +1374,7 @@ class TestObservationTools:
         assert result["object_location"] == [5.0, 5.0, 5.0]
 
     def test_is_object_within_bounds_outside(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
         """Object outside bounds returns within_bounds=False."""
         obj = FakeObject(
@@ -6346,13 +6368,21 @@ class FakeMaterial:
 
 
 class FakeModifier:
-    """Minimal Blender modifier mock."""
+    """Minimal Blender modifier mock with the RNA of its two level settings."""
 
     def __init__(self, name: str, mod_type: str) -> None:
         self.name = name
         self.type = mod_type
         self.levels = 1
         self.render_levels = 2
+        self.bl_rna = SimpleNamespace(
+            properties=FakeRNAProperties(
+                [
+                    FakeRNAProp("levels", "INT", hard=(0, 11)),
+                    FakeRNAProp("render_levels", "INT", hard=(0, 11)),
+                ]
+            )
+        )
 
 
 class TestSceneManipulationTools:
@@ -6439,39 +6469,8 @@ class TestSceneManipulationTools:
         return fake_bpy
 
     # -- create_object -------------------------------------------------------
-
-    def test_create_object_cube(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Create a mesh cube via the create_object adapter."""
-        created_obj = FakeObject("Cube", "MESH", True, location=(1.0, 2.0, 3.0))
-        fake_bpy = self._make_fake_bpy_with_manipulation(
-            active_object=created_obj,
-        )
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.create_object(object_type="CUBE", location=[1.0, 2.0, 3.0])
-
-        assert result["name"] == "Cube"
-        assert result["object_type"] == "CUBE"
-        assert fake_bpy._ops_calls[0]["op"] == "mesh.primitive_cube_add"
-
-    def test_create_object_point_light(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Create a point light passes the type kwarg."""
-        created_obj = FakeObject("Point", "LIGHT", True)
-        fake_bpy = self._make_fake_bpy_with_manipulation(
-            active_object=created_obj,
-        )
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.create_object(object_type="POINT_LIGHT")
-
-        assert result["object_type"] == "POINT_LIGHT"
-        call = fake_bpy._ops_calls[0]
-        assert call["op"] == "object.light_add"
-        assert call["type"] == "POINT"
+    # Creation itself, and deletion, are covered in test_object_ops.py against a
+    # fake that models collections, modes and Blender's Delete operator.
 
     def test_create_object_invalid_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Unsupported type raises ValueError."""
@@ -6483,40 +6482,7 @@ class TestSceneManipulationTools:
         with pytest.raises(ValueError, match="Unsupported object type"):
             session.create_object(object_type="INVALID_TYPE")
 
-    def test_create_object_with_name_and_scale(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Custom name and scale are applied after creation."""
-        created_obj = FakeObject("Cube", "MESH", True)
-        fake_bpy = self._make_fake_bpy_with_manipulation(
-            active_object=created_obj,
-        )
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.create_object(
-            object_type="CUBE", name="MyCube", scale=[2.0, 2.0, 2.0]
-        )
-
-        assert created_obj.name == "MyCube"
-        assert result["name"] == "MyCube"
-
     # -- delete_object -------------------------------------------------------
-
-    def test_delete_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Delete removes the object from data.objects."""
-        obj = FakeObject("ToDelete", "MESH", True)
-        objs = {"ToDelete": obj}
-        fake_bpy = self._make_fake_bpy_with_manipulation(objects=objs)
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.delete_object("ToDelete")
-
-        assert result["deleted_name"] == "ToDelete"
-        assert "ToDelete" not in objs
 
     def test_delete_object_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Delete on a missing object raises ValueError."""
@@ -6896,7 +6862,7 @@ class TestFileIOTools:
             export_mesh=FakeExportMesh,
         )
 
-        fake_scene = SimpleNamespace(name=scene_name)
+        fake_scene = SimpleNamespace(name=scene_name, objects=objects)
         fake_context = SimpleNamespace(scene=fake_scene)
         fake_data = SimpleNamespace(
             objects=objects,
@@ -7797,6 +7763,9 @@ class TestCreateMeshFromData:
             def update(self) -> None:
                 pass
 
+            def validate(self, verbose: bool = False) -> bool:
+                return False
+
         def _new_mesh(name: str) -> FakeMeshData:
             mesh = FakeMeshData(name)
             created_meshes.append(mesh)
@@ -7815,21 +7784,24 @@ class TestCreateMeshFromData:
             created_objects.append(obj)
             return obj
 
+        cols = collections or {}
+
         scene_col = SimpleNamespace(
             objects=SimpleNamespace(
                 link=lambda obj: linked_objects.append(obj),
             ),
+            # The given collections belong to the scene.
+            children_recursive=list(cols.values()),
         )
-
-        cols = collections or {}
 
         fake_bpy = SimpleNamespace(
             app=SimpleNamespace(version=(4, 0, 0)),
             data=SimpleNamespace(
-                meshes=SimpleNamespace(new=_new_mesh),
+                meshes=SimpleNamespace(new=_new_mesh, remove=created_meshes.remove),
                 objects=SimpleNamespace(
                     new=_new_object,
                     get=lambda name: None,
+                    remove=lambda obj, do_unlink=True: created_objects.remove(obj),
                 ),
                 collections=SimpleNamespace(
                     get=lambda name: cols.get(name),

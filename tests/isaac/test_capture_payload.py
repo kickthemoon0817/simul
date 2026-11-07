@@ -32,7 +32,7 @@ from simul.mcp.tools.isaac_tools import MAX_INLINE_CAPTURE_BYTES, IsaacTools
 def _tools(response: Dict[str, Any]) -> tuple[IsaacTools, List[str]]:
     captured: List[str] = []
 
-    def _record(code: str) -> ScriptResult:
+    def _record(code: str, **_kwargs: Any) -> ScriptResult:
         captured.append(code)
         return ScriptResult(success=True, output=json.dumps(response))
 
