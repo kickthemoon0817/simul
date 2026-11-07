@@ -771,6 +771,42 @@ def test_the_path_must_be_a_material_instance_constant(
     assert result == {"success": False, "error_type": error_type, "error": error}
 
 
+ENGINE_INSTANCE = "/Engine/BasicShapes/BasicShapeMaterial_Inst"
+
+
+def _engine_instance(editor: SimpleNamespace) -> Any:
+    parent = editor.fake.instance.parent
+    instance = MaterialInstanceConstant(ENGINE_INSTANCE, parent, editor.fake.events)
+    editor.fake.assets[ENGINE_INSTANCE] = instance
+    return instance
+
+
+def test_an_engine_instance_is_refused_and_nothing_is_written(editor: SimpleNamespace) -> None:
+    """Editing /Engine/BasicShapes/BasicShapeMaterial_Inst left the shared engine asset dirty."""
+    instance = _engine_instance(editor)
+
+    result = _set(editor, ENGINE_INSTANCE, scalar_params={"Roughness": 0.25})
+
+    assert result["success"] is False
+    assert result["error_type"] == "SandboxError"
+    assert result["details"]["content_path"] == ENGINE_INSTANCE + ".BasicShapeMaterial_Inst"
+    assert "create_unreal_material_instance" in result["details"]["hint"]
+    assert instance.overrides == NO_OVERRIDES
+    assert editor.fake.transactions == []
+    assert instance.modified == 0
+
+
+def test_allow_engine_content_edits_an_engine_instance(editor: SimpleNamespace) -> None:
+    instance = _engine_instance(editor)
+
+    result = asyncio.run(editor.session.set_material_params(
+        ENGINE_INSTANCE, scalar_params={"Roughness": 0.25}, allow_engine_content=True
+    ))
+
+    assert result["params_set"] == 1, result
+    assert instance.overrides["scalar"] == {"Roughness": 0.25}
+
+
 def test_play_in_editor_changes_nothing(editor: SimpleNamespace) -> None:
     """EditorAssetLibrary loads nothing during PIE; the tool does not depend on it."""
     outside = _set(
