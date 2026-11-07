@@ -373,7 +373,9 @@ def _session(
     session.scripts = []  # type: ignore[attr-defined]
     session.calls = []  # type: ignore[attr-defined]
 
-    async def execute(code: str, mode: str = "ExecuteFile") -> Dict[str, Any]:
+    async def execute(
+        code: str, mode: str = "ExecuteFile", timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
         session.scripts.append(code)  # type: ignore[attr-defined]
         return editor.run(code)
 
