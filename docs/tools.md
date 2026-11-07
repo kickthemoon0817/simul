@@ -124,7 +124,8 @@ Registered by default only on Linux and Windows, where Isaac Sim runs
 | Prim editing | `create_isaac_object`, `create_isaac_prim`, `delete_isaac_prim`, `set_isaac_prim_transform`, `set_isaac_prim_visibility`, `set_isaac_prim_attribute`, `duplicate_isaac_prim`, `reparent_isaac_prim` |
 | Lights | `list_isaac_lights`, `create_isaac_light` |
 | Cameras and viewport | `list_isaac_cameras`, `get_isaac_camera_info`, `set_isaac_camera`, `capture_isaac_viewport`, `focus_isaac_viewport`, `get_isaac_viewport_info` |
-| Physics | `get_isaac_physics_scene`, `create_isaac_physics_scene`, `add_isaac_rigid_body`, `add_isaac_collision`, `set_isaac_mass_properties`, `set_isaac_physics_material`, `list_isaac_physics_objects` |
+| Physics | `get_isaac_physics_scene`, `create_isaac_physics_scene`, `configure_isaac_physics_scene`, `add_isaac_rigid_body`, `add_isaac_collision`, `set_isaac_mass_properties`, `set_isaac_physics_material`, `list_isaac_physics_objects` |
+| Joints and articulations | `list_isaac_articulations`, `set_isaac_joint_drive`, `set_isaac_joint_limits` |
 | Simulation control | `get_isaac_simulation_state`, `start_isaac_simulation`, `pause_isaac_simulation`, `stop_isaac_simulation`, `step_isaac_simulation`, `reset_isaac_simulation`, `get_isaac_simulation_time` |
 | Materials | `list_isaac_materials`, `create_isaac_material`, `assign_isaac_material`, `set_isaac_material_property` |
 | Rendering and settings | `read_isaac_aovs`, `list_isaac_aovs`, `list_isaac_render_vars`, `get_isaac_carb_settings`, `set_isaac_carb_settings` |
@@ -168,6 +169,27 @@ Notes:
   schema's `-inf` fallback) as `null` with `center_of_mass_note`.
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
   mass and material in one call.
+- `create_isaac_physics_scene` derives a new scene's gravity from the stage:
+  Earth gravity along the negative up axis, in stage units (981 on a
+  centimetre stage); `gravity_magnitude` is taken in m/s^2. It refuses a prim
+  of another type at `prim_path` rather than retyping it.
+  `get_isaac_physics_scene` reports gravity resolved the way the simulation
+  reads it plus the PhysxSceneAPI settings authored on the scene (physics
+  rate, solver type, iteration clamps, GPU dynamics, broadphase, CCD,
+  stabilization, enhanced determinism); `configure_isaac_physics_scene`
+  writes them.
+- `add_isaac_collision` applies CollisionAPI to the geometry at and under
+  `prim_path` (an asset root's meshes, not the root Xform, which would make no
+  shape), puts `approximation` on meshes only, and lists the shapes.
+  `set_isaac_physics_material` binds a MaterialAPI material to the colliders
+  at or under `prim_path` with purpose `physics`, leaving the visual binding
+  alone, and lists them in `bound_to`.
+- The joint tools are USD-level (UsdPhysics DriveAPI, LimitAPI,
+  ArticulationRootAPI). `list_isaac_articulations` orders each
+  articulation's joints depth first from the root body; PhysX's DOF indices
+  need not follow that order. Angular drive targets and revolute limits are in
+  degrees. In the joint aspect, an infinite value ("no limit",
+  "unbreakable") is null with a `<key>_note`, since JSON has no infinity.
 - `get_isaac_ui_state` is a single snapshot of windows, focus, viewport,
   selection, timeline and stage; `get_isaac_ui_window` walks one window's
   widget tree.

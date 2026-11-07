@@ -1598,16 +1598,27 @@ def new_stage(
 @app.command("create-physics-scene")
 def create_physics_scene(
     prim_path: str = typer.Option("/World/PhysicsScene", "--path", help="USD path for the physics scene"),
-    gravity: float = typer.Option(9.81, "--gravity", "-g", help="Gravity magnitude in m/s^2"),
-    gravity_dir: str = typer.Option("0,0,-1", "--gravity-dir", help="Gravity direction as x,y,z"),
+    gravity: Optional[float] = typer.Option(
+        None,
+        "--gravity",
+        "-g",
+        help="Gravity magnitude in m/s^2 (default 9.81, converted to stage units)",
+    ),
+    gravity_dir: Optional[str] = typer.Option(
+        None,
+        "--gravity-dir",
+        help="Gravity direction as x,y,z (default: the stage's negative up axis)",
+    ),
     host: Optional[str] = _host_opt,
     port: Optional[int] = _port_opt,
 ) -> None:
     """Create a UsdPhysics.Scene with gravity settings."""
-    try:
-        grav_dir_list = [float(v) for v in gravity_dir.split(",")]
-    except ValueError as e:
-        fail(f"Invalid numeric value in --gravity-dir: {e}", "ValueError")
+    grav_dir_list: Optional[List[float]] = None
+    if gravity_dir is not None:
+        try:
+            grav_dir_list = [float(v) for v in gravity_dir.split(",")]
+        except ValueError as e:
+            fail(f"Invalid numeric value in --gravity-dir: {e}", "ValueError")
     result = _run(_tools(host, port).create_isaac_physics_scene(
         prim_path=prim_path,
         gravity_direction=grav_dir_list,
@@ -1616,13 +1627,19 @@ def create_physics_scene(
     if is_json_mode():
         emit(result)
         return
+    m_per_s2 = result.get("gravity_magnitude_m_per_s2")
+    direction = result.get("gravity_direction")
     if result.get("already_existed"):
+        state = "gravity updated" if result.get("updated") else "gravity unchanged"
         console.print(
             f"[yellow]Physics scene already exists[/yellow] at {prim_path} "
-            f"(gravity updated to {result.get('gravity_magnitude')} m/s^2)"
+            f"({state}: {m_per_s2} m/s^2 along {direction})"
         )
     else:
-        console.print(f"[green]Physics scene created[/green] at {prim_path} (gravity={gravity} m/s^2)")
+        console.print(
+            f"[green]Physics scene created[/green] at {prim_path} "
+            f"(gravity {m_per_s2} m/s^2 along {direction})"
+        )
 
 
 # ---------------------------------------------------------------------------
