@@ -52,6 +52,44 @@ DEFAULT_ALLOWED_WRITE_URL_SCHEMES: Tuple[str, ...] = ()
 # Sub-directory created under an allowed root to receive viewport captures.
 CAPTURE_SUBDIR = "captures"
 
+# Names the directory simul keeps its state in; unset, ``~/.simul``.
+STATE_DIR_VARIABLE = "SIMUL_HOME"
+
+
+def state_dir() -> Path:
+    """Return the directory simul keeps its state in.
+
+    ``$SIMUL_HOME`` when set, otherwise ``~/.simul``. Session records, the
+    usage log, the default log and audit files, the Blender discovery and
+    attachment files, the Unreal attachment and FastMCP's cache all live
+    under it unless configured elsewhere. Nothing is created here: each
+    writer creates the directory it needs when it first writes.
+
+    Returns:
+        The absolute directory.
+    """
+    raw = os.environ.get(STATE_DIR_VARIABLE, "").strip()
+    if raw:
+        return Path(os.path.expandvars(raw)).expanduser().absolute()
+    return Path.home() / ".simul"
+
+
+def default_state_path(*parts: str) -> str:
+    """Return a path under ``state_dir()`` as a settings default.
+
+    Spelled ``~/.simul/...`` when ``SIMUL_HOME`` is unset, as the defaults
+    always were, and as an absolute path under ``$SIMUL_HOME`` otherwise.
+
+    Args:
+        *parts: Components below the state directory.
+
+    Returns:
+        The path as a string.
+    """
+    if os.environ.get(STATE_DIR_VARIABLE, "").strip():
+        return str(state_dir().joinpath(*parts))
+    return "/".join(("~", ".simul", *parts))
+
 
 def shared_directory_problem(path: Path) -> Optional[str]:
     """Explain why ``path`` cannot be trusted as this user's directory, or None.

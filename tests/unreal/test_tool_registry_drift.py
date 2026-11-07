@@ -125,6 +125,7 @@ def test_converted_arguments_reach_the_session_under_their_target() -> None:
         scalar_params_json='{"Roughness": 0.4}',
         vector_params_json="",
         texture_params_json='{"Albedo": "/Game/T"}',
+        allow_engine_content=False,
     )
 
     assert session_arguments(spec, request) == {
@@ -132,6 +133,7 @@ def test_converted_arguments_reach_the_session_under_their_target() -> None:
         "scalar_params": {"Roughness": 0.4},
         "vector_params": None,
         "texture_params": {"Albedo": "/Game/T"},
+        "allow_engine_content": False,
     }
 
 

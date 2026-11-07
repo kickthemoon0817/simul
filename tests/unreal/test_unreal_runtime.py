@@ -680,15 +680,19 @@ class TestUnrealRuntimeSessionPhase2:
     # -- set_camera_view --
 
     def test_set_camera_view_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_camera_view sends SetLevelViewportCameraInfo and returns applied state."""
+        """set_camera_view sends SetLevelViewportCameraInfo and returns the camera read back."""
         session = self._make_session(monkeypatch)
         calls_made: list = []
+        camera: Dict[str, Any] = {}
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
             fn = (json or {}).get("functionName", "")
             calls_made.append(fn)
             if fn == "SetLevelViewportCameraInfo":
+                camera.update(json["parameters"])
                 return FakeResponse({})
+            if fn == "GetLevelViewportCameraInfo":
+                return FakeResponse({**camera, "ReturnValue": True})
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
@@ -698,28 +702,28 @@ class TestUnrealRuntimeSessionPhase2:
             rotation=(-30.0, 90.0, 0.0),
         ))
 
-        assert result["location"] == (500.0, 600.0, 700.0)
-        assert result["rotation"] == (-30.0, 90.0, 0.0)
-        assert "fov" not in result
-        assert "SetLevelViewportCameraInfo" in calls_made
+        assert result == {"location": (500.0, 600.0, 700.0), "rotation": (-30.0, 90.0, 0.0)}
+        assert calls_made == ["SetLevelViewportCameraInfo", "GetLevelViewportCameraInfo"]
 
     def test_set_camera_view_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_camera_view with no params reports nothing applied and skips HTTP call."""
+        """set_camera_view with no params moves nothing and reports the camera as it is."""
         session = self._make_session(monkeypatch)
         calls_made: list = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
             calls_made.append((json or {}).get("functionName", ""))
-            return FakeResponse({})
+            return FakeResponse({
+                "CameraLocation": {"X": 1.0, "Y": 2.0, "Z": 3.0},
+                "CameraRotation": {"Pitch": -10.0, "Yaw": 20.0, "Roll": 0.0},
+                "ReturnValue": True,
+            })
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
 
         result = asyncio.run(session.set_camera_view())
 
-        assert result["location"] is None
-        assert result["rotation"] is None
-        # No SetLevelViewportCameraInfo call since no params provided
-        assert "SetLevelViewportCameraInfo" not in calls_made
+        assert result == {"location": (1.0, 2.0, 3.0), "rotation": (-10.0, 20.0, 0.0)}
+        assert calls_made == ["GetLevelViewportCameraInfo"]
 
     # -- focus_on_actor --
 
@@ -777,7 +781,8 @@ class TestUnrealRuntimeSessionPhase2:
             "SetLevelViewportCameraInfo",
             "GetLevelViewportCameraInfo",
         ]
-        assert repr(actor_path) in scripts[0] and "set_actor_selection_state" in scripts[0]
+        # The actor becomes the whole selection rather than one more selected actor.
+        assert repr(actor_path) in scripts[0] and "set_selected_level_actors([actor])" in scripts[0]
         assert "get_actor_bounds" in scripts[0]
         # 500 cm behind the actor's location and 250 cm above it, pitched down
         # at it; the center of its bounds plays no part.
@@ -945,13 +950,16 @@ class TestUnrealRuntimeSessionPhase3:
     # -- delete_actor --
 
     def test_delete_actor_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """delete_actor returns deleted=True."""
+        """delete_actor deletes in one editor script and returns what it read back."""
         session = self._make_session(monkeypatch)
+        scripts: list = []
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "DestroyActor":
-                return FakeResponse({"ReturnValue": True})
+            if (json or {}).get("functionName") == "ExecutePythonCommandEx":
+                scripts.append(json["parameters"]["PythonCommand"])
+                return python_json_response(
+                    {"actor_path": "/Game/Maps/Test.Test:PersistentLevel.Cube_0", "deleted": True}
+                )
             return FakeResponse({}, 404)
 
         session._session = SmartFakeClientSession(put_fn=put_fn)
@@ -960,8 +968,8 @@ class TestUnrealRuntimeSessionPhase3:
             actor_path="/Game/Maps/Test.Test:PersistentLevel.Cube_0"
         ))
 
-        assert result["deleted"] is True
-        assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
+        assert result == {"actor_path": "/Game/Maps/Test.Test:PersistentLevel.Cube_0", "deleted": True}
+        assert len(scripts) == 1 and "destroy_actor(actor)" in scripts[0]
 
     # -- set_actor_transform --
 
@@ -1028,6 +1036,8 @@ class TestUnrealRuntimeSessionPhase3:
         session = self._make_session(monkeypatch)
 
         def put_fn(path: str, json: Any = None) -> FakeResponse:
+            if (json or {}).get("functionName") == "ExecutePythonCommandEx":  # the actor check
+                return python_json_response({})
             if path == "/remote/object/call":
                 return FakeResponse({"ReturnValue": 42})
             return FakeResponse({}, 404)
@@ -1046,47 +1056,8 @@ class TestUnrealRuntimeSessionPhase3:
     # set_actor_parent and add_component run editor scripts:
     # tests/unreal/test_actor_hierarchy.py runs them against a fake editor.
 
-    # -- set_actor_visibility --
-
-    def test_set_actor_visibility_hide(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_actor_visibility can hide an actor."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "SetActorHiddenInGame":
-                return FakeResponse({})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.set_actor_visibility(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Cube_0",
-            visible=False,
-            propagate=True,
-        ))
-
-        assert result["actor_path"] == "/Game/Maps/Test.Test:PersistentLevel.Cube_0"
-        assert result["visible"] is False
-
-    def test_set_actor_visibility_show(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """set_actor_visibility can show an actor."""
-        session = self._make_session(monkeypatch)
-
-        def put_fn(path: str, json: Any = None) -> FakeResponse:
-            fn = (json or {}).get("functionName", "")
-            if fn == "SetActorHiddenInGame":
-                return FakeResponse({})
-            return FakeResponse({}, 404)
-
-        session._session = SmartFakeClientSession(put_fn=put_fn)
-
-        result = asyncio.run(session.set_actor_visibility(
-            actor_path="/Game/Maps/Test.Test:PersistentLevel.Cube_0",
-            visible=True,
-        ))
-
-        assert result["visible"] is True
+    # set_actor_visibility runs an editor script:
+    # tests/unreal/test_actor_edits.py runs it against a fake editor.
 
 
 class TestUnrealRuntimeSessionPhase4:

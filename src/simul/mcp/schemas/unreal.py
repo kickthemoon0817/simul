@@ -660,11 +660,11 @@ class UnrealSetCameraViewResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    location: Optional[Tuple[float, float, float]] = Field(
-        None, description="Applied camera position; None when left unchanged"
+    location: Tuple[float, float, float] = Field(
+        ..., description="Camera position (X, Y, Z) in cm, read back after the call"
     )
-    rotation: Optional[Tuple[float, float, float]] = Field(
-        None, description="Applied camera rotation; None when left unchanged"
+    rotation: Tuple[float, float, float] = Field(
+        ..., description="Camera rotation (Pitch, Yaw, Roll) in degrees, read back after the call"
     )
 
 
@@ -839,7 +839,9 @@ class UnrealDeleteActorResponse(BaseModel):
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Path of the deleted actor")
-    deleted: bool = Field(..., description="Whether actor was actually deleted")
+    deleted: bool = Field(
+        ..., description="Whether the actor is gone, read back after the delete"
+    )
 
 
 class UnrealSetActorTransformResponse(BaseModel):
@@ -936,15 +938,47 @@ class UnrealAddComponentResponse(BaseModel):
     )
 
 
+class UnrealActorVisibility(BaseModel):
+    """One actor's hidden flags, read back after a visibility change."""
+
+    actor_path: str = Field(..., description="Full actor path")
+    hidden_in_editor: bool = Field(
+        ...,
+        description=(
+            "Hidden by the editor (the Outliner's eye): the level viewport and captures do not draw it; "
+            "kept for the editor session"
+        ),
+    )
+    hidden_in_editor_at_startup: bool = Field(
+        ...,
+        description="Hidden at editor startup: saved with the level and applied when it loads",
+    )
+    hidden_in_game: bool = Field(
+        ...,
+        description="Hidden in game: saved with the level; Play In Editor and the packaged game do not draw it",
+    )
+
+
 class UnrealSetActorVisibilityResponse(BaseModel):
-    """Response after setting actor visibility."""
+    """Response after setting actor visibility, read back from every actor it changed."""
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor whose visibility was set")
-    visible: bool = Field(..., description="Applied visibility state")
+    visible: bool = Field(..., description="The visibility asked for")
+    scope: str = Field(..., description="Which visibility was set: editor, game or all")
+    propagate: bool = Field(
+        ..., description="Whether every actor attached under it was set the same"
+    )
+    persistent: bool = Field(
+        ..., description="Whether the hidden-at-editor-startup flag was set too"
+    )
+    actors: List[UnrealActorVisibility] = Field(
+        ...,
+        description="The flags read back from each actor set: the actor first, then those attached under it",
+    )
 
 
 # ---------------------------------------------------------------
@@ -1058,6 +1092,9 @@ class UnrealCreateMaterialInstanceResponse(BaseModel):
     )
     instance_path: str = Field(..., description="New MIC asset path")
     parent_path: str = Field(..., description="Parent material path")
+    class_name: str = Field(
+        "MaterialInstanceConstant", description="Class of the new asset"
+    )
 
 
 class UnrealAssignMaterialResponse(BaseModel):
@@ -1068,8 +1105,14 @@ class UnrealAssignMaterialResponse(BaseModel):
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor path")
-    material_path: str = Field(..., description="Assigned material path")
+    component_path: Optional[str] = Field(
+        None, description="Mesh component whose slot was set"
+    )
+    material_path: str = Field(..., description="Assigned material's object path")
     slot_index: int = Field(0, description="Slot index")
+    previous_material_path: Optional[str] = Field(
+        None, description="Material the slot rendered with before the assignment"
+    )
 
 
 class UnrealSetLightParamsResponse(BaseModel):
@@ -1261,6 +1304,10 @@ class UnrealImportUsdResponse(BaseModel):
     actor_paths: List[str] = Field(
         default_factory=list, description="Spawned actor paths in the level"
     )
+    removed_actor_paths: List[str] = Field(
+        default_factory=list,
+        description="Level actors the import replaced (only with replace_existing)",
+    )
     warnings: List[str] = Field(default_factory=list, description="Import warnings")
 
 
@@ -1272,7 +1319,17 @@ class UnrealExportUsdResponse(BaseModel):
         None, description="Error message when success is False"
     )
     output_path: str = Field(..., description="Written USD file path")
-    actors_exported: int = Field(..., description="Number of actors exported")
+    actors_exported: int = Field(
+        ..., description="Number of actors the written stage has a prim for"
+    )
+    exported_prims: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="Each exported actor's actor_path and the prim_path it was written to",
+    )
+    skipped_actors: List[str] = Field(
+        default_factory=list,
+        description="Actors given that the exporter wrote no prim for (editor helpers it leaves out)",
+    )
     file_size_bytes: int = Field(0, description="Output file size in bytes")
 
 

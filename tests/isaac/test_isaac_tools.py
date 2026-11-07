@@ -882,7 +882,11 @@ class TestMaterials:
 
     def test_set_isaac_material_property(self) -> None:
         """set_isaac_material_property updates a shader input."""
-        data = {"material_path": "/World/Looks/Mat1", "property_name": "diffuse_color_constant", "value_set": "[0.5, 0.5, 0.5]"}
+        data = {
+            "material_path": "/World/Looks/Mat1",
+            "property_name": "diffuse_color_constant",
+            "value_set": [0.5, 0.5, 0.5],
+        }
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(
             tools.set_isaac_material_property(
@@ -913,9 +917,11 @@ class TestStageAssetOps:
         assert result["total_prims"] == 50
 
     def test_save_isaac_stage(self) -> None:
-        """save_isaac_stage saves the current stage."""
+        """save_isaac_stage asks what it would write, then saves the current stage."""
+        probe = {"stage_url": "/tmp/simul-work/test.usd", "dirty_layers": [], "timeline_stopped": True}
         data = {"file_path": "/tmp/simul-work/test.usd", "saved": True}
-        tools = _make_tools(execute_return=_make_result(data))
+        tools = _make_tools()
+        tools._client.execute.side_effect = [_make_result(probe), _make_result(data)]
         result = asyncio.run(tools.save_isaac_stage())
         assert result["success"] is True
         assert result["saved"] is True
@@ -949,7 +955,12 @@ class TestStageAssetOps:
 
     def test_add_isaac_reference(self) -> None:
         """add_isaac_reference adds a USD reference to a prim."""
-        data = {"prim_path": "/World/Ref", "reference_path": "/tmp/simul-work/model.usd", "added": True, "total_references": 1}
+        data = {
+            "prim_path": "/World/Ref",
+            "reference_path": "/tmp/simul-work/model.usd",
+            "added": True,
+            "total_references": 1,
+        }
         tools = _make_tools(execute_return=_make_result(data))
         result = asyncio.run(
             tools.add_isaac_reference(prim_path="/World/Ref", reference_path="/tmp/simul-work/model.usd")

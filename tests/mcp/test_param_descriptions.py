@@ -37,6 +37,8 @@ UNIT_BEARING: Dict[str, Dict[str, str]] = {
         "gravity_direction": "Z-up",
     },
     "set_isaac_mass_properties": {"mass": "kg", "density": "kg/m^3"},
+    "set_isaac_joint_drive": {"target_position": "degrees", "target_velocity": "degrees/s"},
+    "set_isaac_joint_limits": {"lower": "degrees"},
     "set_unreal_actor_transform": {"location": "cm", "rotation": "degrees"},
 }
 
