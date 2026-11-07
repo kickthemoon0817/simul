@@ -166,6 +166,22 @@ def _compose_script(*fragments: str) -> str:
     return "\n".join(textwrap.dedent(fragment) for fragment in fragments)
 
 
+# Traversal predicate for the listing tools. Isaac robot assets keep their
+# meshes and colliders under instanceable prims, where the default predicate
+# stops, so a Mesh search or a collider count over a robot came back empty;
+# and a deactivated prim (a disabled sensor) never appeared, so "active" was
+# always true. Instance proxies are on by default, inactive prims by request.
+# The bridge's service carries the same function. Needs ``Usd``.
+TRAVERSAL_PREDICATE_CORE = """\
+    def _traversal_predicate(include_instance_proxies, include_inactive):
+        if include_inactive:
+            # An inactive prim also reads as unloaded, so both flags go.
+            flags = Usd.PrimIsDefined & ~Usd.PrimIsAbstract
+        else:
+            flags = Usd.PrimIsActive & Usd.PrimIsDefined & Usd.PrimIsLoaded & ~Usd.PrimIsAbstract
+        return Usd.TraverseInstanceProxies(flags) if include_instance_proxies else flags
+"""
+
 # What the mass and rigid_body aspects say beside a null centre of mass.
 # MassAPI's fallback is (-inf, -inf, -inf), the normal state after
 # set_isaac_mass_properties(mass=...); json.dumps spells it -Infinity, which
@@ -282,18 +298,109 @@ JSON_VALUE_CORE = """\
             return str(value)
 """
 
+# JSON value -> the attribute's USD type. pxr converts a list to a Gf vector
+# by itself but not to a quaternion or a matrix (both fail with a bare "type
+# mismatch"), which put xformOp:orient, Isaac's default rotation op, and a
+# joint's localRot0/1 out of reach. Needs ``Gf``.
+COERCE_ATTRIBUTE_VALUE_CORE = """\
+    _QUATS = (Gf.Quatf, Gf.Quatd, Gf.Quath)
+    _MATRIX_SIZES = {Gf.Matrix2d: 2, Gf.Matrix3d: 3, Gf.Matrix4d: 4}
+
+    def _coerce_one(item, target, label):
+        if target in _QUATS:
+            if not isinstance(item, (list, tuple)) or len(item) != 4:
+                raise ValueError(label + " takes a quaternion as [w, x, y, z] (real part first)")
+            return target(float(item[0]), float(item[1]), float(item[2]), float(item[3]))
+        if target in _MATRIX_SIZES:
+            size = _MATRIX_SIZES[target]
+            if not isinstance(item, (list, tuple)):
+                raise ValueError(label + " takes a matrix as a list of rows")
+            if item and all(isinstance(row, (list, tuple)) for row in item):
+                if len(item) != size or any(len(row) != size for row in item):
+                    raise ValueError(label + " takes " + str(size) + " rows of " + str(size) + " numbers")
+                flat = [float(x) for row in item for x in row]
+            else:
+                flat = [float(x) for x in item]
+            if len(flat) != size * size:
+                raise ValueError(label + " takes " + str(size * size) + " numbers, row-major")
+            return target(*flat)
+        dimension = getattr(target, "dimension", None)
+        if isinstance(dimension, int) and isinstance(item, (list, tuple)) and len(item) != dimension:
+            raise ValueError(label + " takes " + str(dimension) + " components; got " + str(len(item)))
+        return item
+
+    def _coerce_attribute_value(attr, value):
+        type_name = attr.GetTypeName()
+        if type_name.isArray:
+            if not isinstance(value, (list, tuple)):
+                raise ValueError(str(type_name) + " is an array; pass a list")
+            scalar_cls = type_name.scalarType.type.pythonClass
+            items = [_coerce_one(item, scalar_cls, str(type_name.scalarType)) for item in value]
+            if scalar_cls in _QUATS or scalar_cls in _MATRIX_SIZES:
+                return type_name.type.pythonClass(items)
+            return value
+        return _coerce_one(value, type_name.type.pythonClass, str(type_name))
+"""
+
 DEFINE_PRIM_CORE = """\
     def _define_prim(stage, prim_path, prim_type, attributes):
+        # Needs COERCE_ATTRIBUTE_VALUE_CORE, plus Usd and Tf, in the script.
         existing = stage.GetPrimAtPath(prim_path)
         if existing.IsValid():
             return {"error": "Prim already exists: " + prim_path}
+        definition = None
+        if prim_type:
+            # DefinePrim takes any token: a mistyped "cube" made an untyped
+            # prim that was reported as created.
+            tf_type = Usd.SchemaRegistry.GetTypeFromSchemaTypeName(prim_type)
+            if tf_type.isUnknown or not Usd.SchemaRegistry.IsConcrete(tf_type):
+                suggestion = None
+                for candidate in Tf.Type.Find(Usd.Typed).GetAllDerivedTypes():
+                    name = str(Usd.SchemaRegistry.GetSchemaTypeName(candidate))
+                    if name.lower() == prim_type.lower() and Usd.SchemaRegistry.IsConcrete(candidate):
+                        suggestion = name
+                        break
+                kind = "an abstract schema" if not tf_type.isUnknown else "not a registered prim type"
+                return {
+                    "error": (
+                        "Unknown prim type " + repr(prim_type) + " (" + kind + ")"
+                        + (": did you mean " + repr(suggestion) + "?" if suggestion else ".")
+                        + " Use a concrete schema type name such as Xform, Scope, Cube, Mesh or Camera."
+                    ),
+                    "suggestion": suggestion,
+                }
+            definition = Usd.SchemaRegistry().FindConcretePrimDefinition(prim_type)
+        # Attributes the schema doesn't define were skipped without a word.
+        known = set(definition.GetPropertyNames()) if definition is not None else set()
+        unknown = sorted(name for name in attributes if name not in known)
+        if unknown:
+            return {
+                "error": (
+                    "Attribute(s) not defined by " + (prim_type or "a typeless prim") + ": "
+                    + ", ".join(unknown) + ". Nothing was created; only attributes the type's schema "
+                    "defines can be set on creation."
+                ),
+                "unknown_attributes": unknown,
+            }
         prim = stage.DefinePrim(prim_path, prim_type)
         if not prim.IsValid():
             return {"error": "Failed to create prim: " + prim_path}
         for name, value in attributes.items():
             attr = prim.GetAttribute(name)
-            if attr.IsValid():
-                attr.Set(value)
+            try:
+                if not attr.IsValid():
+                    raise ValueError("it is a relationship, not an attribute")
+                if not attr.Set(_coerce_attribute_value(attr, value)):
+                    raise ValueError("USD refused the value")
+            except Exception as exc:
+                # Leave nothing half-built behind a failure.
+                stage.RemovePrim(prim_path)
+                text = str(exc).strip()
+                message = text.splitlines()[-1].split(" : ", 1)[-1].strip(" '") if text else type(exc).__name__
+                return {
+                    "error": "Failed to set " + name + " on " + prim_path + ": " + message
+                    + "; the prim was not created."
+                }
         return {
             "prim_path": str(prim.GetPath()),
             "prim_type": prim.GetTypeName(),

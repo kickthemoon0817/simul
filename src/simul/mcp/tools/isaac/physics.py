@@ -182,7 +182,9 @@ class PhysicsMixin:
                 rigid_bodies = []
                 colliders = []
                 joints = []
-                for p in Usd.PrimRange(root):
+                # Isaac robot assets keep their colliders under instanceable
+                # prims; the default predicate stops there and counted none.
+                for p in Usd.PrimRange(root, Usd.TraverseInstanceProxies(Usd.PrimDefaultPredicate)):
                     path = str(p.GetPath())
                     if p.HasAPI(UsdPhysics.RigidBodyAPI):
                         rigid_bodies.append({{"path": path, "type": p.GetTypeName()}})

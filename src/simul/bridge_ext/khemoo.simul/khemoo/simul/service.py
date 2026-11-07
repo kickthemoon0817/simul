@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Optional
+from typing import Any
 
 from .executor import ScriptExecutor
 from .prim_detail import BULK_GEOMETRY_ATTRIBUTES, PRIM_DETAIL_ASPECTS, PrimDetailReader
@@ -311,6 +311,7 @@ class BridgeCommandService:
                 f"Invalid root path: {root_path}",
             )
 
+        include_proxies, include_inactive = self._traversal_flags(request.payload)
         root_depth = len(str(root.GetPath()).rstrip("/").split("/"))
         prims = []
         matched = 0
@@ -319,7 +320,9 @@ class BridgeCommandService:
         # depth limit bounded the response and not the work. Prune instead —
         # and the page-full break below is unreachable while we continue past
         # every deep prim on the stage.
-        prim_iter = iter(Usd.PrimRange(root))
+        prim_iter = iter(
+            Usd.PrimRange(root, self._traversal_predicate(include_proxies, include_inactive))
+        )
         for prim in prim_iter:
             path_str = str(prim.GetPath())
             depth = len(path_str.rstrip("/").split("/")) - root_depth
@@ -336,14 +339,15 @@ class BridgeCommandService:
             if len(prims) >= max_results:
                 truncated = True
                 break
-            prims.append(
-                {
-                    "path": path_str,
-                    "type": prim_type_name,
-                    "name": prim.GetName(),
-                    "active": prim.IsActive(),
-                }
-            )
+            entry: dict[str, Any] = {
+                "path": path_str,
+                "type": prim_type_name,
+                "name": prim.GetName(),
+                "active": prim.IsActive(),
+            }
+            if prim.IsInstanceProxy():
+                entry["instance_proxy"] = True
+            prims.append(entry)
 
         return BridgeResponse.success(
             request.request_id,
@@ -352,6 +356,9 @@ class BridgeCommandService:
                 "root_path": root_path,
                 "type_filter": prim_type,
                 "max_depth": max_depth,
+                # Echoed so the MCP side can tell this bridge honoured them.
+                "include_instance_proxies": include_proxies,
+                "include_inactive": include_inactive,
                 "count": len(prims),
                 "offset": offset,
                 "applied_limit": max_results,
@@ -513,10 +520,11 @@ class BridgeCommandService:
                 f"Invalid root path: {root_path}",
             )
 
+        include_proxies, include_inactive = self._traversal_flags(request.payload)
         matches = []
         matched = 0
         truncated = False
-        for prim in Usd.PrimRange(root):
+        for prim in Usd.PrimRange(root, self._traversal_predicate(include_proxies, include_inactive)):
             if search_type == "type":
                 match = prim.GetTypeName() == query
             else:
@@ -529,13 +537,16 @@ class BridgeCommandService:
             if len(matches) >= max_results:
                 truncated = True
                 break
-            matches.append(
-                {
-                    "path": str(prim.GetPath()),
-                    "type": prim.GetTypeName(),
-                    "name": prim.GetName(),
-                }
-            )
+            entry: dict[str, Any] = {
+                "path": str(prim.GetPath()),
+                "type": prim.GetTypeName(),
+                "name": prim.GetName(),
+            }
+            if prim.IsInstanceProxy():
+                entry["instance_proxy"] = True
+            if not prim.IsActive():
+                entry["active"] = False
+            matches.append(entry)
 
         return BridgeResponse.success(
             request.request_id,
@@ -544,6 +555,9 @@ class BridgeCommandService:
                 "search_type": search_type,
                 "query": query,
                 "root_path": root_path,
+                # Echoed so the MCP side can tell this bridge honoured them.
+                "include_instance_proxies": include_proxies,
+                "include_inactive": include_inactive,
                 "count": len(matches),
                 "offset": offset,
                 "applied_limit": max_results,
@@ -831,6 +845,33 @@ class BridgeCommandService:
                 "app updates; it may be at the end of a non-looping time range."
             )
         return result
+
+    @staticmethod
+    def _traversal_flags(payload: dict[str, Any]) -> tuple[bool, bool]:
+        """Read ``(include_instance_proxies, include_inactive)`` from a listing request.
+
+        Instance proxies default on: Isaac robot assets keep their meshes and
+        colliders under instanceable prims, where the default predicate stops.
+        """
+        return (
+            bool(payload.get("include_instance_proxies", True)),
+            bool(payload.get("include_inactive", False)),
+        )
+
+    @staticmethod
+    def _traversal_predicate(include_instance_proxies: bool, include_inactive: bool) -> Any:
+        """Return the ``Usd.PrimRange`` predicate a listing walks with.
+
+        Same as the MCP side's ``TRAVERSAL_PREDICATE_CORE``.
+        """
+        from pxr import Usd
+
+        if include_inactive:
+            # An inactive prim also reads as unloaded, so both flags go.
+            flags = Usd.PrimIsDefined & ~Usd.PrimIsAbstract
+        else:
+            flags = Usd.PrimIsActive & Usd.PrimIsDefined & Usd.PrimIsLoaded & ~Usd.PrimIsAbstract
+        return Usd.TraverseInstanceProxies(flags) if include_instance_proxies else flags
 
     @staticmethod
     def _page_bounds(payload: dict[str, Any], default_limit: int) -> tuple[int, int]:

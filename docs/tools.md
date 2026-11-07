@@ -79,6 +79,41 @@ Notes:
   non-finite floats as `null`.
 - The `mass` and `rigid_body` aspects report an unset centre of mass (the
   schema's `-inf` fallback) as `null` with `center_of_mass_note`.
+- `delete_isaac_prim`, `duplicate_isaac_prim` and `reparent_isaac_prim` edit
+  the stage's edit target, not the root layer, and say what they did. A prim
+  that comes from a referenced asset (every link of an imported robot) or is
+  also defined in another layer can't be removed or moved from this stage:
+  - `delete_isaac_prim` with `mode="auto"` (default) deactivates it instead
+    (`action: "deactivated"`, with the `reason`; local overrides are kept).
+    `mode="remove"` refuses, and `mode="deactivate"` always deactivates.
+  - `duplicate_isaac_prim` copies the spec, arcs included, when the edit
+    target defines the prim. Otherwise it copies the flattened composed
+    result (`method: "flattened_copy"`), and instanceable prims inside stay
+    instanced.
+  - `reparent_isaac_prim` refuses unchanged.
+  
+  Instance proxies are refused by all three. `reparent_isaac_prim` keeps the
+  world pose (`keep_world_transform=true`), retargets relationships and
+  connections that point into the moved subtree, and uses Kit's undoable
+  `MovePrim` when available. `undoable` reports whether the whole edit is on
+  Kit's undo stack.
+- The listings (`list_isaac_prims`, `search_isaac_prims`, `get_isaac_subtree`,
+  `query_isaac_typed_prims`) descend into instanceable prims by default,
+  where Isaac assets keep their meshes and colliders; entries there carry
+  `instance_proxy: true` and are read-only. Pass
+  `include_instance_proxies=false` to stop at the instance. Pass
+  `include_inactive=true` to also see deactivated prims (`active: false`).
+  `list_isaac_physics_objects` counts instanced colliders too, and
+  `get_isaac_subtree` takes `max_depth=-1` as unlimited.
+- `create_isaac_prim` refuses a type that isn't a concrete registered schema
+  (`cube` gets a suggestion, `Cube`) and attributes the type's schema doesn't
+  define; a value that can't be set removes the new prim again.
+  `create_isaac_object` checks its vectors before creating anything. When a
+  step fails, `left_on_stage` lists what the earlier steps created.
+- With `security.allow_script_execution` off, `set_isaac_prim_attribute` and
+  `create_isaac_prim` refuse to write an OmniGraph script node's
+  `inputs:script*` or a script-capable `node:type`
+  (`ScriptExecutionDisabled`), since that would run Python in Kit.
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
   mass and material in one call.
 - `get_isaac_ui_state` is a single snapshot of windows, focus, viewport,

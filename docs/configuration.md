@@ -66,7 +66,10 @@ default `true`). When `false`, the server does not register
 Unreal's `call_unreal_actor_function` and `batch_unreal_operations`
 dispatchers, and `simul isaac exec` / `simul unreal exec` return a
 `ScriptExecutionDisabled` error. The fixed granular tools, including
-`control_unreal_ui`, keep working.
+`control_unreal_ui`, keep working. They refuse the writes that would plant
+code instead: `set_isaac_prim_attribute` and `create_isaac_prim` return
+`ScriptExecutionDisabled` for an OmniGraph script node's `inputs:script*`
+attributes and for a script-capable `node:type`.
 
 This is the only switch that removes the agent-authored code surface. The
 Isaac bridge extension's `allow_unsafe_execution` setting (and
@@ -92,7 +95,8 @@ Some operations refuse by default to protect the running application and
 your data. Each refusal is a structured `RefusedOperation` error:
 
 - `delete_isaac_prim` refuses `/`, and refuses `/World` unless
-  `allow_root_delete=true`.
+  `allow_root_delete=true`. A prim from a referenced asset is deactivated
+  rather than removed (`mode="remove"` refuses it instead).
 - `disable_isaac_extension` refuses the transport extensions
   (`khemoo.simul`, `isaacsim.code_editor.python_server`,
   `isaacsim.code_editor.vscode`).
