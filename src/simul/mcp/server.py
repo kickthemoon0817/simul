@@ -1974,10 +1974,21 @@ class SimulMCPServer(LoggerMixin):
             if transport == "stdio":
                 await self.mcp.run_async(transport="stdio")
             elif transport in NETWORK_TRANSPORTS:
+                from .http_security import resolve_http_security
+
+                # Resolved before the listener opens: a public bind without
+                # --allow-public or a bad token file stops here (see http_security).
+                http_security = resolve_http_security(self.settings.server)
+                for warning in http_security.warnings:
+                    self.logger.warning(warning)
+                auth = http_security.build_auth()
+                if auth is not None:
+                    self.mcp.auth = auth
                 await self.mcp.run_async(
                     transport=cast(Literal["http", "sse"], transport),
                     host=self.settings.server.host,
                     port=self.settings.server.port,
+                    **http_security.run_kwargs(),
                 )
             else:
                 raise ValueError(
