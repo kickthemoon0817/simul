@@ -33,8 +33,15 @@ from simul.adapters.unreal_runtime import (
 from simul.config import Settings
 from simul.mcp import server as server_module
 from tests.fakes import AvailableAdapter
+from tests.unreal.editor_world import (
+    SUBSYSTEM_NAMES,
+    World,
+    editor_subsystems,
+    is_valid,
+)
 
 ACTOR = "/Game/Map.Map:PersistentLevel.PointLight_0"
+WORLD = World("/Game/Map.Map")
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +108,9 @@ class _Actor:
     def get_path_name(self) -> str:
         return self.path
 
+    def get_world(self) -> World:
+        return WORLD
+
 
 def _fake_unreal(actor: _Actor, transactions: List[str]) -> SimpleNamespace:
     @contextmanager
@@ -113,7 +123,10 @@ def _fake_unreal(actor: _Actor, transactions: List[str]) -> SimpleNamespace:
         Vector=_Vector,
         Rotator=_Rotator,
         ScopedEditorTransaction=scoped_transaction,
-        load_object=lambda outer, path: actor if path == actor.path else None,
+        find_object=lambda outer, path: actor if path == actor.path else None,
+        SystemLibrary=SimpleNamespace(is_valid=is_valid),
+        get_editor_subsystem=editor_subsystems(WORLD).__getitem__,
+        **SUBSYSTEM_NAMES,
     )
 
 
@@ -133,7 +146,8 @@ def editor(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             with redirect_stdout(out):
                 exec(code, {})
         except Exception as exc:  # UE reports a raised script this way
-            return {"ReturnValue": False, "CommandResult": repr(exc)}
+            # UE reports the traceback, whose last line is "<Type>: <message>".
+            return {"ReturnValue": False, "CommandResult": f"{type(exc).__name__}: {exc}"}
         return {
             "ReturnValue": True,
             "LogOutput": [{"Type": "Info", "Output": line} for line in out.getvalue().splitlines()],
@@ -258,14 +272,15 @@ def test_a_root_less_actor_reads_back_identity_so_an_identity_request_matches(
     assert result["error"] == "Unreal did not apply: location"
 
 
-def test_a_missing_actor_is_a_script_error(editor: SimpleNamespace) -> None:
+def test_a_missing_actor_is_not_found(editor: SimpleNamespace) -> None:
     result = asyncio.run(
         editor.session.set_actor_transform("/Game/Map.Map:PersistentLevel.Gone", location=[0, 0, 0])
     )
 
     assert result["success"] is False
-    assert result["error_type"] == "ScriptError"
-    assert "Actor not found" in result["error"]
+    assert result["error_type"] == "NotFoundError"
+    assert result["error"].startswith("Actor not found: /Game/Map.Map:PersistentLevel.Gone (")
+    assert editor.transactions == []
 
 
 @pytest.mark.parametrize(
