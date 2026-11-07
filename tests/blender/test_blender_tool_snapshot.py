@@ -175,9 +175,14 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "rotation_euler": [0.1, 0.2, 0.3],
             "scale": [2, 2, 2],
         },
+        "quaternion": {
+            "object_name": "Cube",
+            "rotation_quaternion": [0.5, 0.5, 0.5, 0.5],
+        },
     },
     "set_blender_object_parent": {
-        "minimal": {"child_name": "Wheel", "parent_name": "Car"}
+        "minimal": {"child_name": "Wheel", "parent_name": "Car"},
+        "full": {"child_name": "Wheel", "parent_name": "Car", "keep_transform": False},
     },
     "clear_blender_object_parent": {
         "minimal": {"object_name": "Wheel"},

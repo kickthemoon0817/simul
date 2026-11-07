@@ -428,6 +428,236 @@ def _mathutils() -> Any:
     return mathutils
 
 
+# The order of the Euler angles that set_object_transform and control_ui's
+# set_property take, and that get_object_info and set_object_transform report
+# as rotation_euler, whatever the object's rotation_mode; the camera tools'
+# world-space rotation_euler is XYZ as well.
+TRANSFORM_EULER_ORDER = "XYZ"
+
+
+def _finite(values: Sequence[float], count: int, name: str) -> Tuple[float, ...]:
+    """Return ``count`` finite floats, or raise ValueError naming ``name``."""
+    numbers = tuple(float(v) for v in values)
+    if len(numbers) != count or not all(math.isfinite(v) for v in numbers):
+        raise ValueError(f"{name} must be {count} finite numbers")
+    return numbers
+
+
+def local_rotation_quaternion(obj: Any) -> Any:
+    """
+    Return the rotation of an object's own transform as a unit quaternion.
+
+    Blender keeps one rotation per object, in the property its
+    ``rotation_mode`` names: ``rotation_euler`` (its angles applied in the
+    mode's order), ``rotation_quaternion`` or ``rotation_axis_angle``. The
+    other two keep whatever they held when the mode changed, so on a glTF
+    import (QUATERNION) ``rotation_euler`` stays [0, 0, 0] however the object
+    is turned. Blender normalizes the quaternion, and takes an axis-angle
+    with a zero axis for no rotation, when it builds the matrix.
+
+    Args:
+        obj: The Blender object.
+
+    Returns:
+        A ``mathutils.Quaternion`` (w, x, y, z), before parenting, deltas and
+        constraints.
+    """
+    mathutils = _mathutils()
+    mode = obj.rotation_mode
+    if mode == "QUATERNION":
+        quaternion = mathutils.Quaternion(tuple(obj.rotation_quaternion))
+        if quaternion.magnitude == 0.0:
+            return mathutils.Quaternion()
+        return quaternion.normalized()
+    if mode == "AXIS_ANGLE":
+        angle, *axis = tuple(obj.rotation_axis_angle)
+        direction = mathutils.Vector(axis)
+        if direction.length == 0.0:
+            return mathutils.Quaternion()
+        return mathutils.Quaternion(direction.normalized(), angle)
+    return mathutils.Euler(tuple(obj.rotation_euler), mode).to_quaternion()
+
+
+def local_rotation_euler(obj: Any) -> List[float]:
+    """
+    Return the rotation of an object's own transform as XYZ Euler angles in radians.
+
+    An XYZ object's own angles come back as Blender stores them; any other
+    rotation mode is converted.
+
+    Args:
+        obj: The Blender object.
+
+    Returns:
+        [x, y, z] in TRANSFORM_EULER_ORDER.
+    """
+    if obj.rotation_mode == TRANSFORM_EULER_ORDER:
+        return [float(a) for a in obj.rotation_euler]
+    return [
+        float(a) for a in local_rotation_quaternion(obj).to_euler(TRANSFORM_EULER_ORDER)
+    ]
+
+
+def stored_rotation(obj: Any) -> List[float]:
+    """
+    Return the rotation as Blender stores it for the object's rotation_mode.
+
+    Args:
+        obj: The Blender object.
+
+    Returns:
+        Euler angles [x, y, z] (applied in the mode's order), a quaternion
+        [w, x, y, z] for QUATERNION, or [angle, x, y, z] for AXIS_ANGLE.
+    """
+    mode = obj.rotation_mode
+    if mode == "QUATERNION":
+        return [float(v) for v in obj.rotation_quaternion]
+    if mode == "AXIS_ANGLE":
+        return [float(v) for v in obj.rotation_axis_angle]
+    return [float(v) for v in obj.rotation_euler]
+
+
+def write_rotation(
+    obj: Any,
+    rotation_euler: Optional[Sequence[float]] = None,
+    rotation_quaternion: Optional[Sequence[float]] = None,
+) -> None:
+    """
+    Give an object's own transform a rotation, whatever its rotation_mode.
+
+    Blender reads only the property of the object's rotation mode, so a
+    write to ``rotation_euler`` changes nothing on a QUATERNION or
+    AXIS_ANGLE object, and another Euler order reads the angles in its own
+    order. The rotation is converted to the mode's property instead, and the
+    mode is kept. A converted Euler rotation takes the angles nearest the
+    object's current ones, and a quaternion converted from Euler angles the
+    sign of its current one, so a small turn stays a small change of the
+    stored values (no flip by a whole turn or to the opposite quaternion).
+
+    Args:
+        obj: The Blender object.
+        rotation_euler: XYZ Euler angles [x, y, z] in radians
+            (TRANSFORM_EULER_ORDER).
+        rotation_quaternion: A quaternion [w, x, y, z]; it is normalized.
+
+    Raises:
+        ValueError: Neither or both are given, a value is not finite, or the
+            quaternion has zero length.
+    """
+    if (rotation_euler is None) == (rotation_quaternion is None):
+        raise ValueError("Give either rotation_euler or rotation_quaternion")
+    mathutils = _mathutils()
+    mode = obj.rotation_mode
+    if rotation_euler is not None:
+        angles = _finite(rotation_euler, 3, "rotation_euler")
+        if mode == TRANSFORM_EULER_ORDER:
+            obj.rotation_euler = angles
+            return
+        quaternion = mathutils.Euler(angles, TRANSFORM_EULER_ORDER).to_quaternion()
+        if mode == "QUATERNION":
+            quaternion.make_compatible(local_rotation_quaternion(obj))
+    else:
+        values = _finite(rotation_quaternion or (), 4, "rotation_quaternion")
+        quaternion = mathutils.Quaternion(values)
+        if quaternion.magnitude == 0.0:
+            raise ValueError("rotation_quaternion must not have zero length")
+        quaternion = quaternion.normalized()
+    if mode == "QUATERNION":
+        obj.rotation_quaternion = quaternion
+    elif mode == "AXIS_ANGLE":
+        axis, angle = quaternion.to_axis_angle()
+        obj.rotation_axis_angle = (float(angle), *(float(v) for v in axis))
+    else:
+        obj.rotation_euler = quaternion.to_euler(mode, obj.rotation_euler)
+
+
+def _nearest_rotation(linear: List[List[float]]) -> Optional[List[List[float]]]:
+    """
+    Return the rotation nearest a 3x3 matrix: the orthogonal factor of its polar decomposition.
+
+    A turned child of a parent with non-uniform scale has a sheared world
+    matrix, which no rotation and scale rebuild. ``Matrix.decompose`` and
+    ``to_euler`` then read the rotation from some of its entries, and the two
+    disagree: on Blender 5.0.1 a glTF link under a parent scaled 0.5 on Z
+    came out 0.19 and 0.15 rad from the rotation of its axes. Newton's
+    iteration U = (U + U^-T) / 2 converges to the orthogonal factor, which for
+    such a matrix is the parent's rotation times the child's. A mirroring
+    matrix gives an orthogonal factor that mirrors too; it is negated into a
+    rotation, the scale negative on every axis, as Blender decomposes it.
+
+    Args:
+        linear: The matrix's rows.
+
+    Returns:
+        The rotation's rows, or None for a singular matrix.
+    """
+    current = [[float(v) for v in row] for row in linear]
+    for _ in range(64):
+        a = current
+        # A^-T is the cofactor matrix divided by the determinant.
+        cofactors = [
+            [
+                a[(i + 1) % 3][(j + 1) % 3] * a[(i + 2) % 3][(j + 2) % 3]
+                - a[(i + 1) % 3][(j + 2) % 3] * a[(i + 2) % 3][(j + 1) % 3]
+                for j in range(3)
+            ]
+            for i in range(3)
+        ]
+        determinant = sum(a[0][j] * cofactors[0][j] for j in range(3))
+        if determinant == 0.0 or not math.isfinite(determinant):
+            return None
+        following = [
+            [(a[i][j] + cofactors[i][j] / determinant) / 2 for j in range(3)]
+            for i in range(3)
+        ]
+        change = max(abs(following[i][j] - a[i][j]) for i in range(3) for j in range(3))
+        current = following
+        if change < 1e-12:
+            break
+    mirrored = (
+        current[0][0] * (current[1][1] * current[2][2] - current[1][2] * current[2][1])
+        - current[0][1] * (current[1][0] * current[2][2] - current[1][2] * current[2][0])
+        + current[0][2] * (current[1][0] * current[2][1] - current[1][1] * current[2][0])
+    ) < 0
+    return [[-v for v in row] for row in current] if mirrored else current
+
+
+def world_transform(obj: Any) -> Dict[str, Any]:
+    """
+    Report an object's world matrix, and that matrix decomposed.
+
+    The caller evaluates transforms first (_evaluate_transforms): matrix_world
+    lags a transform written since the last depsgraph evaluation in
+    background Blender and embedded mode. The location and scale are
+    ``Matrix.decompose``'s, which gives a mirrored matrix a scale negative on
+    every axis. The rotation is the one nearest the matrix (_nearest_rotation),
+    which also holds for the sheared matrix of a turned child under a parent
+    with non-uniform scale; ``matrix_world`` is exact.
+
+    Args:
+        obj: The Blender object.
+
+    Returns:
+        world_location, world_rotation_euler (XYZ), world_rotation_quaternion
+        (w, x, y, z), world_scale and matrix_world (four rows of four).
+    """
+    matrix = obj.matrix_world
+    location, rotation, scale = matrix.decompose()
+    rows = [[float(v) for v in row] for row in matrix]
+    nearest = _nearest_rotation([row[:3] for row in rows[:3]])
+    if nearest is not None:
+        rotation = _mathutils().Matrix(nearest).to_quaternion()
+    return {
+        "world_location": [float(v) for v in location],
+        "world_rotation_euler": [
+            float(a) for a in rotation.to_euler(TRANSFORM_EULER_ORDER)
+        ],
+        "world_rotation_quaternion": [float(v) for v in rotation],
+        "world_scale": [float(v) for v in scale],
+        "matrix_world": rows,
+    }
+
+
 # Blender 4.4 introduced slotted actions: one action can animate several IDs,
 # each through its own slot, and keeps each slot's F-curves in a channelbag
 # inside the action's layers and strips. Blender 5.0 removed Action.fcurves,
@@ -709,18 +939,25 @@ class BlenderRuntimeSession:
         """
         Get detailed information about a single Blender object.
 
+        ``location``, ``rotation_euler`` and ``scale`` are the object's own
+        transform, as Blender's Location, Rotation and Scale fields show it:
+        relative to its parent, before constraints. The ``world_*`` values
+        and ``matrix_world`` give where it is in the scene.
+
         Args:
             object_name: Name of the target object.
 
         Returns:
-            Dictionary with transforms, parent, modifiers, constraints,
-            material slots, and visibility.
+            Dictionary with local and world transforms, rotation mode, parent,
+            modifiers, constraints, material slots, and visibility.
         """
         obj = self._get_object_or_raise(object_name)
+        # matrix_world lags a transform written by an earlier call until the
+        # depsgraph is evaluated (background Blender / embedded mode).
+        self._evaluate_transforms()
 
-        location = list(obj.location)
-        rotation = list(obj.rotation_euler)
-        scale = list(obj.scale)
+        location = [float(v) for v in obj.location]
+        scale = [float(v) for v in obj.scale]
 
         parent_name: Optional[str] = obj.parent.name if obj.parent else None
         children_names = [child.name for child in getattr(obj, "children", [])]
@@ -745,8 +982,12 @@ class BlenderRuntimeSession:
             "name": obj.name,
             "object_type": obj.type,
             "location": location,
-            "rotation_euler": rotation,
+            "rotation_euler": local_rotation_euler(obj),
             "scale": scale,
+            "rotation_mode": obj.rotation_mode,
+            "rotation_quaternion": [float(v) for v in local_rotation_quaternion(obj)],
+            "rotation_in_mode": stored_rotation(obj),
+            **world_transform(obj),
             "parent_name": parent_name,
             "children_names": children_names,
             "modifiers": modifiers,
@@ -971,9 +1212,12 @@ class BlenderRuntimeSession:
         """
         obj_a = self._get_object_or_raise(object_name_a)
         obj_b = self._get_object_or_raise(object_name_b)
+        # matrix_world lags a transform written by an earlier call until the
+        # depsgraph is evaluated (background Blender / embedded mode).
+        self._evaluate_transforms()
 
-        loc_a = list(obj_a.matrix_world.translation)
-        loc_b = list(obj_b.matrix_world.translation)
+        loc_a = [float(v) for v in obj_a.matrix_world.translation]
+        loc_b = [float(v) for v in obj_b.matrix_world.translation]
         distance = math.sqrt(sum((a - b) ** 2 for a, b in zip(loc_a, loc_b)))
 
         return {
@@ -1002,7 +1246,8 @@ class BlenderRuntimeSession:
             Dictionary with within_bounds flag and object location.
         """
         obj = self._get_object_or_raise(object_name)
-        loc = list(obj.matrix_world.translation)
+        self._evaluate_transforms()
+        loc = [float(v) for v in obj.matrix_world.translation]
 
         within = all(bounds_min[i] <= loc[i] <= bounds_max[i] for i in range(3))
 
@@ -1474,49 +1719,137 @@ class BlenderRuntimeSession:
         location: Optional[List[float]] = None,
         rotation_euler: Optional[List[float]] = None,
         scale: Optional[List[float]] = None,
+        rotation_quaternion: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
         """
-        Set an object's location, rotation, and/or scale.
+        Set an object's own location, rotation, and/or scale.
+
+        These are the values of Blender's Location, Rotation and Scale fields:
+        relative to the object's parent, before its constraints. The rotation
+        is written in the object's rotation_mode, which is kept: a glTF import
+        stores quaternions, and Blender ignores rotation_euler on a QUATERNION
+        or AXIS_ANGLE object. Every value is checked before any is written.
 
         Args:
             object_name: Object to transform.
-            location: New location [x, y, z] or None to keep current.
-            rotation_euler: New rotation [rx, ry, rz] or None to keep current.
+            location: New location [x, y, z] relative to the parent, or None to keep current.
+            rotation_euler: New rotation as XYZ Euler angles [rx, ry, rz] in radians,
+                converted to the object's rotation_mode; None to keep current.
             scale: New scale [sx, sy, sz] or None to keep current.
+            rotation_quaternion: New rotation as a quaternion [w, x, y, z], normalized
+                and converted to the object's rotation_mode; instead of rotation_euler.
 
         Returns:
-            Dictionary with final transform values.
+            Dictionary with the object's own transform after the change, its
+            rotation mode, the rotation as a quaternion, and its world location.
+
+        Raises:
+            ValueError: A value is not finite, the quaternion has zero length,
+                or both rotation_euler and rotation_quaternion are given.
         """
         obj = self._get_object_or_raise(object_name)
-        if location is not None:
-            obj.location = tuple(location)
+        if rotation_euler is not None and rotation_quaternion is not None:
+            raise ValueError("Give either rotation_euler or rotation_quaternion, not both")
+        new_location = None if location is None else _finite(location, 3, "location")
+        new_scale = None if scale is None else _finite(scale, 3, "scale")
         if rotation_euler is not None:
-            obj.rotation_euler = tuple(rotation_euler)
-        if scale is not None:
-            obj.scale = tuple(scale)
+            _finite(rotation_euler, 3, "rotation_euler")
+        if rotation_quaternion is not None:
+            quaternion = _finite(rotation_quaternion, 4, "rotation_quaternion")
+            if not any(quaternion):
+                raise ValueError("rotation_quaternion must not have zero length")
+        if new_location is not None:
+            obj.location = new_location
+        if rotation_euler is not None or rotation_quaternion is not None:
+            write_rotation(obj, rotation_euler, rotation_quaternion)
+        if new_scale is not None:
+            obj.scale = new_scale
+        self._evaluate_transforms()
 
         return {
             "object_name": object_name,
-            "location": list(obj.location),
-            "rotation_euler": list(obj.rotation_euler),
-            "scale": list(obj.scale),
+            "location": [float(v) for v in obj.location],
+            "rotation_euler": local_rotation_euler(obj),
+            "scale": [float(v) for v in obj.scale],
+            "rotation_mode": obj.rotation_mode,
+            "rotation_quaternion": [float(v) for v in local_rotation_quaternion(obj)],
+            "world_location": [float(v) for v in obj.matrix_world.translation],
         }
 
-    def set_object_parent(self, child_name: str, parent_name: str) -> Dict[str, Any]:
+    def set_object_parent(
+        self, child_name: str, parent_name: str, keep_transform: bool = True
+    ) -> Dict[str, Any]:
         """
         Parent one object to another.
+
+        With keep_transform, as Blender's Object > Parent > Object (Keep
+        Transform), the child stays where it is: its parent inverse matrix
+        cancels the parent's current world transform. A child without a
+        previous parent keeps its Location, Rotation and Scale values too; one
+        moved from another parent gets the values of its world transform
+        before constraints, which still apply on top. Without keep_transform
+        the parent inverse is cleared: the child's own values become relative
+        to the parent, and it moves with the parent's transform.
 
         Args:
             child_name: Object to parent.
             parent_name: Object to be the parent.
+            keep_transform: Keep the child's world transform (default); false clears
+                the parent inverse, so the child's own values become relative to the
+                parent and it moves.
 
         Returns:
-            Dictionary with child_name and parent_name.
+            Dictionary with child_name, parent_name, keep_transform, the
+            previous parent and the child's world location afterwards.
+
+        Raises:
+            ValueError: The parent is the child itself or one of its
+                descendants, which would make a parent loop (Blender refuses
+                such a parent without an error).
         """
         child = self._get_object_or_raise(child_name)
         parent = self._get_object_or_raise(parent_name)
+        if parent == child:
+            raise ValueError(f"Object '{child_name}' cannot be its own parent")
+        ancestor, seen = parent.parent, [parent]
+        while ancestor is not None and ancestor not in seen:
+            if ancestor == child:
+                raise ValueError(
+                    f"Cannot parent '{child_name}' to '{parent_name}': '{parent_name}' is a "
+                    f"descendant of '{child_name}', so the parenting would make a loop. "
+                    f"Clear the parent of '{parent_name}' (or of the object between them) first"
+                )
+            seen.append(ancestor)
+            ancestor = ancestor.parent
+        # The world matrices below must hold transforms written by earlier calls.
+        self._evaluate_transforms()
+        previous = child.parent
+        previous_name = previous.name if previous is not None else None
+        world = (
+            self._matrix_before_constraints(child).copy()
+            if keep_transform
+            else None
+        )
         child.parent = parent
-        return {"child_name": child_name, "parent_name": parent_name}
+        child.parent_type = "OBJECT"
+        if world is None:
+            child.matrix_parent_inverse = _mathutils().Matrix.Identity(4)
+        else:
+            child.matrix_parent_inverse = parent.matrix_world.inverted_safe()
+            # Without a previous parent the child's own values already give the
+            # world matrix; rewriting them could only round them. A curve
+            # parent's matrix can include its path, which only Blender computes
+            # when matrix_world is assigned.
+            if previous is not None or parent.type == "CURVE":
+                child.matrix_world = world
+        self._evaluate_transforms()
+        return {
+            "child_name": child_name,
+            "parent_name": parent_name,
+            "keep_transform": keep_transform,
+            "previous_parent": previous_name,
+            "world_location": [float(v) for v in child.matrix_world.translation],
+        }
 
     def clear_object_parent(
         self, object_name: str, keep_transform: bool = True
@@ -1534,9 +1867,13 @@ class BlenderRuntimeSession:
         obj = self._get_object_or_raise(object_name)
         prev_parent = obj.parent.name if obj.parent else None
         if keep_transform and obj.parent:
+            # matrix_world lags a transform written by an earlier call until
+            # the depsgraph is evaluated (background Blender / embedded mode).
+            self._evaluate_transforms()
             # Keep rotation and scale as well as translation: the full world
             # matrix, not just its translation, becomes the local transform.
-            world_matrix = obj.matrix_world.copy()
+            # Its constraints stay out of it, as they apply on top again.
+            world_matrix = self._matrix_before_constraints(obj).copy()
             obj.parent = None
             obj.matrix_world = world_matrix
         else:
