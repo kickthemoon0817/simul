@@ -194,6 +194,24 @@ def test_run_or_exit_catches_exceptions_when_asked() -> None:
     assert envelope["error_type"] == "ConnectionRefusedError"
 
 
+def test_run_or_exit_names_a_structured_exception_by_its_error_type() -> None:
+    """As the MCP envelope does: an Unreal transport failure is NotFoundError, not UnrealError."""
+    from simul.adapters._unreal_errors import NOT_FOUND_ERROR, UnrealError
+
+    async def refused() -> Dict[str, Any]:
+        raise UnrealError("Object: /Game/X does not exist.", NOT_FOUND_ERROR, status=400, details={"status": 400})
+
+    result = _invoke(lambda: output.run_or_exit(refused(), catch_exceptions=True))
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "success": False,
+        "error": "Object: /Game/X does not exist.",
+        "error_type": "NotFoundError",
+        "details": {"status": 400},
+    }
+
+
 def test_run_or_exit_lets_exceptions_propagate_by_default() -> None:
     result = _invoke(lambda: output.run_or_exit(_raises()))
 

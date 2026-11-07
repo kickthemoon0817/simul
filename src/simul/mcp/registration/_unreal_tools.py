@@ -911,7 +911,15 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_render_settings",
-        description="Set rendering or post-process settings via console command.",
+        description=(
+            "Set one numeric rendering console variable (r.* or sg.*, e.g. r.ScreenPercentage 75) and "
+            "read it back. applied is true only when the variable holds the value afterwards. A "
+            "variable Unreal does not have fails with NotFoundError and changes nothing; a value "
+            "Unreal did not take (a read-only variable such as r.RayTracing, which only startup "
+            "config sets, or one it limits) fails with RenderSettingNotApplied, giving value and "
+            "previous_value. Post-process settings live on PostProcessVolume actors, not in console "
+            "variables, so this tool does not change them."
+        ),
         response=UnrealSetRenderSettingsResponse,
         read_only=False,
         idempotent=True,
@@ -945,7 +953,15 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="enable_unreal_physics",
-        description="Enable or disable physics simulation on an actor.",
+        description=(
+            "Make an actor's body simulate physics (falls, takes forces), make it kinematic (physics "
+            "collision, moved only by its transform), or turn physics off, in one undoable editor "
+            "transaction that marks the map dirty. A Static body is made Movable unless make_movable "
+            "is false; a body without physics collision or simple collision geometry is refused "
+            "(IncompatibleBody, with the reasons). Unreal detaches a simulated body from its parent, "
+            "so an attached one needs allow_detach. Returns the body read back: physics_mode, "
+            "mobility, collision and mass."
+        ),
         response=UnrealEnablePhysicsResponse,
         read_only=False,
         idempotent=True,
@@ -953,15 +969,52 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
         method="enable_physics",
         params=(
             ToolParam("actor_path", str),
-            ToolParam("enable", bool, True),
-            ToolParam("simulate_physics", bool, True),
+            ToolParam(
+                "enable",
+                bool,
+                True,
+                description=(
+                    "True makes the body physical: simulated, or kinematic with kinematic true. False "
+                    "stops it simulating, keeping its collision and mobility."
+                ),
+            ),
+            ToolParam(
+                "kinematic",
+                bool,
+                False,
+                description=(
+                    "With enable true, make the body kinematic instead of simulated: it keeps physics "
+                    "collision, so simulated bodies hit it, but is not simulated and moves only when "
+                    "its transform is set."
+                ),
+            ),
+            ToolParam(
+                "make_movable",
+                bool,
+                True,
+                description=(
+                    "Make a Static or Stationary body Movable, which simulation and kinematic movement "
+                    "need (reported as mobility_changed_from); false refuses such a body instead."
+                ),
+            ),
+            ToolParam(
+                "allow_detach",
+                bool,
+                False,
+                description=(
+                    "Let a body attached to a parent be detached from it as it starts simulating, "
+                    "keeping its world transform, as Unreal does (reported as detached_from; Undo "
+                    "reattaches it, turning physics off does not). False refuses an attached body."
+                ),
+            ),
         ),
     ),
     UnrealTool(
         name="set_unreal_collision",
         description=(
-            "Set an actor's collision preset and/or enable or disable its collision; "
-            "what is left out is kept. Returns the state read back."
+            "Set an actor's collision preset and/or enable or disable its collision, in one undoable "
+            "editor transaction that marks the map dirty; what is left out is kept and an unknown "
+            "preset changes nothing. Returns the state read back."
         ),
         response=UnrealSetCollisionResponse,
         read_only=False,
@@ -993,7 +1046,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_physics_params",
-        description="Set physics body parameters (mass, damping, gravity) on an actor.",
+        description=(
+            "Set physics body parameters (mass in kg, linear and angular damping, gravity) on an actor "
+            "in one undoable editor transaction that marks the map dirty, and read them back; a "
+            "parameter left out is kept. A Static body keeps the values but has no mass until it is "
+            "Movable (see warning)."
+        ),
         response=UnrealSetPhysicsParamsResponse,
         read_only=False,
         idempotent=True,
@@ -1105,13 +1163,27 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     # -- Advanced agent tools ------------------------------------------------------
     UnrealTool(
         name="batch_unreal_operations",
-        description="Execute multiple Remote Control operations in one HTTP call.",
+        description=(
+            "Execute several Remote Control requests in one HTTP call, in order. Each result is "
+            "Remote Control's answer (RequestId, ResponseCode, ResponseBody); a failed one also has "
+            "error and error_type. Operations without a RequestId are numbered for you."
+        ),
         response=UnrealBatchOperationsResponse,
         read_only=False,
         destructive=True,
         script=True,
         method="batch_operations",
-        params=(ToolParam("operations", str, convert=json.loads),),
+        params=(
+            ToolParam(
+                "operations",
+                str,
+                description=(
+                    'JSON array of operations: [{"URL": "/remote/object/call", "Verb": "PUT", '
+                    '"Body": {"objectPath": "...", "functionName": "..."}, "RequestId": 1}]. '
+                    "RequestId is optional and must be a unique integer."
+                ),
+            ),
+        ),
     ),
     UnrealTool(
         name="query_unreal_scene_graph",
