@@ -24,6 +24,8 @@ commands.  When stdout is not a TTY the CLI auto-detects JSON mode.
 
 import asyncio
 import json
+import os
+import signal
 import socket
 import time
 from pathlib import Path
@@ -42,6 +44,7 @@ from simul.cli.output import emit, emit_error, fail, is_json_mode, set_json_mode
 from simul.config import ConfigError, Settings, get_settings, inspect_config_file, load_settings
 from simul.tool_surfaces import THIN_BLENDER_TOOLS, THIN_UNREAL_TOOLS, TOOL_SURFACES
 from simul.logging import setup_logging, get_logger
+from simul.utils.paths import state_dir
 
 from simul.cli.isaac import app as isaac_app
 from simul.cli.usd_cli import app as usd_app
@@ -152,7 +155,7 @@ app.add_typer(logs_app, name="logs")
 def _resolve_log_path(explicit: Optional[Path], audit: bool, structured: bool) -> Path:
     """Pick the right default log path when the user did not pass one.
 
-    ``audit`` -> ~/.simul/logs/audit.jsonl
+    ``audit`` -> logging.audit_path ($SIMUL_HOME/logs/audit.jsonl by default)
     ``structured`` -> the structured JSON file (newest matching basename)
     otherwise -> human-readable simul.log (newest matching basename)
     """
@@ -466,6 +469,76 @@ def _load(config: Optional[Path]) -> Settings:
     return load_settings(config) if config else get_settings()
 
 
+def _keep_fastmcp_home_in_state_dir() -> None:
+    """Point FastMCP's data directory at ``<state dir>/fastmcp`` unless ``FASTMCP_HOME`` names one.
+
+    It defaults to the platform's user data directory (``~/Library/Application
+    Support/fastmcp`` on macOS). Nothing simul runs writes there now that the
+    banner and its update check are off, but whatever FastMCP keeps follows
+    ``SIMUL_HOME`` with the rest of simul's state.
+    """
+    if os.environ.get("FASTMCP_HOME"):
+        return
+    import fastmcp
+
+    fastmcp.settings.home = state_dir() / "fastmcp"
+
+
+async def _serve(settings: Settings, transport: str, backends: Optional[Set[str]]) -> bool:
+    """Run the MCP server until it stops; on SIGTERM, stop it the way Ctrl-C does.
+
+    SIGTERM used to end the process at once (exit -15), so
+    ``SimulMCPServer.shutdown`` never ran and the adapters were never closed.
+    Over stdio the handler cancels the server task; the server's ``finally``
+    shuts it down and the command exits 0. Over HTTP/SSE uvicorn already
+    stops gracefully on SIGTERM, then re-raises the signal to the handler it
+    found, which used to be the default one that kills the process before
+    ``shutdown`` runs. A handler that only records the signal is installed
+    for it instead.
+
+    Returns:
+        True when SIGTERM stopped the server.
+    """
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    received: List[int] = []
+
+    def _cancel_once() -> None:
+        if not received:
+            received.append(signal.SIGTERM)
+            if task is not None:
+                task.cancel()
+
+    def _record(signum: int, _frame: Any) -> None:
+        received.append(signum)
+
+    previous: Any = None
+    if transport == "stdio":
+        try:
+            loop.add_signal_handler(signal.SIGTERM, _cancel_once)
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass  # no loop signal handlers here (Windows, a non-main thread)
+    else:
+        try:
+            previous = signal.signal(signal.SIGTERM, _record)
+        except ValueError:
+            pass  # not the main thread
+    try:
+        await start_mcp_server(settings, transport, backends=backends)
+    except asyncio.CancelledError:
+        if not received:
+            raise
+    finally:
+        if transport == "stdio":
+            try:
+                loop.remove_signal_handler(signal.SIGTERM)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass
+        elif previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+    return bool(received)
+
+
 @app.command()
 def server(
     config: Optional[Path] = _config_option(),
@@ -606,7 +679,10 @@ def server(
         console.print(Panel.fit("\n".join(lines), title="Starting Server"))
 
         logger.info(f"Starting Simul 3D MCP Server with {transport} transport")
-        asyncio.run(start_mcp_server(settings, transport, backends=backend_set))
+        _keep_fastmcp_home_in_state_dir()
+        if asyncio.run(_serve(settings, transport, backend_set)):
+            logger.info("Stopped on SIGTERM")
+            console.print("[yellow]Server stopped (SIGTERM)[/yellow]")
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Server stopped by user[/yellow]")

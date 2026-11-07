@@ -81,10 +81,14 @@ class CoreToolsMixin:
             "Execute arbitrary Python code inside a running Isaac Sim application. The code "
             "runs in Kit's Python scope with full access to omni.*, pxr.*, and isaacsim.* "
             "APIs. stdout is captured and returned. For structured results, print JSON via "
-            "json.dumps(). Each execution is independent — always import modules at the top "
-            "of every script. Call ping_isaac first to verify connectivity before sending "
-            "scripts. Read the 'simul://isaac-sim/skills' resource for scripting patterns, "
-            "API quick reference, and Isaac Sim 5.1 / 6.0 namespace migration notes."
+            "json.dumps(). Executions are not isolated: every transport runs scripts in one "
+            "shared namespace, so globals a script defines persist into later calls, "
+            "including other agents' calls on the same instance. Import what you use in "
+            "every script, keep helpers in functions, and don't depend on leftover globals. "
+            "On Isaac Sim 5.1 with the bridge down, scripts over 32 KiB are refused. Call "
+            "ping_isaac first to verify connectivity before sending scripts. Read the "
+            "'simul://isaac-sim/skills' resource for scripting patterns, API quick "
+            "reference, and Isaac Sim 5.1 / 6.0 namespace migration notes."
         ),
         read_only=False,
         destructive=True,

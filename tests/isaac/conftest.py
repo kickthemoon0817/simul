@@ -30,7 +30,7 @@ def capturing_tools() -> Tuple[IsaacTools, List[str]]:
     """An IsaacTools whose client records every script instead of sending it."""
     captured: List[str] = []
 
-    def _record(code: str) -> ScriptResult:
+    def _record(code: str, **_kwargs: Any) -> ScriptResult:
         captured.append(code)
         return ScriptResult(success=True, output=json.dumps({"ok": True}))
 

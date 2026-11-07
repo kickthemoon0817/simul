@@ -85,17 +85,46 @@ its value is a JSON object, which then sets that section's fields
 used by `simul isaac launch` and `install-bridge`; the YAML default for
 `isaac_sim.path` reads it.
 
+## State directory: `SIMUL_HOME`
+
+simul keeps its state in one directory: `$SIMUL_HOME` when set, otherwise
+`~/.simul`. Each of these defaults to a path under it and moves with it,
+unless you configure that path yourself:
+
+| What | Path under the state directory | Setting |
+|---|---|---|
+| Text log, error and debug logs | `logs/simul.log`, `logs/simul_errors.log`, ... | `LOGGING__FILE_PATH` |
+| Audit stream | `logs/audit.jsonl` | `LOGGING__AUDIT_PATH` |
+| Tool usage log (`simul stats`, `get_tool_usage_stats`) | `logs/tool_usage.jsonl` | none |
+| Isaac Sim session and claim records | `sessions/<port>.json` | none |
+| Blender discovery files and the attachment | `blender/`, `blender/attachment.json` | `BLENDER__DISCOVERY_DIR`, `BLENDER__ATTACHMENT_PATH` |
+| `simul blender install-bridge` ZIP | `blender/simul_blender_bridge.zip` | `--output` |
+| Unreal attachment | `unreal/attachment.json` | `UNREAL__ATTACHMENT_PATH` |
+| FastMCP's data directory | `fastmcp/` | `FASTMCP_HOME` |
+
+Directories are created when something is first written there, with mode
+`0700`. Commands that only read (`simul tools`, `info`, `validate-config`,
+`logs paths`) create nothing, and a server whose home directory is read-only
+still starts: point `SIMUL_HOME` at a writable directory and everything lands
+there. The variable is read when a process starts, so set it in the MCP
+client's server entry or your shell, not in a config file. A YAML value may
+use `${SIMUL_HOME}`, which expands to the state directory whether or not the
+variable is set. The Blender add-on finds discovery files through the same
+variable, so Blender must see the same `SIMUL_HOME` as the server (or set
+`SIMUL_BLENDER_DISCOVERY_DIR` in Blender's environment and
+`BLENDER__DISCOVERY_DIR` for the server).
+
 ## Common settings
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `LOGGING__LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `LOGGING__FILE_PATH` | `~/.simul/logs/simul.log` | Text log (rotated daily, 14 days kept) |
-| `LOGGING__AUDIT_PATH` | `~/.simul/logs/audit.jsonl` | One JSON line per tool call |
+| `LOGGING__FILE_PATH` | `$SIMUL_HOME/logs/simul.log` (`~/.simul/...`) | Text log (rotated daily, 14 days kept) |
+| `LOGGING__AUDIT_PATH` | `$SIMUL_HOME/logs/audit.jsonl` (`~/.simul/...`) | One JSON line per tool call |
 | `ISAAC_SIM__ENABLED` | `auto` | Register the Isaac Sim tools: `auto` on Linux and Windows only (elsewhere when `--backends` names `isaac`), `true` on any OS, `false` never; see [isaac-sim.md](isaac-sim.md#platforms) |
 | `ISAAC_SIM__SOCKET_PORT` / `ISAAC_SIM__BRIDGE_PORT` | `8226` / `8229` | Isaac Sim transports |
 | `ISAAC_SIM__SOCKET_PROTOCOL` | `auto` | `python_server` (6.0+) or `vscode` (5.x) skips the one-time probe |
-| `ISAAC_SIM__SOCKET_AUTH_TOKEN` | unset | Token for a 6.0 python_server started with `--auth-token` |
+| `ISAAC_SIM__SOCKET_AUTH_TOKEN` | unset | Token for a 6.0 python_server started with `--auth-token`; also sent to the bridge, which then requires it ([security model](isaac-sim.md#security-model)) |
 | `ISAAC_SIM__BRIDGE_FAILURE_THRESHOLD` / `ISAAC_SIM__BRIDGE_COOLDOWN_SECONDS` | `3` / `30` | Bridge circuit breaker; see [isaac-sim.md](isaac-sim.md#transports) |
 | `UNREAL__HOST` / `UNREAL__PORT` | `localhost` / `30010` | Remote Control endpoint |
 | `UNREAL__TOOL_SURFACE` | `thin` | `full` registers every granular Unreal tool (`--unreal-tools` overrides) |
@@ -125,9 +154,10 @@ dispatchers, and `simul isaac exec` / `simul unreal exec` return a
 This is the only switch that removes the agent-authored code surface. The
 Isaac bridge extension's `allow_unsafe_execution` setting (and
 `simul isaac bridge-set-unsafe`) only gates raw scripts sent over the
-bridge on port 8229. Raw scripts and every generated tool script still run
-over the stock Python socket on 8226, so that flag is not a security
-boundary.
+bridge on port 8229. The bridge refuses such a script without running it,
+and simul then sends it, like every generated tool script, to the stock
+Python socket on 8226 when that socket is enabled, so that flag is not a
+security boundary.
 
 ### Network transports (HTTP and SSE)
 
@@ -223,6 +253,10 @@ your data. Each refusal is a structured `RefusedOperation` error:
 - `save_isaac_stage` needs `overwrite=true` to replace an existing file.
 - `new_isaac_stage` and `open_isaac_stage` need `discard_unsaved=true` when
   the current stage has unsaved edits.
+- `delete_prim` (headless USD) refuses `/`, and refuses the stage's default
+  prim unless `allow_root_delete=true`.
+- `create_prim` (headless USD) refuses a path that already holds a prim
+  unless `redefine_existing=true`.
 
 ### Rate limiting
 

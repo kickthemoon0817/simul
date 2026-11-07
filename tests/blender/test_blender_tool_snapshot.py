@@ -207,6 +207,12 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "params": {"levels": 2},
         },
     },
+    "apply_blender_modifier": {
+        "minimal": {"object_name": "Cube", "modifier_name": "Decimate"}
+    },
+    "remove_blender_modifier": {
+        "minimal": {"object_name": "Cube", "modifier_name": "Decimate"}
+    },
     "set_blender_light_params": {
         "minimal": {"light_name": "Light"},
         "full": {
@@ -317,13 +323,34 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
         },
     },
     "get_blender_constraint_info": {"minimal": {"object_name": "Hinge"}},
-    "get_blender_physics_state": {"minimal": {"object_name": "Cube"}},
+    "get_blender_physics_state": {
+        "minimal": {"object_name": "Cube"},
+        "full": {"object_name": "Cube", "step_simulation": False},
+    },
     "get_blender_object_trajectory": {
         "minimal": {"object_name": "Cube", "start_frame": 1, "end_frame": 10},
         "full": {"object_name": "Cube", "start_frame": 1, "end_frame": 10, "step": 3},
     },
-    "bake_blender_simulation": {"minimal": {"frame_start": 1, "frame_end": 50}},
-    "free_blender_bake": {"minimal": {}},
+    "bake_blender_simulation": {
+        "minimal": {"frame_start": 1, "frame_end": 50},
+        "full": {"frame_start": 1, "frame_end": 50, "scope": "all"},
+    },
+    "free_blender_bake": {"minimal": {}, "full": {"scope": "all"}},
+    "get_blender_rigid_body_world": {"minimal": {}},
+    "set_blender_rigid_body_world": {
+        "minimal": {},
+        "full": {
+            "enabled": False,
+            "gravity": [0, 0, -1.62],
+            "use_gravity": False,
+            "substeps_per_frame": 20,
+            "solver_iterations": 30,
+            "time_scale": 0.5,
+            "use_split_impulse": True,
+            "cache_frame_start": 10,
+            "cache_frame_end": 400,
+        },
+    },
     "execute_blender_script": {
         "minimal": {"script": "print(1)"},
         "full": {"script": "print(1)", "timeout": 5, "max_output_chars": 100},
@@ -337,6 +364,15 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "faces": [[0, 1, 2]],
             "location": [1, 2, 3],
             "collection_name": "Props",
+        },
+    },
+    "clean_blender_mesh": {
+        "minimal": {"object_name": "Cube"},
+        "full": {
+            "object_name": "Cube",
+            "merge_distance": 0.001,
+            "dissolve_degenerate_distance": 0.0001,
+            "recalculate_normals": True,
         },
     },
     "apply_simready_metadata": {
@@ -368,6 +404,9 @@ CALLS: Dict[str, Dict[str, Dict[str, Any]]] = {
             "object_names": ["Cube"],
             "embed_metadata": False,
             "validate_before_export": False,
+            "include_children": False,
+            "include_lights_and_cameras": True,
+            "force": True,
         },
     },
     "setup_simready_hierarchy": {

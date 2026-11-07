@@ -117,16 +117,42 @@ From an agent, `ping_isaac` does the same check.
 - Neither the Python socket nor the bridge is enabled at startup. Use
   `simul isaac launch`. The equivalent manual command is
   `isaac-sim.sh --enable isaacsim.code_editor.python_server --enable khemoo.simul --no-window`.
-- The python_server can require a token. Start Isaac with
-  `simul isaac launch --auth-token <secret>` and give the MCP server
-  `ISAAC_SIM__SOCKET_AUTH_TOKEN=<secret>`. Alternatively
-  `--generate-auth-token` creates one and writes it to the discovery
-  directory, where the server finds it for the newest running editor.
+- The python_server can require a token, and with it the bridge. Start Isaac
+  with `simul isaac launch --generate-auth-token`, which lets Kit create the
+  token and writes it to the discovery directory, where the server finds it
+  for the newest running editor. `--auth-token <secret>` with
+  `ISAAC_SIM__SOCKET_AUTH_TOKEN=<secret>` for the MCP server also works, but
+  puts the secret on the editor's command line. See
+  [Security model](#security-model).
 - `isaacsim.core.api`, `isaacsim.core.prims` and `isaacsim.core.utils` are
   deprecated in favour of `isaacsim.core.experimental.*`, and the
   `omni.isaac.*` shims are gone. Read
   [`skills/isaac-scripting/references/namespace-migration.md`](../skills/isaac-scripting/references/namespace-migration.md)
-  before writing `execute_isaac_script` code.
+  before writing `execute_isaac_script` code. The `simul://isaac-sim/api/core`
+  resource documents the 5.1 API and lists the 6.0 equivalents.
+
+## Reading simulated state
+
+simul's granular readers (transforms, bounding boxes, rigid-body velocities,
+camera poses) read USD. That is the simulated state only while PhysX writes
+its results back to USD. For GPU physics, Isaac Sim's `SimulationManager`
+(`set_physics_sim_device` on 5.1, `set_device` on 6.0) calls `enable_fabric`.
+That enables `omni.physx.fabric` and sets `/physics/updateToUsd` and
+`/physics/updateVelocitiesToUsd` to false. From then on USD keeps the
+pre-play values while the robot moves.
+
+The readers detect this. While the timeline is not stopped and either setting
+is false, the result carries `stale_under_fabric: true`, a `usd_readback`
+object (the two settings and whether `omni.physx.fabric` is enabled) and a
+warning. `get_isaac_runtime_info` reports the same settings under `physics`.
+simul does not read Fabric itself. To get simulated poses and velocities,
+use `execute_isaac_script` with a physics view:
+- on 5.1, the `isaacsim.core.prims` views in `simul://isaac-sim/api/core`;
+- on 6.0, `isaacsim.core.experimental.prims.RigidPrim(...).get_world_poses()`
+  and `get_velocities()`.
+
+A stopped timeline is not flagged: USD then holds the authored state, which
+`/physics/resetOnStop` (on in Isaac Sim's apps) restores on every stop.
 
 ## Transports
 
@@ -135,10 +161,40 @@ From an agent, `ping_isaac` does the same check.
 | 8229 | `khemoo.simul` bridge | Preferred: typed protocol, fewer round trips, script interruption, busy state |
 | 8226 | Stock Python socket | `isaacsim.code_editor.vscode` on 5.x, `isaacsim.code_editor.python_server` on 6.0; used when the bridge is unavailable |
 
-- **Timeouts.** Every script carries a server-side execution timeout derived
-  from `ISAAC_SIM__SOCKET_TIMEOUT` (one second under it, minimum 1 s). The
-  bridge interrupts an overrunning script inside Kit; the 6.0 python_server
-  reports the overrun in its response.
+- **Timeouts.** Every script carries a budget derived from
+  `ISAAC_SIM__SOCKET_TIMEOUT` (one second under it, minimum 1 s). Tools that
+  routinely take longer (`open_isaac_stage`, `new_isaac_stage`,
+  `read_isaac_aovs`, `capture_isaac_viewport`, `enable_isaac_extension`)
+  send at least 110 s; a longer configured timeout is kept. What happens
+  when a budget runs out depends on the transport:
+  - the bridge interrupts the script inside Kit, but Kit work the script had
+    started (a stage load, an extension enable, a render) is not undone and
+    may still complete;
+  - the 6.0 python_server only replies with a `TimeoutError`; the script
+    itself keeps running inside Kit and its effects may still land;
+  - the 5.x VS Code socket has no timeout; the client stops waiting and the
+    script runs on.
+
+  Every timeout reply says so. Check the state (`get_isaac_stage_info`,
+  `get_isaac_runtime_info`) before retrying a timed-out call.
+- **5.x stock socket size limit.** Isaac Sim 5.1's `isaacsim.code_editor.vscode`
+  has no framing: it runs every chunk of bytes it receives as a separate
+  script, replies to the first and closes the connection. A script that
+  arrives in two reads would execute as two fragments. simul therefore sends
+  that socket at most 32 KiB per script (one loopback read) and refuses larger
+  ones with `ScriptTooLargeForSocket`; every generated tool script fits well
+  under it. Send bigger `execute_isaac_script` code through the bridge
+  (`simul isaac bridge-up`), which reads a length-prefixed frame. Over a
+  container network or an SSH tunnel even smaller scripts can be split, so use
+  the bridge there. The 6.0 python_server buffers until the client half-closes
+  and has no such limit.
+- **Shared stdout.** Kit's `sys.stdout` is one stream for every Python
+  callback. The bridge captures a script's output only while the script's own
+  code runs; the stock sockets capture it across the script's awaits, so a
+  physics callback or script node that prints during those frames lands in the
+  reply. Tools take the JSON object their script printed last and report any
+  other text under `foreign_output`, with a note in `warnings`, instead of
+  failing to parse.
 - **Interrupting.** `interrupt_isaac_script` / `simul isaac interrupt`
   stops a running script when it is a coroutine or suspended at an `await`. A
   synchronous loop that never yields also blocks the bridge's event loop, so
@@ -148,15 +204,67 @@ From an agent, `ping_isaac` does the same check.
   `bridge.busy_since` and `bridge.current_action`.
 - **Circuit breaker.** A filtered or half-open bridge port would cost the full
   timeout on every call. After `ISAAC_SIM__BRIDGE_FAILURE_THRESHOLD`
-  consecutive failures (default 3) the client skips the bridge for
+  consecutive connection failures (default 3) the client skips the bridge for
   `ISAAC_SIM__BRIDGE_COOLDOWN_SECONDS` (default 30) and uses the stock socket.
+  Only failures to reach the bridge count: a request the bridge accepted and
+  has not answered yet (a slow script) does not, because sending the next
+  scripts to the stock socket would run them beside the one still going.
   `ping_isaac`, `list_isaac_instances` and `get_isaac_runtime_info` report
   this as `bridge_circuit_open`.
 - **Raw scripts over the bridge.** The bridge's `allow_unsafe_execution`
   setting (`simul isaac bridge-set-unsafe`) only gates raw scripts on
-  8229. It is not a security boundary; to remove scripting from agents use
-  `SECURITY__ALLOW_SCRIPT_EXECUTION=false`
+  8229. With it off the bridge replies `UnsafeExecutionDisabled` without
+  running anything, and the client sends the script (a generated tool script
+  or `execute_isaac_script` code) to the stock socket on 8226 instead, when
+  fallback is on and that socket is enabled. It is not a security boundary;
+  to remove scripting from agents use `SECURITY__ALLOW_SCRIPT_EXECUTION=false`
   ([configuration.md](configuration.md#script-execution)).
+
+## Security model
+
+Both transports run arbitrary Python inside Isaac Sim, with the editor's
+privileges, for whoever can connect. They bind to `127.0.0.1` (and the bridge
+optionally to a Unix socket), so the network is not the exposure; **other
+local users and processes are**.
+
+| | Isaac Sim 5.1 | Isaac Sim 6.0 |
+|---|---|---|
+| Stock socket on 8226 | `isaacsim.code_editor.vscode`: no authentication at all | `isaacsim.code_editor.python_server`: optional token (`require_auth`) |
+| Bridge on 8229 | Optional token (`/exts/khemoo.simul/require_auth`, `auth_token`) | Requires python_server's token whenever python_server does, and accepts it |
+| `simul isaac launch --generate-auth-token` | Not available (no authenticated stock socket) | Both ports require the Kit-generated token; nothing secret on argv |
+
+- **Default: no token.** Any local process can run Python through either
+  port, as with Isaac Sim's own VS Code socket. The bridge logs a warning at
+  startup saying so. This is acceptable on a single-user workstation and not
+  on a shared host.
+- **With a token.** `launch --generate-auth-token` (6.0+) turns on
+  python_server's `require_auth` and the bridge's `require_auth`. Kit
+  generates the token at startup; `launch` reads it from the launch log and
+  stores it `0600` in the discovery directory, where the MCP server picks it
+  up and sends it to both transports. The bridge checks it on every request,
+  framed or raw, before anything runs, compares it in constant time, and
+  rejects everything when auth is required but no token is configured. A
+  client without the token gets `AuthenticationError`.
+- **The bridge's own token.** `--/exts/khemoo.simul/auth_token=<token>`
+  (with `ISAAC_SIM__SOCKET_AUTH_TOKEN=<token>` for the server) protects the
+  bridge on its own, for example on 5.1. There the VS Code socket on 8226
+  stays unauthenticated, so it only helps if that socket is disabled or
+  firewalled. Kit settings on argv are visible to other local users through
+  the process list.
+- **Unix socket.** Created `0600` (owner only; `connect(2)` needs write
+  permission). The Compose file opts into `socket_mode=0666` because its
+  bridge runs as container root while the host user connects; there the
+  discovery directory's mode and the token are the boundary.
+- **Tokens stay out of results.** `get_isaac_carb_settings` reads any
+  `auth_token` key back as `***`, the launch output redacts an `--auth-token`
+  value, and the token never travels inside an action's payload.
+- **Not a boundary.** `allow_unsafe_execution=false` on the bridge (see
+  above). The control for agent-authored code is
+  `SECURITY__ALLOW_SCRIPT_EXECUTION=false`.
+
+The bridge extension's version moves in lockstep with simul's
+([AGENTS.md](../AGENTS.md#versioning)); after upgrading, run `install-bridge`
+again (copy mode) so Isaac loads a bridge that checks tokens.
 
 ## Multiple instances
 
@@ -176,9 +284,9 @@ orphaned claim over; `simul isaac claims` lists the claims on this machine and
 
 Cross-host Isaac Sim is not supported. The server trusts only loopback
 addresses in discovery files, `launch` binds the transports on the local
-machine, and neither transport authenticates beyond the optional
-python_server token: anything that can reach the ports can run Python inside
-Isaac Sim. Run `simul` on the same host as Isaac, or for a container,
+machine, and neither transport authenticates beyond the optional token
+([Security model](#security-model)), which travels in plaintext: anything
+that can reach the ports can run Python inside Isaac Sim. Run `simul` on the same host as Isaac, or for a container,
 publish the ports to the host's loopback as the Compose file does. Unreal's
 `--bind` / `--allow-public` / `--passphrase` flow has no Isaac counterpart.
 
@@ -210,7 +318,9 @@ The Compose file:
   connect and then be closed on with no data) and publishes them to
   `127.0.0.1` on the host, which is where the loopback restriction belongs;
 - also exposes the bridge as a Unix socket on the shared discovery volume
-  (`SIMUL_DISCOVERY_DIR`, default `/tmp/simul`);
+  (`SIMUL_DISCOVERY_DIR`, default `/tmp/simul`), created with
+  `socket_mode=0666` so the host user can connect to a socket container
+  root owns;
 - enables the bridge's raw `execute_script` action, which only gates the
   bridge transport and is not a security boundary;
 - keeps the container stateless, so each run starts clean.
@@ -242,4 +352,8 @@ docker compose -f compose.isaac-sim.yml up -d
 | Bridge port 8229 never opens | Bridge not published (`install-bridge`) or not enabled (`launch` / `bridge-up`) |
 | Old behaviour after upgrading simul | Stale copy in `extsUser`; run `install-bridge --force` |
 | Every call is slow, then falls back | Bridge port filtered or half-open; the circuit breaker will route to 8226 |
+| `AuthenticationError` from the bridge or 8226 | Isaac was launched with a token the server does not have; set `ISAAC_SIM__SOCKET_AUTH_TOKEN` or let the server read the token file `launch --generate-auth-token` wrote |
+| `ScriptTooLargeForSocket` on 5.1 | Script over 32 KiB with the bridge down; enable it with `simul isaac bridge-up` |
+| A timeout, yet the stage opened anyway | The budget ran out while Kit kept working; see Timeouts under [Transports](#transports) |
+| `foreign_output` in a tool result | Another callback printed while the tool's script waited on frames; the result itself is intact |
 | `ModuleNotFoundError: omni.isaac...` in a script on 6.0 | Shims removed; see the namespace migration reference |
