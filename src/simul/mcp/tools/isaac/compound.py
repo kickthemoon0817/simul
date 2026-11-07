@@ -19,6 +19,7 @@ from ._shared import (
     _pyval,
 )
 from .._meta import tool_meta
+from .prims import _script_refusal, is_script_capable_node_type
 
 # Compound-only glue: reuse an existing material or define a fresh
 # UsdPreviewSurface one. The single-step tool refuses to overwrite, and a
@@ -104,6 +105,10 @@ class CompoundMixin:
             bind_material), plus ``error``/``failed_step`` when a step failed
             and ``left_on_stage`` naming what the completed steps created.
         """
+        if not self.settings.security.allow_script_execution and is_script_capable_node_type(prim_type):
+            return _script_refusal(
+                f"Refusing to create a {prim_type!r} prim: that type runs code.", prim_type=prim_type
+            )
         if collision is not None and collision not in COLLISION_APPROXIMATIONS:
             return ErrorResponse(
                 error=(

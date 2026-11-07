@@ -21,22 +21,96 @@ from .._meta import tool_meta
 
 DELETE_MODES = ("auto", "remove", "deactivate")
 
-# Attribute-name prefix of an OmniGraph script node's code (inputs:script) and
-# script file (inputs:scriptPath). Writing either runs arbitrary Python inside
-# Kit, which is what security.allow_script_execution=false exists to stop.
-SCRIPT_ATTRIBUTE_PREFIX = "inputs:script"
+# OmniGraph nodes are USD prims, so with security.allow_script_execution off
+# the prim tools are another way to plant code Kit runs: a ScriptNode runs its
+# inputs:script (or the file in inputs:scriptPath), omni.warp's WarpKernel
+# compiles its inputs:codeStr, Replicator nodes run inputs:augmentationScript
+# and inputs:conditionScript. Matched by name fragment, deliberately broadly:
+# a refused harmless write costs one call, an admitted one costs the setting.
+# Local stand-ins for the shared predicate the graph lane is landing in
+# graph.py (#316); switch to graph.is_script_capable_node_type and
+# graph.is_script_attribute once it is on main.
+SCRIPT_NODE_TYPE_HINTS = ("script", "warp")
+SCRIPT_ATTRIBUTE_HINTS = ("script", "code")
 
 
-def _is_script_capable_node_type(node_type: Any) -> bool:
-    """Whether an OmniGraph ``node:type`` value names a node that runs Python.
+def is_script_capable_node_type(node_type: Any) -> bool:
+    """Whether an OmniGraph ``node:type`` (or prim type) names a node that runs code.
 
-    omni.graph.scriptnode.ScriptNode executes the code in its inputs:script,
-    and Isaac's base .kit enables omni.graph.scriptnode on 5.1 and 6.0. Local
-    stand-in for the graph lane's ``is_script_capable_node_type``; unify the
-    two once that lands.
+    Args:
+        node_type: Node type ID, e.g. ``omni.graph.scriptnode.ScriptNode``.
+
+    Returns:
+        True when creating, copying or editing such a node amounts to running
+        agent-authored code.
     """
-    return isinstance(node_type, str) and "script" in node_type.lower()
+    return isinstance(node_type, str) and any(
+        hint in node_type.lower() for hint in SCRIPT_NODE_TYPE_HINTS
+    )
 
+
+def is_script_attribute(attribute_name: Any) -> bool:
+    """Whether an attribute name carries code or a path to code.
+
+    Args:
+        attribute_name: Attribute name, e.g. ``inputs:script`` or ``inputs:codeStr``.
+
+    Returns:
+        True when writing it can change the code a node runs.
+    """
+    return isinstance(attribute_name, str) and any(
+        hint in attribute_name.lower() for hint in SCRIPT_ATTRIBUTE_HINTS
+    )
+
+
+def _script_refusal(message: str, **details: Any) -> Dict[str, Any]:
+    """Return the ScriptExecutionDisabled envelope for a write that would plant code."""
+    return ErrorResponse(
+        error=(
+            message + " Script execution is disabled by security.allow_script_execution; "
+            "set SECURITY__ALLOW_SCRIPT_EXECUTION=true to allow it."
+        ),
+        error_type="ScriptExecutionDisabled",
+        details=details or None,
+    ).model_dump()
+
+
+# The same guard inside Kit, where the target prim's node:type can be read.
+# A ScriptNode's every input steers its code (inputs:usePath switches it to
+# a file), so any write to a script-capable node is refused, not only the
+# code attribute. Needs ``Usd``.
+SCRIPT_GUARD_CORE = (
+    f"    _SCRIPT_NODE_TYPE_HINTS = {_pyval(SCRIPT_NODE_TYPE_HINTS)}\n"
+    + """\
+
+    def _script_node_type(prim):
+        attr = prim.GetAttribute("node:type")
+        value = attr.Get() if attr else None
+        if isinstance(value, str) and any(hint in value.lower() for hint in _SCRIPT_NODE_TYPE_HINTS):
+            return value
+        return None
+
+    def _script_nodes_in(stage, root):
+        found = []
+        for prim in Usd.PrimRange(root, Usd.TraverseInstanceProxies(Usd.PrimAllPrimsPredicate)):
+            node_type = _script_node_type(prim)
+            if node_type:
+                found.append({"path": str(prim.GetPath()), "node_type": node_type})
+                if len(found) >= 20:
+                    break
+        return found
+
+    def _script_guard_error(message, **details):
+        return {
+            "error": (
+                message + " Script execution is disabled by security.allow_script_execution; "
+                "set SECURITY__ALLOW_SCRIPT_EXECUTION=true to allow it."
+            ),
+            "error_type": "ScriptExecutionDisabled",
+            "details": details,
+        }
+"""
+)
 
 # Where a prim's opinions live, for the tools that remove, copy or move it.
 # Editing the root layer alone ignored the stage's edit target and every
@@ -44,6 +118,11 @@ def _is_script_capable_node_type(node_type: Any) -> bool:
 # removed only the user's local override and reported success with the link
 # still there. Needs ``Sdf``.
 PRIM_LAYERING_CORE = """\
+    def _fail(error_type, code, message, **details):
+        # Typed failure: error_type is the envelope's, details.code says which.
+        details["code"] = code
+        return {"error": message, "error_type": error_type, "details": details}
+
     def _ancestral_arc(prim):
         # A reference, payload, inherit, specialize or variant authored on an
         # ancestor brings this prim in. Its definition lives in that arc's
@@ -80,6 +159,21 @@ PRIM_LAYERING_CORE = """\
             if spec.layer.identifier in local and spec.path == prim.GetPath()
         ]
 
+    def _session_layers(stage):
+        return set(layer.identifier for layer in stage.GetLayerStack(True)) - set(
+            layer.identifier for layer in stage.GetLayerStack(False)
+        )
+
+    def _session_only(stage, prim):
+        # Kit keeps its own prims (the OmniverseKit_* viewport cameras) in the
+        # session layer. They aren't part of the scene the user saves, and an
+        # override written into the user's layer to hide one would be.
+        session = _session_layers(stage)
+        if stage.GetEditTarget().GetLayer().identifier in session:
+            return False
+        defining = [spec for spec in _local_specs(stage, prim) if _spec_defines(spec)]
+        return bool(defining) and all(spec.layer.identifier in session for spec in defining)
+
     def _edit_blockers(stage, prim):
         # Why the edit target's opinions are not all there is to the prim:
         # removing or moving them would leave it defined where it was.
@@ -105,54 +199,84 @@ PRIM_LAYERING_CORE = """\
             instance = prim.GetParent()
             while instance.IsInstanceProxy():
                 instance = instance.GetParent()
-            return {
-                "error": (
-                    str(prim.GetPath()) + " is inside the instance " + str(instance.GetPath())
-                    + ", whose contents are shared and read-only here. " + action + " the instance "
-                    "prim itself, or make it non-instanceable first."
-                ),
-                "instance": str(instance.GetPath()),
-            }
+            return _fail(
+                "InvalidState", "INSTANCE_PROXY",
+                str(prim.GetPath()) + " is inside the instance " + str(instance.GetPath())
+                + ", whose contents are shared and read-only here. " + action + " the instance "
+                "prim itself, or make it non-instanceable first.",
+                instance=str(instance.GetPath()),
+            )
         if prim.IsInPrototype():
-            return {"error": str(prim.GetPath()) + " is an instancing prototype, which can't be edited."}
+            return _fail(
+                "InvalidState", "PROTOTYPE",
+                str(prim.GetPath()) + " is an instancing prototype, which can't be edited.",
+            )
         return None
 
-    def _kit_command(name, **kwargs):
-        # A Kit command lands on Kit's undo stack; a raw pxr edit does not.
+    def _kit_attempt(name, kwargs, optional, done):
+        # Kit's commands land on its undo stack; a raw pxr edit doesn't.
+        # "unavailable": no omni.kit.commands, so pxr does the edit.
+        # "done": Kit did it. "declined": Kit ran and changed nothing, as it
+        # does for a prim marked no_delete or one it treats as referenced
+        # content; that refusal is respected, not overridden with pxr.
+        # "raised": Kit failed. An older Kit without an optional keyword is
+        # called again without it.
         try:
             import omni.kit.commands
         except Exception:
-            return False
-        try:
-            omni.kit.commands.execute(name, **kwargs)
-        except Exception:
-            return False
-        return True
+            return "unavailable", None
+        attempts = [dict(kwargs)]
+        if optional:
+            attempts.append({key: value for key, value in kwargs.items() if key not in optional})
+        error = None
+        for index, call in enumerate(attempts):
+            try:
+                omni.kit.commands.execute(name, **call)
+            except Exception as exc:
+                error = type(exc).__name__ + ": " + str(exc).strip()
+                continue
+            error = None
+            if done():
+                if index:
+                    return "done", "this Kit's " + name + " takes no " + ", ".join(optional) + "; called without"
+                return "done", None
+        return ("raised", error) if error else ("declined", None)
 """
 
 DELETE_PRIM_CORE = """\
     def _delete_prim(stage, prim_path, mode):
         prim = stage.GetPrimAtPath(prim_path)
         if not prim.IsValid():
-            return {"error": "Prim not found: " + prim_path}
+            return _fail("NotFoundError", "PRIM_NOT_FOUND", "Prim not found: " + prim_path)
         refusal = _instance_refusal(prim, "Delete or deactivate")
         if refusal is not None:
             return refusal
+        if prim.GetMetadata("no_delete") or prim.GetCustomDataByKey("no_delete"):
+            return _fail("InvalidState", "NO_DELETE", prim_path + " is marked no_delete; nothing was changed.")
+        if _session_only(stage, prim):
+            return _fail(
+                "InvalidState", "SESSION_LAYER_PRIM",
+                prim_path + " is defined only in the session layer (Kit's own prims, such as the "
+                "OmniverseKit_* viewport cameras, live there). It isn't part of the saved scene, and "
+                "deactivating it would write an override into the scene's layer. Nothing was changed.",
+            )
         edit_layer = stage.GetEditTarget().GetLayer()
         result = {"prim_path": prim_path, "mode": mode, "edit_target": edit_layer.identifier}
         blockers = _edit_blockers(stage, prim)
         if mode == "remove" and blockers:
-            return dict(result, blockers=blockers, error=(
+            return dict(result, **_fail(
+                "InvalidState", "DEFINED_ELSEWHERE",
                 "Can't remove " + prim_path + ": " + "; ".join(blockers) + ". Nothing was changed. "
                 "Pass mode='deactivate' (or 'auto') to deactivate it instead: it and its subtree leave "
-                "traversal, rendering and physics, and its local overrides are kept."
+                "traversal, rendering and physics, and its local overrides are kept.",
+                blockers=blockers,
             ))
         if mode == "deactivate" or blockers:
             was_active = prim.IsActive()
             prim.SetActive(False)
             after = stage.GetPrimAtPath(prim_path)
             if after.IsValid() and after.IsActive():
-                return dict(result, error="Failed to deactivate " + prim_path)
+                return dict(result, **_fail("InvalidState", "DEACTIVATE_FAILED", "Failed to deactivate " + prim_path))
             result.update({
                 "action": "deactivated",
                 "deleted": False,
@@ -175,16 +299,35 @@ DELETE_PRIM_CORE = """\
 
         method = "pxr Usd.Stage.RemovePrim at the edit target"
         undoable = False
-        # Kit's DeletePrims is undoable; when the edit target holds every
-        # local opinion it removes exactly what RemovePrim would.
+        # Kit's DeletePrims is undoable. Called only when the edit target
+        # holds every local opinion, where it removes what RemovePrim would;
+        # destructive=False keeps it to the edit target as well.
         if all(spec.layer == edit_layer for spec in _local_specs(stage, prim)):
-            if _kit_command("DeletePrims", paths=[prim_path]) and not _still_defined():
+            status, kit_note = _kit_attempt(
+                "DeletePrims", {"paths": [prim_path], "destructive": False}, ("destructive",),
+                lambda: not _still_defined(),
+            )
+            if status == "declined":
+                return dict(result, **_fail(
+                    "InvalidState", "KIT_DECLINED",
+                    "Kit's DeletePrims declined to delete " + prim_path + " (Kit refuses prims it "
+                    "protects, such as ones marked no_delete); nothing was changed.",
+                ))
+            if status == "raised":
+                return dict(result, **_fail(
+                    "InvalidState", "KIT_ERROR", "Kit's DeletePrims failed on " + prim_path + ": " + kit_note
+                ))
+            if status == "done":
                 method = "omni.kit.commands DeletePrims"
                 undoable = True
+                if kit_note:
+                    result["kit_note"] = kit_note
         if _still_defined():
             stage.RemovePrim(prim_path)
         if _still_defined():
-            return dict(result, error="Removing " + prim_path + " at the edit target left it defined")
+            return dict(result, **_fail(
+                "InvalidState", "REMOVE_FAILED", "Removing " + prim_path + " at the edit target left it defined"
+            ))
         result.update({
             "action": "removed",
             "deleted": True,
@@ -260,29 +403,43 @@ DUPLICATE_PRIM_CORE = """\
             pending.extend(spec.nameChildren)
         return restored
 
-    def _duplicate_prim(stage, prim_path, new_path):
+    def _duplicate_prim(stage, prim_path, new_path, script_guard):
         src = stage.GetPrimAtPath(prim_path)
         if not src.IsValid():
-            return {"error": "Source prim not found: " + prim_path}
+            return _fail("NotFoundError", "PRIM_NOT_FOUND", "Source prim not found: " + prim_path)
         refusal = _instance_refusal(src, "Duplicate")
         if refusal is not None:
             return refusal
+        if script_guard:
+            nodes = _script_nodes_in(stage, src)
+            if nodes:
+                return _script_guard_error(
+                    "Refusing to duplicate " + prim_path + ": it holds OmniGraph nodes that run code ("
+                    + ", ".join(node["path"] + " " + node["node_type"] for node in nodes) + ").",
+                    nodes=nodes,
+                )
         valid = Sdf.Path.IsValidPathString(new_path)
         # Returns True, or a (False, reason) tuple, which is truthy.
         if isinstance(valid, tuple):
             valid = valid[0]
         if not valid or not Sdf.Path(new_path).IsAbsolutePath():
-            return {"error": "Invalid destination path: " + new_path}
+            return _fail("ValidationError", "INVALID_PATH", "Invalid destination path: " + new_path)
         dst_path = Sdf.Path(new_path)
         if not dst_path.IsPrimPath():
-            return {"error": "Destination is not a prim path: " + new_path}
+            return _fail("ValidationError", "INVALID_PATH", "Destination is not a prim path: " + new_path)
         if stage.GetPrimAtPath(dst_path).IsValid():
-            return {"error": "Destination already exists: " + new_path}
+            return _fail("ValidationError", "DESTINATION_EXISTS", "Destination already exists: " + new_path)
         if dst_path.HasPrefix(src.GetPath()):
-            return {"error": "Can't duplicate " + prim_path + " into its own subtree: " + new_path}
+            return _fail(
+                "ValidationError", "INVALID_DESTINATION",
+                "Can't duplicate " + prim_path + " into its own subtree: " + new_path,
+            )
         parent = stage.GetPrimAtPath(dst_path.GetParentPath())
         if not parent.IsValid():
-            return {"error": "Parent of the destination not found: " + str(dst_path.GetParentPath())}
+            return _fail(
+                "NotFoundError", "PARENT_NOT_FOUND",
+                "Parent of the destination not found: " + str(dst_path.GetParentPath()),
+            )
         refusal = _instance_refusal(parent, "Duplicate into")
         if refusal is not None:
             return refusal
@@ -327,7 +484,10 @@ DUPLICATE_PRIM_CORE = """\
                 cleanup = Sdf.BatchNamespaceEdit()
                 cleanup.Add(Sdf.NamespaceEdit.Remove(dst_spec_path))
                 layer.Apply(cleanup)
-            return dict(result, error="Duplicating " + prim_path + " produced no defined prim at " + new_path)
+            return dict(result, **_fail(
+                "InvalidState", "COPY_FAILED",
+                "Duplicating " + prim_path + " produced no defined prim at " + new_path,
+            ))
         result.update({
             "type": new_prim.GetTypeName(),
             "duplicated": True,
@@ -384,15 +544,15 @@ REPARENT_PRIM_CORE = """\
         default_time = Usd.TimeCode.Default()
         prim = stage.GetPrimAtPath(prim_path)
         if not prim.IsValid():
-            return {"error": "Prim not found: " + prim_path}
+            return _fail("NotFoundError", "PRIM_NOT_FOUND", "Prim not found: " + prim_path)
         if prim.IsPseudoRoot():
-            return {"error": "The pseudo-root can't be reparented"}
+            return _fail("ValidationError", "INVALID_SOURCE", "The pseudo-root can't be reparented")
         refusal = _instance_refusal(prim, "Move")
         if refusal is not None:
             return refusal
         parent = stage.GetPrimAtPath(new_parent_path)
         if not parent.IsValid():
-            return {"error": "Parent not found: " + new_parent_path}
+            return _fail("NotFoundError", "PARENT_NOT_FOUND", "Parent not found: " + new_parent_path)
         refusal = _instance_refusal(parent, "Move into")
         if refusal is not None:
             return refusal
@@ -405,15 +565,22 @@ REPARENT_PRIM_CORE = """\
         if parent.GetPath() == old_path.GetParentPath():
             return dict(result, reparented=False, unchanged=True, note="Already a child of " + str(parent.GetPath()))
         if parent.GetPath().HasPrefix(old_path):
-            return dict(result, error="Can't move " + prim_path + " under itself (" + new_parent_path + ")")
+            return dict(result, **_fail(
+                "ValidationError", "INVALID_DESTINATION",
+                "Can't move " + prim_path + " under itself (" + new_parent_path + ")",
+            ))
         if stage.GetPrimAtPath(new_path).IsValid():
-            return dict(result, error="Destination already exists: " + str(new_path))
+            return dict(result, **_fail(
+                "ValidationError", "DESTINATION_EXISTS", "Destination already exists: " + str(new_path)
+            ))
         blockers = _edit_blockers(stage, prim)
         if blockers:
-            return dict(result, blockers=blockers, error=(
+            return dict(result, **_fail(
+                "InvalidState", "DEFINED_ELSEWHERE",
                 "Can't move " + prim_path + ": " + "; ".join(blockers) + ". Nothing was changed. "
                 "Duplicate it with duplicate_isaac_prim (a flattened copy) and deactivate the original "
-                "with delete_isaac_prim, or edit the layer it comes from."
+                "with delete_isaac_prim, or edit the layer it comes from.",
+                blockers=blockers,
             ))
 
         # World pose to keep, and the local transform that keeps it under the
@@ -437,25 +604,47 @@ REPARENT_PRIM_CORE = """\
                 if problem is None and not Gf.IsClose(rebuilt.GetMatrix(), local, 1e-6):
                     problem = "keeping it under the new parent needs a sheared transform"
                 if problem is not None:
-                    return dict(result, error=(
+                    return dict(result, **_fail(
+                        "InvalidState", "WORLD_TRANSFORM_NOT_KEEPABLE",
                         "Can't keep the world transform of " + prim_path + " under " + str(parent.GetPath())
                         + ": " + problem + ". Nothing was changed. Pass keep_world_transform=false to move "
-                        "it with its local transform unchanged."
+                        "it with its local transform unchanged.",
                     ))
                 z_y_x = parts.GetRotation().Decompose(Gf.Vec3d(0, 0, 1), Gf.Vec3d(0, 1, 0), Gf.Vec3d(1, 0, 0))
                 keep_parts = (list(parts.GetTranslation()), list(reversed(z_y_x)), list(parts.GetScale()))
 
         def _moved():
-            return stage.GetPrimAtPath(new_path).IsValid() and not stage.GetPrimAtPath(old_path).IsValid()
+            # An over left at the old path in another layer defines nothing.
+            moved_to = stage.GetPrimAtPath(new_path)
+            left = stage.GetPrimAtPath(old_path)
+            return moved_to.IsValid() and moved_to.IsDefined() and not (left.IsValid() and left.IsDefined())
 
-        method = None
-        if _kit_command("MovePrim", path_from=str(old_path), path_to=str(new_path),
-                        keep_world_transform=bool(keep_world_transform)) and _moved():
+        # Kit's MovePrim is undoable. Called only when the edit target holds
+        # every opinion that defines the prim (checked above);
+        # destructive=False keeps it to the edit target as well.
+        status, kit_note = _kit_attempt(
+            "MovePrim",
+            {
+                "path_from": str(old_path), "path_to": str(new_path),
+                "keep_world_transform": bool(keep_world_transform), "destructive": False,
+            },
+            ("keep_world_transform", "destructive"),
+            _moved,
+        )
+        if status == "declined":
+            return dict(result, **_fail(
+                "InvalidState", "KIT_DECLINED",
+                "Kit's MovePrim declined to move " + prim_path + "; nothing was changed.",
+            ))
+        if status == "raised":
+            return dict(result, **_fail(
+                "InvalidState", "KIT_ERROR", "Kit's MovePrim failed on " + prim_path + ": " + kit_note
+            ))
+        if status == "done":
             method = "omni.kit.commands MovePrim"
-        elif not _moved() and _kit_command("MovePrim", path_from=str(old_path), path_to=str(new_path)) and _moved():
-            # A Kit too old for keep_world_transform; the pose is fixed below.
-            method = "omni.kit.commands MovePrim"
-        if not _moved():
+            if kit_note:
+                result["kit_note"] = kit_note
+        else:
             target = stage.GetEditTarget()
             layer = target.GetLayer()
             parent_spec_path = target.MapToSpecPath(parent.GetPath())
@@ -466,10 +655,13 @@ REPARENT_PRIM_CORE = """\
                 target.MapToSpecPath(old_path), parent_spec_path, name, -1
             ))
             if not layer.CanApply(edit) or not layer.Apply(edit):
-                return dict(result, error="The namespace edit moving " + prim_path + " failed on " + layer.identifier)
+                return dict(result, **_fail(
+                    "InvalidState", "NAMESPACE_EDIT_FAILED",
+                    "The namespace edit moving " + prim_path + " failed on " + layer.identifier,
+                ))
             method = "pxr Sdf namespace edit on the edit target"
         if not _moved():
-            return dict(result, error="Moving " + prim_path + " left it at " + prim_path)
+            return dict(result, **_fail("InvalidState", "MOVE_FAILED", "Moving " + prim_path + " left it in place"))
 
         fixups = []
         retargeted = _retarget(stage, old_path, new_path)
@@ -509,16 +701,20 @@ class PrimEditMixin:
     # Phase 3: Prim Manipulation
     # ------------------------------------------------------------------
 
+    @property
+    def _script_guard(self) -> bool:
+        """Whether writes that would plant code must be refused."""
+        return not self.settings.security.allow_script_execution
+
     def _script_write_refusal(
         self, attribute_name: str, value: Any
     ) -> Optional[Dict[str, Any]]:
-        """Refuse an attribute write that would run Python while scripts are off.
+        """Refuse an attribute write that would plant code while scripts are off.
 
-        OmniGraph nodes are USD prims, so with
-        ``security.allow_script_execution`` false a script could still be
-        planted through the prim tools: as a script node's ``inputs:script``
-        (or ``inputs:scriptPath``), or by setting ``node:type`` to a
-        script-capable node type.
+        Covers what is decidable without the stage: a code-carrying attribute
+        name, or ``node:type`` set to a node type that runs code. The scripts
+        add the check that needs the stage (the target prim's own
+        ``node:type``).
 
         Args:
             attribute_name: Attribute about to be written.
@@ -527,22 +723,21 @@ class PrimEditMixin:
         Returns:
             The ScriptExecutionDisabled payload, or None when the write may go.
         """
-        if self.settings.security.allow_script_execution:
+        if not self._script_guard:
             return None
-        if attribute_name.startswith(SCRIPT_ATTRIBUTE_PREFIX):
-            reason = f"{attribute_name} holds code an OmniGraph script node runs"
-        elif attribute_name == "node:type" and _is_script_capable_node_type(value):
-            reason = f"node:type {value!r} is a script-capable OmniGraph node"
-        else:
-            return None
-        return ErrorResponse(
-            error=(
-                f"Refusing the write: {reason}, and arbitrary script execution is "
-                "disabled by security.allow_script_execution. Set "
-                "SECURITY__ALLOW_SCRIPT_EXECUTION=true to allow it."
-            ),
-            error_type="ScriptExecutionDisabled",
-        ).model_dump()
+        if is_script_attribute(attribute_name):
+            return _script_refusal(
+                f"Refusing to write {attribute_name}: it carries code or a path to code "
+                "an OmniGraph node runs.",
+                attribute=attribute_name,
+            )
+        if attribute_name == "node:type" and is_script_capable_node_type(value):
+            return _script_refusal(
+                f"Refusing to set node:type to {value!r}: that node runs code.",
+                attribute=attribute_name,
+                node_type=value,
+            )
+        return None
 
     @tool_meta(
         name="create_isaac_prim",
@@ -573,8 +768,13 @@ class PrimEditMixin:
                 convert like set_isaac_prim_attribute's.
 
         Returns:
-            Dict confirming the created prim path and type.
+            Dict confirming the created prim path and type, and any missing
+            ancestors it created (``ancestors_created``).
         """
+        if self._script_guard and is_script_capable_node_type(prim_type):
+            return _script_refusal(
+                f"Refusing to create a {prim_type!r} prim: that type runs code.", prim_type=prim_type
+            )
         for name, value in (attributes or {}).items():
             refusal = self._script_write_refusal(str(name), value)
             if refusal is not None:
@@ -586,7 +786,7 @@ class PrimEditMixin:
             """\
             import json
             import omni.usd
-            from pxr import Gf, Tf, Usd
+            from pxr import Gf, Sdf, Tf, Usd
             """,
             COERCE_ATTRIBUTE_VALUE_CORE,
             DEFINE_PRIM_CORE,
@@ -608,8 +808,11 @@ class PrimEditMixin:
             "another layer can't be removed from this stage: mode='auto' (default) "
             "deactivates it instead and says so, mode='remove' refuses, "
             "mode='deactivate' always deactivates (local overrides are kept). The reply's "
-            "action is 'removed' or 'deactivated'. Refuses the pseudo-root '/'. Refuses "
-            "'/World' unless allow_root_delete=true, since that removes the whole scene."
+            "action is 'removed' or 'deactivated'. Removal goes through Kit's undoable "
+            "DeletePrims (destructive=false) when available, and a refusal from Kit is "
+            "reported, not overridden. Refuses prims marked no_delete, prims defined only in "
+            "the session layer (Kit's own viewport cameras), the pseudo-root '/', and '/World' "
+            "unless allow_root_delete=true, since that removes the whole scene."
         ),
         read_only=False,
         destructive=True,
@@ -803,7 +1006,10 @@ class PrimEditMixin:
             "USD type: quaternions (xformOp:orient, physics:localRot0) as [w, x, y, z] with "
             "the real part first, matrices (xformOp:transform) as a list of rows or a flat "
             "row-major list, vectors as [x, y, z], arrays as lists of those. Writes the "
-            "default (static) value; the reply warns when time samples hide it."
+            "default (static) value; the reply warns when time samples hide it. With "
+            "script execution disabled, writes that would plant code are refused: "
+            "code-carrying attributes (inputs:script*, inputs:codeStr, ...), a node:type "
+            "that runs code, and any attribute of such a node."
         ),
         read_only=False,
         destructive=True,
@@ -831,8 +1037,9 @@ class PrimEditMixin:
             ``value_read`` read back from the stage as JSON (an array over
             16 elements as a length summary), plus ``warning`` when time
             samples override the default value written. With script
-            execution disabled, a script node's ``inputs:script*`` and a
-            script-capable ``node:type`` are refused.
+            execution disabled, a code-carrying attribute, a node:type that
+            runs code and any attribute of such a node are refused
+            (``ScriptExecutionDisabled``).
         """
         refusal = self._script_write_refusal(attribute_name, value)
         if refusal is not None:
@@ -840,22 +1047,36 @@ class PrimEditMixin:
         _prim_path = _pyval(prim_path)
         _attr_name = _pyval(attribute_name)
         _val_str = _pyval(json.dumps(value))
+        _guard = _pyval(self._script_guard)
         script = _compose_script(
             """\
             import json
             import omni.usd
-            from pxr import Gf, Sdf
+            from pxr import Gf, Sdf, Usd
             """,
             JSON_VALUE_CORE,
             COERCE_ATTRIBUTE_VALUE_CORE,
+            SCRIPT_GUARD_CORE,
             f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
                 prim = stage.GetPrimAtPath({_prim_path})
+                guarded_type = _script_node_type(prim) if {_guard} and prim.IsValid() else None
                 if not prim.IsValid():
-                    print(json.dumps({{"error": "Prim not found: " + {_prim_path}}}))
+                    print(json.dumps({{
+                        "error": "Prim not found: " + {_prim_path},
+                        "error_type": "NotFoundError",
+                        "details": {{"code": "PRIM_NOT_FOUND"}},
+                    }}))
+                elif guarded_type:
+                    # Every input of a node that runs code steers that code.
+                    print(json.dumps(_script_guard_error(
+                        "Refusing to write " + {_attr_name} + " on " + {_prim_path} + ": it is a "
+                        + guarded_type + " node, which runs code.",
+                        node_type=guarded_type,
+                    )))
                 else:
                     attr = prim.GetAttribute({_attr_name})
                     if not attr.IsValid():
@@ -909,7 +1130,9 @@ class PrimEditMixin:
             "defined entirely there is copied with its composition arcs (a referenced "
             "asset stays a reference); one that comes from a referenced asset or another "
             "layer is copied as its flattened composed result (method='flattened_copy'), "
-            "with instanceable prims inside kept instanced. Instance proxies are refused."
+            "with instanceable prims inside kept instanced. Instance proxies are refused. "
+            "With script execution disabled, a subtree holding OmniGraph nodes that run "
+            "code is refused."
         ),
         read_only=False,
     )
@@ -930,12 +1153,14 @@ class PrimEditMixin:
         """
         _prim_path = _pyval(prim_path)
         _new_path = _pyval(new_path)
+        _guard = _pyval(self._script_guard)
         script = _compose_script(
             """\
             import json
             import omni.usd
             from pxr import Sdf, Usd
             """,
+            SCRIPT_GUARD_CORE,
             PRIM_LAYERING_CORE,
             DUPLICATE_PRIM_CORE,
             f"""\
@@ -943,7 +1168,7 @@ class PrimEditMixin:
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
             else:
-                print(json.dumps(_duplicate_prim(stage, {_prim_path}, {_new_path})))
+                print(json.dumps(_duplicate_prim(stage, {_prim_path}, {_new_path}, {_guard})))
             """,
         )
         return await self._execute_json_script(script)
@@ -954,10 +1179,11 @@ class PrimEditMixin:
             "Move a prim under a new parent in the hierarchy, keeping its world transform "
             "(keep_world_transform=true by default). Relationships and connections that "
             "point at the prim or into its subtree (material bindings, joint bodies) are "
-            "retargeted to the new path. Uses Kit's undoable MovePrim when available, "
-            "otherwise a namespace edit at the stage's edit target. A prim that comes from "
-            "a referenced asset or is also defined in another layer can't be moved and is "
-            "refused unchanged."
+            "retargeted to the new path. Uses Kit's undoable MovePrim (destructive=false) "
+            "when available, and reports a refusal from Kit rather than overriding it; "
+            "without Kit, a namespace edit at the stage's edit target. A prim that comes "
+            "from a referenced asset or is also defined in another layer can't be moved "
+            "and is refused unchanged."
         ),
         read_only=False,
         destructive=True,

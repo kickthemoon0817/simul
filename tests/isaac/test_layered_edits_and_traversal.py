@@ -159,6 +159,7 @@ def _run_with_kit(
         )
     result = json.loads(stdout.getvalue())
     result["_kit_calls"] = [name for name, _ in calls]
+    result["_kit_kwargs"] = [kwargs for _, kwargs in calls]
     return result
 
 
@@ -223,7 +224,11 @@ def test_a_prim_added_under_a_referenced_link_is_removed(
     UsdGeom.Xform.Define(robot_stage, LINK + "/sensor")
 
     result = _call(
-        capturing_tools, run_on_stage, robot_stage, "delete_isaac_prim", LINK + "/sensor"
+        capturing_tools,
+        run_on_stage,
+        robot_stage,
+        "delete_isaac_prim",
+        LINK + "/sensor",
     )
 
     assert result["action"] == "removed"
@@ -271,7 +276,9 @@ def test_instance_proxies_are_refused(
         ("reparent_isaac_prim", (COLLIDER, "/World")),
     ):
         result = _call(capturing_tools, run_on_stage, robot_stage, method, *args)
-        assert result["instance"] == "/World/Franka/link1/collisions", method
+        assert result["error_type"] == "InvalidState", method
+        assert result["details"]["code"] == "INSTANCE_PROXY", method
+        assert result["details"]["instance"] == "/World/Franka/link1/collisions", method
     assert robot_stage.GetPrimAtPath(COLLIDER).IsValid()
 
 
@@ -286,14 +293,141 @@ def test_delete_uses_kits_undoable_command_when_present(
     result = _run_with_kit(
         captured[-1],
         stage,
-        {"DeletePrims": lambda paths: [stage.RemovePrim(p) for p in paths]},
+        {
+            "DeletePrims": lambda paths, destructive=True: [
+                stage.RemovePrim(p) for p in paths
+            ]
+        },
         monkeypatch,
     )
 
     assert result["_kit_calls"] == ["DeletePrims"]
+    assert result["_kit_kwargs"] == [{"paths": ["/World/Box"], "destructive": False}]
     assert result["method"] == "omni.kit.commands DeletePrims"
     assert result["undoable"] is True
     assert not stage.GetPrimAtPath("/World/Box").IsValid()
+
+
+def test_a_kit_that_declines_the_delete_is_respected(
+    capturing_tools: Tools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kit refuses prims it protects; the delete used to fall back to RemovePrim."""
+    stage = _local_stage()
+    UsdGeom.Cube.Define(stage, "/World/Box")
+    tools, captured = capturing_tools
+    asyncio.run(tools.delete_isaac_prim("/World/Box"))
+
+    result = _run_with_kit(
+        captured[-1],
+        stage,
+        {"DeletePrims": lambda paths, destructive=True: None},
+        monkeypatch,
+    )
+
+    assert result["error_type"] == "InvalidState"
+    assert result["details"]["code"] == "KIT_DECLINED"
+    assert stage.GetPrimAtPath("/World/Box").IsDefined(), "pxr did not override Kit"
+
+
+def test_an_older_kit_without_destructive_is_called_again(
+    capturing_tools: Tools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage = _local_stage()
+    UsdGeom.Cube.Define(stage, "/World/Box")
+    tools, captured = capturing_tools
+    asyncio.run(tools.delete_isaac_prim("/World/Box"))
+
+    result = _run_with_kit(
+        captured[-1],
+        stage,
+        {"DeletePrims": lambda paths: [stage.RemovePrim(p) for p in paths]},
+        monkeypatch,
+    )
+
+    assert result["_kit_kwargs"] == [
+        {"paths": ["/World/Box"], "destructive": False},
+        {"paths": ["/World/Box"]},
+    ]
+    assert result["method"] == "omni.kit.commands DeletePrims"
+    assert "destructive" in result["kit_note"]
+
+
+def test_session_layer_prims_are_not_deleted(
+    capturing_tools: Tools, run_on_stage: Any
+) -> None:
+    """Kit's viewport cameras live in the session layer; an over hid them from the saved scene."""
+    stage = _local_stage()
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    UsdGeom.Camera.Define(stage, "/OmniverseKit_Persp")
+    stage.SetEditTarget(Usd.EditTarget(stage.GetRootLayer()))
+
+    result = _call(
+        capturing_tools, run_on_stage, stage, "delete_isaac_prim", "/OmniverseKit_Persp"
+    )
+
+    assert result["details"]["code"] == "SESSION_LAYER_PRIM"
+    assert stage.GetPrimAtPath("/OmniverseKit_Persp").IsActive()
+    assert not stage.GetRootLayer().GetPrimAtPath("/OmniverseKit_Persp")
+
+
+def test_refusals_are_typed(
+    capturing_tools: Tools, run_on_stage: Any, robot_stage: Usd.Stage
+) -> None:
+    UsdGeom.Cube.Define(robot_stage, "/World/Box")
+    UsdGeom.Cube.Define(robot_stage, "/World/Other/Box")
+    cases = [
+        (
+            "delete_isaac_prim",
+            (LINK,),
+            {"mode": "remove"},
+            "InvalidState",
+            "DEFINED_ELSEWHERE",
+        ),
+        (
+            "reparent_isaac_prim",
+            (LINK, "/World"),
+            {},
+            "InvalidState",
+            "DEFINED_ELSEWHERE",
+        ),
+        (
+            "reparent_isaac_prim",
+            ("/World/Box", "/World/Other"),
+            {},
+            "ValidationError",
+            "DESTINATION_EXISTS",
+        ),
+        (
+            "duplicate_isaac_prim",
+            ("/World/Box", "/World/Other/Box"),
+            {},
+            "ValidationError",
+            "DESTINATION_EXISTS",
+        ),
+        ("delete_isaac_prim", ("/World/Nope",), {}, "NotFoundError", "PRIM_NOT_FOUND"),
+        (
+            "create_isaac_prim",
+            ("/World/C", "cube"),
+            {},
+            "ValidationError",
+            "UNKNOWN_PRIM_TYPE",
+        ),
+        (
+            "create_isaac_prim",
+            ("/World/Box", "Cube"),
+            {},
+            "ValidationError",
+            "PRIM_EXISTS",
+        ),
+    ]
+    for method, args, kwargs, error_type, code in cases:
+        result = _call(
+            capturing_tools, run_on_stage, robot_stage, method, *args, **kwargs
+        )
+        assert (result.get("error_type"), result.get("details", {}).get("code")) == (
+            error_type,
+            code,
+        ), method
 
 
 def test_invalid_delete_mode_is_refused_before_sending(capturing_tools: Tools) -> None:
@@ -588,7 +722,10 @@ def test_kit_move_is_followed_by_retargeting_and_says_what_undo_covers(
     UsdShade.MaterialBindingAPI.Apply(cube.GetPrim()).Bind(material)
 
     def _move_prim(
-        path_from: str, path_to: str, keep_world_transform: bool = False
+        path_from: str,
+        path_to: str,
+        keep_world_transform: bool = False,
+        destructive: bool = True,
     ) -> None:
         # A move that, like a bare namespace edit, leaves the targets alone.
         edit = Sdf.BatchNamespaceEdit()
@@ -602,11 +739,38 @@ def test_kit_move_is_followed_by_retargeting_and_says_what_undo_covers(
     result = _run_with_kit(captured[-1], stage, {"MovePrim": _move_prim}, monkeypatch)
 
     assert result["method"] == "omni.kit.commands MovePrim"
+    assert result["_kit_kwargs"] == [
+        {
+            "path_from": "/World/Looks/Red",
+            "path_to": "/World/Materials/Red",
+            "keep_world_transform": True,
+            "destructive": False,
+        }
+    ]
     assert result["retargeted"] == ["/World/Box.material:binding"]
     assert result["undoable"] is False
     assert "undo" in result["undo_note"]
     bound, _ = UsdShade.MaterialBindingAPI(cube.GetPrim()).ComputeBoundMaterial()
     assert bound.GetPath() == Sdf.Path("/World/Materials/Red")
+
+
+def test_a_kit_that_declines_the_move_is_respected(
+    capturing_tools: Tools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The move used to fall back to an Sdf namespace edit behind Kit's back."""
+    stage = _local_stage()
+    UsdGeom.Cube.Define(stage, "/World/Box")
+    UsdGeom.Xform.Define(stage, "/World/Group")
+    tools, captured = capturing_tools
+    asyncio.run(tools.reparent_isaac_prim("/World/Box", "/World/Group"))
+
+    result = _run_with_kit(
+        captured[-1], stage, {"MovePrim": lambda **kwargs: None}, monkeypatch
+    )
+
+    assert result["details"]["code"] == "KIT_DECLINED"
+    assert stage.GetPrimAtPath("/World/Box").IsValid()
+    assert not stage.GetPrimAtPath("/World/Group/Box").IsValid()
 
 
 # ---------------------------------------------------------------------------
@@ -984,6 +1148,26 @@ def _locked_tools() -> Tools:
                 {"node:type": "omni.graph.scriptnode.ScriptNode"},
             ),
         ),
+        # omni.warp's kernel node compiles the code in inputs:codeStr.
+        (
+            "set_isaac_prim_attribute",
+            ("/World/Graph/kernel", "inputs:codeStr", "import os"),
+        ),
+        (
+            "set_isaac_prim_attribute",
+            ("/World/Graph/node", "node:type", "omni.warp.WarpKernel"),
+        ),
+        # Replicator nodes run these.
+        (
+            "set_isaac_prim_attribute",
+            ("/World/Graph/aug", "inputs:augmentationScript", "x"),
+        ),
+        (
+            "set_isaac_prim_attribute",
+            ("/World/Graph/aug", "inputs:conditionScript", "x"),
+        ),
+        ("set_isaac_prim_attribute", ("/World/Graph/node", "inputs:SCRIPT", "x")),
+        ("create_isaac_object", ("/World/Graph/node", "ScriptNode")),
     ],
 )
 def test_script_writes_are_refused_when_scripts_are_disabled(
@@ -1018,3 +1202,133 @@ def test_script_writes_pass_when_scripts_are_enabled(capturing_tools: Tools) -> 
     )
 
     assert len(captured) == 1
+
+
+def _graph_stage() -> Usd.Stage:
+    stage = _local_stage()
+    stage.DefinePrim("/World/Graph", "OmniGraph")
+    node = stage.DefinePrim("/World/Graph/script", "OmniGraphNode")
+    node.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
+        "omni.graph.scriptnode.ScriptNode"
+    )
+    node.CreateAttribute("inputs:usePath", Sdf.ValueTypeNames.Bool).Set(False)
+    kernel = stage.DefinePrim("/World/Graph/kernel", "OmniGraphNode")
+    kernel.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
+        "omni.warp.WarpKernel"
+    )
+    kernel.CreateAttribute("inputs:dim1", Sdf.ValueTypeNames.Int).Set(1)
+    const = stage.DefinePrim("/World/Graph/const", "OmniGraphNode")
+    const.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
+        "omni.graph.nodes.ConstantString"
+    )
+    const.CreateAttribute("inputs:value", Sdf.ValueTypeNames.String).Set("")
+    return stage
+
+
+@pytest.mark.parametrize(
+    ("node", "attribute", "value"),
+    [
+        ("/World/Graph/script", "inputs:usePath", True),
+        ("/World/Graph/kernel", "inputs:dim1", 4),
+    ],
+)
+def test_no_attribute_of_a_code_running_node_is_written(
+    node: str, attribute: str, value: Any, run_on_stage: Any
+) -> None:
+    """The target's own node:type is read in Kit: inputs:usePath points a ScriptNode at a file."""
+    stage = _graph_stage()
+    tools, captured = _locked_tools()
+
+    asyncio.run(tools.set_isaac_prim_attribute(node, attribute, value))
+    result = run_on_stage(captured[-1], stage)
+
+    assert result["error_type"] == "ScriptExecutionDisabled"
+    assert stage.GetPrimAtPath(node).GetAttribute(attribute).Get() != value
+
+
+def test_ordinary_nodes_stay_writable_when_scripts_are_disabled(
+    run_on_stage: Any,
+) -> None:
+    stage = _graph_stage()
+    tools, captured = _locked_tools()
+
+    asyncio.run(
+        tools.set_isaac_prim_attribute("/World/Graph/const", "inputs:value", "hello")
+    )
+    result = run_on_stage(captured[-1], stage)
+
+    assert "error" not in result
+    value = stage.GetPrimAtPath("/World/Graph/const").GetAttribute("inputs:value").Get()
+    assert value == "hello"
+
+
+def test_duplicating_a_subtree_with_a_script_node_is_refused(run_on_stage: Any) -> None:
+    stage = _graph_stage()
+    tools, captured = _locked_tools()
+
+    asyncio.run(tools.duplicate_isaac_prim("/World/Graph", "/World/GraphCopy"))
+    result = run_on_stage(captured[-1], stage)
+
+    assert result["error_type"] == "ScriptExecutionDisabled"
+    assert [node["path"] for node in result["details"]["nodes"]] == [
+        "/World/Graph/script",
+        "/World/Graph/kernel",
+    ]
+    assert not stage.GetPrimAtPath("/World/GraphCopy").IsValid()
+
+
+def test_duplicating_a_script_node_works_when_scripts_are_enabled(
+    capturing_tools: Tools, run_on_stage: Any
+) -> None:
+    stage = _graph_stage()
+
+    result = _call(
+        capturing_tools,
+        run_on_stage,
+        stage,
+        "duplicate_isaac_prim",
+        "/World/Graph",
+        "/World/GraphCopy",
+    )
+
+    assert result["duplicated"] is True
+
+
+def test_a_failed_create_removes_the_ancestors_it_made(
+    capturing_tools: Tools, run_on_stage: Any
+) -> None:
+    """DefinePrim made /World/A and /World/A/B; only the leaf used to be removed."""
+    stage = _local_stage()
+
+    result = _call(
+        capturing_tools,
+        run_on_stage,
+        stage,
+        "create_isaac_prim",
+        "/World/A/B/Box",
+        "Cube",
+        {"size": "x"},
+    )
+
+    assert result["details"]["code"] == "VALUE_REJECTED"
+    assert result["details"]["removed"] == ["/World/A", "/World/A/B", "/World/A/B/Box"]
+    assert not stage.GetPrimAtPath("/World/A").IsValid()
+    assert stage.GetPrimAtPath("/World").IsValid()
+
+
+def test_a_create_reports_the_ancestors_it_made(
+    capturing_tools: Tools, run_on_stage: Any
+) -> None:
+    stage = _local_stage()
+
+    result = _call(
+        capturing_tools,
+        run_on_stage,
+        stage,
+        "create_isaac_prim",
+        "/World/A/Box",
+        "Cube",
+    )
+
+    assert result["created"] is True
+    assert result["ancestors_created"] == ["/World/A"]

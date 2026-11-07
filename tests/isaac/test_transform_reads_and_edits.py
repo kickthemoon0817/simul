@@ -564,6 +564,43 @@ def test_wrong_shape_names_the_expected_one(
     assert message in result["error"]
 
 
+@pytest.mark.parametrize(
+    ("attribute", "type_name", "value", "expected"),
+    [
+        ("xformOp:translate", Sdf.ValueTypeNames.Double3, [7, 8, 9], Gf.Vec3d(7, 8, 9)),
+        ("custom:float3", Sdf.ValueTypeNames.Float3, [1.5, 2, 3], Gf.Vec3f(1.5, 2, 3)),
+        ("custom:color", Sdf.ValueTypeNames.Color3f, [1, 0, 0], Gf.Vec3f(1, 0, 0)),
+        ("custom:uv", Sdf.ValueTypeNames.TexCoord2f, [0.5, 0.25], Gf.Vec2f(0.5, 0.25)),
+        ("custom:int3", Sdf.ValueTypeNames.Int3, [1, 2, 3], Gf.Vec3i(1, 2, 3)),
+    ],
+)
+def test_vectors_are_built_explicitly(
+    attribute: str,
+    type_name: Any,
+    value: List[float],
+    expected: Any,
+    capturing_tools: Tools,
+    run_on_stage: Any,
+) -> None:
+    """usd-core 26.11 does not turn [7, 8, 9] into a GfVec3d on its own."""
+    stage = _stage()
+    prim = UsdGeom.Cube.Define(stage, "/World/Box").GetPrim()
+    prim.CreateAttribute(attribute, type_name)
+
+    result = _call(
+        capturing_tools,
+        run_on_stage,
+        stage,
+        "set_isaac_prim_attribute",
+        "/World/Box",
+        attribute,
+        value,
+    )
+
+    assert "error" not in result, result.get("error")
+    assert prim.GetAttribute(attribute).Get() == expected
+
+
 def test_attribute_under_time_samples_warns(
     capturing_tools: Tools, run_on_stage: Any
 ) -> None:

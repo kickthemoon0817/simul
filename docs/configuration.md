@@ -149,10 +149,11 @@ default `true`). When `false`, the server does not register
 Unreal's `call_unreal_actor_function` and `batch_unreal_operations`
 dispatchers, and `simul isaac exec` / `simul unreal exec` return a
 `ScriptExecutionDisabled` error. The fixed granular tools, including
-`control_unreal_ui`, keep working. They refuse the writes that would plant
-code instead: `set_isaac_prim_attribute` and `create_isaac_prim` return
-`ScriptExecutionDisabled` for an OmniGraph script node's `inputs:script*`
-attributes and for a script-capable `node:type`.
+`control_unreal_ui`, keep working. The Isaac prim tools refuse the writes
+that would plant code instead (`ScriptExecutionDisabled`): code-carrying
+attributes such as `inputs:script*` and `inputs:codeStr`, a `node:type` that
+runs code (ScriptNode, omni.warp's WarpKernel), any write to such a node,
+creating one and duplicating a subtree that holds one.
 
 This is the only switch that removes the agent-authored code surface. The
 Isaac bridge extension's `allow_unsafe_execution` setting (and

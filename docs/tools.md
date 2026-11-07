@@ -249,11 +249,19 @@ Notes:
     instanced.
   - `reparent_isaac_prim` refuses unchanged.
   
-  Instance proxies are refused by all three. `reparent_isaac_prim` keeps the
-  world pose (`keep_world_transform=true`), retargets relationships and
-  connections that point into the moved subtree, and uses Kit's undoable
-  `MovePrim` when available. `undoable` reports whether the whole edit is on
-  Kit's undo stack.
+  Instance proxies are refused by all three. `delete_isaac_prim` also
+  refuses prims marked `no_delete` and prims defined only in the session
+  layer (Kit's `OmniverseKit_*` viewport cameras), which a deactivation would
+  hide by writing into the scene's layer. `reparent_isaac_prim` keeps the
+  world pose (`keep_world_transform=true`) and retargets relationships and
+  connections that point into the moved subtree. Removal and moves go
+  through Kit's undoable `DeletePrims` / `MovePrim` (`destructive=false`)
+  when Kit is there; when Kit declines one, the tool reports
+  `KIT_DECLINED` and changes nothing rather than editing the layer itself.
+  `undoable` reports whether the whole edit is on Kit's undo stack.
+  Refusals are typed: `error_type` is `NotFoundError`, `ValidationError` or
+  `InvalidState`, and `details.code` names the case (`INSTANCE_PROXY`,
+  `DEFINED_ELSEWHERE`, `DESTINATION_EXISTS`, `UNKNOWN_PRIM_TYPE`, ...).
 - The listings (`list_isaac_prims`, `search_isaac_prims`, `get_isaac_subtree`,
   `query_isaac_typed_prims`) descend into instanceable prims by default,
   where Isaac assets keep their meshes and colliders; entries there carry
@@ -264,13 +272,16 @@ Notes:
   `get_isaac_subtree` takes `max_depth=-1` as unlimited.
 - `create_isaac_prim` refuses a type that isn't a concrete registered schema
   (`cube` gets a suggestion, `Cube`) and attributes the type's schema doesn't
-  define; a value that can't be set removes the new prim again.
+  define; a value that can't be set removes the new prim again, with any
+  ancestors the call created (`ancestors_created` lists them on success).
   `create_isaac_object` checks its vectors before creating anything. When a
   step fails, `left_on_stage` lists what the earlier steps created.
-- With `security.allow_script_execution` off, `set_isaac_prim_attribute` and
-  `create_isaac_prim` refuse to write an OmniGraph script node's
-  `inputs:script*` or a script-capable `node:type`
-  (`ScriptExecutionDisabled`), since that would run Python in Kit.
+- With `security.allow_script_execution` off, the prim tools refuse what
+  would plant code Kit runs (`ScriptExecutionDisabled`): code-carrying
+  attributes (`inputs:script*`, `inputs:codeStr`, Replicator's
+  `inputs:augmentationScript` / `inputs:conditionScript`), a `node:type` that
+  runs code (ScriptNode, omni.warp's WarpKernel), any write to such a node,
+  creating one, and duplicating a subtree that holds one.
 - `create_isaac_object` creates a prim with transform, rigid body, collider,
   mass and material in one call.
 - `create_isaac_physics_scene` derives a new scene's gravity from the stage:

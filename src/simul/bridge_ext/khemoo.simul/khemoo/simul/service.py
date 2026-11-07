@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Optional
 
 from .executor import ScriptExecutor
 from .prim_detail import BULK_GEOMETRY_ATTRIBUTES, PRIM_DETAIL_ASPECTS, PrimDetailReader
