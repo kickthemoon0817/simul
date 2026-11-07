@@ -147,6 +147,7 @@ from ..schemas.blender_ui import AgentControl, BlenderUIRequest, BlenderUIRespon
 from ..schemas.simready import (
     SimReadyApplyMetadataRequest,
     SimReadyApplyMetadataResponse,
+    SimReadyCheckName,
     SimReadyClearName,
     SimReadyExportRequest,
     SimReadyExportResponse,
@@ -1196,8 +1197,9 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "Store NVIDIA SimReady metadata (semantic labels, physics properties, material info) "
             "on a Blender object as simready_ custom properties, which export_simready_usd writes "
             "as UsdPhysics and UsdSemantics schemas. Omitted fields keep their stored value; "
-            "clear removes stored values. Unknown fields and invalid values are refused with "
-            "the valid names, before anything changes."
+            "clear removes stored values. An additional label named after a field's taxonomy "
+            "(class, hierarchy, wikidata_qcode) sets that field. Unknown fields, invalid values, "
+            "Edit Mode and linked objects are refused, before anything changes."
         ),
         hints=OVERWRITING,
         operation="apply_simready_metadata",
@@ -1223,12 +1225,13 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
     BlenderTool(
         name="validate_simready_compliance",
         description=(
-            "Validate Blender objects against NVIDIA SimReady conventions; any error makes them "
-            "non-compliant. Checks names (objects, materials, mesh data), real-world size in the "
-            "scene's units, applied transforms (the asset root at the origin, parts unscaled), "
-            "material slots, hierarchy, metadata (semantic class, collider, stored values) and "
-            "geometry (UVs, n-gons, degenerate faces). Filter by severity and page with "
-            "offset/limit (next_offset)."
+            "Validate what export_simready_usd would export against the SimReady Robotics-Prop "
+            "rules and Isaac Sim's asset checks; any error makes it non-compliant. Errors: an "
+            "asset root that is not the identity, a skewed rigid body, no material, no semantic "
+            "label on a mesh or an exported object above it, invalid stored values, a rigid body "
+            "without mass, without a collider or nested in another, degenerate faces. Warnings: "
+            "names, sizes and units, scaled parts, an empty slot faces use, missing colliders, "
+            "UVs, n-gons. Filter by severity and page with offset/limit (next_offset)."
         ),
         hints=READ_ONLY,
         operation="validate_simready_compliance",
@@ -1244,21 +1247,24 @@ BLENDER_TOOLS: Tuple[BlenderTool, ...] = (
             "and UsdSemantics labels. The asset root is the default prim and holds its materials; "
             "metersPerUnit follows the scene's Unit Scale. Listed objects export with their "
             "descendants, hidden ones too; lights, cameras and the World are left out by default. "
-            "Refuses when validation finds errors unless force=true. Returns each object's prim path."
+            "Refuses when validation finds errors; skip_checks leaves a check out, force=true "
+            "ignores every error. Returns each object's prim path."
         ),
         hints=DESTRUCTIVE,
         operation="export_simready_usd",
         request=SimReadyExportRequest,
         response=SimReadyExportResponse,
+        params={"skip_checks": Param(Optional[List[SimReadyCheckName]])},
     ),
     BlenderTool(
         name="setup_simready_hierarchy",
         description=(
-            "Put Blender objects under a SimReady root empty (an Xform in the USD), keeping their "
-            "world transforms. Only listed objects without a listed ancestor are re-parented; "
-            "existing nesting stays. Checks everything first and changes nothing on failure; an "
-            "existing root name is refused unless reuse_root=true. Optionally stores semantic "
-            "labels on the root."
+            "Put Blender objects under a SimReady root empty (an Xform in the USD), keeping where "
+            "they are, also for objects in excluded collections, skewed by a parent or under "
+            "constraints. Only listed objects without a listed ancestor are re-parented; existing "
+            "nesting stays. Needs Object Mode; refuses linked objects. Checks everything first "
+            "and changes nothing on failure; an existing root name is refused unless "
+            "reuse_root=true. Optionally stores semantic labels on the root."
         ),
         hints=ADDITIVE,
         operation="setup_simready_hierarchy",

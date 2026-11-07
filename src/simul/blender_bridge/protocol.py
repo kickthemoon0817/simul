@@ -24,7 +24,8 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # Version 7: export_simready_usd takes include_children, include_lights_and_cameras and force, and
 # authors UsdPhysics and UsdSemantics schemas through the add-on's bundled simready_usd module.
 # Version 8: apply_simready_metadata takes clear; validate_simready_compliance takes check_metadata,
-# check_geometry, severity, offset and limit; setup_simready_hierarchy takes reuse_root.
+# check_physics, check_geometry, include_children, severity, offset and limit;
+# setup_simready_hierarchy takes reuse_root; export_simready_usd takes skip_checks.
 PROTOCOL_VERSION = 8
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 

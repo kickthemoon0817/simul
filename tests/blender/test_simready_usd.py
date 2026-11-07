@@ -270,3 +270,23 @@ def test_stage_metrics_follow_the_plan(tmp_path: Path) -> None:
 )
 def test_usd_identifier(name: str, identifier: str) -> None:
     assert usd_identifier(name) == identifier
+
+
+def test_a_qcode_goes_under_simreadys_wikidata_qcode_taxonomy(tmp_path: Path) -> None:
+    objects = _crate()
+    objects[0]["semantic"] = {
+        "semantic_class": "crate",
+        "semantic_qcode": "Q1420",
+        # Stored by an earlier Simul: it would overwrite the class label.
+        "additional_labels": {"class": "vehicle", "sku": "C-1"},
+    }
+
+    layer, report = author_simready_layer(_layer(tmp_path), _plan(objects))
+
+    stage = _stage(layer)
+    prim = stage.GetPrimAtPath("/crate")
+    assert list(prim.GetAttribute("semantics:labels:wikidata_qcode").Get()) == ["Q1420"]
+    assert list(prim.GetAttribute("semantics:labels:class").Get()) == ["crate"]
+    assert list(prim.GetAttribute("semantics:labels:sku").Get()) == ["C-1"]
+    assert not prim.GetAttribute("semantics:labels:qcode")
+    assert any("'class' is a semantic field's taxonomy" in w for w in report["warnings"])

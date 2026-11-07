@@ -23,6 +23,7 @@ from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 from simul.adapters import blender_runtime
 from simul.utils.paths import PathPolicy
+from tests.fakes import FakeMatrix
 
 # ---------------------------------------------------------------------------
 # A stand-in Blender scene and exporter
@@ -63,6 +64,10 @@ class FakeObject:
         self.hide_select = False
         self.selected = False
         self.users_collection: List[Any] = []
+        # Where Blender places it; the stand-in has no depsgraph, so this is taken as current.
+        self.matrix_world = FakeMatrix.Identity(4)
+        self.matrix_basis = FakeMatrix.Identity(4)
+        self.matrix_parent_inverse = FakeMatrix.Identity(4)
         self.mode = "OBJECT"
 
     # custom properties
@@ -355,7 +360,10 @@ def test_export_authors_usd_physics_and_semantics(scene: Any) -> None:
     labels = stage.GetPrimAtPath("/robot").GetAttribute("semantics:labels:class").Get()
     assert list(labels) == ["robot"]
     assert list(base.GetAttribute("semantics:labels:sku").Get()) == ["RA-100"]
-    assert "SemanticsLabelsAPI:qcode" in stage.GetPrimAtPath("/robot").GetAppliedSchemas()
+    # SimReady's taxonomy for a Wikidata Q-code.
+    robot = stage.GetPrimAtPath("/robot")
+    assert "SemanticsLabelsAPI:wikidata_qcode" in robot.GetAppliedSchemas()
+    assert list(robot.GetAttribute("semantics:labels:wikidata_qcode").Get()) == ["Q11012"]
 
     parsed = _physics_parse(stage)
     assert parsed["RigidBody"] == ["/robot/base_link"]
@@ -406,9 +414,10 @@ def test_export_declares_the_scene_unit_scale_and_converts_density(scene: Any) -
     assert UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.z
 
 
-def test_validation_flags_a_size_implausible_in_the_declared_units(scene: Any) -> None:
+def test_validation_warns_of_a_size_implausible_in_the_declared_units(scene: Any) -> None:
     part = FakeObject("mm_part", materials=["m"], dimensions=(500.0, 500.0, 500.0))
     part.parent = scene.obj("robot")
+    part["simready_semantic_class"] = "part"
     scene.fake.objects.append(part)
     scene.fake.layer_objects.append(part)
 
@@ -416,11 +425,17 @@ def test_validation_flags_a_size_implausible_in_the_declared_units(scene: Any) -
     scene.fake.context.scene.unit_settings.scale_length = 0.001
     in_millimetres = scene.session.validate_simready_compliance(["mm_part"])
 
-    assert in_metres["compliant"] is False
-    [issue] = [i for i in in_metres["issues"] if i["check"] == "scale"]
-    assert (issue["check"], issue["severity"]) == ("scale", "error")
+    # Large assets exist (a warehouse), so an implausible size is a warning.
+    [issue] = [i for i in in_metres["issues"] if i["object_name"] == "mm_part" and i["check"] == "scale"]
+    assert issue["severity"] == "warning"
     assert "500 m" in issue["message"]
-    assert in_millimetres["compliant"] is True
+    assert in_metres["compliant"] is True
+    assert not [
+        i for i in in_millimetres["issues"]
+        if i["object_name"] == "mm_part" and i["check"] == "scale"
+    ]
+    # A Unit Scale other than 1 is itself a warning [UN.007].
+    assert any("Unit Scale is 0.001" in i["message"] for i in in_millimetres["issues"])
     assert in_millimetres["meters_per_unit"] == 0.001
 
 
@@ -535,14 +550,14 @@ def test_lights_and_cameras_are_exported_when_asked_under_a_named_root(scene: An
 
 
 def test_a_failed_validation_writes_nothing_unless_forced(scene: Any) -> None:
-    scene.obj("arm_link").name = "ArmLink"
+    scene.obj("arm_link").data.materials = []
     path = scene.out / "bad.usda"
 
     refused = scene.session.export_simready_usd(str(path), object_names=["robot"])
 
     assert refused["success"] is False
     assert refused["error_type"] == "SimReadyValidationFailed"
-    assert "ArmLink" in refused["error"] and "force=true" in refused["error"]
+    assert "arm_link" in refused["error"] and "force=true" in refused["error"]
     assert refused["details"]["file_written"] is False
     assert not path.exists()
     assert not scene.fake.export_calls
@@ -552,6 +567,47 @@ def test_a_failed_validation_writes_nothing_unless_forced(scene: Any) -> None:
     assert path.exists()
     assert forced["validation_passed"] is False
     assert forced["forced"] is True
+
+
+def test_skip_checks_leaves_one_check_out_without_force(scene: Any) -> None:
+    scene.obj("arm_link").data.materials = []
+    path = scene.out / "skipped.usda"
+
+    result = scene.session.export_simready_usd(
+        str(path), object_names=["robot"], skip_checks=["materials"]
+    )
+
+    assert path.exists()
+    assert result["validation_passed"] is True and result["forced"] is False
+    with pytest.raises(ValueError, match="unknown check 'material' .did you mean 'materials'"):
+        scene.session.export_simready_usd(str(path), skip_checks=["material"])
+
+
+def test_a_class_on_an_unexported_ancestor_does_not_count(scene: Any) -> None:
+    """Blender writes the unexported robot as a bare Xform: its label is not in the file."""
+    path = scene.out / "arm.usda"
+
+    refused = scene.session.export_simready_usd(
+        str(path), object_names=["arm_link"], include_children=False
+    )
+
+    assert refused["success"] is False
+    issue = refused["details"]["issues"][0]
+    assert (issue["object_name"], issue["check"]) == ("arm_link", "metadata")
+    assert "No semantic label" in issue["message"]
+
+
+def test_the_root_check_applies_to_the_prim_that_becomes_the_default_prim(scene: Any) -> None:
+    # The robot root becomes the default prim even when only its child is exported.
+    scene.obj("robot").matrix_world = FakeMatrix.Translation((0.0, 0.0, 2.0))
+    scene.obj("arm_link")["simready_semantic_class"] = "arm"
+
+    refused = scene.session.export_simready_usd(
+        str(scene.out / "lifted.usda"), object_names=["arm_link"], include_children=False
+    )
+
+    assert refused["details"]["issues"][0]["object_name"] == "robot"
+    assert "becomes the default prim" in refused["details"]["issues"][0]["message"]
 
 
 def test_validation_issues_in_a_refusal_are_capped(scene: Any) -> None:

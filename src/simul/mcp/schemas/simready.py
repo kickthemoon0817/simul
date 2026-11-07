@@ -8,6 +8,7 @@ it ships inside the Blender add-on and cannot import these models, and
 """
 
 import difflib
+import re
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -66,6 +67,27 @@ SimReadyClearName = Literal[
 
 SimReadySeverity = Literal["all", "error", "warning"]
 
+#: The validation checks, for export_simready_usd's skip_checks.
+SimReadyCheckName = Literal[
+    "naming",
+    "scale",
+    "transforms",
+    "materials",
+    "hierarchy",
+    "metadata",
+    "physics",
+    "geometry",
+]
+
+#: Additional label keys refused: the taxonomies the fields are written under,
+#: and qcode, the Q-code taxonomy an earlier export wrote.
+RESERVED_LABELS = {
+    "class": "semantic_class",
+    "hierarchy": "semantic_hierarchy",
+    "wikidata_qcode": "semantic_qcode",
+    "qcode": "semantic_qcode",
+}
+
 #: A label key is a USD semantics taxonomy name, so it must be an identifier.
 LabelKey = Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
 NonEmpty = Annotated[str, Field(min_length=1)]
@@ -96,10 +118,10 @@ class SimReadySemanticLabels(_StrictModel):
     Semantic labeling for SimReady assets.
 
     export_simready_usd writes each field as a UsdSemantics LabelsAPI taxonomy
-    (``class``, ``hierarchy``, ``qcode``, and each additional label's key), or
-    with Isaac Sim's SemanticsAPI convention where Blender's USD has no
-    UsdSemantics. Validation requires a semantic class on each mesh or an
-    object above it.
+    (``class``, ``hierarchy``, ``wikidata_qcode``, and each additional label's
+    key), or with Isaac Sim's SemanticsAPI convention where Blender's USD has
+    no UsdSemantics. Validation requires a label of some taxonomy on each mesh
+    or an exported object above it.
     """
 
     semantic_class: Optional[NonEmpty] = Field(
@@ -119,9 +141,27 @@ class SimReadySemanticLabels(_StrictModel):
         None,
         description=(
             "Custom labels such as sku or product_id; each key becomes a semantics "
-            "taxonomy, so it must be an identifier"
+            "taxonomy, so it must be an identifier. A key that is a field's taxonomy "
+            "(class, hierarchy, wikidata_qcode, or the older qcode) sets that field "
+            "instead, and must not disagree with it"
         ),
     )
+
+    @model_validator(mode="after")
+    def _labels_agree_with_their_fields(self) -> "SimReadySemanticLabels":
+        for key, label in (self.additional_labels or {}).items():
+            target = RESERVED_LABELS.get(key)
+            if target is None:
+                continue
+            given = getattr(self, target)
+            if given is not None and given != label:
+                raise ValueError(
+                    f"label '{key}'={label!r} sets {target}, which is also given as "
+                    f"{given!r}; give one of them"
+                )
+            if target == "semantic_qcode" and not re.fullmatch(r"Q[1-9][0-9]*", label):
+                raise ValueError(f"label '{key}'={label!r} must be a Wikidata Q-code such as Q1420")
+        return self
 
 
 class SimReadyPhysicsProperties(_StrictModel):
@@ -291,7 +331,7 @@ class SimReadyValidationIssue(BaseModel):
         ...,
         description=(
             "Check category: naming, scale, transforms, materials, hierarchy, "
-            "metadata or geometry"
+            "metadata, physics or geometry"
         ),
     )
     severity: str = Field(
@@ -308,8 +348,9 @@ class SimReadyValidateRequest(BaseModel):
         None,
         min_length=1,
         description=(
-            "Objects to check; null checks the scene's meshes and every object "
-            "above them, asset roots included"
+            "Objects to check, each with its descendants unless include_children is "
+            "false; null checks the scene's objects that are visible in renders, as "
+            "export_simready_usd exports them"
         ),
     )
     check_naming: bool = Field(
@@ -318,14 +359,22 @@ class SimReadyValidateRequest(BaseModel):
     check_scale: bool = Field(
         True, description="Check real-world size in the scene's units"
     )
-    check_transforms: bool = Field(True, description="Check for applied transforms")
+    check_transforms: bool = Field(
+        True, description="Check the asset root's and the parts' transforms"
+    )
     check_materials: bool = Field(True, description="Check material slots")
     check_hierarchy: bool = Field(True, description="Check hierarchy structure")
     check_metadata: bool = Field(
-        True, description="Check semantic class, collider and stored values"
+        True, description="Check semantic labels, colliders and stored values"
+    )
+    check_physics: bool = Field(
+        True, description="Check rigid bodies: mass, colliders and nesting"
     )
     check_geometry: bool = Field(
         True, description="Check UVs, n-gons and degenerate faces"
+    )
+    include_children: bool = Field(
+        True, description="Also check the descendants of the listed objects"
     )
     severity: SimReadySeverity = Field(
         "all", description="Return all issues, or only errors or warnings"
@@ -356,6 +405,10 @@ class SimReadyValidateResponse(BaseModel):
     offset: int = Field(0, description="Index of the first issue in this page")
     next_offset: Optional[int] = Field(
         None, description="offset for the next page; null on the last page"
+    )
+    skipped_objects: List["SimReadySkippedObject"] = Field(
+        default_factory=list,
+        description="Objects left out as export_simready_usd leaves them out (cut at 50)",
     )
     meters_per_unit: Optional[float] = Field(
         None,
@@ -398,6 +451,13 @@ class SimReadyExportRequest(BaseModel):
     )
     force: bool = Field(
         False, description="Export although validation found errors"
+    )
+    skip_checks: Optional[List[SimReadyCheckName]] = Field(
+        None,
+        description=(
+            "Validation checks to leave out, so that one that does not apply needs no "
+            "force (which lets every other error through too)"
+        ),
     )
 
 
@@ -524,7 +584,13 @@ class SimReadyKeptParent(BaseModel):
     """A listed object left under its listed parent."""
 
     object_name: str = Field(..., description="Blender object name")
-    parent: str = Field(..., description="Its parent, also listed")
+    parent: str = Field(
+        ...,
+        description=(
+            "Its parent: a listed object, or an unlisted one between it and its listed "
+            "ancestor"
+        ),
+    )
 
 
 class SimReadySetupHierarchyResponse(BaseModel):
@@ -544,7 +610,8 @@ class SimReadySetupHierarchyResponse(BaseModel):
         description="Objects parented to the root, their world transforms kept",
     )
     kept_parent: List[SimReadyKeptParent] = Field(
-        default_factory=list, description="Listed objects left under their listed parent"
+        default_factory=list,
+        description="Listed objects with a listed ancestor, left under their current parent",
     )
     hierarchy_path: str = Field(
         ..., description="The root's prim path in export_simready_usd's USD"
@@ -552,13 +619,25 @@ class SimReadySetupHierarchyResponse(BaseModel):
     prim_paths: Dict[str, str] = Field(
         default_factory=dict, description="Each listed object's prim path in that USD"
     )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Skew kept in a parent inverse matrix, a pose a constraint changed, or two "
+            "objects that become the same prim name"
+        ),
+    )
 
+
+# SimReadySkippedObject is declared after the validate response that lists it.
+SimReadyValidateResponse.model_rebuild()
 
 __all__ = [
     "COLLIDER_TYPES",
     "ColliderType",
     "SimReadyClearName",
     "SimReadySeverity",
+    "SimReadyCheckName",
+    "RESERVED_LABELS",
     "SimReadySemanticLabels",
     "SimReadyPhysicsProperties",
     "SimReadyMaterialProperties",

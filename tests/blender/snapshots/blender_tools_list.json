@@ -1319,7 +1319,7 @@
     "apply_simready_metadata": {
       "name": "apply_simready_metadata",
       "title": "Apply Simready Metadata",
-      "description": "Store NVIDIA SimReady metadata (semantic labels, physics properties, material info) on a Blender object as simready_ custom properties, which export_simready_usd writes as UsdPhysics and UsdSemantics schemas. Omitted fields keep their stored value; clear removes stored values. Unknown fields and invalid values are refused with the valid names, before anything changes.",
+      "description": "Store NVIDIA SimReady metadata (semantic labels, physics properties, material info) on a Blender object as simready_ custom properties, which export_simready_usd writes as UsdPhysics and UsdSemantics schemas. Omitted fields keep their stored value; clear removes stored values. An additional label named after a field's taxonomy (class, hierarchy, wikidata_qcode) sets that field. Unknown fields, invalid values, Edit Mode and linked objects are refused, before anything changes.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1335,7 +1335,7 @@
                     "anyOf": [
                       {
                         "additionalProperties": false,
-                        "description": "Semantic labeling for SimReady assets.\n\nexport_simready_usd writes each field as a UsdSemantics LabelsAPI taxonomy\n(``class``, ``hierarchy``, ``qcode``, and each additional label's key), or\nwith Isaac Sim's SemanticsAPI convention where Blender's USD has no\nUsdSemantics. Validation requires a semantic class on each mesh or an\nobject above it.",
+                        "description": "Semantic labeling for SimReady assets.\n\nexport_simready_usd writes each field as a UsdSemantics LabelsAPI taxonomy\n(``class``, ``hierarchy``, ``wikidata_qcode``, and each additional label's\nkey), or with Isaac Sim's SemanticsAPI convention where Blender's USD has\nno UsdSemantics. Validation requires a label of some taxonomy on each mesh\nor an exported object above it.",
                         "properties": {
                           "semantic_class": {
                             "anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}],
@@ -1361,7 +1361,7 @@
                               {"type": "null"}
                             ],
                             "default": null,
-                            "description": "Custom labels such as sku or product_id; each key becomes a semantics taxonomy, so it must be an identifier"
+                            "description": "Custom labels such as sku or product_id; each key becomes a semantics taxonomy, so it must be an identifier. A key that is a field's taxonomy (class, hierarchy, wikidata_qcode, or the older qcode) sets that field instead, and must not disagree with it"
                           }
                         },
                         "type": "object"
@@ -1535,7 +1535,7 @@
     "validate_simready_compliance": {
       "name": "validate_simready_compliance",
       "title": "Validate Simready Compliance",
-      "description": "Validate Blender objects against NVIDIA SimReady conventions; any error makes them non-compliant. Checks names (objects, materials, mesh data), real-world size in the scene's units, applied transforms (the asset root at the origin, parts unscaled), material slots, hierarchy, metadata (semantic class, collider, stored values) and geometry (UVs, n-gons, degenerate faces). Filter by severity and page with offset/limit (next_offset).",
+      "description": "Validate what export_simready_usd would export against the SimReady Robotics-Prop rules and Isaac Sim's asset checks; any error makes it non-compliant. Errors: an asset root that is not the identity, a skewed rigid body, no material, no semantic label on a mesh or an exported object above it, invalid stored values, a rigid body without mass, without a collider or nested in another, degenerate faces. Warnings: names, sizes and units, scaled parts, an empty slot faces use, missing colliders, UVs, n-gons. Filter by severity and page with offset/limit (next_offset).",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1543,7 +1543,7 @@
           "object_names": {
             "anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}],
             "default": null,
-            "description": "Objects to check. Null checks the scene's meshes and every object above them, asset roots included. An empty list is refused."
+            "description": "Objects to check, each with its descendants unless include_children is false. Null checks the scene's objects that are visible in renders. An empty list is refused."
           },
           "check_naming": {
             "default": true,
@@ -1555,13 +1555,31 @@
             "description": "Validate real-world size in the scene's units.",
             "type": "boolean"
           },
-          "check_transforms": {"default": true, "description": "Validate applied transforms.", "type": "boolean"},
+          "check_transforms": {
+            "default": true,
+            "description": "Validate the asset root's and the parts' transforms.",
+            "type": "boolean"
+          },
           "check_materials": {"default": true, "description": "Validate material slots.", "type": "boolean"},
           "check_hierarchy": {"default": true, "description": "Validate hierarchy structure.", "type": "boolean"},
-          "check_metadata": {"default": true, "description": "Validate the SimReady metadata.", "type": "boolean"},
+          "check_metadata": {
+            "default": true,
+            "description": "Validate semantic labels, colliders and stored values.",
+            "type": "boolean"
+          },
+          "check_physics": {
+            "default": true,
+            "description": "Validate rigid bodies: mass, colliders, nesting.",
+            "type": "boolean"
+          },
           "check_geometry": {
             "default": true,
             "description": "Validate UVs, n-gons and degenerate faces.",
+            "type": "boolean"
+          },
+          "include_children": {
+            "default": true,
+            "description": "Also check the descendants of the listed objects.",
             "type": "boolean"
           },
           "severity": {
@@ -1584,7 +1602,7 @@
     "export_simready_usd": {
       "name": "export_simready_usd",
       "title": "Export Simready Usd",
-      "description": "Export Blender objects as a SimReady USD asset a simulator reads: from the simready_ metadata it authors UsdPhysics rigid bodies, mass, mesh colliders and physics materials, and UsdSemantics labels. The asset root is the default prim and holds its materials; metersPerUnit follows the scene's Unit Scale. Listed objects export with their descendants, hidden ones too; lights, cameras and the World are left out by default. Refuses when validation finds errors unless force=true. Returns each object's prim path.",
+      "description": "Export Blender objects as a SimReady USD asset a simulator reads: from the simready_ metadata it authors UsdPhysics rigid bodies, mass, mesh colliders and physics materials, and UsdSemantics labels. The asset root is the default prim and holds its materials; metersPerUnit follows the scene's Unit Scale. Listed objects export with their descendants, hidden ones too; lights, cameras and the World are left out by default. Refuses when validation finds errors; skip_checks leaves a check out, force=true ignores every error. Returns each object's prim path.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1602,7 +1620,7 @@
           },
           "validate_before_export": {
             "default": true,
-            "description": "First run every validate_simready_compliance check on the exported objects, the asset root included.",
+            "description": "First run every validate_simready_compliance check on the exported objects, the asset root included, after writing Edit Mode's edits back to the mesh.",
             "type": "boolean"
           },
           "include_children": {
@@ -1619,6 +1637,29 @@
             "default": false,
             "description": "Export although validation found errors.",
             "type": "boolean"
+          },
+          "skip_checks": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "naming",
+                    "scale",
+                    "transforms",
+                    "materials",
+                    "hierarchy",
+                    "metadata",
+                    "physics",
+                    "geometry"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {"type": "null"}
+            ],
+            "default": null,
+            "description": "Validation checks to leave out (naming, scale, transforms, materials, hierarchy, metadata, physics, geometry), so that one check that does not apply does not need force, which also lets every other error through."
           }
         },
         "required": ["file_path"]
@@ -1629,13 +1670,13 @@
     "setup_simready_hierarchy": {
       "name": "setup_simready_hierarchy",
       "title": "Setup Simready Hierarchy",
-      "description": "Put Blender objects under a SimReady root empty (an Xform in the USD), keeping their world transforms. Only listed objects without a listed ancestor are re-parented; existing nesting stays. Checks everything first and changes nothing on failure; an existing root name is refused unless reuse_root=true. Optionally stores semantic labels on the root.",
+      "description": "Put Blender objects under a SimReady root empty (an Xform in the USD), keeping where they are, also for objects in excluded collections, skewed by a parent or under constraints. Only listed objects without a listed ancestor are re-parented; existing nesting stays. Needs Object Mode; refuses linked objects. Checks everything first and changes nothing on failure; an existing root name is refused unless reuse_root=true. Optionally stores semantic labels on the root.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "root_name": {
-            "description": "Name for the root empty: lowercase letters, digits, underscores.",
+            "description": "Name for the root empty: a USD identifier (letters, digits and underscores, not starting with a digit).",
             "type": "string"
           },
           "child_names": {
@@ -1647,7 +1688,7 @@
             "anyOf": [
               {
                 "additionalProperties": false,
-                "description": "Semantic labeling for SimReady assets.\n\nexport_simready_usd writes each field as a UsdSemantics LabelsAPI taxonomy\n(``class``, ``hierarchy``, ``qcode``, and each additional label's key), or\nwith Isaac Sim's SemanticsAPI convention where Blender's USD has no\nUsdSemantics. Validation requires a semantic class on each mesh or an\nobject above it.",
+                "description": "Semantic labeling for SimReady assets.\n\nexport_simready_usd writes each field as a UsdSemantics LabelsAPI taxonomy\n(``class``, ``hierarchy``, ``wikidata_qcode``, and each additional label's\nkey), or with Isaac Sim's SemanticsAPI convention where Blender's USD has\nno UsdSemantics. Validation requires a label of some taxonomy on each mesh\nor an exported object above it.",
                 "properties": {
                   "semantic_class": {
                     "anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}],
@@ -1673,7 +1714,7 @@
                       {"type": "null"}
                     ],
                     "default": null,
-                    "description": "Custom labels such as sku or product_id; each key becomes a semantics taxonomy, so it must be an identifier"
+                    "description": "Custom labels such as sku or product_id; each key becomes a semantics taxonomy, so it must be an identifier. A key that is a field's taxonomy (class, hierarchy, wikidata_qcode, or the older qcode) sets that field instead, and must not disagree with it"
                   }
                 },
                 "type": "object"

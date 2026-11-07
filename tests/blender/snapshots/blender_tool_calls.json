@@ -1878,7 +1878,9 @@
               "check_materials": "True",
               "check_hierarchy": "True",
               "check_metadata": "True",
+              "check_physics": "True",
               "check_geometry": "True",
+              "include_children": "True",
               "severity": "'all'",
               "offset": "0",
               "limit": "50"
@@ -1897,7 +1899,9 @@
           "check_materials": false,
           "check_hierarchy": false,
           "check_metadata": false,
+          "check_physics": false,
           "check_geometry": false,
+          "include_children": false,
           "severity": "error",
           "offset": 5,
           "limit": 10
@@ -1913,7 +1917,9 @@
               "check_materials": "False",
               "check_hierarchy": "False",
               "check_metadata": "False",
+              "check_physics": "False",
               "check_geometry": "False",
+              "include_children": "False",
               "severity": "'error'",
               "offset": "5",
               "limit": "10"
@@ -1939,7 +1945,9 @@
               "check_materials": true,
               "check_hierarchy": true,
               "check_metadata": true,
+              "check_physics": true,
               "check_geometry": true,
+              "include_children": true,
               "severity": "all",
               "offset": 0,
               "limit": 50
@@ -1961,7 +1969,8 @@
               "validate_before_export": "True",
               "include_children": "True",
               "include_lights_and_cameras": "False",
-              "force": "False"
+              "force": "False",
+              "skip_checks": "None"
             }
           }
         ],
@@ -1976,7 +1985,8 @@
           "validate_before_export": false,
           "include_children": false,
           "include_lights_and_cameras": true,
-          "force": true
+          "force": true,
+          "skip_checks": ["naming", "scale"]
         },
         "session_calls": [
           {
@@ -1988,7 +1998,8 @@
               "validate_before_export": "False",
               "include_children": "False",
               "include_lights_and_cameras": "True",
-              "force": "True"
+              "force": "True",
+              "skip_checks": "['naming', 'scale']"
             }
           }
         ],
@@ -2010,7 +2021,8 @@
               "validate_before_export": true,
               "include_children": true,
               "include_lights_and_cameras": false,
-              "force": false
+              "force": false,
+              "skip_checks": null
             }
           }
         }

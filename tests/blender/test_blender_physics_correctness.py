@@ -192,17 +192,7 @@ def _default_scene() -> List[Any]:
     ]
 
 
-def test_validation_skips_material_check_for_objects_without_slots(install: Any) -> None:
-    fake = _fake_bpy(_default_scene())
-    session = install(fake)
-
-    result = session.validate_simready_compliance(
-        object_names=["Camera", "Light"], check_naming=False, check_hierarchy=False,
-        check_transforms=False, check_metadata=False,
-    )
-
-    assert result["issues"] == []
-
-
-# export_simready_usd is covered against a Blender-like exporter, with the
-# written file checked through pxr, in test_simready_export.py.
+# validate_simready_compliance checks what export_simready_usd exports, which
+# leaves cameras and lights out unless asked; it checks material slots on
+# meshes only. Both are covered, against a Blender-like exporter whose file is
+# read through pxr, in test_simready_export.py and test_simready_validation.py.

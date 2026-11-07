@@ -28,6 +28,7 @@ class Obj:
         self.name = name
         self.type = kind
         self.props: Dict[str, Any] = {}
+        self.library: Optional[str] = None
 
     def __setitem__(self, key: str, value: Any) -> None:
         self.props[key] = value
@@ -53,12 +54,12 @@ def box(monkeypatch: pytest.MonkeyPatch) -> Any:
     objects = Objects([obj])
     fake = SimpleNamespace(
         data=SimpleNamespace(objects=objects),
-        context=SimpleNamespace(scene=SimpleNamespace(objects=objects)),
+        context=SimpleNamespace(scene=SimpleNamespace(objects=objects), mode="OBJECT"),
         app=SimpleNamespace(version=(5, 0, 1), version_string="5.0.1", background=True),
     )
     monkeypatch.setattr(blender_runtime, "bpy", fake)
     monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-    return SimpleNamespace(obj=obj, session=blender_runtime.BlenderRuntimeSession())
+    return SimpleNamespace(obj=obj, session=blender_runtime.BlenderRuntimeSession(), fake=fake)
 
 
 # ---------------------------------------------------------------------------
@@ -310,3 +311,71 @@ def test_the_runtime_and_the_models_agree_on_values(
         runtime_ok = False
 
     assert (model_ok, runtime_ok) == (accepted, accepted)
+
+
+# ---------------------------------------------------------------------------
+# The #325 review: taxonomy-named labels, Edit Mode, linked data, error codes
+# ---------------------------------------------------------------------------
+
+
+def test_a_label_named_after_a_fields_taxonomy_sets_that_field(box: Any) -> None:
+    """wikidata_qcode is SimReady's Q-code taxonomy: as a label it is the Q-code."""
+    box.session.apply_simready_metadata(
+        "box", {"semantic": {"additional_labels": {"wikidata_qcode": "Q2413", "sku": "M-1"}}}
+    )
+
+    assert box.obj.props == {"simready_semantic_qcode": "Q2413", "simready_label_sku": "M-1"}
+
+
+def test_a_label_that_would_overwrite_its_field_is_refused(box: Any) -> None:
+    """An additional label `class` overwrote semantic_class in the USD."""
+    with pytest.raises(blender_runtime.ValidationError) as excinfo:
+        box.session.apply_simready_metadata(
+            "box",
+            {"semantic": {"semantic_class": "crate", "additional_labels": {"class": "vehicle"}}},
+        )
+
+    assert excinfo.value.details["code"] == "InvalidMetadata"
+    assert "sets semantic.semantic_class, which is also given as 'crate'" in str(excinfo.value)
+    assert box.obj.props == {}
+    with pytest.raises(ValidationError, match="sets semantic_class"):
+        schemas.SimReadySemanticLabels(semantic_class="crate", additional_labels={"class": "vehicle"})
+    with pytest.raises(ValidationError, match="Wikidata Q-code"):
+        schemas.SimReadySemanticLabels(additional_labels={"wikidata_qcode": "x"})
+
+
+def test_a_stored_label_named_after_a_taxonomy_is_reported(box: Any) -> None:
+    box.obj["simready_label_class"] = "vehicle"
+
+    payload = box.session.get_simready_metadata("box")
+
+    assert payload["metadata"] is None
+    assert payload["invalid_values"][0]["property"] == "simready_label_class"
+
+
+def test_edit_mode_and_linked_objects_are_refused(box: Any) -> None:
+    box.fake.context.mode = "EDIT_MESH"
+    with pytest.raises(blender_runtime.ValidationError) as excinfo:
+        box.session.apply_simready_metadata("box", {"physics": {"mass_kg": 1.0}})
+    assert excinfo.value.details["code"] == "ObjectModeRequired"
+
+    box.fake.context.mode = "OBJECT"
+    box.obj.library = "//parts.blend"
+    with pytest.raises(blender_runtime.ValidationError) as excinfo:
+        box.session.apply_simready_metadata("box", {"physics": {"mass_kg": 1.0}})
+    assert excinfo.value.details["code"] == "LinkedData"
+    assert box.obj.props == {}
+
+
+@pytest.mark.parametrize(
+    ("metadata", "clear", "code"),
+    [
+        ({"physics": {"mass": 1}}, None, "InvalidMetadata"),
+        ({}, None, "NothingToApply"),
+        (None, ["mass"], "InvalidClear"),
+    ],
+)
+def test_refusals_carry_a_code(box: Any, metadata: Any, clear: Any, code: str) -> None:
+    with pytest.raises(blender_runtime.ValidationError) as excinfo:
+        box.session.apply_simready_metadata("box", metadata, clear=clear)
+    assert excinfo.value.details["code"] == code

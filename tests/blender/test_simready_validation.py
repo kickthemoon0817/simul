@@ -1,17 +1,26 @@
-"""validate_simready_compliance: real checks with severities, where errors flip compliant."""
+"""validate_simready_compliance: the SimReady Robotics-Prop rules and Isaac Sim's checks.
+
+Errors flip ``compliant``; warnings do not. The stand-in objects carry world
+matrices directly, as validation reads them (the stand-in bpy has no depsgraph,
+so every ``matrix_world`` is taken as current).
+"""
 
 from __future__ import annotations
 
+import json
+import math
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence
 
+import numpy as np
 import pytest
 
 from simul.adapters import blender_runtime
+from tests.fakes import FakeMatrix
 
 
 class Polygons(list):
-    """mesh.polygons: ``foreach_get`` of loop_total and area, as Blender offers it."""
+    """mesh.polygons: ``foreach_get`` of loop_total, area and material_index, as Blender offers it."""
 
     def foreach_get(self, attribute: str, out: Any) -> None:
         for index, polygon in enumerate(self):
@@ -24,18 +33,23 @@ def _mesh(
     areas: Optional[Sequence[float]] = None,
     uv: bool = True,
     materials: Sequence[Any] = ("opaque_metal",),
+    slots: Optional[Sequence[int]] = None,
 ) -> SimpleNamespace:
     areas = list(areas) if areas is not None else [1.0] * len(corners)
+    slots = list(slots) if slots is not None else [0] * len(corners)
     return SimpleNamespace(
         name=name,
         materials=list(materials),
-        polygons=Polygons({"loop_total": c, "area": a} for c, a in zip(corners, areas)),
+        polygons=Polygons(
+            {"loop_total": c, "area": a, "material_index": m}
+            for c, a, m in zip(corners, areas, slots)
+        ),
         uv_layers=["UVMap"] if uv else [],
     )
 
 
 class Obj:
-    """A Blender object with the transform, material and custom-property surface validation reads."""
+    """A Blender object with the matrix, material and custom-property surface validation reads."""
 
     def __init__(
         self,
@@ -43,7 +57,7 @@ class Obj:
         kind: str = "MESH",
         parent: Optional["Obj"] = None,
         data: Optional[Any] = None,
-        **transform: Any,
+        world: Optional[FakeMatrix] = None,
     ) -> None:
         self.name = name
         self.type = kind
@@ -53,26 +67,20 @@ class Obj:
             parent.children.append(self)
         self.data = data if data is not None or kind != "MESH" else _mesh(name)
         self.dimensions = (1.0, 1.0, 1.0) if kind == "MESH" else (0.0, 0.0, 0.0)
-        self.location = (0.0, 0.0, 0.0)
-        self.delta_location = (0.0, 0.0, 0.0)
-        self.rotation_mode = "XYZ"
-        self.rotation_euler = (0.0, 0.0, 0.0)
-        self.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
-        self.rotation_axis_angle = (0.0, 0.0, 1.0, 0.0)
-        self.delta_rotation_euler = (0.0, 0.0, 0.0)
-        self.delta_rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
-        self.scale = (1.0, 1.0, 1.0)
-        self.delta_scale = (1.0, 1.0, 1.0)
+        self.matrix_world = world or (parent.matrix_world if parent else FakeMatrix.Identity(4))
         self.modifiers: List[Any] = []
         self.props: Dict[str, Any] = {}
-        for key, value in transform.items():
-            setattr(self, key, value)
+        self.mode = "OBJECT"
+        self.hide_render = False
 
     def __setitem__(self, key: str, value: Any) -> None:
         self.props[key] = value
 
     def __getitem__(self, key: str) -> Any:
         return self.props[key]
+
+    def __delitem__(self, key: str) -> None:
+        del self.props[key]
 
     def keys(self) -> List[str]:
         return list(self.props)
@@ -84,7 +92,7 @@ class Objects(list):
 
 
 def _asset() -> List[Obj]:
-    """A compliant crate: root (class, rigid body) > body (collider) and lid."""
+    """A compliant crate: root (class, rigid body, mass, collider) > body and lid."""
     root = Obj("crate", "EMPTY")
     root.props.update(
         {
@@ -94,8 +102,8 @@ def _asset() -> List[Obj]:
             "simready_collider_type": "convexHull",
         }
     )
-    body = Obj("body", parent=root, location=(0.0, 0.0, 0.5))
-    lid = Obj("lid", parent=root, location=(0.0, 0.0, 1.0))
+    body = Obj("body", parent=root, world=FakeMatrix.Translation((0.0, 0.0, 0.5)))
+    lid = Obj("lid", parent=root, world=FakeMatrix.Translation((0.0, 0.0, 1.0)))
     return [root, body, lid]
 
 
@@ -105,8 +113,11 @@ def scene(monkeypatch: pytest.MonkeyPatch) -> Any:
     fake = SimpleNamespace(
         data=SimpleNamespace(objects=objects),
         context=SimpleNamespace(
-            scene=SimpleNamespace(objects=objects, unit_settings=SimpleNamespace(scale_length=1.0)),
-            evaluated_depsgraph_get=lambda: "depsgraph",
+            scene=SimpleNamespace(
+                name="Scene", objects=objects, unit_settings=SimpleNamespace(scale_length=1.0)
+            ),
+            view_layer=SimpleNamespace(objects=objects),
+            mode="OBJECT",
         ),
         app=SimpleNamespace(version=(5, 0, 1), version_string="5.0.1", background=True),
     )
@@ -118,7 +129,7 @@ def scene(monkeypatch: pytest.MonkeyPatch) -> Any:
         objects.append(obj)
         return obj
 
-    return SimpleNamespace(session=session, objects=objects, get=objects.get, add=add)
+    return SimpleNamespace(session=session, objects=objects, get=objects.get, add=add, fake=fake)
 
 
 def _issues(result: Dict[str, Any], check: Optional[str] = None) -> List[tuple]:
@@ -129,6 +140,22 @@ def _issues(result: Dict[str, Any], check: Optional[str] = None) -> List[tuple]:
     ]
 
 
+def _scaled(sx: float, sy: float, sz: float, at: Sequence[float] = (0.0, 0.0, 0.0)) -> FakeMatrix:
+    return FakeMatrix.Translation(at) @ FakeMatrix(np.diag([sx, sy, sz, 1.0]))
+
+
+def _rotated_z(degrees: float, at: Sequence[float] = (0.0, 0.0, 0.0)) -> FakeMatrix:
+    c, s = math.cos(math.radians(degrees)), math.sin(math.radians(degrees))
+    return FakeMatrix.Translation(at) @ FakeMatrix(
+        [(c, -s, 0, 0), (s, c, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)]
+    )
+
+
+# ---------------------------------------------------------------------------
+# A clean asset, and the asset root [VG.025]
+# ---------------------------------------------------------------------------
+
+
 def test_a_clean_asset_is_compliant_and_the_root_is_checked_by_default(scene: Any) -> None:
     result = scene.session.validate_simready_compliance()
 
@@ -137,64 +164,155 @@ def test_a_clean_asset_is_compliant_and_the_root_is_checked_by_default(scene: An
     assert result["issues"] == []
 
 
-def test_a_scaled_root_is_an_error(scene: Any) -> None:
-    scene.get("crate").scale = (0.01, 0.01, 0.01)
+@pytest.mark.parametrize(
+    ("world", "said"),
+    [
+        (_scaled(0.01, 0.01, 0.01), "scaled"),
+        (FakeMatrix.Translation((1.0, 0.0, 0.0)), "at (1.0, 0.0, 0.0)"),
+        (_rotated_z(90.0), "rotated"),
+    ],
+)
+def test_an_asset_root_that_is_not_the_identity_is_an_error(
+    scene: Any, world: FakeMatrix, said: str
+) -> None:
+    scene.get("crate").matrix_world = world
 
     result = scene.session.validate_simready_compliance()
 
+    [issue] = [i for i in result["issues"] if i["object_name"] == "crate"]
+    assert (issue["check"], issue["severity"]) == ("transforms", "error")
+    assert said in issue["message"] and "default prim" in issue["message"]
     assert result["compliant"] is False
-    assert ("crate", "transforms", "error") in _issues(result)
 
 
-def test_a_root_away_from_the_origin_or_rotated_is_an_error(scene: Any) -> None:
+def test_a_lone_mesh_off_the_origin_is_the_default_prim_and_an_error(scene: Any) -> None:
+    lone = scene.add(Obj("lone_part", world=_rotated_z(90.0, at=(5.0, 0.0, 0.0))))
+    lone.props.update({"simready_semantic_class": "part"})
+
+    result = scene.session.validate_simready_compliance(["lone_part"])
+
+    assert ("lone_part", "transforms", "error") in _issues(result)
+
+
+def test_top_level_objects_wrapped_in_a_new_root_are_not_roots(scene: Any) -> None:
+    """With several top-level objects the export adds an identity root above them."""
+    other = scene.add(Obj("other_part", world=FakeMatrix.Translation((3.0, 0.0, 0.0))))
+    other.props.update({"simready_semantic_class": "part"})
+    scene.get("crate").matrix_world = FakeMatrix.Translation((-3.0, 0.0, 0.0))
+
+    result = scene.session.validate_simready_compliance()
+
+    assert not [i for i in result["issues"] if i["severity"] == "error"]
+
+
+# ---------------------------------------------------------------------------
+# Parts: scale and mirroring are warnings; skew is an error on a rigid body [RB.009]
+# ---------------------------------------------------------------------------
+
+
+def test_a_scaled_or_mirrored_part_is_a_warning(scene: Any) -> None:
+    scene.get("body").matrix_world = _scaled(1.2, 0.6, 0.04, at=(0.0, 0.0, 0.5))
+    scene.get("lid").matrix_world = _scaled(-1.0, 1.0, 1.0, at=(0.0, 0.0, 1.0))
+
+    result = scene.session.validate_simready_compliance()
+
+    assert ("body", "transforms", "warning") in _issues(result)
+    [mirrored] = [i for i in result["issues"] if i["object_name"] == "lid"]
+    assert "mirrored" in mirrored["message"] and mirrored["severity"] == "warning"
+    assert result["compliant"] is True
+
+
+def test_scale_in_the_parent_inverse_matrix_counts(scene: Any) -> None:
+    """The exporter writes the world-relative transform, not loc/rot/scale."""
+    scene.get("body").matrix_world = _scaled(0.5, 0.5, 0.5, at=(0.0, 0.0, 0.5))
+
+    result = scene.session.validate_simready_compliance()
+
+    assert ("body", "transforms", "warning") in _issues(result)
+
+
+def test_a_skewed_rigid_body_is_an_error_and_a_skewed_part_a_warning(scene: Any) -> None:
+    skew = _scaled(1.0, 3.0, 1.0) @ _rotated_z(45.0)
+    scene.get("body").matrix_world = skew
+    scene.get("lid").matrix_world = skew
+    scene.get("lid").props.update({"simready_is_rigid_body": 1, "simready_mass_kg": 1.0})
+
+    result = scene.session.validate_simready_compliance()
+
+    body = [i for i in result["issues"] if i["object_name"] == "body" and "skewed" in i["message"]]
+    lid = [i for i in result["issues"] if i["object_name"] == "lid" and "skewed" in i["message"]]
+    assert body[0]["severity"] == "warning"
+    assert lid[0]["severity"] == "error"
+
+
+def test_a_rotated_part_is_fine(scene: Any) -> None:
+    scene.get("body").matrix_world = _rotated_z(30.0, at=(0.0, 0.0, 0.5))
+
+    assert scene.session.validate_simready_compliance()["issues"] == []
+
+
+# ---------------------------------------------------------------------------
+# Names: warnings; camelCase is fine
+# ---------------------------------------------------------------------------
+
+
+def test_names_that_are_not_identifiers_are_warnings_and_camel_case_is_fine(scene: Any) -> None:
+    body, lid = scene.get("body"), scene.get("lid")
+    body.name = "lidPanel"
+    lid.name = "Lid Panel.001"
+    lid.data = _mesh("Cube.001", materials=[SimpleNamespace(name="Bad Material.001")])
+
+    result = scene.session.validate_simready_compliance()
+
+    naming = [i for i in result["issues"] if i["check"] == "naming"]
+    assert {i["severity"] for i in naming} == {"warning"}
+    assert not [i for i in naming if i["object_name"] == "lidPanel"]
+    messages = " ".join(i["message"] for i in naming)
+    assert "Lid_Panel_001" in messages and "Bad_Material_001" in messages and "Cube_001" in messages
+    assert result["compliant"] is True
+
+
+def test_two_siblings_that_become_one_prim_name_are_reported(scene: Any) -> None:
     root = scene.get("crate")
-    root.location = (1.0, 0.0, 0.0)
-    root.rotation_mode = "QUATERNION"
-    root.rotation_quaternion = (0.7071068, 0.7071068, 0.0, 0.0)  # glTF's Y-up turn
+    scene.add(Obj("arm.L", parent=root))
+    scene.add(Obj("arm_L", parent=root))
 
-    result = scene.session.validate_simready_compliance(["crate"])
+    result = scene.session.validate_simready_compliance()
 
-    messages = [i["message"] for i in result["issues"] if i["check"] == "transforms"]
-    assert any("not the origin" in m for m in messages)
-    assert any("quaternion" in m for m in messages)
-    assert result["error_count"] == 2
+    assert any("also becomes the prim name 'arm_L'" in i["message"] for i in result["issues"])
 
 
-def test_quaternion_axis_angle_and_delta_transforms_count(scene: Any) -> None:
-    body = scene.get("body")
-    body.rotation_mode = "QUATERNION"
-    body.rotation_quaternion = (0.9238795, 0.0, 0.0, 0.3826834)
-    lid = scene.get("lid")
-    lid.delta_scale = (100.0, 100.0, 100.0)
-    lid.delta_rotation_euler = (1.0, 0.0, 0.0)
-
-    result = scene.session.validate_simready_compliance(["body", "lid"])
-
-    assert ("body", "transforms", "warning") in _issues(result)  # a rotated part
-    assert ("lid", "transforms", "error") in _issues(result)  # a delta scale
-    assert ("lid", "transforms", "warning") in _issues(result)  # a delta rotation
-    assert result["compliant"] is False
+# ---------------------------------------------------------------------------
+# Semantic labels [SL.001], from exported objects only (M6)
+# ---------------------------------------------------------------------------
 
 
-def test_a_mirrored_part_is_an_error(scene: Any) -> None:
-    scene.get("body").scale = (-1.0, 1.0, 1.0)
+def test_a_label_of_any_taxonomy_counts(scene: Any) -> None:
+    root = scene.get("crate")
+    del root.props["simready_semantic_class"]
+    root.props["simready_semantic_qcode"] = "Q2413"
 
-    result = scene.session.validate_simready_compliance(["body"])
+    assert scene.session.validate_simready_compliance()["compliant"] is True
+    del root.props["simready_semantic_qcode"]
+    root.props["simready_label_product_id"] = "C-1"
+    assert scene.session.validate_simready_compliance()["compliant"] is True
 
-    [issue] = [i for i in result["issues"] if i["check"] == "transforms"]
-    assert issue["severity"] == "error" and "mirrors" in issue["message"]
 
-
-def test_a_mesh_without_metadata_is_not_compliant(scene: Any) -> None:
-    bare = scene.add(Obj("bare_part", parent=None))
+def test_a_mesh_without_a_label_is_an_error(scene: Any) -> None:
+    scene.add(Obj("bare_part")).props["simready_collider_type"] = "convexHull"
 
     result = scene.session.validate_simready_compliance(["bare_part"])
 
-    assert ("bare_part", "metadata", "error") in _issues(result)  # no semantic class
-    assert ("bare_part", "metadata", "warning") in _issues(result)  # no collider
+    assert ("bare_part", "metadata", "error") in _issues(result)
+
+
+def test_an_unexported_ancestor_passes_nothing_on(scene: Any) -> None:
+    """The crate is not exported: its label, body and collider are not in the file."""
+    result = scene.session.validate_simready_compliance(["body"])
+
+    assert ("body", "metadata", "error") in _issues(result)
+    assert ("body", "metadata", "warning") in _issues(result)  # no collider either
     assert result["compliant"] is False
-    bare["simready_semantic_class"] = "part"
-    assert scene.session.validate_simready_compliance(["bare_part"])["compliant"] is True
 
 
 def test_invalid_stored_values_are_errors(scene: Any) -> None:
@@ -207,32 +325,80 @@ def test_invalid_stored_values_are_errors(scene: Any) -> None:
     assert "simready_restitution=1.5 must be at most 1" in issue["message"]
 
 
-def test_a_rigid_body_without_mass_is_a_warning(scene: Any) -> None:
+# ---------------------------------------------------------------------------
+# Rigid bodies (M5): mass [RB.007], collider, nesting [RB.012], triangle meshes, none [RB.001]
+# ---------------------------------------------------------------------------
+
+
+def test_a_rigid_body_without_mass_or_density_is_an_error(scene: Any) -> None:
     del scene.get("crate").props["simready_mass_kg"]
 
-    result = scene.session.validate_simready_compliance(["crate"])
+    result = scene.session.validate_simready_compliance()
 
-    assert _issues(result, "metadata") == [("crate", "metadata", "warning")]
+    assert ("crate", "physics", "error") in _issues(result)
+    scene.get("crate")["simready_density"] = 500.0
+    assert scene.session.validate_simready_compliance()["compliant"] is True
+
+
+def test_a_rigid_body_without_a_collider_is_an_error(scene: Any) -> None:
+    del scene.get("crate").props["simready_collider_type"]
+
+    result = scene.session.validate_simready_compliance()
+
+    assert any(
+        i["object_name"] == "crate" and "without a collider" in i["message"]
+        for i in result["issues"]
+    )
+    assert result["compliant"] is False
+
+
+def test_nested_rigid_bodies_are_an_error(scene: Any) -> None:
+    scene.get("lid").props.update({"simready_is_rigid_body": 1, "simready_mass_kg": 0.5})
+
+    result = scene.session.validate_simready_compliance()
+
+    [issue] = [i for i in result["issues"] if i["object_name"] == "lid" and i["check"] == "physics"]
+    assert issue["severity"] == "error" and "nested in the rigid body crate" in issue["message"]
+
+
+def test_a_triangle_mesh_collider_on_a_dynamic_body_is_a_warning(scene: Any) -> None:
+    scene.get("crate")["simready_collider_type"] = "none"
+
+    result = scene.session.validate_simready_compliance()
+
+    assert ("body", "physics", "warning") in _issues(result)
     assert result["compliant"] is True
 
 
-def test_material_and_mesh_data_names_are_checked(scene: Any) -> None:
-    scene.get("body").data = _mesh("Cube.001", materials=[SimpleNamespace(name="Bad Material.001")])
+def test_an_asset_without_a_rigid_body_is_a_warning(scene: Any) -> None:
+    del scene.get("crate").props["simready_is_rigid_body"]
 
-    result = scene.session.validate_simready_compliance(["body"])
+    result = scene.session.validate_simready_compliance()
 
-    naming = {i["message"]: i["severity"] for i in result["issues"] if i["check"] == "naming"}
-    assert any("Material name 'Bad Material.001'" in m and s == "error" for m, s in naming.items())
-    assert any("Mesh data name 'Cube.001'" in m and s == "warning" for m, s in naming.items())
+    assert _issues(result, "physics") == [("crate", "physics", "warning")]
+    assert result["compliant"] is True
 
 
-def test_an_empty_material_slot_is_an_error(scene: Any) -> None:
+# ---------------------------------------------------------------------------
+# Materials, geometry, units
+# ---------------------------------------------------------------------------
+
+
+def test_an_empty_slot_is_a_warning_only_when_faces_use_it(scene: Any) -> None:
     scene.get("body").data = _mesh("body", materials=["opaque_metal", None])
+    assert _issues(scene.session.validate_simready_compliance(), "materials") == []
 
-    result = scene.session.validate_simready_compliance(["body"])
+    scene.get("body").data = _mesh("body", materials=["opaque_metal", None], slots=[0, 1, 0, 0, 0, 0])
+    result = scene.session.validate_simready_compliance()
 
     [issue] = [i for i in result["issues"] if i["check"] == "materials"]
-    assert issue["severity"] == "error" and "slot(s) 1" in issue["message"]
+    assert issue["severity"] == "warning" and "slot(s) 1" in issue["message"]
+
+
+def test_no_material_at_all_is_an_error(scene: Any) -> None:
+    scene.get("body").data = _mesh("body", materials=[])
+
+    assert ("body", "materials", "error") in _issues(scene.session.validate_simready_compliance())
 
 
 def test_uvs_ngons_and_degenerate_faces_are_checked(scene: Any) -> None:
@@ -240,7 +406,7 @@ def test_uvs_ngons_and_degenerate_faces_are_checked(scene: Any) -> None:
         "body", corners=(4, 6, 3, 3), areas=(1.0, 1.0, 0.0, 1.0), uv=False
     )
 
-    result = scene.session.validate_simready_compliance(["body"])
+    result = scene.session.validate_simready_compliance(["body"], check_metadata=False)
 
     geometry = {i["message"]: i["severity"] for i in result["issues"] if i["check"] == "geometry"}
     assert geometry == {
@@ -259,21 +425,80 @@ def test_geometry_is_read_from_the_mesh_with_modifiers_applied(scene: Any) -> No
     body.evaluated_get = lambda graph: SimpleNamespace(
         to_mesh=lambda: triangulated, to_mesh_clear=lambda: released.append(True)
     )
+    scene.fake.context.evaluated_depsgraph_get = lambda: None  # no depsgraph for the worlds
 
-    result = scene.session.validate_simready_compliance(["body"])
+    result = scene.session.validate_simready_compliance(["body"], check_metadata=False)
 
     assert _issues(result, "geometry") == []
     assert released == [True]
 
 
+def test_edit_mode_edits_are_written_back_before_the_checks(scene: Any) -> None:
+    body = scene.get("body")
+    body.mode = "EDIT"
+    flushed: List[str] = []
+    body.update_from_editmode = lambda: flushed.append("body")
+
+    scene.session.validate_simready_compliance()
+
+    assert flushed == ["body"]
+
+
+def test_a_size_implausible_in_the_declared_units_is_a_warning(scene: Any) -> None:
+    scene.get("body").dimensions = (500.0, 500.0, 500.0)
+
+    result = scene.session.validate_simready_compliance()
+
+    assert ("body", "scale", "warning") in _issues(result)
+    assert result["compliant"] is True
+
+
+def test_a_unit_scale_other_than_one_is_a_warning(scene: Any) -> None:
+    scene.fake.context.scene.unit_settings.scale_length = 0.01
+
+    result = scene.session.validate_simready_compliance()
+
+    assert any("Unit Scale is 0.01" in i["message"] for i in result["issues"])
+    assert result["compliant"] is True
+
+
+# ---------------------------------------------------------------------------
+# Scope: what the export exports
+# ---------------------------------------------------------------------------
+
+
+def test_the_scope_is_the_exports(scene: Any) -> None:
+    """Render-hidden helpers and lights, which the export leaves out, are not checked."""
+    helper = scene.add(Obj("Reference.Scan", data=_mesh("scan", materials=[])))
+    helper.hide_render = True
+    scene.add(Obj("Light", "LIGHT"))
+
+    result = scene.session.validate_simready_compliance()
+
+    assert result["compliant"] is True
+    assert {s["object_name"] for s in result["skipped_objects"]} == {"Reference.Scan", "Light"}
+
+
+def test_listed_objects_are_checked_with_their_descendants(scene: Any) -> None:
+    assert scene.session.validate_simready_compliance(["crate"])["object_count"] == 3
+    only = scene.session.validate_simready_compliance(["crate"], include_children=False)
+    assert only["object_count"] == 1
+
+
 def test_an_empty_object_list_is_refused(scene: Any) -> None:
-    with pytest.raises(ValueError, match="object_names is empty"):
+    with pytest.raises(blender_runtime.ValidationError) as excinfo:
         scene.session.validate_simready_compliance([])
+    assert excinfo.value.details["code"] == "EmptyObjectList"
+
+
+# ---------------------------------------------------------------------------
+# Paging
+# ---------------------------------------------------------------------------
 
 
 def test_issues_are_filtered_by_severity_and_paged(scene: Any) -> None:
     for index in range(10):
-        scene.add(Obj(f"Part.{index:03d}"))  # five issues each, errors and warnings
+        scene.add(Obj(f"Part.{index:03d}"))  # each: name, label, collider, hierarchy issues
 
     everything = scene.session.validate_simready_compliance(limit=500)
     errors = scene.session.validate_simready_compliance(severity="error", limit=500)
@@ -299,8 +524,6 @@ def test_a_page_stays_inside_the_result_budget(scene: Any) -> None:
 
     assert len(page["issues"]) < 500
     assert page["next_offset"] == len(page["issues"])
-    import json
-
     assert len(json.dumps(page["issues"])) <= 30_000 + 1_000
 
 
@@ -308,13 +531,17 @@ def test_a_page_stays_inside_the_result_budget(scene: Any) -> None:
     ("severity", "offset", "limit"), [("fatal", 0, 10), ("all", -1, 10), ("all", 0, 0), ("all", 0, 501)]
 )
 def test_bad_paging_arguments_are_refused(scene: Any, severity: str, offset: int, limit: int) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(blender_runtime.ValidationError) as excinfo:
         scene.session.validate_simready_compliance(severity=severity, offset=offset, limit=limit)
+    assert excinfo.value.details["code"] == "InvalidPaging"
 
 
 def test_the_validate_response_model_accepts_a_page(scene: Any) -> None:
     from simul.mcp.schemas.simready import SimReadyValidateResponse
 
+    scene.add(Obj("Light", "LIGHT"))
     payload = scene.session.validate_simready_compliance(limit=5)
 
-    assert SimReadyValidateResponse(success=True, **payload).next_offset is None
+    response = SimReadyValidateResponse(success=True, **payload)
+    assert response.next_offset is None
+    assert response.skipped_objects[0].object_name == "Light"

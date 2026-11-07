@@ -339,6 +339,132 @@ class UnsavedChangesError(RuntimeError):
         self.details = {"blend_file_path": open_file, "is_dirty": True}
 
 
+class ValidationError(ValueError):
+    """A SimReady request refused before anything changed.
+
+    Its class name is the ``error_type`` clients see (the Blender bridge
+    reports the class name), and ``details["code"]`` names the reason, so a
+    caller can tell them apart without parsing the message.
+    """
+
+    def __init__(self, message: str, code: str, **details: Any) -> None:
+        super().__init__(message)
+        self.details: Dict[str, Any] = {"code": code, **details}
+
+
+# 4x4 matrices as row lists of floats. The SimReady tools compose and invert
+# world matrices themselves: Blender stores no fresh matrix_world for an object
+# its depsgraph leaves out, and mathutils is not importable outside Blender.
+_Matrix4 = List[List[float]]
+_IDENTITY4: _Matrix4 = [[1.0 if i == j else 0.0 for j in range(4)] for i in range(4)]
+
+
+def _m4(matrix: Any) -> _Matrix4:
+    """A mathutils Matrix, a stand-in or nested sequences as four rows of four floats."""
+    return [[float(matrix[i][j]) for j in range(4)] for i in range(4)]
+
+
+def _m4_mul(a: _Matrix4, b: _Matrix4) -> _Matrix4:
+    return [[sum(a[i][k] * b[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+
+
+def _m4_inverse(m: _Matrix4) -> Optional[_Matrix4]:
+    """The inverse by Gauss-Jordan elimination, or None for a matrix with no inverse."""
+    rows = [list(row) + [1.0 if i == j else 0.0 for j in range(4)] for i, row in enumerate(m)]
+    for col in range(4):
+        pivot = max(range(col, 4), key=lambda r: abs(rows[r][col]))
+        if abs(rows[pivot][col]) < 1e-12:
+            return None
+        rows[col], rows[pivot] = rows[pivot], rows[col]
+        lead = rows[col][col]
+        rows[col] = [v / lead for v in rows[col]]
+        for r in range(4):
+            factor = rows[r][col]
+            if r != col and factor:
+                rows[r] = [v - factor * w for v, w in zip(rows[r], rows[col])]
+    return [row[4:] for row in rows]
+
+
+def _m4_shape(m: _Matrix4) -> Tuple[List[float], List[float], float, bool]:
+    """Translation, axis lengths, shear and mirroring of a transform matrix.
+
+    Shear is the largest cosine between two of its axes: 0 for a matrix that
+    location, rotation and scale can express, as Blender's loc/rot/scale and
+    USD's translate/rotate/scale ops can.
+    """
+    axes = [[m[r][c] for r in range(3)] for c in range(3)]
+    lengths = [math.sqrt(sum(v * v for v in axis)) for axis in axes]
+    units = [[v / n for v in axis] if n > 0 else axis for axis, n in zip(axes, lengths)]
+    shear = max(
+        abs(sum(a * b for a, b in zip(units[i], units[j])))
+        for i, j in ((0, 1), (0, 2), (1, 2))
+    )
+    a, b, c = axes
+    det = (
+        a[0] * (b[1] * c[2] - b[2] * c[1])
+        - b[0] * (a[1] * c[2] - a[2] * c[1])
+        + c[0] * (a[1] * b[2] - a[2] * b[1])
+    )
+    return [m[0][3], m[1][3], m[2][3]], lengths, shear, det < 0
+
+
+def _m4_is_identity(m: _Matrix4, tolerance: float = 1e-5) -> bool:
+    return all(abs(m[i][j] - _IDENTITY4[i][j]) <= tolerance for i in range(4) for j in range(4))
+
+
+class _WorldResolver:
+    """Where Blender places objects, as its USD exporter writes them.
+
+    An object the depsgraph evaluates has a fresh ``matrix_world``. One it
+    leaves out (in an excluded collection, a collection or object disabled in
+    viewports) keeps the matrix of its last evaluation, which is stale once its
+    parent moved; its world is composed from its parent as Blender composes it:
+    parent world @ matrix_parent_inverse @ matrix_basis. Without a depsgraph
+    (a stand-in bpy) every ``matrix_world`` is taken as fresh.
+    """
+
+    def __init__(self, depsgraph: Any) -> None:
+        self._depsgraph = depsgraph
+        self._worlds: Dict[str, _Matrix4] = {}
+        self._evaluated: Dict[str, bool] = {}
+
+    def _copy(self, obj: Any) -> Any:
+        if self._depsgraph is None or not hasattr(obj, "evaluated_get"):
+            return obj
+        return obj.evaluated_get(self._depsgraph)
+
+    def evaluated(self, obj: Any) -> bool:
+        """Whether Blender evaluates the object, so that its matrix_world is current."""
+        if obj.name not in self._evaluated:
+            if self._depsgraph is None or not hasattr(obj, "evaluated_get"):
+                fresh = True
+            else:
+                # The original comes back for an object the depsgraph left out.
+                fresh = bool(getattr(self._copy(obj), "is_evaluated", False))
+            self._evaluated[obj.name] = fresh
+        return self._evaluated[obj.name]
+
+    def world(self, obj: Any) -> _Matrix4:
+        """The object's world matrix: evaluated, or composed from its parent."""
+        if obj.name in self._worlds:
+            return self._worlds[obj.name]
+        if self.evaluated(obj):
+            world = _m4(self._copy(obj).matrix_world)
+        else:
+            local = _m4_mul(_m4(obj.matrix_parent_inverse), _m4(obj.matrix_basis))
+            parent = obj.parent
+            if parent is None:
+                world = local
+            elif getattr(obj, "parent_type", "OBJECT") == "OBJECT":
+                world = _m4_mul(self.world(parent), local)
+            else:
+                # A bone or vertex parent of an object Blender does not evaluate:
+                # its last stored matrix is all there is.
+                world = _m4(obj.matrix_world)
+        self._worlds[obj.name] = world
+        return world
+
+
 def add_context_hint(error: Optional[str]) -> Optional[str]:
     """Append the context-override recipe to a missing ``bpy.context`` member error.
 
@@ -3863,11 +3989,22 @@ class BlenderRuntimeSession:
     # Additional semantic labels are stored as simready_label_<key>.
     _SIMREADY_LABEL_PREFIX: str = "simready_label_"
 
-    # Valid SimReady naming pattern: lowercase letters, digits, underscores only
-    _SIMREADY_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+    # A name that is a USD identifier becomes the prim name as it is; SimReady
+    # accepts camelCase as well as lowercase_underscore. Any other name is
+    # rewritten by the exporter, which validation reports as a warning.
+    _SIMREADY_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     _SIMREADY_QCODE_RE = re.compile(r"^Q[1-9][0-9]*$")
     # A label key names a USD semantics taxonomy, so it must be an identifier.
     _SIMREADY_LABEL_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    # The taxonomies the semantic fields are written under, by field; an
+    # additional label may not reuse them, nor qcode, the Q-code taxonomy an
+    # earlier export wrote.
+    _SIMREADY_RESERVED_LABELS = {
+        "class": "semantic_class",
+        "hierarchy": "semantic_hierarchy",
+        "wikidata_qcode": "semantic_qcode",
+        "qcode": "semantic_qcode",
+    }
 
     # The metadata fields by group, with the rule a value must meet. The MCP
     # request models (mcp/schemas/simready.py) state the same rules for the
@@ -3944,7 +4081,10 @@ class BlenderRuntimeSession:
     def _simready_writes(self, metadata: Any) -> List[Tuple[str, Any]]:
         """The custom properties ``metadata`` sets, or ValueError naming every problem."""
         if not isinstance(metadata, Mapping):
-            raise ValueError("metadata must be an object with semantic, physics or material")
+            raise ValidationError(
+                "metadata must be an object with semantic, physics or material",
+                "InvalidMetadata",
+            )
         problems: List[str] = []
         writes: List[Tuple[str, Any]] = []
         for group, fields in metadata.items():
@@ -3971,6 +4111,21 @@ class BlenderRuntimeSession:
                                 f"label key '{key}' must be a USD identifier "
                                 "(letters, digits, underscores, not starting with a digit)"
                             )
+                        elif key in self._SIMREADY_RESERVED_LABELS:
+                            # A label named after a field's taxonomy sets that field,
+                            # so it cannot overwrite the field's label in the USD.
+                            target = self._SIMREADY_RESERVED_LABELS[key]
+                            given = fields.get(target)
+                            problem = self._simready_value_problem(spec[target], label)
+                            if given is not None and given != label:
+                                problems.append(
+                                    f"label '{key}'={label!r} sets semantic.{target}, which is "
+                                    f"also given as {given!r}; give one of them"
+                                )
+                            elif problem is not None:
+                                problems.append(f"label '{key}'={label!r} {problem}")
+                            elif given is None:
+                                writes.append((f"{self._SIMREADY_PREFIX}{target}", label))
                         elif not isinstance(label, str) or not label.strip():
                             problems.append(f"label '{key}' must be a non-empty string")
                         else:
@@ -3990,7 +4145,11 @@ class BlenderRuntimeSession:
                     value = 1 if value else 0
                 writes.append((f"{self._SIMREADY_PREFIX}{name}", value))
         if problems:
-            raise ValueError("Invalid SimReady metadata: " + "; ".join(problems))
+            raise ValidationError(
+                "Invalid SimReady metadata: " + "; ".join(problems),
+                "InvalidMetadata",
+                problems=problems,
+            )
         return writes
 
     def _simready_clear_keys(self, obj: Any, clear: Sequence[str]) -> List[str]:
@@ -4018,8 +4177,41 @@ class BlenderRuntimeSession:
             else:
                 problems.append(self._unknown_name("clear name", name, choices))
         if problems:
-            raise ValueError("Invalid clear: " + "; ".join(problems))
+            raise ValidationError(
+                "Invalid clear: " + "; ".join(problems), "InvalidClear", problems=problems
+            )
         return list(dict.fromkeys(keys))
+
+    def _simready_editable(self, objects: Sequence[Any], tool: str) -> None:
+        """Refuse outside Object Mode and for linked data, before anything changes.
+
+        In Edit Mode Blender records the bridge's undo step on the mesh undo
+        stack, which does not hold object changes: the first Ctrl+Z did
+        nothing and the second also left Edit Mode. A linked object's parent
+        and custom properties are reset when the file is reopened.
+        """
+        blender_module: Any = bpy
+        mode = getattr(blender_module.context, "mode", "OBJECT")
+        if mode != "OBJECT":
+            raise ValidationError(
+                f"{tool} needs Object Mode, as Edit Mode's undo cannot step back over it; "
+                f"the window is in {mode}",
+                "ObjectModeRequired",
+                mode=mode,
+            )
+        linked = sorted(
+            obj.name
+            for obj in objects
+            if getattr(obj, "library", None) is not None
+            or getattr(obj, "is_editable", True) is False
+        )
+        if linked:
+            raise ValidationError(
+                f"{', '.join(linked)} is linked from a library: changes to it are lost when "
+                "the file is reopened; make it local (Object > Relations > Make Local) first",
+                "LinkedData",
+                objects=linked,
+            )
 
     def apply_simready_metadata(
         self,
@@ -4047,14 +4239,22 @@ class BlenderRuntimeSession:
             Dict with object_name, applied_properties and cleared_properties.
 
         Raises:
-            ValueError: For an unknown object, group, field or clear name, an
-                invalid value, or a call that neither stores nor clears anything.
+            ValueError: For an unknown object.
+            ValidationError: For an unknown group, field or clear name, an
+                invalid value, an additional label named after a semantic
+                field's taxonomy (class, hierarchy, wikidata_qcode, qcode) that
+                disagrees with that field (otherwise it sets the field), a call
+                that neither stores nor clears anything, Edit Mode, or a linked
+                object; ``details.code`` names which.
         """
         obj = self._get_object_or_raise(object_name)
+        self._simready_editable([obj], "apply_simready_metadata")
         writes = self._simready_writes(metadata or {})
         removals = self._simready_clear_keys(obj, clear or [])
         if not writes and not clear:
-            raise ValueError("Nothing to apply: pass metadata values, or clear")
+            raise ValidationError(
+                "Nothing to apply: pass metadata values, or clear", "NothingToApply"
+            )
         present = set(obj.keys())
         cleared = [key for key in removals if key in present]
         for key in cleared:
@@ -4121,6 +4321,11 @@ class BlenderRuntimeSession:
                     for key, label in value.items():
                         if not self._SIMREADY_LABEL_KEY_RE.match(str(key)):
                             problem = "label key must be a USD identifier"
+                        elif key in self._SIMREADY_RESERVED_LABELS:
+                            problem = (
+                                "label key is the taxonomy "
+                                f"{self._SIMREADY_RESERVED_LABELS[key]} is written under"
+                            )
                         elif not isinstance(label, str) or not label.strip():
                             problem = "must be a non-empty string"
                         else:
@@ -4196,6 +4401,7 @@ class BlenderRuntimeSession:
         "materials",
         "hierarchy",
         "metadata",
+        "physics",
         "geometry",
     )
     _SIMREADY_SEVERITIES = ("all", "error", "warning")
@@ -4206,6 +4412,10 @@ class BlenderRuntimeSession:
     _SIMREADY_PAGE_BYTES = 30_000
     # A face this small (in square Blender units) has collapsed to a line or point.
     _SIMREADY_DEGENERATE_AREA = 1e-12
+    # Axes whose cosine exceeds this are skewed: no location, rotation and scale
+    # express the transform.
+    _SIMREADY_SHEAR = 1e-5
+    _SIMREADY_TRIANGLE_MESH = frozenset({"none", "mesh"})
 
     def validate_simready_compliance(
         self,
@@ -4216,7 +4426,9 @@ class BlenderRuntimeSession:
         check_materials: bool = True,
         check_hierarchy: bool = True,
         check_metadata: bool = True,
+        check_physics: bool = True,
         check_geometry: bool = True,
+        include_children: bool = True,
         severity: str = "all",
         offset: int = 0,
         limit: int = 50,
@@ -4224,25 +4436,42 @@ class BlenderRuntimeSession:
         """
         Validate objects against SimReady conventions; any error makes them non-compliant.
 
-        Checks: naming of objects and materials (errors) and mesh data
-        (warning); real-world size in the scene's units; transforms (an asset
-        root must be at the origin unrotated and unscaled, a part unscaled,
-        and a rotated part is a warning; quaternion, axis-angle and delta
-        transforms count); material slots; hierarchy; metadata (a semantic
-        class on the mesh or an ancestor, a collider, invalid stored values);
-        and geometry (UVs, n-gons, degenerate faces).
+        It checks what export_simready_usd would export: the listed objects
+        with their descendants, or the scene's objects that are visible in
+        renders, without lights and cameras. The rules follow the SimReady
+        Robotics-Prop profile and Isaac Sim's asset validation (the codes in
+        brackets):
+
+        - errors: the asset root (the prim that becomes the default prim) not
+          at the origin, unrotated and unscaled [VG.025]; a skewed rigid body
+          [RB.009]; no material; a material slot faces use left empty; no
+          semantic label on a mesh or an exported object above it [SL.001];
+          a stored value that breaks the metadata rules; a rigid body without
+          mass or density [RB.007], without a collider, or nested in another
+          rigid body with no joint [RB.012]; degenerate faces [VG.014];
+        - warnings: names that are not USD identifiers (camelCase is fine),
+          mesh data names likewise; sizes over 100 m or under 1 mm in the
+          scene's units and a Unit Scale other than 1 [UN.007]; scaled or
+          mirrored parts; no collider on a mesh; a triangle-mesh collider on a
+          dynamic body; no rigid body at all [RB.001]; no UV map; n-gons.
+
+        Transforms are read from the world matrices, as the exporter writes
+        them (also for objects Blender does not evaluate, such as ones in an
+        excluded collection), and meshes in Edit Mode are read with their edits.
 
         Args:
-            object_names: Objects to check. Null checks the scene's meshes
-                and every object above them, asset roots included. An empty
-                list is refused.
+            object_names: Objects to check, each with its descendants unless
+                include_children is false. Null checks the scene's objects that
+                are visible in renders. An empty list is refused.
             check_naming: Validate object, material and mesh-data names.
             check_scale: Validate real-world size in the scene's units.
-            check_transforms: Validate applied transforms.
+            check_transforms: Validate the asset root's and the parts' transforms.
             check_materials: Validate material slots.
             check_hierarchy: Validate hierarchy structure.
-            check_metadata: Validate the SimReady metadata.
+            check_metadata: Validate semantic labels, colliders and stored values.
+            check_physics: Validate rigid bodies: mass, colliders, nesting.
             check_geometry: Validate UVs, n-gons and degenerate faces.
+            include_children: Also check the descendants of the listed objects.
             severity: Return all issues, or only error or warning issues.
             offset: Index of the first issue returned.
             limit: Most issues returned (1 to 500); next_offset gives the
@@ -4251,21 +4480,31 @@ class BlenderRuntimeSession:
         Returns:
             Dict with compliant (no errors at all), object_count, issue_count,
             error_count, warning_count, issues (the page), offset,
-            next_offset (null on the last page) and meters_per_unit.
+            next_offset (null on the last page), skipped_objects (left out as
+            the export leaves them out) and meters_per_unit.
 
         Raises:
-            ValueError: For an empty object list, an unknown object, or a bad
-                severity, offset or limit.
+            ValueError: For an unknown object.
+            ValidationError: For an empty object list, a listed object outside
+                the view layer, or a bad severity, offset or limit.
         """
         if object_names is not None and not object_names:
-            raise ValueError(
-                "object_names is empty; list the objects to check, or pass null for the scene"
+            raise ValidationError(
+                "object_names is empty; list the objects to check, or pass null for the scene",
+                "EmptyObjectList",
             )
         if severity not in self._SIMREADY_SEVERITIES:
-            raise ValueError(f"severity must be one of {', '.join(self._SIMREADY_SEVERITIES)}")
+            raise ValidationError(
+                f"severity must be one of {', '.join(self._SIMREADY_SEVERITIES)}",
+                "InvalidPaging",
+            )
         if offset < 0 or not 1 <= limit <= self._SIMREADY_PAGE_MAX:
-            raise ValueError(f"offset must be >= 0 and limit 1 to {self._SIMREADY_PAGE_MAX}")
-        targets = self._simready_validation_targets(object_names)
+            raise ValidationError(
+                f"offset must be >= 0 and limit 1 to {self._SIMREADY_PAGE_MAX}", "InvalidPaging"
+            )
+        targets, _, skipped = self._simready_export_targets(
+            object_names, include_children, include_lights_and_cameras=False
+        )
         checks = {
             "naming": check_naming,
             "scale": check_scale,
@@ -4273,6 +4512,7 @@ class BlenderRuntimeSession:
             "materials": check_materials,
             "hierarchy": check_hierarchy,
             "metadata": check_metadata,
+            "physics": check_physics,
             "geometry": check_geometry,
         }
         unit_scale = self._scene_unit_scale()
@@ -4296,45 +4536,56 @@ class BlenderRuntimeSession:
             "issues": page,
             "offset": offset,
             "next_offset": end if end < len(selected) else None,
+            "skipped_objects": skipped[: self._SIMREADY_RESULT_ITEMS],
             "meters_per_unit": unit_scale,
         }
 
-    def _simready_validation_targets(self, object_names: Optional[List[str]]) -> List[Any]:
-        """The listed objects, or the scene's meshes and every object above them."""
-        if object_names is not None:
-            return [self._get_object_or_raise(name) for name in object_names]
+    def _simready_world_resolver(self) -> "_WorldResolver":
+        """World matrices as the exporter writes them, for the objects of one call."""
         blender_module: Any = bpy
-        targets: List[Any] = []
-        seen: set = set()
-        for obj in blender_module.context.scene.objects:
-            if obj is None or obj.type != "MESH":
-                continue
-            chain = []
-            current = obj
-            while current is not None and current.name not in seen:
-                chain.append(current)
-                seen.add(current.name)
-                current = current.parent
-            targets.extend(reversed(chain))
-        return targets
+        graph_get = getattr(blender_module.context, "evaluated_depsgraph_get", None)
+        return _WorldResolver(graph_get() if graph_get is not None else None)
+
+    @staticmethod
+    def _simready_flush_edit_mode(targets: Sequence[Any]) -> None:
+        """Write Edit Mode's mesh edits back to the mesh, so the checks see them."""
+        for obj in targets:
+            if getattr(obj, "mode", "OBJECT") == "EDIT" and hasattr(obj, "update_from_editmode"):
+                obj.update_from_editmode()
+
+    def _simready_default_prim(self, targets: Sequence[Any]) -> Optional[Any]:
+        """The object that becomes the default prim, or None when a new root wraps several.
+
+        Blender writes the unexported ancestors of exported objects too, so it
+        is the top-most ancestor when every target has the same one.
+        """
+        tops: Dict[str, Any] = {}
+        for obj in targets:
+            top = obj
+            for ancestor in self._ancestors(obj):
+                top = ancestor
+            tops.setdefault(top.name, top)
+        return next(iter(tops.values())) if len(tops) == 1 else None
 
     def _simready_issues(
         self, targets: Sequence[Any], checks: Mapping[str, bool], unit_scale: float
     ) -> List[Dict[str, Any]]:
-        """Every issue of ``targets``, in object order."""
+        """Every issue of ``targets``, in object order, then the asset-wide ones."""
+        self._simready_flush_edit_mode(targets)
         issues: List[Dict[str, Any]] = []
-        stored_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        exported = {obj.name: obj for obj in targets}
+        values = {
+            obj.name: self._simready_checked(self._read_simready_properties(obj))
+            for obj in targets
+        }
+        worlds = self._simready_world_resolver()
+        root = self._simready_default_prim(targets)
         named: set = set()
-
-        def stored(obj: Any) -> Dict[str, Dict[str, Any]]:
-            if obj.name not in stored_cache:
-                stored_cache[obj.name] = self._read_simready_properties(obj)
-            return stored_cache[obj.name]
 
         def add(obj: Any, check: str, severity: str, message: str, suggestion: Optional[str]) -> None:
             issues.append(
                 {
-                    "object_name": obj.name,
+                    "object_name": getattr(obj, "name", str(obj)),
                     "check": check,
                     "severity": severity,
                     "message": message,
@@ -4342,51 +4593,207 @@ class BlenderRuntimeSession:
                 }
             )
 
+        def chain(obj: Any) -> Iterator[Any]:
+            """The object and its exported ancestors: what its metadata inherits from."""
+            yield obj
+            for ancestor in self._ancestors(obj):
+                if ancestor.name in exported:
+                    yield ancestor
+
+        def field(obj: Any, group: str, name: str) -> Any:
+            return values[obj.name][0].get(group, {}).get(name)
+
+        def nearest(obj: Any, group: str, name: str) -> Optional[Any]:
+            return next((o for o in chain(obj) if field(o, group, name) is not None), None)
+
+        def rigid(obj: Any) -> bool:
+            return field(obj, "physics", "is_rigid_body") is True
+
+        def body_of(obj: Any) -> Optional[Any]:
+            return next((o for o in chain(obj) if rigid(o)), None)
+
+        # The rigid bodies that some mesh of theirs collides for.
+        collided = {
+            body.name
+            for body in (
+                body_of(o)
+                for o in targets
+                if o.type == "MESH" and nearest(o, "physics", "collider_type") is not None
+            )
+            if body is not None
+        }
+        if checks["transforms"] and root is not None:
+            self._simready_root_transform_issues(root, worlds, add)
         for obj in targets:
             is_mesh = obj.type == "MESH"
-            is_root = obj.parent is None and (obj.type == "EMPTY" or bool(obj.children))
             if checks["naming"]:
                 self._simready_naming_issues(obj, add, named)
             if checks["scale"]:
-                issues.extend(self._simready_size_issues(obj, unit_scale))
-            if checks["transforms"]:
-                self._simready_transform_issues(obj, is_root, add)
+                issues.extend(self._simready_size_issues(obj, unit_scale, worlds.world(obj)))
+            if checks["transforms"] and obj is not root:
+                self._simready_part_transform_issues(obj, rigid(obj), worlds, add)
+            stats = self._simready_mesh_stats(obj) if is_mesh else None
             if checks["materials"] and is_mesh:
-                slots = self._material_slots(obj)
-                if not slots:
-                    add(obj, "materials", "error", "No material assigned",
-                        "Assign at least one material per mesh prim")
-                empty = [str(i) for i, material in enumerate(slots) if material is None]
-                if empty:
-                    add(obj, "materials", "error",
-                        f"Material slot(s) {', '.join(empty)} hold no material",
-                        "Assign a material to every slot or remove the empty slots")
+                self._simready_material_issues(obj, stats, add)
             if checks["hierarchy"]:
                 if is_mesh and obj.parent is None and not obj.children:
                     add(obj, "hierarchy", "warning",
                         "Mesh has no parent empty — SimReady assets should be under a root XForm",
                         "Use setup_simready_hierarchy to create a root")
-                elif is_root and obj.type != "EMPTY":
+                elif root is not None and obj.name == root.name and obj.type != "EMPTY":
                     add(obj, "hierarchy", "warning",
                         f"The asset root is a {obj.type.lower()}, not an empty (Xform)",
                         "Use setup_simready_hierarchy to put it under a root empty")
             if checks["metadata"]:
-                self._simready_metadata_issues(obj, is_mesh, stored, add)
+                for entry in values[obj.name][1]:
+                    add(obj, "metadata", "error",
+                        f"Stored {entry['property']}={entry['value']!r} {entry['problem']}",
+                        "Set a valid value with apply_simready_metadata, or clear it")
+                if is_mesh and not any(self._simready_has_label(values[o.name][0]) for o in chain(obj)):
+                    add(obj, "metadata", "error",
+                        "No semantic label on the mesh or an exported object above it",
+                        "Set semantic.semantic_class (or another label) on the asset root or the "
+                        "mesh with apply_simready_metadata")
+                if is_mesh and nearest(obj, "physics", "collider_type") is None:
+                    add(obj, "metadata", "warning",
+                        "No collider_type on the mesh or an exported object above it; it will "
+                        "not collide in a simulator",
+                        "Set physics.collider_type (e.g. convexHull) with apply_simready_metadata")
+            if checks["physics"]:
+                self._simready_body_issues(obj, add, field, nearest, rigid, body_of, chain, collided)
             if checks["geometry"] and is_mesh:
-                self._simready_geometry_issues(obj, add)
+                self._simready_geometry_issues(obj, stats, add)
+        if checks["physics"] and targets and not any(rigid(o) for o in targets):
+            add(root or targets[0], "physics", "warning",
+                "No rigid body: the asset is static in a simulator",
+                "Set physics.is_rigid_body on the asset root if it should move")
+        if checks["scale"] and targets and abs(unit_scale - 1.0) > 1e-9:
+            add(root or targets[0], "scale", "warning",
+                f"The scene's Unit Scale is {unit_scale:g}, so the asset's metersPerUnit is "
+                f"{unit_scale:g}; SimReady assets use metres (1.0)",
+                "Scale the asset to metres and set Scene > Units > Unit Scale to 1, or keep it: "
+                "Isaac Sim converts the units when it references the asset")
         return issues
 
+    @staticmethod
+    def _simready_has_label(valid: Mapping[str, Mapping[str, Any]]) -> bool:
+        """Whether the object carries a semantic label of any taxonomy."""
+        semantic = valid.get("semantic") or {}
+        return any(semantic.get(key) for key in semantic)
+
+    def _simready_body_issues(
+        self,
+        obj: Any,
+        add: Callable[..., None],
+        field: Callable[[Any, str, str], Any],
+        nearest: Callable[[Any, str, str], Optional[Any]],
+        rigid: Callable[[Any], bool],
+        body_of: Callable[[Any], Optional[Any]],
+        chain: Callable[[Any], Iterator[Any]],
+        collided: set,
+    ) -> None:
+        """A rigid body's mass, colliders and nesting; a triangle-mesh collider on a body."""
+        if obj.type == "MESH":
+            source = nearest(obj, "physics", "collider_type")
+            body = body_of(obj)
+            if (
+                source is not None
+                and body is not None
+                and field(source, "physics", "collider_type") in self._SIMREADY_TRIANGLE_MESH
+            ):
+                add(obj, "physics", "warning",
+                    f"A triangle-mesh collider on the dynamic body {body.name}; PhysX does not "
+                    "simulate it",
+                    "Use collider_type convexHull or convexDecomposition")
+        if not rigid(obj):
+            return
+        if field(obj, "physics", "mass_kg") is None and field(obj, "physics", "density") is None:
+            add(obj, "physics", "error",
+                "Rigid body without mass_kg or density",
+                "Set physics.mass_kg (or density) with apply_simready_metadata")
+        parent = next((a for a in chain(obj) if a is not obj and rigid(a)), None)
+        if parent is not None:
+            add(obj, "physics", "error",
+                f"Rigid body nested in the rigid body {parent.name} with no joint between them; "
+                "the export writes no joints",
+                "Keep one rigid body per asset, or make the parts separate rigid bodies that "
+                "are not parented to each other")
+        if obj.name not in collided:
+            add(obj, "physics", "error",
+                "Rigid body without a collider: no mesh of it has a collider_type",
+                "Set physics.collider_type on the body or its meshes")
+
+    def _simready_root_transform_issues(
+        self, root: Any, worlds: "_WorldResolver", add: Callable[..., None]
+    ) -> None:
+        """The default prim's transform must be the identity [VG.025]."""
+        world = worlds.world(root)
+        if _m4_is_identity(world):
+            return
+        translation, lengths, shear, mirrored = _m4_shape(world)
+        rotated = any(
+            abs(world[r][c] / (lengths[c] or 1.0) - _IDENTITY4[r][c]) > 1e-5
+            for r in range(3)
+            for c in range(3)
+        )
+        what = []
+        if any(abs(v) > 1e-6 for v in translation):
+            what.append(f"at {tuple(round(v, 6) for v in translation)}")
+        if rotated:
+            what.append("rotated")
+        if any(abs(n - 1.0) > 1e-6 for n in lengths) or mirrored or shear > self._SIMREADY_SHEAR:
+            what.append(f"scaled {tuple(round(n, 6) for n in lengths)}")
+        add(root, "transforms", "error",
+            f"The asset root {root.name} becomes the default prim but is "
+            f"{', '.join(what) or 'transformed'}; SimReady requires an identity root transform",
+            "Clear the root's transform (Alt+G, Alt+R, Alt+S) and apply it to its children, "
+            "or put the asset under setup_simready_hierarchy's root")
+
+    def _simready_part_transform_issues(
+        self, obj: Any, is_rigid: bool, worlds: "_WorldResolver", add: Callable[..., None]
+    ) -> None:
+        """A part's transform relative to its parent, as the exporter writes it."""
+        world = worlds.world(obj)
+        if obj.parent is None:
+            local = world
+        else:
+            inverse = _m4_inverse(worlds.world(obj.parent))
+            if inverse is None:
+                add(obj, "transforms", "warning",
+                    f"Its parent {obj.parent.name} has zero scale, so its transform cannot be "
+                    "written", "Give the parent a scale")
+                return
+            local = _m4_mul(inverse, world)
+        _, lengths, shear, mirrored = _m4_shape(local)
+        if shear > self._SIMREADY_SHEAR:
+            add(obj, "transforms", "error" if is_rigid else "warning",
+                "The transform is skewed (its axes are not perpendicular)"
+                + ("; a rigid body's transform must not skew" if is_rigid else ""),
+                "Apply the parent's non-uniform scale (Ctrl+A > Scale on the parent) before "
+                "rotating its children")
+        if any(abs(n - 1.0) > 1e-6 for n in lengths) or mirrored:
+            add(obj, "transforms", "warning",
+                f"The object is scaled {tuple(round(n, 6) for n in lengths)}"
+                + (" and mirrored" if mirrored else ""),
+                "Apply scale: Ctrl+A > Scale (and clear delta transforms)")
+
     def _simready_naming_issues(self, obj: Any, add: Callable[..., None], named: set) -> None:
-        """Object and material names (errors) and the mesh data name (a warning)."""
+        """Names that are not USD identifiers, which the exporter rewrites (warnings)."""
 
         def suggestion(name: str) -> str:
-            return "Rename to: " + (re.sub(r"[^a-z0-9_]+", "_", name.lower()).strip("_") or "part")
+            return "Rename to: " + usd_identifier(name.strip(), "part")
 
         name = obj.name
         if not self._SIMREADY_NAME_RE.match(name):
-            add(obj, "naming", "error",
-                f"Name '{name}' violates SimReady convention "
-                "(lowercase letters, digits, underscores only)", suggestion(name))
+            add(obj, "naming", "warning",
+                f"Name '{name}' is not a USD identifier; the export writes the prim as "
+                f"'{usd_identifier(name)}'", suggestion(name))
+        sibling = (getattr(obj.parent, "name", None), usd_identifier(name))
+        if sibling in named:
+            add(obj, "naming", "warning",
+                f"Another object under the same parent also becomes the prim name "
+                f"'{sibling[1]}'; the export renames one of them", suggestion(name))
+        named.add(sibling)
         if obj.type != "MESH":
             return
         for material in self._material_slots(obj):
@@ -4395,16 +4802,17 @@ class BlenderRuntimeSession:
                 continue
             named.add(("material", material_name))
             if not self._SIMREADY_NAME_RE.match(str(material_name)):
-                add(obj, "naming", "error",
-                    f"Material name '{material_name}' violates SimReady convention; "
-                    "it becomes a prim name in the USD", suggestion(str(material_name)))
+                add(obj, "naming", "warning",
+                    f"Material name '{material_name}' is not a USD identifier; the export "
+                    f"writes the material as '{usd_identifier(str(material_name))}'",
+                    suggestion(str(material_name)))
         data_name = getattr(getattr(obj, "data", None), "name", None)
         if data_name and ("mesh", data_name) not in named:
             named.add(("mesh", data_name))
             if not self._SIMREADY_NAME_RE.match(data_name):
                 add(obj, "naming", "warning",
-                    f"Mesh data name '{data_name}' violates SimReady convention; "
-                    "it becomes the mesh prim's name in the USD", suggestion(data_name))
+                    f"Mesh data name '{data_name}' is not a USD identifier; it becomes the "
+                    f"mesh prim's name as '{usd_identifier(data_name)}'", suggestion(data_name))
 
     @staticmethod
     def _material_slots(obj: Any) -> List[Any]:
@@ -4415,138 +4823,71 @@ class BlenderRuntimeSession:
         data = getattr(obj, "data", None)
         return list(getattr(data, "materials", None) or [])
 
-    @staticmethod
-    def _simready_rotation(obj: Any) -> Tuple[bool, str]:
-        """Whether the object is rotated (its mode's rotation and the delta), and how."""
-        tolerance = 1e-6
-        mode = getattr(obj, "rotation_mode", "XYZ")
-        if mode == "QUATERNION":
-            w, *xyz = [float(v) for v in getattr(obj, "rotation_quaternion", (1.0, 0.0, 0.0, 0.0))]
-            dw, *dxyz = [
-                float(v) for v in getattr(obj, "delta_rotation_quaternion", (1.0, 0.0, 0.0, 0.0))
-            ]
-            rotated = any(abs(v) > tolerance for v in xyz + dxyz) or (
-                abs(abs(w) - 1.0) > tolerance or abs(abs(dw) - 1.0) > tolerance
-            )
-            return rotated, f"quaternion {tuple(round(v, 6) for v in (w, *xyz))}"
-        if mode == "AXIS_ANGLE":
-            angle = float(tuple(getattr(obj, "rotation_axis_angle", (0.0, 0.0, 1.0, 0.0)))[0])
-            delta = [float(v) for v in getattr(obj, "delta_rotation_euler", (0.0, 0.0, 0.0))]
-            rotated = abs(angle) > tolerance or any(abs(v) > tolerance for v in delta)
-            return rotated, f"axis-angle {angle:.6g} rad"
-        euler = [float(v) for v in getattr(obj, "rotation_euler", (0.0, 0.0, 0.0))]
-        delta = [float(v) for v in getattr(obj, "delta_rotation_euler", (0.0, 0.0, 0.0))]
-        rotated = any(abs(v) > tolerance for v in euler + delta)
-        shown = tuple(round(a + b, 6) for a, b in zip(euler, delta))
-        return rotated, f"Euler {shown} rad" + (" (with a delta rotation)" if any(delta) else "")
-
-    def _simready_transform_issues(
-        self, obj: Any, is_root: bool, add: Callable[..., None]
+    def _simready_material_issues(
+        self, obj: Any, stats: Optional[Dict[str, Any]], add: Callable[..., None]
     ) -> None:
-        """An asset root must carry no transform; a part no scale (error) and no rotation (warning)."""
-        tolerance = 1e-6
-        scale = [float(v) for v in getattr(obj, "scale", (1.0, 1.0, 1.0))]
-        delta_scale = [float(v) for v in getattr(obj, "delta_scale", (1.0, 1.0, 1.0))]
-        total = [a * b for a, b in zip(scale, delta_scale)]
-        location = [
-            float(a) + float(b)
-            for a, b in zip(
-                getattr(obj, "location", (0.0, 0.0, 0.0)),
-                getattr(obj, "delta_location", (0.0, 0.0, 0.0)),
-            )
-        ]
-        rotated, rotation = self._simready_rotation(obj)
-        what = "The asset root" if is_root else "The object"
-        if any(abs(s - 1.0) > tolerance for s in total):
-            mirrored = " and mirrors it" if any(s < 0 for s in total) else ""
-            delta = " (with a delta scale)" if any(abs(s - 1.0) > tolerance for s in delta_scale) else ""
-            add(obj, "transforms", "error",
-                f"{what} is scaled {tuple(round(s, 6) for s in total)}{delta}{mirrored}; "
-                "SimReady requires applied (1,1,1) scale",
-                "Apply scale: Ctrl+A → Scale (and clear delta transforms)")
-        if rotated:
-            add(obj, "transforms", "error" if is_root else "warning",
-                f"{what} is rotated: {rotation}; SimReady expects applied (zero) rotation",
-                "Apply rotation: Ctrl+A → Rotation (and clear delta transforms)")
-        if is_root and any(abs(v) > tolerance for v in location):
-            add(obj, "transforms", "error",
-                f"The asset root is at {tuple(round(v, 6) for v in location)}, not the origin",
-                "Clear the root's location (Alt+G) and apply the offset to its children")
-
-    def _simready_metadata_issues(
-        self,
-        obj: Any,
-        is_mesh: bool,
-        stored: Callable[[Any], Dict[str, Dict[str, Any]]],
-        add: Callable[..., None],
-    ) -> None:
-        """Invalid stored values, a mesh without a semantic class or collider, a body without mass."""
-        mine = stored(obj)
-        _, invalid = self._simready_checked(mine)
-        for entry in invalid:
-            add(obj, "metadata", "error",
-                f"Stored {entry['property']}={entry['value']!r} {entry['problem']}",
-                "Set a valid value with apply_simready_metadata, or clear it")
-        physics = mine.get("physics") or {}
-        rigid = physics.get("is_rigid_body") in (True, 1)
-        if rigid and physics.get("mass_kg") is None and physics.get("density") is None:
-            add(obj, "metadata", "warning",
-                "Rigid body without mass_kg or density; the simulator assumes a default density",
-                "Set physics.mass_kg (or density) with apply_simready_metadata")
-        if not is_mesh:
+        """No material at all is an error; an empty slot is a warning when faces use it."""
+        slots = self._material_slots(obj)
+        if not slots:
+            add(obj, "materials", "error", "No material assigned",
+                "Assign at least one material per mesh prim")
             return
+        used = set((stats or {}).get("material_indices") or ())
+        empty = [str(i) for i, material in enumerate(slots) if material is None and i in used]
+        if empty:
+            add(obj, "materials", "warning",
+                f"Faces use the empty material slot(s) {', '.join(empty)}",
+                "Assign a material to the slot, or move its faces to another slot")
 
-        def inherited(group: str, field: str) -> bool:
-            current = obj
-            while current is not None:
-                value = (stored(current).get(group) or {}).get(field)
-                if value not in (None, ""):
-                    return True
-                current = current.parent
-            return False
-
-        if not inherited("semantic", "semantic_class"):
-            add(obj, "metadata", "error",
-                "No semantic class on the mesh or any object above it",
-                "Set semantic.semantic_class on the asset root or the mesh with "
-                "apply_simready_metadata")
-        if not inherited("physics", "collider_type"):
-            add(obj, "metadata", "warning",
-                "No collider_type on the mesh or any object above it; it will not collide "
-                "in a simulator",
-                "Set physics.collider_type (e.g. convexHull) with apply_simready_metadata")
-
-    def _simready_geometry_issues(self, obj: Any, add: Callable[..., None]) -> None:
-        """UV maps, n-gons and degenerate faces of the mesh the export writes."""
+    def _simready_mesh_stats(self, obj: Any) -> Optional[Dict[str, Any]]:
+        """Face counts, corners, areas, material indices and UV maps of the mesh the export writes."""
         mesh, release = self._simready_export_mesh(obj)
         try:
             polygons = getattr(mesh, "polygons", None)
             if polygons is None:
-                return
+                return None
             count = len(polygons)
             if hasattr(polygons, "foreach_get"):
                 corners = array("i", [0]) * count
                 areas = array("f", [0.0]) * count
+                indices = array("i", [0]) * count
                 polygons.foreach_get("loop_total", corners)
                 polygons.foreach_get("area", areas)
+                polygons.foreach_get("material_index", indices)
             else:
                 corners = array("i", [len(p.vertices) for p in polygons])
                 areas = array("f", [float(p.area) for p in polygons])
-            ngons = sum(1 for c in corners if c > 4)
-            degenerate = sum(1 for a in areas if a <= self._SIMREADY_DEGENERATE_AREA)
-            if count and not len(getattr(mesh, "uv_layers", ())):
-                add(obj, "geometry", "warning", "Mesh has no UV map; textures cannot be mapped",
-                    "Unwrap the mesh (U → Smart UV Project)")
-            if ngons:
-                add(obj, "geometry", "warning",
-                    f"{ngons} of {count} faces are n-gons (more than 4 corners)",
-                    "Triangulate or quad-fill them (Ctrl+T, or a Triangulate modifier)")
-            if degenerate:
-                add(obj, "geometry", "error",
-                    f"{degenerate} of {count} faces are degenerate (zero area)",
-                    "Remove them: Mesh → Clean Up → Degenerate Dissolve, or Merge by Distance")
+                indices = array("i", [int(getattr(p, "material_index", 0)) for p in polygons])
+            return {
+                "count": count,
+                "corners": corners,
+                "areas": areas,
+                "material_indices": set(indices),
+                "uv_maps": len(getattr(mesh, "uv_layers", ())),
+            }
         finally:
             release()
+
+    def _simready_geometry_issues(
+        self, obj: Any, stats: Optional[Dict[str, Any]], add: Callable[..., None]
+    ) -> None:
+        """UV maps (warning), n-gons (warning) and degenerate faces (error) [VG.014]."""
+        if not stats:
+            return
+        count = stats["count"]
+        ngons = sum(1 for c in stats["corners"] if c > 4)
+        degenerate = sum(1 for a in stats["areas"] if a <= self._SIMREADY_DEGENERATE_AREA)
+        if count and not stats["uv_maps"]:
+            add(obj, "geometry", "warning", "Mesh has no UV map; textures cannot be mapped",
+                "Unwrap the mesh (U > Smart UV Project)")
+        if ngons:
+            add(obj, "geometry", "warning",
+                f"{ngons} of {count} faces are n-gons (more than 4 corners)",
+                "Triangulate or quad-fill them (Ctrl+T, or a Triangulate modifier)")
+        if degenerate:
+            add(obj, "geometry", "error",
+                f"{degenerate} of {count} faces are degenerate (zero area)",
+                "Remove them: Mesh > Clean Up > Degenerate Dissolve, or Merge by Distance")
 
     def _simready_export_mesh(self, obj: Any) -> Tuple[Any, Callable[[], None]]:
         """The mesh the USD export writes (with modifiers evaluated), and how to release it."""
@@ -4560,12 +4901,10 @@ class BlenderRuntimeSession:
         return getattr(obj, "data", None), lambda: None
 
     # A part's largest real-world dimension (Blender units times the scene's
-    # Unit Scale) outside these bounds means the scene's units are not the ones
-    # it was modelled in: a 0.5 m part modelled in millimetres in a metre scene
-    # measures 500 m. Above the warning size an asset is plausible (a vehicle,
-    # a rack) but worth a second look.
+    # Unit Scale) outside these bounds suggests the scene's units are not the
+    # ones it was modelled in: a 0.5 m part modelled in millimetres in a metre
+    # scene measures 500 m. Large assets exist (a warehouse), so it is a warning.
     _SIMREADY_MAX_SIZE_M = 100.0
-    _SIMREADY_WARN_SIZE_M = 20.0
     _SIMREADY_MIN_SIZE_M = 0.001
 
     def _scene_unit_scale(self) -> float:
@@ -4583,14 +4922,15 @@ class BlenderRuntimeSession:
         return float(f"{scale:.7g}")
 
     @staticmethod
-    def _world_dimensions(obj: Any) -> List[float]:
+    def _world_dimensions(obj: Any, world: Optional[_Matrix4] = None) -> List[float]:
         """The object's world-space bounding-box size in Blender units.
 
-        Read from the bounding box corners and the world matrix, so a parent's
-        scale counts; ``dimensions`` (object scale only) when either is missing.
+        Read from the bounding box corners and the world matrix (``world``, or
+        the object's matrix_world), so a parent's scale counts; ``dimensions``
+        (object scale only) when either is missing.
         """
         corners = getattr(obj, "bound_box", None)
-        matrix = getattr(obj, "matrix_world", None)
+        matrix = world if world is not None else getattr(obj, "matrix_world", None)
         if corners is not None and matrix is not None:
             try:
                 rows = [[float(matrix[i][j]) for j in range(4)] for i in range(3)]
@@ -4607,11 +4947,13 @@ class BlenderRuntimeSession:
                 pass
         return [abs(float(d)) for d in getattr(obj, "dimensions", ())]
 
-    def _simready_size_issues(self, obj: Any, unit_scale: float) -> List[Dict[str, Any]]:
-        """A scale issue when a mesh's real-world size is implausible in the declared units."""
+    def _simready_size_issues(
+        self, obj: Any, unit_scale: float, world: Optional[_Matrix4] = None
+    ) -> List[Dict[str, Any]]:
+        """A warning when a mesh's real-world size is implausible in the declared units."""
         if getattr(obj, "type", "MESH") != "MESH":
             return []
-        dimensions = self._world_dimensions(obj)
+        dimensions = self._world_dimensions(obj, world)
         largest_units = max(dimensions) if dimensions else 0.0
         largest = largest_units * unit_scale
         if largest <= 0:
@@ -4621,33 +4963,27 @@ class BlenderRuntimeSession:
             f"{unit_scale:g} m)"
         )
         if largest > self._SIMREADY_MAX_SIZE_M:
-            severity = "error"
             message = (
-                f"Largest dimension {declared} is implausibly large for a SimReady "
-                f"asset (over {self._SIMREADY_MAX_SIZE_M:g} m)"
+                f"Largest dimension {declared} is large for a SimReady asset "
+                f"(over {self._SIMREADY_MAX_SIZE_M:g} m); verify the units"
             )
         elif largest < self._SIMREADY_MIN_SIZE_M:
-            severity = "error"
             message = (
-                f"Largest dimension {declared} is implausibly small for a SimReady "
-                f"asset (under {self._SIMREADY_MIN_SIZE_M * 1000:g} mm)"
+                f"Largest dimension {declared} is small for a SimReady asset "
+                f"(under {self._SIMREADY_MIN_SIZE_M * 1000:g} mm); verify the units"
             )
-        elif largest > self._SIMREADY_WARN_SIZE_M:
-            severity = "warning"
-            message = f"Largest dimension {declared} is large for a SimReady asset"
         else:
             return []
         return [
             {
                 "object_name": obj.name,
                 "check": "scale",
-                "severity": severity,
+                "severity": "warning",
                 "message": message,
                 "suggestion": (
                     "If it was modelled in other units, set Scene > Units > Unit Scale "
                     "to the modelling unit (0.001 for millimetres, 0.01 for centimetres) "
-                    "or scale the mesh to its real size; pass check_scale=false for an "
-                    "asset this size"
+                    "or scale the mesh to its real size"
                 ),
             }
         ]
@@ -4667,6 +5003,7 @@ class BlenderRuntimeSession:
         include_children: bool = True,
         include_lights_and_cameras: bool = False,
         force: bool = False,
+        skip_checks: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Export a SimReady asset as USD that a simulator reads as physics and semantics.
@@ -4694,11 +5031,16 @@ class BlenderRuntimeSession:
                 Blender's names) as userProperties attributes, which Blender's
                 USD import reads back as custom properties.
             validate_before_export: First run every validate_simready_compliance
-                check on the exported objects, the asset root included.
+                check on the exported objects, the asset root included, after
+                writing Edit Mode's edits back to the mesh.
             include_children: Export the descendants of the listed objects.
             include_lights_and_cameras: Also export lights, cameras and the
                 World's dome light, which are left out of an asset by default.
             force: Export although validation found errors.
+            skip_checks: Validation checks to leave out (naming, scale,
+                transforms, materials, hierarchy, metadata, physics, geometry),
+                so that one check that does not apply does not need force,
+                which also lets every other error through.
 
         Returns:
             Dict with file_path (written exactly there; a missing folder is
@@ -4710,29 +5052,41 @@ class BlenderRuntimeSession:
 
         Raises:
             PermissionError: If the path is outside the sandbox policy.
-            ValueError: For an unsupported extension, an empty object_names, an
-                unknown object, or a listed object that cannot be exported.
+            ValueError: For an unknown object.
+            ValidationError: For an unsupported extension (UnsupportedExtension),
+                an empty object_names (EmptyObjectList), an unknown check
+                (UnknownCheck), a listed object that cannot be exported
+                (NotInViewLayer) or nothing to export (NothingToExport).
         """
         # Written at file_path exactly, as export_file does.
         file_path = self._export_target(self._deny_outside_sandbox(file_path, write=True))
         extension = os.path.splitext(file_path)[1].lower()
         if extension not in self._SIMREADY_USD_EXTENSIONS:
-            raise ValueError(
+            raise ValidationError(
                 f"Unsupported SimReady export extension '{extension or file_path}'; "
-                f"use one of {', '.join(self._SIMREADY_USD_EXTENSIONS)}"
+                f"use one of {', '.join(self._SIMREADY_USD_EXTENSIONS)}",
+                "UnsupportedExtension",
             )
         if object_names is not None and not object_names:
-            raise ValueError(
+            raise ValidationError(
                 "object_names is empty; list the objects to export, or pass null "
-                "to export the whole scene"
+                "to export the whole scene",
+                "EmptyObjectList",
+            )
+        unknown_checks = sorted(set(skip_checks or ()) - set(self._SIMREADY_CHECKS))
+        if unknown_checks:
+            raise ValidationError(
+                self._unknown_name("check", unknown_checks[0], self._SIMREADY_CHECKS),
+                "UnknownCheck",
             )
         targets, listed, skipped = self._simready_export_targets(
             object_names, include_children, include_lights_and_cameras
         )
         if not targets:
-            raise ValueError(
+            raise ValidationError(
                 "Nothing to export: "
-                + "; ".join(f"{s['object_name']}: {s['reason']}" for s in skipped)
+                + "; ".join(f"{s['object_name']}: {s['reason']}" for s in skipped),
+                "NothingToExport",
             )
 
         issues: Optional[List[Dict[str, Any]]] = None
@@ -4741,7 +5095,7 @@ class BlenderRuntimeSession:
             # Every exported object is checked, the asset root included.
             issues = self._simready_issues(
                 targets,
-                {check: True for check in self._SIMREADY_CHECKS},
+                {check: check not in (skip_checks or ()) for check in self._SIMREADY_CHECKS},
                 self._scene_unit_scale(),
             )
             validation_passed = not any(i["severity"] == "error" for i in issues)
@@ -4931,11 +5285,13 @@ class BlenderRuntimeSession:
             listed = [self._get_object_or_raise(name) for name in object_names]
             outside = sorted(o.name for o in listed if layer_objects.get(o.name) is None)
             if outside:
-                raise ValueError(
+                raise ValidationError(
                     "Cannot export "
                     + ", ".join(outside)
                     + ": not in the active view layer (another scene, or an excluded "
-                    "collection)"
+                    "collection)",
+                    "NotInViewLayer",
+                    objects=outside,
                 )
             candidates = list(listed)
             if include_children:
@@ -5038,14 +5394,22 @@ class BlenderRuntimeSession:
         """
         Put objects under a SimReady root empty (an Xform in the USD), keeping where they are.
 
-        Each listed object without a listed ancestor is parented to the root
-        with its world transform kept; a listed object under another listed
-        object keeps its parent, so an existing nesting stays. Everything is
-        checked before anything changes, and a failure part-way restores the
-        parents and removes a root this call created.
+        Each listed object without a listed ancestor is parented to the root;
+        a listed object under another listed object keeps its parent, so an
+        existing nesting stays. The object's matrix before constraints is
+        kept, so constraints act as before: from its former parent's world
+        matrix (composed from the parent chain for an object Blender does not
+        evaluate, such as one in an excluded collection). The transform moves
+        into the object's own location, rotation and scale, or, when its
+        former parent's non-uniform scale skews it, which those cannot
+        express, into its parent inverse matrix. A bone or vertex parent
+        becomes an object parent. Everything is checked before anything
+        changes, and a failure part-way restores the parents and removes a
+        root this call created.
 
         Args:
-            root_name: Name for the root empty: lowercase letters, digits, underscores.
+            root_name: Name for the root empty: a USD identifier (letters,
+                digits and underscores, not starting with a digit).
             child_names: Existing objects to put under the root.
             semantic: Semantic labels to store on the root.
             reuse_root: Put the objects under an existing empty named root_name;
@@ -5053,23 +5417,29 @@ class BlenderRuntimeSession:
 
         Returns:
             Dict with root_name, root_created, children, reparented, kept_parent
-            (each with its parent), hierarchy_path (the root's prim path in
-            export_simready_usd's USD) and prim_paths of the children.
+            (each with its current parent, which may be an unlisted object
+            between it and its listed ancestor), hierarchy_path (the root's
+            prim path in export_simready_usd's USD), prim_paths of the children
+            and warnings.
 
         Raises:
-            ValueError: For an invalid root name, an empty or unknown child,
-                an existing root without reuse_root (or one that is not an
-                empty, or would end up under its own child), or invalid
-                semantic labels. Nothing is changed then.
+            ValidationError: Nothing is changed. ``details.code`` names the
+                reason: InvalidRootName, NoChildren, ObjectNotFound, RootIsChild,
+                RootExists, RootNotEmpty, RootNotInScene, RootCycle,
+                RootNotInvertible, UnsupportedParent, ObjectModeRequired,
+                LinkedData, or InvalidMetadata for the semantic labels.
         """
         blender_module: Any = bpy
         if not self._SIMREADY_NAME_RE.match(root_name):
-            raise ValueError(
-                f"Root name '{root_name}' violates SimReady naming "
-                "(lowercase letters, digits, underscores only)"
+            raise ValidationError(
+                f"Root name '{root_name}' is not a USD identifier (letters, digits and "
+                "underscores, not starting with a digit)",
+                "InvalidRootName",
             )
         if not child_names:
-            raise ValueError("child_names is empty; list the objects to put under the root")
+            raise ValidationError(
+                "child_names is empty; list the objects to put under the root", "NoChildren"
+            )
         missing = []
         children: List[Any] = []
         for name in dict.fromkeys(child_names):
@@ -5078,29 +5448,42 @@ class BlenderRuntimeSession:
             except ValueError:
                 missing.append(name)
         if missing:
-            raise ValueError(f"Objects not found: {', '.join(missing)}; nothing was changed")
+            raise ValidationError(
+                f"Objects not found: {', '.join(missing)}; nothing was changed",
+                "ObjectNotFound",
+                objects=missing,
+            )
         if any(child.name == root_name for child in children):
-            raise ValueError(f"'{root_name}' cannot be put under itself")
+            raise ValidationError(f"'{root_name}' cannot be put under itself", "RootIsChild")
         root = blender_module.data.objects.get(root_name)
         if root is not None:
             if not reuse_root:
-                raise ValueError(
+                raise ValidationError(
                     f"An object named '{root_name}' already exists; pass reuse_root=true to "
-                    "put the objects under it, or choose another root_name. Nothing was changed"
+                    "put the objects under it, or choose another root_name. Nothing was changed",
+                    "RootExists",
                 )
             if root.type != "EMPTY":
-                raise ValueError(
+                raise ValidationError(
                     f"'{root_name}' is a {str(root.type).lower()}, not an empty; a SimReady "
-                    "root must be an empty (an Xform in the USD)"
+                    "root must be an empty (an Xform in the USD)",
+                    "RootNotEmpty",
                 )
             if blender_module.context.scene.objects.get(root_name) is None:
-                raise ValueError(f"'{root_name}' is not in the current scene")
+                raise ValidationError(
+                    f"'{root_name}' is not in the current scene", "RootNotInScene"
+                )
             above = {a.name for a in self._ancestors(root)}
             cycle = sorted(child.name for child in children if child.name in above)
             if cycle:
-                raise ValueError(
-                    f"{', '.join(cycle)} is above '{root_name}'; it cannot also go under it"
+                raise ValidationError(
+                    f"{', '.join(cycle)} is above '{root_name}'; it cannot also go under it",
+                    "RootCycle",
+                    objects=cycle,
                 )
+        self._simready_editable(
+            children + ([root] if root is not None else []), "setup_simready_hierarchy"
+        )
         semantic_writes = self._simready_writes({"semantic": semantic}) if semantic else []
         listed = {child.name for child in children}
         top = [c for c in children if not any(a.name in listed for a in self._ancestors(c))]
@@ -5109,44 +5492,63 @@ class BlenderRuntimeSession:
         update = getattr(getattr(blender_module.context, "view_layer", None), "update", None)
         if update is not None:
             update()  # current world matrices to keep
+        worlds = self._simready_world_resolver()
+        root_world = worlds.world(root) if root is not None else [list(r) for r in _IDENTITY4]
+        root_inverse = _m4_inverse(root_world)
+        if root_inverse is None:
+            raise ValidationError(
+                f"The root '{root_name}' has zero scale, so nothing can keep its place under it",
+                "RootNotInvertible",
+            )
+        plans = [
+            (child, self._simready_parent_space(child, worlds))
+            for child in top
+            if root is None or child.parent is not root
+        ]
+        before = {child.name: worlds.world(child) for child, _ in plans}
+
         created = root is None
         if created:
             root = blender_module.data.objects.new(root_name, None)
             if root.name != root_name:
                 blender_module.data.objects.remove(root)
-                raise ValueError(f"Blender named the root '{root.name}'; nothing was changed")
+                raise ValidationError(
+                    f"Blender named the root '{root.name}'; nothing was changed", "RootExists"
+                )
             blender_module.context.scene.collection.objects.link(root)
             root.empty_display_type = "PLAIN_AXES"
             root.location = (0.0, 0.0, 0.0)
             root.rotation_euler = (0.0, 0.0, 0.0)
             root.scale = (1.0, 1.0, 1.0)
-        undo: List[Tuple[Any, Any, Any, Any]] = []
+        undo: List[Tuple[Any, Dict[str, Any]]] = []
         reparented: List[str] = []
+        warnings: List[str] = []
         try:
-            inverse = root.matrix_world.inverted()
-            for child in top:
-                if child.parent is root:
-                    continue
-                undo.append(
-                    (child, child.parent, child.matrix_parent_inverse.copy(), child.matrix_basis.copy())
-                )
-                world = child.matrix_world.copy()
+            for child, space in plans:
+                undo.append((child, self._simready_parenting(child)))
                 child.parent = root
-                # root @ inverse(root) @ basis: the world transform is the basis,
-                # Blender's "Keep Transform" parenting.
-                child.matrix_parent_inverse = inverse
-                child.matrix_basis = world
+                if getattr(child, "parent_type", "OBJECT") != "OBJECT":
+                    child.parent_type = "OBJECT"
+                    child.parent_bone = ""
+                basis = _m4_mul(space, _m4(child.matrix_basis))
+                if _m4_shape(basis)[2] <= self._SIMREADY_SHEAR:
+                    # root @ inverse(root) @ basis: the transform is the object's own.
+                    child.matrix_parent_inverse = self._matrix(root_inverse)
+                    child.matrix_basis = self._matrix(basis)
+                else:
+                    child.matrix_parent_inverse = self._matrix(_m4_mul(root_inverse, space))
+                    warnings.append(
+                        f"{child.name}: its former parent's non-uniform scale skews it, which "
+                        "location, rotation and scale cannot express, so the skew is kept in its "
+                        "parent inverse matrix; validation reports the skew"
+                    )
                 reparented.append(child.name)
             for key, value in semantic_writes:
                 root[key] = value
         except Exception:
-            for child, parent, parent_inverse, basis in reversed(undo):
+            for child, state in reversed(undo):
                 # Best effort: one object that refuses must not keep the rest moved.
-                for attribute, value in (
-                    ("parent", parent),
-                    ("matrix_parent_inverse", parent_inverse),
-                    ("matrix_basis", basis),
-                ):
+                for attribute, value in state.items():
                     try:
                         setattr(child, attribute, value)
                     except Exception:  # noqa: BLE001
@@ -5156,8 +5558,23 @@ class BlenderRuntimeSession:
             raise
         if update is not None:
             update()
+        after = self._simready_world_resolver()
+        for child, _ in plans:
+            if after.evaluated(child):
+                moved = max(
+                    abs(a - b)
+                    for row_a, row_b in zip(before[child.name], after.world(child))
+                    for a, b in zip(row_a, row_b)
+                )
+                if moved > 1e-4:
+                    warnings.append(
+                        f"{child.name}: its evaluated transform changed by up to {moved:.4g} "
+                        "after re-parenting, through a constraint that works in local space; "
+                        "check its pose"
+                    )
 
         root_path = f"/{usd_identifier(root.name)}"
+        paths: Dict[str, str] = {}
 
         def prim_path(obj: Any) -> str:
             names = [usd_identifier(obj.name)]
@@ -5167,6 +5584,15 @@ class BlenderRuntimeSession:
                 names.append(usd_identifier(ancestor.name))
             return root_path + "/" + "/".join(reversed(names))
 
+        for child in children:
+            path = prim_path(child)
+            clash = next((n for n, p in paths.items() if p == path), None)
+            if clash is not None:
+                warnings.append(
+                    f"{clash} and {child.name} both become the prim {path}; the export renames "
+                    "one of them (it reports the paths it wrote)"
+                )
+            paths[child.name] = path
         return {
             "root_name": root.name,
             "root_created": created,
@@ -5176,8 +5602,65 @@ class BlenderRuntimeSession:
                 {"object_name": child.name, "parent": child.parent.name} for child in kept
             ],
             "hierarchy_path": root_path,
-            "prim_paths": {child.name: prim_path(child) for child in children},
+            "prim_paths": paths,
+            "warnings": warnings,
         }
+
+    def _simready_parent_space(self, child: Any, worlds: "_WorldResolver") -> _Matrix4:
+        """The matrix the child's basis is multiplied by: its world before constraints.
+
+        For an object parent that is the parent's world matrix times the
+        parent inverse matrix, whether or not Blender evaluates the child. A
+        bone or vertex parent's matrix is read from the child's evaluated
+        world matrix, which needs an evaluated child without constraints.
+
+        Raises:
+            ValidationError: For a bone or vertex parent that cannot be read.
+        """
+        parent = child.parent
+        if parent is None:
+            return [list(row) for row in _IDENTITY4]
+        if getattr(child, "parent_type", "OBJECT") == "OBJECT":
+            return _m4_mul(worlds.world(parent), _m4(child.matrix_parent_inverse))
+        constrained = any(
+            not getattr(c, "mute", False) for c in getattr(child, "constraints", ()) or ()
+        )
+        basis_inverse = _m4_inverse(_m4(child.matrix_basis))
+        if constrained or not worlds.evaluated(child) or basis_inverse is None:
+            raise ValidationError(
+                f"{child.name} has a {str(child.parent_type).lower()} parent whose matrix cannot "
+                "be read (it has constraints, is not evaluated, or has zero scale); parent it to "
+                "an object first",
+                "UnsupportedParent",
+                objects=[child.name],
+            )
+        return _m4_mul(worlds.world(child), basis_inverse)
+
+    @staticmethod
+    def _simready_parenting(obj: Any) -> Dict[str, Any]:
+        """What re-parenting changes on an object, for the rollback."""
+        state = {
+            "parent": obj.parent,
+            "matrix_parent_inverse": obj.matrix_parent_inverse.copy(),
+            "matrix_basis": obj.matrix_basis.copy(),
+        }
+        if hasattr(obj, "parent_type"):
+            state = {
+                "parent": obj.parent,
+                "parent_type": obj.parent_type,
+                "parent_bone": getattr(obj, "parent_bone", ""),
+                "matrix_parent_inverse": state["matrix_parent_inverse"],
+                "matrix_basis": state["matrix_basis"],
+            }
+        return state
+
+    @staticmethod
+    def _matrix(rows: _Matrix4) -> Any:
+        """A mathutils Matrix of ``rows`` for a matrix property (the rows outside Blender)."""
+        try:
+            return _mathutils().Matrix(rows)
+        except ImportError:
+            return rows
 
     @staticmethod
     def _ancestors(obj: Any) -> Iterator[Any]:

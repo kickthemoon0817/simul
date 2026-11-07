@@ -64,12 +64,17 @@ COLLIDER_APPROXIMATIONS: Dict[str, str] = {
 #: The collider_type values apply_simready_metadata accepts.
 COLLIDER_TYPES: Tuple[str, ...] = tuple(COLLIDER_APPROXIMATIONS)
 
-#: Semantic metadata key -> semantics taxonomy (the LabelsAPI instance name).
+#: Semantic metadata key -> semantics taxonomy (the LabelsAPI instance name),
+#: SimReady's: a Wikidata Q-code goes under wikidata_qcode.
 SEMANTIC_TAXONOMIES: Tuple[Tuple[str, str], ...] = (
     ("semantic_class", "class"),
     ("semantic_hierarchy", "hierarchy"),
-    ("semantic_qcode", "qcode"),
+    ("semantic_qcode", "wikidata_qcode"),
 )
+#: Taxonomies an additional label may not take: the fields' own, and qcode,
+#: under which an earlier export wrote the Q-code (readers of those files
+#: should accept both qcode and wikidata_qcode).
+RESERVED_TAXONOMIES = frozenset({"class", "hierarchy", "wikidata_qcode", "qcode"})
 
 LABELS_API_SCHEMA = "UsdSemantics.LabelsAPI"
 LEGACY_SEMANTICS_SCHEMA = "Isaac SemanticsAPI"
@@ -669,6 +674,13 @@ def _labels(entry: Mapping[str, Any], name: str, report: Dict[str, Any]) -> List
             if not _IDENTIFIER.match(str(key)):
                 report["warnings"].append(
                     f"{name}: label {key!r} is not a valid USD identifier; not exported"
+                )
+                continue
+            if key in RESERVED_TAXONOMIES:
+                # It would overwrite a field's labels, as `class` overwrote semantic_class.
+                report["warnings"].append(
+                    f"{name}: additional label {key!r} is a semantic field's taxonomy; "
+                    "not exported"
                 )
                 continue
             labels.append((str(key), str(value)))
