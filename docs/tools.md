@@ -24,8 +24,10 @@ mapping keeps its prefix and is named in `truncated_fields`.
 
 ## Headless USD
 
-No running application needed. File arguments must be inside the sandbox
-(see [configuration.md](configuration.md#file-sandbox)).
+No running application needed. File arguments must be inside the sandbox,
+and so must every sublayer, reference, payload, clip and asset path the file
+draws on: one outside it fails the call with `SandboxError` listing them (see
+[configuration.md](configuration.md#file-sandbox)).
 
 | Group | Tools |
 |---|---|
@@ -144,7 +146,22 @@ parse error). The checks, in order:
 to the same access or parsing code, with pxr's message in `error`. A stage
 that opens with missing sublayers, references or payloads loads, and lists
 them in `warnings`. `simul usd validate` runs the same checks and exits 1
-when the file is invalid.
+when the file is invalid. A relative `file_path` resolves against
+`security.relative_path_base` (default: the server's working directory), and
+the result's `file_path` is the resolved path. A URL needs an asset resolver
+for its scheme, which usd-core does not ship, so `omniverse://` fails with
+`UnsupportedURL` (see [configuration.md](configuration.md#file-sandbox)).
+
+Every successful response carries `success: true`, like the other backends.
+The pxr work of each call runs on a worker thread, so a slow call does not
+hold up the server. Reads run concurrently, one at a time per stage, and an
+edit (`create_prim`, `update_prim_attributes`, `delete_prim`) runs alone,
+because pxr does not allow a write alongside reads of the same layers. A
+call that cannot start within `server.timeout` seconds (default 30) fails
+with `StageBusy`; retry it. Python cannot stop pxr mid-call, so a call the
+client cancels or times out still finishes in the background and holds its
+stage until it does. Calls on other stages and `validate_usd_file` carry on
+meanwhile.
 
 ### Editing
 
