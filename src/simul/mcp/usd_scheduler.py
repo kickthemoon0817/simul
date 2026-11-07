@@ -13,12 +13,13 @@ references the robot file another stage edits), so the scheduler takes two
 kinds of lock before a call starts:
 
 - an access lock for the whole backend: any number of reads at once, or one
-  write (``create_prim``, ``update_prim_attributes``, ``delete_prim``) alone.
-  Callers queue in arrival order, so a waiting write is not starved by a
-  stream of reads;
-- a lock per stage, held by every call bound to that stage and by the load
-  that (re)registers it. Reads on one stage share per-stage state that is
-  not thread-safe, such as its bounding-box cache.
+  write (``create_prim``, ``update_prim_attributes``, ``delete_prim``, and
+  ``load_usd_file`` and ``reload_usd_stage``, which may reread a shared
+  layer in place) alone. Callers queue in arrival order, so a waiting write
+  is not starved by a stream of reads;
+- a lock per stage, held by every other call bound to that stage. Reads on
+  one stage share per-stage state that is not thread-safe, such as its
+  bounding-box cache.
 
 A call waits at most ``server.timeout`` seconds for its locks and otherwise
 fails with ``StageBusy``, so nothing queues forever behind a slow call.

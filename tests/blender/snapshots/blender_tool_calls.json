@@ -2903,7 +2903,27 @@
             "method": "apply_simready_metadata",
             "arguments": {
               "object_name": "'Cube'",
-              "metadata": "{'semantic': {'semantic_class': 'cup'}, 'physics': {'mass_kg': 2.0, 'collider_type': 'box', 'is_rigid_body': False}, 'material': {'substrate_type': 'metal'}}"
+              "metadata": "{'semantic': {'semantic_class': 'cup'}, 'physics': {'mass_kg': 2.0, 'collider_type': 'box'}, 'material': {'substrate_type': 'metal'}}",
+              "clear": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "SimReadyApplyMetadataResponse"},
+        "usage": [{"tool": "apply_simready_metadata", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_name": "Cube",
+          "metadata": {"physics": {"is_rigid_body": false}},
+          "clear": ["mass_kg", "additional_labels"]
+        },
+        "session_calls": [
+          {
+            "method": "apply_simready_metadata",
+            "arguments": {
+              "object_name": "'Cube'",
+              "metadata": "{'physics': {'is_rigid_body': False}}",
+              "clear": "['mass_kg', 'additional_labels']"
             }
           }
         ],
@@ -2939,7 +2959,8 @@
                 "semantic": {"semantic_class": "cup"},
                 "physics": {"mass_kg": 2, "collider_type": "box"},
                 "material": {"substrate_type": "metal"}
-              }
+              },
+              "clear": null
             }
           }
         }
@@ -2985,7 +3006,14 @@
               "check_scale": "True",
               "check_transforms": "True",
               "check_materials": "True",
-              "check_hierarchy": "True"
+              "check_hierarchy": "True",
+              "check_metadata": "True",
+              "check_physics": "True",
+              "check_geometry": "True",
+              "include_children": "True",
+              "severity": "'all'",
+              "offset": "0",
+              "limit": "50"
             }
           }
         ],
@@ -2999,7 +3027,14 @@
           "check_scale": false,
           "check_transforms": false,
           "check_materials": false,
-          "check_hierarchy": false
+          "check_hierarchy": false,
+          "check_metadata": false,
+          "check_physics": false,
+          "check_geometry": false,
+          "include_children": false,
+          "severity": "error",
+          "offset": 5,
+          "limit": 10
         },
         "session_calls": [
           {
@@ -3010,7 +3045,14 @@
               "check_scale": "False",
               "check_transforms": "False",
               "check_materials": "False",
-              "check_hierarchy": "False"
+              "check_hierarchy": "False",
+              "check_metadata": "False",
+              "check_physics": "False",
+              "check_geometry": "False",
+              "include_children": "False",
+              "severity": "'error'",
+              "offset": "5",
+              "limit": "10"
             }
           }
         ],
@@ -3039,7 +3081,14 @@
               "check_scale": true,
               "check_transforms": true,
               "check_materials": true,
-              "check_hierarchy": true
+              "check_hierarchy": true,
+              "check_metadata": true,
+              "check_physics": true,
+              "check_geometry": true,
+              "include_children": true,
+              "severity": "all",
+              "offset": 0,
+              "limit": 50
             }
           }
         }
@@ -3058,7 +3107,8 @@
               "validate_before_export": "True",
               "include_children": "True",
               "include_lights_and_cameras": "False",
-              "force": "False"
+              "force": "False",
+              "skip_checks": "None"
             }
           }
         ],
@@ -3073,7 +3123,8 @@
           "validate_before_export": false,
           "include_children": false,
           "include_lights_and_cameras": true,
-          "force": true
+          "force": true,
+          "skip_checks": ["naming", "scale"]
         },
         "session_calls": [
           {
@@ -3085,7 +3136,8 @@
               "validate_before_export": "False",
               "include_children": "False",
               "include_lights_and_cameras": "True",
-              "force": "True"
+              "force": "True",
+              "skip_checks": "['naming', 'scale']"
             }
           }
         ],
@@ -3115,7 +3167,8 @@
               "validate_before_export": true,
               "include_children": true,
               "include_lights_and_cameras": false,
-              "force": false
+              "force": false,
+              "skip_checks": null
             }
           }
         }
@@ -3127,7 +3180,12 @@
         "session_calls": [
           {
             "method": "setup_simready_hierarchy",
-            "arguments": {"root_name": "'asset_root'", "child_names": "['Cube']", "semantic": "None"}
+            "arguments": {
+              "root_name": "'asset_root'",
+              "child_names": "['Cube']",
+              "semantic": "None",
+              "reuse_root": "False"
+            }
           }
         ],
         "response": {"checked_against": "SimReadySetupHierarchyResponse"},
@@ -3137,7 +3195,8 @@
         "arguments": {
           "root_name": "asset_root",
           "child_names": ["Cube"],
-          "semantic": {"semantic_class": "cup", "semantic_qcode": "Q81727"}
+          "semantic": {"semantic_class": "cup", "semantic_qcode": "Q81727"},
+          "reuse_root": true
         },
         "session_calls": [
           {
@@ -3145,7 +3204,8 @@
             "arguments": {
               "root_name": "'asset_root'",
               "child_names": "['Cube']",
-              "semantic": "{'semantic_class': 'cup', 'semantic_qcode': 'Q81727'}"
+              "semantic": "{'semantic_class': 'cup', 'semantic_qcode': 'Q81727'}",
+              "reuse_root": "True"
             }
           }
         ],
@@ -3168,7 +3228,12 @@
                 "input": {"bogus": 1}
               }
             ],
-            "input": {"root_name": {"bogus": 1}, "child_names": ["Cube"], "semantic": null}
+            "input": {
+              "root_name": {"bogus": 1},
+              "child_names": ["Cube"],
+              "semantic": null,
+              "reuse_root": false
+            }
           }
         }
       }

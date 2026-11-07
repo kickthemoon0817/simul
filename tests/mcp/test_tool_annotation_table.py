@@ -137,6 +137,11 @@ EXPECTED: Dict[str, tuple[str, bool, bool]] = {
     "summarize_scene": (RO, True, False),
     "update_prim_attributes": (DESTRUCTIVE, True, False),
     "validate_usd_file": (RO, True, False),
+    "list_usd_stages": (RO, True, False),
+    "save_usd_stage": (DESTRUCTIVE, True, False),  # overwrites the stage's own file
+    "export_usd_stage": (DESTRUCTIVE, False, False),  # overwrite=true replaces a file
+    "reload_usd_stage": (DESTRUCTIVE, True, False),  # discard_unsaved drops edits
+    "unload_usd_stage": (DESTRUCTIVE, False, False),
     # Unreal (full surface)
     "add_unreal_component": (RW, False, True),
     "analyze_unreal_scene_for_robotics": (RO, True, True),

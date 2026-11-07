@@ -36,7 +36,11 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # light_type, angle, size, size_y and shape and refuses settings of another light type;
 # uv_unwrap_mesh is new. An older add-on would reject the arguments, or, left without them,
 # append a slot no face uses (the bug the new assignment fixes).
-PROTOCOL_VERSION = 11
+# Version 12: apply_simready_metadata takes clear; validate_simready_compliance takes check_metadata,
+# check_physics, check_geometry, include_children, severity, offset and limit;
+# setup_simready_hierarchy takes reuse_root; export_simready_usd takes skip_checks and writes
+# rigid body constraints as UsdPhysics joints; unknown objects raise NotFoundError.
+PROTOCOL_VERSION = 12
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 

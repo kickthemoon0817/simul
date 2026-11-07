@@ -173,10 +173,17 @@ _TOOL_ARGUMENTS: Dict[str, Any] = {
 _TOOL_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "create_prim": {"prim_path": "/World/made_by_test"},
     "delete_prim": {"prim_path": "/World/made_by_test"},
+    "reload_usd_stage": {"discard_unsaved": True},
+    "unload_usd_stage": {"discard_unsaved": True},
 }
+# Run last, in this order: the delete undoes the create, then the stage is
+# reread and closed.
+_LAST = {"delete_prim": 1, "reload_usd_stage": 2, "unload_usd_stage": 3}
 # Edits run alone; everything else bound to a stage holds that stage's lock.
-_WRITES = {"create_prim", "update_prim_attributes", "delete_prim"}
-_UNBOUND = {"validate_usd_file"}
+# A load or reload may reread a shared sublayer or reference in place, which
+# every stage composing it sees, so those run alone too.
+_WRITES = {"create_prim", "update_prim_attributes", "delete_prim", "load_usd_file", "reload_usd_stage"}
+_UNBOUND = {"validate_usd_file", "list_usd_stages"}
 
 
 def test_every_usd_tool_runs_through_the_scheduler(
@@ -205,7 +212,8 @@ def test_every_usd_tool_runs_through_the_scheduler(
     monkeypatch.setattr(usd_scheduler.USDCallScheduler, "run", recording_run)
     server = _server(root)
     usd_tools = sorted(name for name, backend in server._tool_backends.items() if backend == "usd")
-    order = sorted(usd_tools, key=lambda name: (name != "load_usd_file", name == "delete_prim", name))
+    order = sorted(usd_tools, key=lambda name: (name != "load_usd_file", _LAST.get(name, 0), name))
+    overrides = {**_TOOL_OVERRIDES, "export_usd_stage": {"file_path": str(root / "exported.usda")}}
 
     async def scenario() -> Dict[str, Dict[str, Any]]:
         results: Dict[str, Dict[str, Any]] = {}
@@ -221,10 +229,10 @@ def test_every_usd_tool_runs_through_the_scheduler(
                     elif param == "stage_id":
                         arguments[param] = stage_id
                     else:
-                        value = _TOOL_OVERRIDES.get(name, {}).get(param, _TOOL_ARGUMENTS.get(param))
+                        value = overrides.get(name, {}).get(param, _TOOL_ARGUMENTS.get(param))
                         assert value is not None, f"add an argument for {name}.{param}"
                         arguments[param] = value
-                for param, value in _TOOL_OVERRIDES.get(name, {}).items():
+                for param, value in overrides.get(name, {}).items():
                     if param in schema.get("properties", {}):
                         arguments[param] = value
                 results[name] = await _call(client, name, **arguments)
