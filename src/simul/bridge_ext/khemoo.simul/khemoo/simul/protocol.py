@@ -30,12 +30,19 @@ class BridgeError:
 
 @dataclass(frozen=True)
 class BridgeRequest:
-    """Typed request envelope for the Isaac bridge."""
+    """Typed request envelope for the Isaac bridge.
+
+    ``auth_token`` is the token a client presents when the bridge requires
+    one. It sits beside ``payload`` rather than in it so no action handler
+    ever sees it, and it is left out of ``repr`` so a logged request does not
+    leak it. Clients that predate authentication omit it.
+    """
 
     request_id: str
     action: str
     payload: dict[str, Any] = field(default_factory=dict)
     protocol_version: str = "1.0"
+    auth_token: str = field(default="", repr=False, compare=False)
 
     @classmethod
     def from_json(cls, raw: bytes) -> "BridgeRequest":
@@ -46,11 +53,13 @@ class BridgeRequest:
         payload = data.get("payload") or {}
         if not isinstance(payload, dict):
             raise ValueError("Bridge request payload must be an object.")
+        auth_token = data.get("auth_token")
         return cls(
             request_id=str(data.get("request_id", "")),
             action=str(data.get("action", "")),
             payload=payload,
             protocol_version=str(data.get("protocol_version", "1.0")),
+            auth_token=auth_token if isinstance(auth_token, str) else "",
         )
 
 

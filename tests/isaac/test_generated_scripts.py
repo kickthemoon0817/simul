@@ -77,7 +77,7 @@ def _capture_generated_scripts() -> Tuple[Dict[str, List[str]], Dict[str, str]]:
     errors: Dict[str, str] = {}
     current: List[str] = []
 
-    def _record(code: str) -> ScriptResult:
+    def _record(code: str, **_kwargs: Any) -> ScriptResult:
         current.append(code)
         return ScriptResult(success=True, output=json.dumps({"ok": True}))
 
@@ -182,3 +182,22 @@ def test_generated_scripts_embed_no_json_literals(generated) -> None:
         "generated scripts reference JSON literals that are undefined names in "
         f"Python: {offenders}"
     )
+
+
+def test_generated_scripts_fit_one_read_of_the_5x_socket(generated) -> None:
+    """Granular tools must keep working on Isaac Sim 5.1 without the bridge.
+
+    The 5.x VS Code socket executes each read separately, so the client refuses
+    scripts larger than ``MAX_VSCODE_SCRIPT_BYTES``; a tool script that grew past
+    it would stop working there. The margin leaves room for the token header.
+    """
+    from simul.adapters.isaac_socket_client import MAX_VSCODE_SCRIPT_BYTES
+
+    scripts, _ = generated
+    limit = MAX_VSCODE_SCRIPT_BYTES - 256
+    sizes = {
+        method: max(len(script.encode("utf-8")) for script in rendered)
+        for method, rendered in scripts.items()
+    }
+    too_big = {method: size for method, size in sizes.items() if size > limit}
+    assert not too_big, f"tool scripts over {limit} bytes: {too_big}"

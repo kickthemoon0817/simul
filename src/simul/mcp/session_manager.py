@@ -45,9 +45,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
+from ..utils.paths import state_dir
+
 logger = logging.getLogger(__name__)
 
-_DEFAULT_SESSION_DIR = Path.home() / ".simul" / "sessions"
+# Under $SIMUL_HOME (default ~/.simul); created on the first write, not here.
+_DEFAULT_SESSION_DIR = state_dir() / "sessions"
 CLAIM_TTL_SECONDS = 120.0
 #: How long one store operation waits for another process's lock. The critical
 #: sections are a file read and a write, so a wait this long means a process

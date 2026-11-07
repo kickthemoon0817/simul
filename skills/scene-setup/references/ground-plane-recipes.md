@@ -17,10 +17,9 @@ Then add collision using the analytic shape (no mesh approximation needed for a 
 ```
 mcp__simul__add_isaac_collision
   prim_path: "/World/GroundPlane"
-  collision_type: "none"
 ```
 
-`collision_type: "none"` tells the physics engine to use the prim's analytic shape (infinite plane) rather than generating a mesh collider. This is the correct and most performant choice for Plane prims.
+A Plane always collides with its analytic shape (an infinite plane) rather than a mesh collider, so it takes no `approximation`. This is the correct and most performant choice for Plane prims.
 
 ---
 
@@ -36,12 +35,11 @@ mcp__simul__create_isaac_prim
   scale: [50, 50, 0.1]
 ```
 
-Add collision with convexHull (correct for a box):
+Add collision; a Cube collides as an exact box:
 
 ```
 mcp__simul__add_isaac_collision
   prim_path: "/World/Ground"
-  collision_type: "convexHull"
 ```
 
 Optionally set a high mass so it acts as a static body that is never pushed by colliding objects:
@@ -87,30 +85,20 @@ print(json.dumps(result))
 
 Every dynamic scene needs a `UsdPhysics.Scene` prim. Without it, simulation starts but gravity and contacts do not apply.
 
-```python
-import json, traceback
-try:
-    from pxr import UsdPhysics
-    import omni.usd
-    stage = omni.usd.get_context().get_stage()
-    scene_prim = stage.GetPrimAtPath("/physicsScene")
-    if not scene_prim.IsValid():
-        scene = UsdPhysics.Scene.Define(stage, "/physicsScene")
-        scene.CreateGravityDirectionAttr().Set((0, 0, -1))   # -Z is down (Z-up convention)
-        scene.CreateGravityMagnitudeAttr().Set(9.81)          # m/s^2
-        result = {"success": True, "created": True, "path": "/physicsScene"}
-    else:
-        result = {"success": True, "created": False, "note": "already exists"}
-except Exception as e:
-    result = {"success": False, "error": str(e), "traceback": traceback.format_exc()}
-print(json.dumps(result))
+```
+mcp__simul__create_isaac_physics_scene
+  prim_path: "/World/PhysicsScene"
 ```
 
-**Gravity direction reference:**
-- Isaac Sim default (Z-up): direction `(0, 0, -1)`, magnitude `9.81`
-- Y-up convention: direction `(0, -1, 0)`, magnitude `9.81`
-- Moon gravity: direction `(0, 0, -1)`, magnitude `1.62`
-- Mars gravity: direction `(0, 0, -1)`, magnitude `3.72`
+With no arguments the scene gets Earth gravity along the stage's negative up axis, in stage units: UsdPhysics stores the magnitude in stage units per s^2, so `create_isaac_physics_scene` divides the m/s^2 value by the stage's metersPerUnit.
+
+**Gravity reference** (`gravity_magnitude` in m/s^2, `gravity_direction` in stage axes):
+- Isaac Sim default (Z-up, metres): direction `[0, 0, -1]`, magnitude `9.81`
+- Y-up stage: direction `[0, -1, 0]` (the default there); a centimetre stage stores 981
+- Moon gravity: magnitude `1.62`
+- Mars gravity: magnitude `3.72`
+
+In a raw script, author the magnitude in stage units: `9.81 / UsdGeom.GetStageMetersPerUnit(stage)`.
 
 Check the existing physics scene with:
 
