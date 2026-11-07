@@ -11,12 +11,13 @@ import re
 from functools import lru_cache
 from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Union, cast
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
+    DotEnvSettingsSource,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
     YamlConfigSettingsSource,
@@ -30,6 +31,68 @@ _DEFAULT_CONFIG_FILE: Path = resource_filesystem_path("config", "default.yaml")
 _ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{([^}]+)\}")
 _LOGGER = logging.getLogger(__name__)
 
+# Names the one .env file the settings read. Unset, no .env is read at all.
+ENV_FILE_VARIABLE = "SIMUL_ENV_FILE"
+
+# Working-directory .env files already warned about, by (path, mtime).
+_IGNORED_DOTENV_WARNED: Set[Tuple[str, float]] = set()
+
+
+class ConfigError(ValueError):
+    """The configuration cannot be loaded as given: a missing or unreadable file."""
+
+
+def explicit_env_file() -> Optional[Path]:
+    """Return the ``.env`` file ``$SIMUL_ENV_FILE`` names, or None when it is unset.
+
+    Returns:
+        The absolute path of the file.
+
+    Raises:
+        ConfigError: When the variable names a file that does not exist.
+    """
+    raw = os.environ.get(ENV_FILE_VARIABLE, "").strip()
+    if not raw:
+        return None
+    path = Path(os.path.expandvars(raw)).expanduser().absolute()
+    if not path.is_file():
+        raise ConfigError(f"{ENV_FILE_VARIABLE} names no file: {path}")
+    return path
+
+
+def _warn_about_ignored_dotenv() -> None:
+    """Warn once when the working directory's ``.env`` sets simul variables.
+
+    Earlier releases read that file. It is ignored now, so a user who kept
+    settings there learns why they stopped applying; a project ``.env`` that
+    sets nothing simul reads stays silent.
+    """
+    candidate = Path.cwd() / ".env"
+    try:
+        key = (str(candidate), candidate.stat().st_mtime)
+    except OSError:
+        return
+    if key in _IGNORED_DOTENV_WARNED:
+        return
+    _IGNORED_DOTENV_WARNED.add(key)
+    try:
+        from dotenv import dotenv_values
+
+        names = [str(name) for name in dotenv_values(candidate)]
+    except Exception:  # noqa: BLE001 - an unparsable project file is not ours to report
+        return
+    prefixes = tuple(f"{section.upper()}__" for section in Settings.model_fields)
+    ours = sorted(name for name in names if name.upper().startswith(prefixes) or name.upper() == "CONFIG_FILE")
+    if ours:
+        _LOGGER.warning(
+            "Ignoring %s, which sets %s: simul does not read a .env from the working "
+            "directory. Export the variables, or set %s=%s to load that file.",
+            candidate,
+            ", ".join(ours),
+            ENV_FILE_VARIABLE,
+            candidate,
+        )
+
 
 def _check_scan_port_range(start: int, end: int) -> None:
     """Raise ``ValueError`` when a discovery scan range would be empty."""
@@ -40,7 +103,13 @@ def _check_scan_port_range(start: int, end: int) -> None:
 
 
 class ServerConfig(BaseModel):
-    """MCP Server configuration."""
+    """MCP Server configuration.
+
+    ``host`` and ``port`` only matter for ``--transport http`` and ``sse``; the
+    remaining fields harden those network transports (see
+    ``simul.mcp.http_security``). Over stdio the client spawns the server and
+    none of them apply.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -51,6 +120,54 @@ class ServerConfig(BaseModel):
     host: str = Field(default="localhost", description="Server host")
     port: int = Field(default=8765, description="Server port", ge=1024, le=65535)
     timeout: int = Field(default=30, description="Connection timeout in seconds", ge=1)
+    allow_public: bool = Field(
+        default=False,
+        description=(
+            "Let --transport http/sse bind a host that is not loopback (0.0.0.0, a LAN "
+            "address, a host name). Off, the server refuses to start on such a host. "
+            "Env: SERVER__ALLOW_PUBLIC; CLI: simul server --allow-public."
+        ),
+    )
+    host_origin_protection: bool = Field(
+        default=True,
+        description=(
+            "Refuse HTTP/SSE requests whose Host header is not a loopback name, the "
+            "bound host or one of allowed_hosts (421), and browser requests whose "
+            "Origin is neither same-origin, loopback nor one of allowed_origins (403). "
+            "This is the DNS-rebinding defense; switching it off lets any web page the "
+            "user opens reach the tools. Env: SERVER__HOST_ORIGIN_PROTECTION."
+        ),
+    )
+    allowed_hosts: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Extra Host header names to accept (port ignored, fnmatch wildcards), for "
+            "example the DNS name clients use to reach a public bind. Loopback names "
+            "and the bound address are always accepted. Env: SERVER__ALLOWED_HOSTS."
+        ),
+    )
+    allowed_origins: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Extra browser origins to accept, as scheme://host[:port] (fnmatch "
+            "wildcards). Env: SERVER__ALLOWED_ORIGINS."
+        ),
+    )
+    auth_token: Optional[SecretStr] = Field(
+        default=None,
+        description=(
+            "Bearer token every HTTP/SSE request must carry as 'Authorization: Bearer "
+            "<token>' (at least 16 characters). Prefer auth_token_file. "
+            "Env: SERVER__AUTH_TOKEN."
+        ),
+    )
+    auth_token_file: Optional[str] = Field(
+        default=None,
+        description=(
+            "File holding the bearer token on its first line; it must be readable by "
+            "its owner only (chmod 600). Env: SERVER__AUTH_TOKEN_FILE."
+        ),
+    )
 
 
 class IsaacInstanceConfig(BaseModel):
@@ -146,7 +263,7 @@ class IsaacSimConfig(BaseModel):
         description=(
             "Auth token for an Isaac Sim 6.0+ python_server started with "
             "require_auth=true; sent as the '# isaacsim-python-server-token:' header. "
-            "Precedence: an explicit value (ISAAC_SIM__SOCKET_AUTH_TOKEN, .env or YAML) "
+            "Precedence: an explicit value (ISAAC_SIM__SOCKET_AUTH_TOKEN, the SIMUL_ENV_FILE file or YAML) "
             "wins; when unset, the token file `simul isaac launch "
             "--generate-auth-token` wrote to <discovery_dir>/auth-token-<pid> for the "
             "newest still-running editor is used"
@@ -234,7 +351,7 @@ class IsaacSimConfig(BaseModel):
     def _pick_up_generated_auth_token(self) -> "IsaacSimConfig":
         """Fall back to the token file ``simul isaac launch`` left in the discovery dir.
 
-        Only when nothing explicit was configured: the environment, ``.env`` and
+        Only when nothing explicit was configured: the environment, the env file and
         YAML all rank above the file. The file is read only from a discovery
         directory that is owned by the current user and writable by nobody else.
         """
@@ -397,7 +514,7 @@ class UnrealConfig(BaseModel):
     # a pre-computed 32-character hex digest (we pass it through). Required
     # whenever the editor was started with --passphrase enabled —
     # without it the editor returns 401 "Given Passphrase is not correct!"
-    # Read from env var UNREAL__PASSPHRASE (or .env file).
+    # Read from env var UNREAL__PASSPHRASE (or the file SIMUL_ENV_FILE names).
     passphrase: Optional[str] = Field(
         default=None,
         description=(
@@ -598,8 +715,13 @@ class Settings(BaseSettings):
     """Main settings class that combines all configuration sections.
 
     Value precedence per leaf, highest first: constructor arguments, process
-    environment, ``.env`` file, the YAML file named by ``model_config["yaml_file"]``
-    (set through :meth:`from_yaml`), model defaults.
+    environment, the ``.env`` file named by ``$SIMUL_ENV_FILE`` (none by
+    default), the YAML file named by ``model_config["yaml_file"]`` (set through
+    :meth:`from_yaml`), model defaults.
+
+    A ``.env`` in the working directory is never read: MCP clients start the
+    server in the user's project, so a cloned repository's ``.env`` could
+    otherwise widen the sandbox or re-enable script execution.
     """
 
     # Configuration sections
@@ -613,7 +735,8 @@ class Settings(BaseSettings):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # No implicit .env: see the class docstring and SIMUL_ENV_FILE.
+        env_file=None,
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         case_sensitive=False,
@@ -629,18 +752,27 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> Tuple[PydanticBaseSettingsSource, ...]:
-        """Rank the YAML file below the environment and ``.env``.
+        """Rank the YAML file below the environment and the explicit ``.env``.
 
         Args:
             settings_cls: The concrete settings class being built.
             init_settings: Constructor-argument source.
             env_settings: Process-environment source.
-            dotenv_settings: ``.env`` file source.
+            dotenv_settings: ``.env`` file source; replaced by one reading
+                ``$SIMUL_ENV_FILE`` when that is set.
             file_secret_settings: Secrets-directory source.
 
         Returns:
             The sources in priority order, highest first.
+
+        Raises:
+            ConfigError: When ``SIMUL_ENV_FILE`` names a file that does not exist.
         """
+        env_file = explicit_env_file()
+        if env_file is not None:
+            dotenv_settings = DotEnvSettingsSource(settings_cls, env_file=env_file)
+        else:
+            _warn_about_ignored_dotenv()
         return (
             init_settings,
             env_settings,
@@ -749,7 +881,6 @@ def _normalise_isaac_instances(value: Any) -> Optional[List[Dict[str, Any]]]:
         if not isinstance(item, dict):
             raise ValueError(f"Each instance must be a dict, got {type(item).__name__}")
 
-
         bridge = item.get("bridge") or {}
         instances.append(
             _compact_dict(
@@ -818,6 +949,12 @@ def _normalise_settings_payload(config_data: Dict[str, Any]) -> Dict[str, Any]:
                     "host": server.get("host"),
                     "port": server.get("port"),
                     "timeout": server.get("timeout"),
+                    "allow_public": server.get("allow_public"),
+                    "host_origin_protection": server.get("host_origin_protection"),
+                    "allowed_hosts": server.get("allowed_hosts"),
+                    "allowed_origins": server.get("allowed_origins"),
+                    "auth_token": server.get("auth_token"),
+                    "auth_token_file": _normalise_optional_path(server.get("auth_token_file")),
                 }
             ),
             "isaac_sim": _compact_dict(
