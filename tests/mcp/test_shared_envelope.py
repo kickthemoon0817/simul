@@ -523,7 +523,15 @@ def test_a_cancelled_isaac_call_holds_the_instance_until_the_engine_is_done(
     assert events == ["engine done", "next call ran"]
     assert not lock.locked()
     assert beats == ["isaac_next"]
-    assert _records(instance, "isaac_step") == [{"success": False, "error": "cancelled"}]
+    # The engine finished the step: the record keeps its outcome, and says the
+    # client cancelled a call that ran (it used to read as a failure).
+    (row,) = instance.usage_tracker.get_recent(tool_name="isaac_step")
+    assert (row["success"], row.get("error"), row["cancelled"], row["executed"]) == (
+        True,
+        None,
+        True,
+        True,
+    )
 
 
 def test_a_call_cancelled_while_queued_for_the_lock_closes_its_coroutine(

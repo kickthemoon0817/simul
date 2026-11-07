@@ -301,12 +301,14 @@ def test_sessionless_http_clients_get_no_session_to_share(
     assert re.fullmatch(rf"{server_module._ANONYMOUS_AGENT}@[\w.:]+:\d+", peer), peer
     assert server._session_routes == {}
     # The refused session tools spend that client's budget too, all but
-    # release_isaac_instance, which the rate limit never refuses.
+    # release_isaac_instance, which the rate limit never refuses. The ceiling
+    # across every tool is its host's, so reconnecting does not renew it.
+    host = peer.rpartition(":")[0]
     assert set(server._rate_limiters) == {
         (peer, tool)
-        for tool in ("ping_isaac", "*", *(name for name, _ in SESSION_TOOLS))
+        for tool in ("ping_isaac", *(name for name, _ in SESSION_TOOLS))
         if tool != "release_isaac_instance"
-    }
+    } | {(host, "*")}
     assert server.session_manager.get_all_sessions() == []
 
 

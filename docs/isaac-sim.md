@@ -205,7 +205,11 @@ A stopped timeline is not flagged: USD then holds the authored state, which
   interrupt it and keeps the instance until the engine has finished, so the
   next call is not let in while the first is still being served (it waits,
   or gets `InstanceBusy` after `server.timeout`). The cancelled call is
-  recorded with `error: "cancelled"`.
+  recorded with `cancelled: true, executed: true` and the engine's own
+  outcome (a script that finished is a success), or `executed: "unknown"`
+  when the connection failed or timed out first. Waiting for the engine is
+  bounded by the transport's timeout, which can also delay a server that is
+  stopping.
 - **Ping while busy.** `ping_isaac` does not wait for a call already running
   on the instance; its `busy` field says one is. A synchronous script blocks
   the stock socket and the bridge alike, so a ping during one can fail even

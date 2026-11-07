@@ -23,10 +23,11 @@ import logging.config
 import logging.handlers
 import os
 import queue
+import re
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
@@ -34,6 +35,7 @@ import yaml
 
 from .config import Settings, get_settings
 from .resources import find_checkout_root, resource_filesystem_path
+from .utils.filelock import exclusive_file_lock
 
 
 _CHECKOUT_ROOT: Optional[Path] = find_checkout_root()
@@ -143,8 +145,9 @@ def make_private_dir(path: Path) -> None:
 
     ``Path.mkdir(mode=..., parents=True)`` applies the mode only to the last
     directory, so each missing level is created on its own. An existing
-    directory keeps its mode, unless it is simul's own state directory or
-    inside it and owned by this user: those are tightened to 0700.
+    directory keeps its mode: simul did not create it, and a user may have
+    pointed ``SIMUL_HOME`` or the log paths at a directory they share (their
+    home). The files simul writes there are 0600 all the same.
 
     Raises:
         OSError: A missing directory could not be created.
@@ -162,21 +165,13 @@ def make_private_dir(path: Path) -> None:
             os.mkdir(directory, LOG_DIR_MODE)
         except FileExistsError:
             pass
-    # The directory and its ancestors up to simul's state root (``~/.simul``
-    # for ``~/.simul/logs``); anything outside the root is left alone.
-    for directory in (path, *path.parents):
-        _tighten(directory, LOG_DIR_MODE, only_under_state_root=True)
-        if directory == _simul_state_root():
-            break
+        else:
+            # mkdir's mode passes through the umask, which may only narrow it.
+            _tighten(directory, LOG_DIR_MODE)
 
 
-def _tighten(path: Path, mode: int, *, only_under_state_root: bool) -> None:
-    """Drop group and other permissions from a path this user owns, when it is simul's.
-
-    A directory is tightened only inside simul's state root (a user may point
-    the logs at a shared directory, which must keep its mode); a log file simul
-    writes is simul's wherever it lives.
-    """
+def _tighten(path: Path, mode: int) -> None:
+    """Drop group and other permissions from a file or directory this user owns."""
     if os.name == "nt":  # pragma: no cover - POSIX modes only
         return
     try:
@@ -185,14 +180,6 @@ def _tighten(path: Path, mode: int, *, only_under_state_root: bool) -> None:
         return
     if info.st_uid != os.getuid() or (info.st_mode & 0o077) == 0:
         return
-    if only_under_state_root:
-        root = _simul_state_root()
-        try:
-            resolved = path.resolve()
-            if resolved != root.resolve() and root.resolve() not in resolved.parents:
-                return
-        except OSError:
-            return
     try:
         os.chmod(path, (info.st_mode & 0o7777) & mode)
     except OSError:
@@ -208,7 +195,7 @@ def tighten_log_files(base: Path) -> None:
     except OSError:
         pass
     for candidate in candidates:
-        _tighten(candidate, LOG_FILE_MODE, only_under_state_root=False)
+        _tighten(candidate, LOG_FILE_MODE)
 
 
 def _open_private(filename: str, mode: str, encoding: Optional[str], errors: Optional[str]) -> Any:
@@ -236,10 +223,155 @@ class PrivateTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler)
         return _open_private(self.baseFilename, self.mode, self.encoding, self.errors)
 
 
+class SharedRotatingFileHandler(logging.Handler):
+    """A log file every simul process on the machine appends to and rotates together.
+
+    Each server process writes the same ``simul.log`` and ``audit.jsonl``.
+    Python's TimedRotatingFileHandler keeps its file open and rotates on its
+    own schedule, so after the first midnight every process but the one that
+    rotated went on writing into the previous day's file, and the retention
+    of the next rotation deleted those rows. This handler holds a lock on
+    ``<file>.lock`` for each record, rotates under it, and appends to the file
+    at its path opened afresh (``O_APPEND``, mode 0600), so no process writes
+    to a file another one has rotated away. Under the lock, before writing:
+
+    * a file last written on an earlier day is renamed to
+      ``<file>.<YYYY-MM-DD>`` (the day it was written; the names
+      TimedRotatingFileHandler used);
+    * a file that has reached ``maxBytes`` (when set) is renamed to
+      ``<file>.<YYYY-MM-DD>`` or, when that is taken, ``<file>.<YYYY-MM-DD>.<n>``;
+
+    and copies older than ``backupCount`` days are deleted, as are the oldest
+    beyond ``maxBackups`` copies (when set). A lock another process holds for
+    longer than a second is skipped: the record is appended unrotated rather
+    than lost.
+
+    Args:
+        filename: The log file.
+        when: ``"midnight"`` (daily rotation) or anything else (none).
+        backupCount: Days of rotated copies kept; 0 keeps them all.
+        maxBytes: Size at which the file is rotated; 0 never.
+        maxBackups: Most rotated copies kept; 0 no limit.
+        encoding: Text encoding of the records.
+    """
+
+    _LOCK_TIMEOUT_SECONDS = 1.0
+
+    def __init__(
+        self,
+        filename: str,
+        when: str = "midnight",
+        backupCount: int = 14,
+        maxBytes: int = 0,
+        maxBackups: int = 0,
+        encoding: Optional[str] = "utf-8",
+        errors: Optional[str] = None,
+        **_unused: Any,
+    ) -> None:
+        super().__init__()
+        self.baseFilename = os.path.abspath(os.fspath(Path(filename).expanduser()))
+        self.daily = str(when).lower() == "midnight"
+        self.backupCount = max(0, int(backupCount))
+        self.maxBytes = max(0, int(maxBytes))
+        self.maxBackups = max(0, int(maxBackups))
+        self.encoding = encoding or "utf-8"
+        self.errors = errors
+        self._rotated_name = re.compile(
+            re.escape(os.path.basename(self.baseFilename))
+            + r"\.(\d{4}-\d{2}-\d{2})(?:\.(\d+))?$"
+        )
+
+    @staticmethod
+    def _day(timestamp: float) -> date:
+        """The local day a timestamp falls on (a test may make days shorter)."""
+        return date.fromtimestamp(timestamp)
+
+    def _today(self) -> date:
+        return self._day(time.time())
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            data = (self.format(record) + "\n").encode(self.encoding, self.errors or "strict")
+            try:
+                with exclusive_file_lock(
+                    Path(self.baseFilename + ".lock"), timeout=self._LOCK_TIMEOUT_SECONDS
+                ):
+                    self._rotate(len(data))
+                    self._append(data)
+            except TimeoutError:
+                self._append(data)
+        except Exception:
+            self.handleError(record)
+
+    def _append(self, data: bytes) -> None:
+        fd = os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_APPEND, LOG_FILE_MODE)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+
+    def _rotate(self, incoming: int) -> None:
+        try:
+            info = os.stat(self.baseFilename)
+        except FileNotFoundError:
+            return
+        today = self._today()
+        written = self._day(info.st_mtime)
+        if self.daily and written < today:
+            self._move(written)
+        elif self.maxBytes and info.st_size and info.st_size + incoming > self.maxBytes:
+            self._move(today)
+        else:
+            return
+        self._prune(today)
+
+    def _move(self, day: date) -> None:
+        target = f"{self.baseFilename}.{day:%Y-%m-%d}"
+        index = 0
+        while os.path.exists(target if index == 0 else f"{target}.{index}"):
+            index += 1
+        os.replace(self.baseFilename, target if index == 0 else f"{target}.{index}")
+
+    def _prune(self, today: date) -> None:
+        directory = os.path.dirname(self.baseFilename)
+        copies = []
+        for name in os.listdir(directory):
+            match = self._rotated_name.fullmatch(name)
+            if match is None:
+                continue
+            try:
+                day = date.fromisoformat(match.group(1))
+            except ValueError:
+                continue
+            copies.append((day, int(match.group(2) or 0), os.path.join(directory, name)))
+        copies.sort()
+        if self.backupCount:
+            oldest = today - timedelta(days=self.backupCount)
+            for day, _index, path in [copy for copy in copies if copy[0] < oldest]:
+                _remove_quietly(path)
+            copies = [copy for copy in copies if copy[0] >= oldest]
+        if self.maxBackups and len(copies) > self.maxBackups:
+            for _day, _index, path in copies[: len(copies) - self.maxBackups]:
+                _remove_quietly(path)
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+#: Size at which ``audit.jsonl`` is rotated within a day, and the most
+#: rotated copies kept (with ``retention_days`` of daily ones).
+AUDIT_MAX_BYTES = 10 * 1024 * 1024
+AUDIT_MAX_BACKUPS = 30
+
 # The handler classes the YAML names and their private counterparts.
 _PRIVATE_HANDLER_CLASSES = {
     "logging.FileHandler": "simul.logging.PrivateFileHandler",
-    "logging.handlers.TimedRotatingFileHandler": "simul.logging.PrivateTimedRotatingFileHandler",
+    "logging.handlers.TimedRotatingFileHandler": "simul.logging.SharedRotatingFileHandler",
+    "simul.logging.PrivateTimedRotatingFileHandler": "simul.logging.SharedRotatingFileHandler",
 }
 
 
@@ -352,6 +484,7 @@ def _apply_retention_to_timed_handlers(
         if cfg.get("class") in (
             "logging.handlers.TimedRotatingFileHandler",
             "simul.logging.PrivateTimedRotatingFileHandler",
+            "simul.logging.SharedRotatingFileHandler",
         ):
             cfg["backupCount"] = retention_days
 
@@ -393,10 +526,12 @@ def _start_audit_listener(audit_path: Path, retention_days: int) -> None:
         _audit_listener = None
     _audit_queue = queue.Queue(-1)
 
-    file_handler = PrivateTimedRotatingFileHandler(
+    file_handler = SharedRotatingFileHandler(
         filename=str(audit_path),
         when="midnight",
         backupCount=retention_days,
+        maxBytes=AUDIT_MAX_BYTES,
+        maxBackups=AUDIT_MAX_BACKUPS,
         encoding="utf8",
     )
     file_handler.setFormatter(AuditFormatter())
@@ -746,8 +881,11 @@ def emit_audit(
     agent_id: Optional[str] = None,
     session: Optional[str] = None,
     reason: Optional[str] = None,
+    executed: Optional[Union[bool, str]] = None,
 ) -> None:
     """Emit one audit JSONL record describing a completed tool-call boundary.
+
+    Every text field is cut at ``AUDIT_MAX_FIELD_CHARS``.
 
     Args:
         tool: The tool called.
@@ -763,14 +901,16 @@ def emit_audit(
         session: The session label the call came in on.
         reason: Why the envelope refused the call before it ran
             (``rate_limited``, ``instance_busy``, ``instance_claimed``).
+        executed: For a cancelled call, whether the engine ran it anyway
+            (True, False or ``"unknown"``).
     """
     audit_logger = logging.getLogger(_AUDIT_LOGGER_NAME)
     payload: Dict[str, Any] = {
         "ts": _utc_now_iso(),
-        "request_id": request_id,
-        "tool": tool,
+        "request_id": _bounded(request_id),
+        "tool": _bounded(tool),
         "duration_ms": round(duration_ms, 3),
-        "status": status,
+        "status": _bounded(status),
     }
     for key, value in (
         ("error_type", error_type),
@@ -780,10 +920,23 @@ def emit_audit(
         ("session", session),
     ):
         if value:
-            payload[key] = value
+            payload[key] = _bounded(str(value))
+    if executed is not None:
+        payload["executed"] = executed if isinstance(executed, bool) else _bounded(str(executed))
     if extra:
         payload["extra"] = extra
     audit_logger.info("", extra={"audit": payload})
+
+
+#: Longest value an audit row keeps in a field (a tool name a client made
+#: up, an agent label); longer ones are cut, saying how much was left out.
+AUDIT_MAX_FIELD_CHARS = 128
+
+
+def _bounded(value: str) -> str:
+    if len(value) <= AUDIT_MAX_FIELD_CHARS:
+        return value
+    return f"{value[:AUDIT_MAX_FIELD_CHARS]}... <{len(value) - AUDIT_MAX_FIELD_CHARS} more characters>"
 
 
 # What the envelope reports about the call in progress, for the audit row:
@@ -846,6 +999,8 @@ def _tool_call_context(tool_name: str) -> Iterator[Dict[str, Any]]:
     """
     request_id = uuid.uuid4().hex[:12]
     outcome: Dict[str, Any] = {"request_id": request_id}
+    # A made-up tool name can be any length; records and log lines keep a cut one.
+    tool_name = _bounded(str(tool_name))
     rid_token = _REQUEST_ID_VAR.set(request_id)
     tn_token = _TOOL_NAME_VAR.set(tool_name)
     outcome_token = _CALL_OUTCOME_VAR.set(outcome)
@@ -869,17 +1024,24 @@ def _tool_call_context(tool_name: str) -> Iterator[Dict[str, Any]]:
                 derived = _outcome_of_result(outcome.get("result"))
                 status = derived["status"]
                 outcome.setdefault("error_type", derived.get("error_type"))
-            emit_audit(
-                tool=tool_name,
-                request_id=request_id,
-                duration_ms=duration_ms,
-                status=status,
-                error_class=error_class,
-                error_type=outcome.get("error_type"),
-                agent_id=outcome.get("agent_id"),
-                session=outcome.get("session"),
-                reason=outcome.get("reason"),
-            )
+            if status == "cancelled" and "executed" not in outcome:
+                outcome["executed"] = "unknown"
+            try:
+                emit_audit(
+                    tool=tool_name,
+                    request_id=request_id,
+                    duration_ms=duration_ms,
+                    status=status,
+                    error_class=error_class,
+                    error_type=outcome.get("error_type"),
+                    agent_id=outcome.get("agent_id"),
+                    session=outcome.get("session"),
+                    reason=outcome.get("reason"),
+                    executed=outcome.get("executed"),
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                # The audit row never fails the call it describes.
+                _logger.warning("Could not write the audit row of %s: %s", _bounded(tool_name), exc)
         finally:
             _CALL_OUTCOME_VAR.reset(outcome_token)
             _REQUEST_ID_VAR.reset(rid_token)

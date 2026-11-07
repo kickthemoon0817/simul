@@ -228,7 +228,9 @@ def test_log_directories_are_0700_and_files_0600(tmp_path: Path, restore_logging
     for directory in (tmp_path / "deep", tmp_path / "deep" / "state", logs):
         assert _mode(directory) == 0o700, directory
     files = sorted(p for p in logs.iterdir() if p.is_file())
-    assert {p.name for p in files} >= {"simul.log", "simul.json", "audit.jsonl", "simul_errors.log"}
+    # Each file is written by every server process under its own lock file
+    # (created 0600 too); a file nothing has written yet does not exist.
+    assert {p.name for p in files} >= {"simul.log", "simul.json", "audit.jsonl", "simul.log.lock"}
     assert {p.name: _mode(p) for p in files} == {p.name: 0o600 for p in files}
 
 
@@ -250,9 +252,10 @@ def test_a_rotated_log_file_stays_0600(tmp_path: Path) -> None:
 
 
 @posix_only
-def test_existing_simul_files_are_tightened_but_foreign_directories_are_not(
+def test_existing_simul_files_are_tightened_but_existing_directories_are_not(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_logging: None
 ) -> None:
+    """A directory simul did not create keeps its mode: SIMUL_HOME may be a shared one (the home)."""
     state = tmp_path / "state"
     (state / "logs").mkdir(parents=True)
     os.chmod(state / "logs", 0o755)
@@ -274,10 +277,22 @@ def test_existing_simul_files_are_tightened_but_foreign_directories_are_not(
     )
     simul_logging._stop_audit_listener()
 
-    assert _mode(state / "logs") == 0o700, "simul's own state directory is tightened"
+    assert _mode(state / "logs") == 0o755, "an existing directory keeps its mode"
     assert _mode(state / "logs" / "audit.jsonl") == 0o600
     assert _mode(shared) == 0o755, "a directory outside the state root keeps its mode"
     assert _mode(shared / "simul.log") == 0o600
+
+
+@posix_only
+def test_an_old_world_readable_usage_log_is_tightened(tmp_path: Path) -> None:
+    for name in ("tool_usage.jsonl", "tool_usage.jsonl.1"):
+        (tmp_path / name).write_text("{}\n")
+        os.chmod(tmp_path / name, 0o644)
+
+    ToolUsageTracker(log_dir=tmp_path).record("tool", 1.0, True)
+
+    assert _mode(tmp_path / "tool_usage.jsonl") == 0o600
+    assert _mode(tmp_path / "tool_usage.jsonl.1") == 0o600
 
 
 # ---------------------------------------------------------------------------

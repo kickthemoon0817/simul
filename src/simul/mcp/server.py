@@ -192,6 +192,25 @@ _ANONYMOUS_AGENT: str = "anonymous"
 # The HTTP header an anonymous client names itself in, for the logs only.
 _CLIENT_LABEL_HEADER: str = "x-simul-agent"
 
+# The attribute a cancelled Isaac call's CancelledError carries its
+# CancelledOutcome under, from _exec_isaac to _run_envelope's record.
+_DRAINED_OUTCOME = "_simul_drained_outcome"
+
+
+@dataclass(frozen=True)
+class CancelledOutcome:
+    """What the engine did with a call the client cancelled.
+
+    Attributes:
+        executed: True when the engine ran the operation, ``"unknown"`` when
+            nothing says whether it did.
+        payload: The engine's answer, normalised like any call's, when it gave one.
+    """
+
+    executed: Union[bool, str]
+    payload: Optional[Dict[str, Any]]
+
+
 # How long a cancelled Isaac call waits for the bridge to accept its interrupt.
 _INTERRUPT_TIMEOUT_SECONDS: float = 5.0
 
@@ -200,6 +219,16 @@ _INTERRUPT_TIMEOUT_SECONDS: float = 5.0
 # changes nothing; the sweep only bounds the table for identities that never
 # end a session (authenticated sessionless clients).
 _RATE_LIMITER_SWEEP_SIZE: int = 512
+
+
+def _ceiling_key(agent: str) -> str:
+    """The agent whose ceiling across every tool a call spends: an anonymous peer's host."""
+    prefix = f"{_ANONYMOUS_AGENT}@"
+    if agent.startswith(prefix):
+        host, _, _port = agent[len(prefix):].rpartition(":")
+        if host:
+            return f"{prefix}{host}"
+    return agent
 
 
 def default_agent_label(session_id: str) -> str:
@@ -992,7 +1021,11 @@ class SimulMCPServer(LoggerMixin):
             if tool_name in self._per_tool_rate_exempt
             else self._get_rate_limiter(tool_name, agent)
         )
-        agent_bucket = self._get_rate_limiter(_GLOBAL_RATE_BUCKET, agent)
+        # An anonymous HTTP client is named by its connection, so its per-tool
+        # buckets start afresh when it reconnects; the ceiling across every
+        # tool is kept per host, so reconnecting for each request is
+        # throttled all the same.
+        agent_bucket = self._get_rate_limiter(_GLOBAL_RATE_BUCKET, _ceiling_key(agent))
         tool_wait = tool_bucket.seconds_until_available() if tool_bucket is not None else 0.0
         agent_wait = agent_bucket.seconds_until_available()
         if tool_wait <= 0.0 and agent_wait <= 0.0:
@@ -1640,10 +1673,16 @@ class SimulMCPServer(LoggerMixin):
 
         Two exits return no result: cancellation (the client gave up while the
         call ran or while it waited for Isaac's instance lock), which is
-        recorded as ``cancelled`` (or ``cancelled_before_start``) and
-        re-raised, and an exception raised by the admission hook itself, which
-        propagates to FastMCP unrecorded. ``discard`` runs on every exit before
-        ``call`` starts, a cancelled wait and an admission exception included.
+        recorded as ``cancelled`` and re-raised, and an exception raised by
+        the admission hook itself, which
+        propagates to FastMCP unrecorded. A cancelled call's record says
+        whether the engine ran the operation all the same (``executed``):
+        false when it never started, true with the engine's own outcome when
+        the call waited for the engine to finish (Isaac), ``"unknown"`` when
+        the request was already sent and nothing waited for it (Unreal,
+        Blender), since cancelling the request does not stop the engine.
+        ``discard`` runs on every exit before ``call`` starts, a cancelled
+        wait and an admission exception included.
         Every record carries the call's request id, and the call's audit row
         is told its status, ``error_type`` and agent (``note_call_outcome``).
 
@@ -1694,29 +1733,36 @@ class SimulMCPServer(LoggerMixin):
             status: Optional[str] = None,
             error_type: Optional[str] = None,
             reason: Optional[str] = None,
+            executed: Optional[Union[bool, str]] = None,
         ) -> None:
             # One request id ties this row to the call's audit row, which this
             # also tells how the call ended (the audit used to say "ok" for
-            # every call that did not raise).
-            recorded_agent = self._recorded_agent_id(agent_id)
-            self.usage_tracker.record(
-                tool_name,
-                duration_ms,
-                success,
-                params=params,
-                error=error,
-                agent_id=recorded_agent,
-                script_sha256=script_sha256,
-                session=agent_id,
-                request_id=current_request_id(),
-            )
-            note_call_outcome(
-                status=status or ("ok" if success else "error"),
-                error_type=None if success else error_type,
-                agent_id=recorded_agent,
-                session=agent_id,
-                reason=reason,
-            )
+            # every call that did not raise). Neither may fail the call.
+            try:
+                recorded_agent = self._recorded_agent_id(agent_id)
+                self.usage_tracker.record(
+                    tool_name,
+                    duration_ms,
+                    success,
+                    params=params,
+                    error=error,
+                    agent_id=recorded_agent,
+                    script_sha256=script_sha256,
+                    session=agent_id,
+                    request_id=current_request_id(),
+                    cancelled=status == "cancelled",
+                    executed=executed,
+                )
+                note_call_outcome(
+                    status=status or ("ok" if success else "error"),
+                    error_type=None if success else error_type,
+                    agent_id=recorded_agent,
+                    session=agent_id,
+                    reason=reason,
+                    executed=executed,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                self.logger.warning("Could not record the %s call: %s", tool_name, exc)
 
         def refuse(refusal: Refusal) -> ToolResult:
             record(
@@ -1749,17 +1795,29 @@ class SimulMCPServer(LoggerMixin):
                     error_type=payload.get("error_type"),
                 )
             return self._as_text_result(payload)
-        except asyncio.CancelledError:
-            # The client gave up. The call is recorded all the same; an Isaac
-            # call has already kept the instance until the engine finished
-            # (_exec_isaac), so the duration runs to then.
+        except asyncio.CancelledError as cancelled:
+            # The client gave up. The call is recorded all the same, saying
+            # whether the engine ran it: an Isaac call has kept the instance
+            # until the engine finished (_exec_isaac), so the duration runs to
+            # then and the engine's own outcome is known.
             since = started if started is not None else entered
-            record(
-                (time.monotonic() - since) * 1000,
-                False,
-                "cancelled" if call_started else "cancelled_before_start",
-                status="cancelled",
-            )
+            duration = (time.monotonic() - since) * 1000
+            drained = getattr(cancelled, _DRAINED_OUTCOME, None)
+            if not call_started:
+                record(duration, False, "cancelled_before_start", status="cancelled", executed=False)
+            elif isinstance(drained, CancelledOutcome) and drained.payload is not None:
+                outcome = drained.payload
+                failed = outcome.get("success") is False or bool(outcome.get("error"))
+                record(
+                    duration,
+                    not failed,
+                    str(outcome.get("error") or "") or None,
+                    status="cancelled",
+                    error_type=outcome.get("error_type"),
+                    executed=drained.executed,
+                )
+            else:
+                record(duration, False, "cancelled", status="cancelled", executed="unknown")
             raise
         finally:
             # One place for every way a call can end before it starts. A
@@ -1993,8 +2051,14 @@ class SimulMCPServer(LoggerMixin):
             task = asyncio.ensure_future(coro)
             try:
                 return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                await self._drain_cancelled_isaac_call(tool_name, task, client)
+            except asyncio.CancelledError as cancelled:
+                # The same exception goes on; it carries what the engine did
+                # to the usage and audit records (_run_envelope).
+                setattr(
+                    cancelled,
+                    _DRAINED_OUTCOME,
+                    await self._drain_cancelled_isaac_call(tool_name, task, client),
+                )
                 raise
 
         return await self._run_envelope(
@@ -2008,16 +2072,45 @@ class SimulMCPServer(LoggerMixin):
 
     async def _drain_cancelled_isaac_call(
         self, tool_name: str, task: "asyncio.Future[Dict[str, Any]]", client: Any
-    ) -> None:
+    ) -> "CancelledOutcome":
         """Wait, shielded from the cancellation, for a cancelled Isaac call to finish.
 
         Asks the bridge to interrupt the running script first, so a coroutine
         script stops at its next await instead of running to its end. The
         wait is bounded by the client's own socket deadline; a further cancel
         of the waiting request does not cut it short.
+
+        Returns:
+            What the engine did: its payload, normalised like any other, and
+            whether it ran the operation (``"unknown"`` when the call ended
+            without an answer, or with a connection failure or timeout that
+            leaves it open).
         """
-        if task.done():
-            return
+        if not task.done():
+            await self._wait_for_cancelled_isaac_call(tool_name, task, client)
+        if task.cancelled() or task.exception() is not None:
+            if not task.cancelled():
+                self.logger.debug(
+                    "The cancelled %s ended with %s", tool_name, type(task.exception()).__name__
+                )
+            return CancelledOutcome("unknown", None)
+        payload = task.result()
+        if not isinstance(payload, dict):
+            return CancelledOutcome("unknown", None)
+        apply_success_from_error(payload)
+        if payload.get("success") is False:
+            normalize_error_payload(payload)
+            if payload.get("error_type") in (
+                error_types.CONNECTION_ERROR,
+                error_types.TIMEOUT_ERROR,
+            ):
+                return CancelledOutcome("unknown", payload)
+        return CancelledOutcome(True, payload)
+
+    async def _wait_for_cancelled_isaac_call(
+        self, tool_name: str, task: "asyncio.Future[Dict[str, Any]]", client: Any
+    ) -> None:
+        """Interrupt the cancelled call's script and wait for it, shielded."""
         self.logger.info(
             "%s was cancelled by the client; holding the Isaac instance until it ends", tool_name
         )
@@ -2036,10 +2129,6 @@ class SimulMCPServer(LoggerMixin):
                     # A cancellation anyio's shield does not cover (a bare
                     # task.cancel()); the engine is still busy, keep waiting.
                     continue
-        if not task.cancelled() and task.exception() is not None:
-            self.logger.debug(
-                "The cancelled %s ended with %s", tool_name, type(task.exception()).__name__
-            )
 
     async def _exec_payload(
         self,

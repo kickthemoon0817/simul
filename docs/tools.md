@@ -1699,6 +1699,12 @@ under `<unknown tool>` with the name it gave in the record's parameters. The
 audit row of every call states the envelope's outcome, `error_type` included
 (see [Audit log](configuration.md#audit-log)).
 
+A call the client cancels may still have run: cancelling the request does not
+stop the engine. Its usage and audit rows say `cancelled` and `executed`:
+`false` (it never started), `true` (Isaac: the server waited for the engine,
+and the row keeps the engine's outcome) or `"unknown"` (Unreal, Blender: the
+request had been sent). Check the scene before repeating a cancelled call.
+
 ## Annotations
 
 Every tool's `readOnlyHint`, `destructiveHint` and `idempotentHint` follow one
