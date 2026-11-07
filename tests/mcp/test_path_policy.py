@@ -246,3 +246,166 @@ class TestCaptureDirectory:
         policy = _policy(tmp_path, enabled=False)
         expected = str(Path(tempfile.gettempdir()) / "simul" / "captures")
         assert policy.default_capture_dir() == expected
+
+
+class TestRelativePathBase:
+    """A relative tool path resolves against the relative-path base, not the checkout.
+
+    It used to resolve against the source checkout in an editable install, so
+    ``scenes/robot.usda`` named a file inside simul's own repository rather
+    than the client's project.
+    """
+
+    def test_from_settings_resolves_tool_paths_against_the_working_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        checkout = tmp_path / "checkout"
+        client = tmp_path / "client"
+        (checkout / "examples").mkdir(parents=True)
+        client.mkdir()
+        monkeypatch.chdir(client)
+        settings = Settings()
+        security = settings.security.model_copy(update={"allowed_paths": ["examples", str(client)]})
+
+        policy = PathPolicy.from_settings(
+            settings.model_copy(update={"security": security}), project_root=checkout
+        )
+
+        assert policy.relative_base == client.resolve()
+        assert policy.authorize("scenes/robot.usda") == str(client.resolve() / "scenes" / "robot.usda")
+        # A relative allowlist entry is configuration: it still names the checkout.
+        assert (checkout / "examples").resolve() in policy.allowed_roots
+
+    def test_relative_path_base_setting(self, tmp_path: Path) -> None:
+        base = tmp_path / "project"
+        base.mkdir()
+        settings = Settings()
+        security = settings.security.model_copy(
+            update={"allowed_paths": [str(base)], "relative_path_base": str(base)}
+        )
+
+        policy = PathPolicy.from_settings(settings.model_copy(update={"security": security}))
+
+        assert policy.authorize("robot.usda") == str(base.resolve() / "robot.usda")
+
+    def test_strict_config_accepts_the_setting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``validate-config`` (#311) knows it, nested as default.yaml documents it and flat."""
+        from simul.config import find_unknown_env_names, inspect_config_file
+
+        for text in (
+            "security:\n  sandbox:\n    relative_path_base: /abs/project\n",
+            "security:\n  relative_path_base: /abs/project\n",
+        ):
+            config = tmp_path / "simul.yaml"
+            config.write_text(text)
+            report = inspect_config_file(config)
+            assert report.errors == [] and report.warnings == [], text
+            assert report.settings.security.relative_path_base == "/abs/project"
+        assert find_unknown_env_names(["SECURITY__RELATIVE_PATH_BASE"]) == []
+        monkeypatch.setenv("SECURITY__RELATIVE_PATH_BASE", str(tmp_path))
+        assert Settings().security.relative_path_base == str(tmp_path)
+
+    def test_denial_shows_the_absolute_path_and_its_base(self, tmp_path: Path) -> None:
+        policy = _policy(tmp_path, relative_base=tmp_path / "client")
+
+        with pytest.raises(SandboxDenied) as excinfo:
+            policy.authorize("../escape/robot.usda")
+
+        details = excinfo.value.details
+        assert details["file_path"] == "../escape/robot.usda"
+        assert details["absolute_path"] == str(tmp_path.resolve() / "escape" / "robot.usda")
+        assert details["relative_to"] == str((tmp_path / "client").resolve())
+        # Outside the sandbox: nothing is followed, so no resolved_path.
+        assert "resolved_path" not in details
+
+    def test_denial_never_follows_a_link_outside_the_sandbox(self, tmp_path: Path) -> None:
+        """Following it would let a caller read where any symlink on disk points."""
+        policy = _policy(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        link = elsewhere / "lnk.usda"
+        link.symlink_to(tmp_path / "hidden_target_dir" / "target.usda")
+
+        details = policy.denial_details(str(link))
+
+        assert details["absolute_path"] == str(link)
+        assert "resolved_path" not in details
+        assert "hidden_target_dir" not in str(details)
+
+    def test_denial_of_an_absolute_path_shows_where_it_leads(self, tmp_path: Path) -> None:
+        policy = _policy(tmp_path)
+        link = tmp_path / "sandbox" / "link.usda"
+        link.symlink_to(tmp_path / "outside.usda")
+
+        details = policy.denial_details(str(link))
+
+        assert details["resolved_path"] == str((tmp_path / "outside.usda").resolve())
+        assert "relative_to" not in details
+
+    def test_url_denial_has_no_resolved_path(self, tmp_path: Path) -> None:
+        details = _policy(tmp_path).denial_details("https://example.com/a.usd")
+        assert "resolved_path" not in details
+
+
+class TestReadCheck:
+    """``read_check`` gives ``is_allowed``'s verdict for file-named paths, memoised."""
+
+    def test_agrees_with_is_allowed(self, tmp_path: Path) -> None:
+        policy = _policy(tmp_path)
+        inside = tmp_path / "sandbox"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.usda").write_text("x")
+        (inside / "real.usda").write_text("x")
+        (inside / "dir").mkdir()
+        (inside / "to_outside.usda").symlink_to(outside / "secret.usda")
+        (inside / "dir_link").symlink_to(outside, target_is_directory=True)
+        (inside / "to_inside.usda").symlink_to(inside / "real.usda")
+        candidates = [
+            str(inside / "real.usda"),
+            str(inside / "missing.usda"),
+            str(inside / "dir" / "missing" / "deep.usda"),
+            str(inside / "to_outside.usda"),
+            str(inside / "dir_link" / "secret.usda"),
+            str(inside / "dir_link" / ".." / "sandbox" / "real.usda"),
+            str(inside / "dir" / ".." / "real.usda"),
+            str(inside / "to_inside.usda"),
+            str(outside / "secret.usda"),
+            str(inside),
+            (inside / "real.usda").as_uri(),
+            "omniverse://nucleus/a.usd",
+            "https://example.com/a.usd",
+            "relative_root/a.usda",
+            "",
+        ]
+        check = policy.read_check()
+        for candidate in candidates:
+            assert check(candidate) is policy.is_allowed(candidate), candidate
+            assert check(candidate) is policy.is_allowed(candidate), candidate  # memoised
+
+    def test_takes_file_named_paths_literally(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A directory literally named ``$VAR`` is not expanded the way a caller's path is.
+
+        A layer naming ``<sandbox>/$SIMUL_TEST_DIR/secret.usda``, where that
+        directory is a symlink out of the sandbox, makes pxr read outside it;
+        expanding the variable to a path inside would pass it.
+        """
+        policy = _policy(tmp_path)
+        inside = tmp_path / "sandbox"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.usda").write_text("x")
+        (inside / "$SIMUL_TEST_DIR").symlink_to(outside, target_is_directory=True)
+        monkeypatch.setenv("SIMUL_TEST_DIR", str(inside))
+        named = str(inside / "$SIMUL_TEST_DIR" / "secret.usda")
+
+        assert policy.is_allowed(named)  # a caller's path: $VARS expand
+        assert policy.read_check()(named) is False
+
+    def test_disabled_policy_allows_everything(self, tmp_path: Path) -> None:
+        check = _policy(tmp_path, enabled=False).read_check()
+        assert check("/etc/shadow") is True

@@ -16,11 +16,13 @@ import math
 import numbers
 import os
 import re
+import secrets
 import shutil
+import struct
 import tempfile
+import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -86,9 +88,31 @@ MAX_SCRIPT_OUTPUT_CHARS = 100_000
 # repeat it as SCRIPT_OUTPUT_JSON_BYTES_MAX.
 MAX_SCRIPT_OUTPUT_JSON_BYTES = 300_000
 
+# A page of list_scene_objects or search_objects stops before its entries' JSON
+# passes this many bytes. The server cuts any list that takes a reply past its
+# 40 KB result budget (simul.mcp.result_budget) and keeps the count it was
+# given: at 6,006 objects, a page of 5000 came back as 429 with count 5000. The
+# rest of the reply takes well under a kilobyte. The MCP schemas repeat it as
+# LISTING_JSON_BYTES_MAX; this module ships inside the Blender add-on and
+# cannot import them.
+LISTING_JSON_BYTES_MAX = 30_000
+
 # capture_viewport methods (issue #228). "auto" means "viewport" in attached
 # mode and "render" in embedded mode, which has no editor window.
 CAPTURE_METHODS = ("auto", "viewport", "render")
+
+# capture_viewport_sequence writes its frames to files (B1-05): five 512 px
+# frames inline exceeded the server's 40 KB result budget and came back as one,
+# and 1500 frames ran 7 s on Blender's main thread before failing to encode.
+# One call captures at most MAX_SEQUENCE_FRAMES frames (DEFAULT_SEQUENCE_FRAMES
+# unless asked), so that its list of paths stays well inside the budget, and
+# starts no frame after SEQUENCE_TIME_BUDGET_SECONDS, well inside the default
+# 30 s client timeout; the reply names the frame to continue from.
+# BlenderCaptureSequenceRequest repeats the frame numbers: this module ships
+# inside the Blender add-on and cannot import the MCP schemas.
+DEFAULT_SEQUENCE_FRAMES = 50
+MAX_SEQUENCE_FRAMES = 100
+SEQUENCE_TIME_BUDGET_SECONDS = 10.0
 
 # Engines the draw manager draws itself, so an offscreen redraw of a 3D View
 # shows them. An external engine (Cycles, third-party) draws its Rendered view
@@ -338,12 +362,76 @@ _ID_COLLECTIONS: Dict[str, str] = {
     "VectorFont": "fonts",
 }
 
+# The Principled BSDF input each assign_material texture drives.
+_TEXTURE_SOCKETS: Dict[str, str] = {
+    "base_color": "Base Color",
+    "metallic": "Metallic",
+    "roughness": "Roughness",
+    "normal": "Normal",
+}
+
+# The settings each light type has besides energy, color and use_shadow, as
+# set_light_params takes them. A sun's softness is its angle and an area
+# light's its size; shadow_soft_size is the radius of point and spot lights.
+_LIGHT_TYPE_SETTINGS: Dict[str, Tuple[str, ...]] = {
+    "POINT": ("shadow_soft_size",),
+    "SPOT": ("shadow_soft_size", "spot_size", "spot_blend"),
+    "SUN": ("angle",),
+    "AREA": ("shape", "size", "size_y"),
+}
+
+# Limits of the light settings: Blender 5.0.1's hard limits, which it clamps
+# to silently, except that energy may not be negative here (Blender allows
+# it). None leaves that side open. The angles are 1 degree and pi as Blender
+# stores them, in single precision, so a value read back passes again; the
+# MCP schemas repeat them as LIGHT_ANGLE_MIN and LIGHT_ANGLE_MAX.
+_LIGHT_ANGLE_MIN = 0.01745329238474369
+_LIGHT_ANGLE_MAX = 3.1415927410125732
+_LIGHT_LIMITS: Dict[str, Tuple[float, Optional[float]]] = {
+    "energy": (0.0, None),
+    "shadow_soft_size": (0.0, None),
+    "spot_size": (_LIGHT_ANGLE_MIN, _LIGHT_ANGLE_MAX),
+    "spot_blend": (0.0, 1.0),
+    "angle": (0.0, _LIGHT_ANGLE_MAX),
+    "size": (0.0, None),
+    "size_y": (0.0, None),
+}
+
+_AREA_LIGHT_SHAPES = ("SQUARE", "RECTANGLE", "DISK", "ELLIPSE")
+
+# uv_unwrap_mesh methods and the uv operator each runs.
+_UV_UNWRAP_METHODS: Dict[str, str] = {
+    "SMART_PROJECT": "smart_project",
+    "CUBE_PROJECT": "cube_project",
+}
+
 # Modifier types whose viewport and render results can differ through a
 # second level setting: (viewport setting, render setting).
 _RENDER_LEVEL_SETTINGS: Dict[str, Tuple[str, str]] = {
     "MULTIRES": ("levels", "render_levels"),
     "SUBSURF": ("levels", "render_levels"),
 }
+
+
+class ValidationError(ValueError):
+    """Arguments a Blender tool refuses, with a stable reason in ``details.code``.
+
+    The class name is the envelope's ``error_type`` in both modes: the server
+    names an exception by its class, and so does the add-on's bridge. It
+    subclasses ValueError, which these refusals raised before they had a type.
+    """
+
+    def __init__(self, message: str, code: str, **details: Any) -> None:
+        super().__init__(message)
+        self.details: Dict[str, Any] = {"code": code, **details}
+
+
+class NotFoundError(ValueError):
+    """Something an argument names does not exist; ``details.code`` names what."""
+
+    def __init__(self, message: str, code: str, **details: Any) -> None:
+        super().__init__(message)
+        self.details: Dict[str, Any] = {"code": code, **details}
 
 
 class UnsavedChangesError(RuntimeError):
@@ -695,6 +783,70 @@ def world_transform(obj: Any) -> Dict[str, Any]:
     }
 
 
+def _box_relation(
+    corners: List[List[float]],
+    rows: List[List[float]],
+    low: Sequence[float],
+    high: Sequence[float],
+) -> str:
+    """
+    Say where an object's world-space bounding box lies relative to an axis-aligned box.
+
+    The object's box is the parallelepiped its eight world-space corners span,
+    its edges along the columns of its world matrix. Two convex boxes are
+    apart exactly when some axis separates their projections, and the axes to
+    try are each box's face normals and the cross products of their edges
+    (the separating axis theorem). Comparisons allow for single-precision
+    rounding of the corners, so touching counts as intersecting and a box
+    that fills the bounds as inside.
+
+    Args:
+        corners: The eight world-space corners, in any order.
+        rows: The first three rows of the object's world matrix.
+        low: The bounds' minimum corner.
+        high: The bounds' maximum corner.
+
+    Returns:
+        "inside", "intersecting" or "outside".
+    """
+    extent = max(
+        [1.0] + [abs(v) for corner in corners for v in corner] + [abs(v) for v in (*low, *high)]
+    )
+    slack = 4 * _FLOAT32_EPSILON * extent
+    if all(
+        low[i] - slack <= corner[i] <= high[i] + slack for corner in corners for i in range(3)
+    ):
+        return "inside"
+
+    def cross(a: Sequence[float], b: Sequence[float]) -> List[float]:
+        return [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+
+    world_axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    edges = [[rows[0][i], rows[1][i], rows[2][i]] for i in range(3)]
+    axes = (
+        world_axes
+        + [cross(edges[1], edges[2]), cross(edges[2], edges[0]), cross(edges[0], edges[1])]
+        + [cross(w, e) for w in world_axes for e in edges]
+    )
+    middle = [(a + b) / 2 for a, b in zip(low, high)]
+    half = [(b - a) / 2 for a, b in zip(low, high)]
+    for axis in axes:
+        length = math.sqrt(sum(v * v for v in axis))
+        if length <= 1e-12:
+            continue
+        unit = [v / length for v in axis]
+        projected = [sum(u * c for u, c in zip(unit, corner)) for corner in corners]
+        centre = sum(u * m for u, m in zip(unit, middle))
+        reach = sum(abs(u) * h for u, h in zip(unit, half))
+        if max(projected) < centre - reach - slack or min(projected) > centre + reach + slack:
+            return "outside"
+    return "intersecting"
+
+
 # Blender 4.4 introduced slotted actions: one action can animate several IDs,
 # each through its own slot, and keeps each slot's F-curves in a channelbag
 # inside the action's layers and strips. Blender 5.0 removed Action.fcurves,
@@ -741,6 +893,371 @@ def action_fcurves(
 def _channel_name(data_path: str, index: int) -> str:
     """Name a keyframed property, or one element of it, as ``location[2]``."""
     return data_path if index < 0 else f"{data_path}[{index}]"
+
+
+# -- Files an import reads besides the one named (B1-20) ---------------------
+#
+# The sandbox checked only the path handed to import_file, so a glTF inside the
+# allowed folders whose image URI pointed outside them imported that image, and
+# a later GLB export embedded it. Each function below lists, for one reference
+# the file makes, the paths Blender's importer tries in the order it tries
+# them; the first that exists is what it reads.
+
+# MTL texture options and how many arguments each takes at most (the OBJ
+# importer's parse_texture_option); numeric ones stop at the first non-number.
+_MTL_OPTION_ARGUMENTS = {
+    "-o": 3,
+    "-s": 3,
+    "-t": 3,
+    "-mm": 2,
+    "-bm": 1,
+    "-boost": 1,
+    "-texres": 1,
+    "-blendu": 1,
+    "-blendv": 1,
+    "-clamp": 1,
+    "-cc": 1,
+    "-imfchan": 1,
+    "-type": 1,
+}
+_MTL_NUMERIC_OPTIONS = frozenset({"-o", "-s", "-t", "-mm", "-bm", "-boost", "-texres"})
+_MTL_MAP_KEYWORDS = frozenset({"bump", "refl", "norm", "disp", "decal"})
+
+# USD layers an import composes, and so reads, besides textures.
+_USD_LAYER_EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
+
+
+def _unquote_path(text: str) -> str:
+    """Strip whitespace and the surrounding double quotes the OBJ importer strips."""
+    text = text.strip()
+    if len(text) > 2 and text.startswith('"') and text.endswith('"'):
+        text = text[1:-1]
+    return text
+
+
+def _joined(directory: str, path: str) -> str:
+    """Join as Blender's BLI_path_join does: a later absolute part stays inside."""
+    return os.path.normpath(os.path.join(directory, path.lstrip("/\\")))
+
+
+def _gltf_document(path: Path) -> Dict[str, Any]:
+    """Read the JSON of a .gltf, or the JSON chunk of a .glb."""
+    with path.open("rb") as handle:
+        header = handle.read(20)
+        if header[:4] == b"glTF":
+            length, kind = struct.unpack_from("<II", header, 12)
+            if kind != 0x4E4F534A:  # "JSON"
+                raise ValueError(f"{path.name} has no JSON chunk")
+            return dict(json.loads(handle.read(length)))
+        return dict(json.loads(header + handle.read()))
+
+
+def _gltf_reads(path: Path) -> List[List[str]]:
+    """List the buffer and image files a glTF or GLB names, as its importer opens them."""
+    from urllib.parse import unquote
+
+    document = _gltf_document(path)
+    base = str(path.parent)
+    reads = []
+    for key in ("buffers", "images"):
+        for entry in document.get(key) or []:
+            uri = entry.get("uri") if isinstance(entry, dict) else None
+            if not isinstance(uri, str) or not uri or uri.startswith("data:"):
+                continue
+            # io_scene_gltf2: join(dirname(gltf), normpath(unquote(uri))).
+            local = os.path.normpath(unquote(uri.replace("\\", "/")))
+            reads.append([os.path.join(base, local)])
+    return reads
+
+
+def _mtl_texture_path(rest: str) -> str:
+    """Return the image path of an MTL map line, after its options."""
+    text = rest.strip()
+    while text.startswith("-"):
+        option, _, text = text.partition(" ")
+        text = text.lstrip()
+        for _ in range(_MTL_OPTION_ARGUMENTS.get(option, 1)):
+            argument, _, remainder = text.partition(" ")
+            if not argument:
+                break
+            if option in _MTL_NUMERIC_OPTIONS:
+                try:
+                    float(argument)
+                except ValueError:
+                    break
+            text = remainder.lstrip()
+    return _unquote_path(text)
+
+
+def _obj_reads(path: Path) -> List[List[str]]:
+    """List the MTL libraries an OBJ names and the textures they name.
+
+    The OBJ importer joins each mtllib to the OBJ's folder, and tries a
+    texture joined to the MTL's folder, as given (absolute, or relative to the
+    working directory), with underscores turned to spaces, and its base name
+    in the MTL's folder.
+    """
+    reads: List[List[str]] = []
+    folder = str(path.parent)
+    libraries: List[str] = []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if line.startswith("mtllib"):
+                name = _unquote_path(line[6:])
+                if name:
+                    libraries.append(_joined(folder, name))
+    for library in dict.fromkeys(libraries):
+        reads.append([library])
+        if not os.path.isfile(library):
+            continue
+        library_folder = os.path.dirname(library)
+        with open(library, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                keyword, _, rest = line.strip().partition(" ")
+                keyword = keyword.lower()
+                if not (keyword.startswith("map_") or keyword in _MTL_MAP_KEYWORDS):
+                    continue
+                image = _mtl_texture_path(rest)
+                if image:
+                    reads.append(
+                        [
+                            _joined(library_folder, image),
+                            os.path.abspath(image),
+                            os.path.abspath(image.replace("_", " ")),
+                            os.path.join(library_folder, os.path.basename(image)),
+                        ]
+                    )
+    return reads
+
+
+def _resolve_ncase(path: str) -> str:
+    """Find a path's real spelling on a case-sensitive file system.
+
+    Mirrors ``bpy.path.resolve_ncase`` (Blender 4.2 through 5.0.1), which
+    ``bpy_extras.image_utils.load_image`` tries after each path: a component
+    that does not exist is matched case-insensitively among its folder's
+    entries. Returns the path unchanged when nothing matches.
+    """
+
+    def found(candidate: str) -> Tuple[str, bool]:
+        if not candidate or os.path.exists(candidate):
+            return candidate, True
+        filename, folder = os.path.basename(candidate), os.path.dirname(candidate)
+        suffix = ""
+        if not filename:
+            if len(folder) < len(candidate):
+                suffix = candidate[len(folder) :]
+            filename, folder = os.path.basename(folder), os.path.dirname(folder)
+        if not os.path.exists(folder):
+            if folder == candidate:
+                return candidate, False
+            folder, ok = found(folder)
+            if not ok:
+                return candidate, False
+        if not os.path.isdir(folder):
+            return candidate, False
+        try:
+            entries = os.listdir(folder)
+        except OSError:
+            return candidate, False
+        lower = filename.lower()
+        match = next((entry for entry in entries if entry.lower() == lower), None)
+        if match is None:
+            return candidate, False
+        return os.path.join(folder, match) + suffix, True
+
+    return found(path)[0]
+
+
+def _fbx_element_name(element: Any) -> str:
+    """An FBX object's name: the part of its name property before the class."""
+    props = getattr(element, "props", None) or []
+    if len(props) < 2 or not isinstance(props[-2], bytes):
+        return ""
+    return props[-2].split(b"\x00\x01")[0].decode("utf-8", "replace")
+
+
+def _fbx_reads(path: Path, allowed: Callable[[str], bool]) -> List[List[str]]:
+    """List the texture files an FBX names, as Blender's FBX importer looks for them.
+
+    blen_read_texture_image takes a texture's RelativeFilename joined to the
+    FBX's folder (stripped of a leading separator), else its FileName or
+    Filename, else the texture's name. bpy_extras.image_utils.load_image then
+    tries that path, the path joined to the folder and its base name there,
+    each also with its case resolved (resolve_ncase). Its recursive search of
+    folders, the importer's use_image_search, is switched off for an import
+    the sandbox checks (import_file), so it reads nothing found that way.
+    Blender's own FBX parser reads the file; a file it cannot parse fails the
+    import itself.
+    """
+    try:
+        from io_scene_fbx import parse_fbx  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise UncheckableReferences("Blender's FBX add-on is not available") from exc
+
+    try:
+        root, _version = parse_fbx.parse(str(path))
+    except Exception:
+        return []
+    base = str(path.parent)
+    reads: List[List[str]] = []
+    for section in root.elems:
+        if section.id != b"Objects":
+            continue
+        for element in section.elems:
+            if element.id not in (b"Texture", b"Video"):
+                continue
+            names: Dict[bytes, str] = {}
+            for prop in element.elems:
+                if prop.id in (b"RelativeFilename", b"FileName", b"Filename") and prop.props:
+                    value = prop.props[0]
+                    if isinstance(value, bytes):
+                        value = value.decode("utf-8", "replace")
+                    names.setdefault(prop.id, str(value))
+            relative = names.get(b"RelativeFilename")
+            if relative:
+                # str.lstrip(None) strips whitespace, as the importer's
+                # lstrip(os.path.altsep) does where altsep is None.
+                image = os.path.join(base, relative.lstrip(os.path.sep).lstrip(os.path.altsep))
+            else:
+                image = names.get(b"FileName") or names.get(b"Filename") or ""
+            if not image:
+                image = _fbx_element_name(element)
+            if not image:
+                continue
+            # bpy.path.native_pathsep, as load_image applies it.
+            image = image.replace("\\", "/") if os.sep == "/" else image.replace("/", "\\")
+            short = image[2:] if image[:2] == "//" else image
+            candidates = [image]
+            for variant in (image, os.path.join(base, image), os.path.join(base, os.path.basename(short))):
+                candidates.extend((variant, _resolve_ncase(variant)))
+            reads.append(list(dict.fromkeys(candidates)))
+    return reads
+
+
+def _usd_reads(path: Path, allowed: Callable[[str], bool]) -> List[List[str]]:
+    """List the layers and assets a USD file composes, following its layers.
+
+    Sublayers, references, payloads and asset-valued attributes (textures)
+    of each layer, resolved against that layer, through pxr (Blender bundles
+    it). Layers outside the sandbox are not opened: they are refused anyway.
+    """
+    try:
+        from pxr import Ar, Sdf, UsdUtils
+    except ImportError:
+        return _usda_text_reads(path)
+
+    reads: List[List[str]] = []
+    pending: List[str] = [str(path)]
+    seen: set = set()
+    while pending:
+        identifier = pending.pop()
+        if identifier in seen or len(seen) >= 1000:
+            continue
+        seen.add(identifier)
+        try:
+            layer = Sdf.Layer.FindOrOpen(identifier)
+        except Exception:
+            # The importer cannot open it either, so it reads nothing through it.
+            layer = None
+        if layer is None:
+            continue
+        anchor = os.path.dirname(Ar.SplitPackageRelativePathOuter(identifier)[0])
+        try:
+            sublayers, references, payloads = UsdUtils.ExtractExternalReferences(identifier)
+        except Exception as exc:
+            raise UncheckableReferences(f"pxr could not list the references of {identifier}: {exc}") from exc
+        for asset in (*sublayers, *references, *payloads):
+            if not asset:
+                continue
+            resolved = layer.ComputeAbsolutePath(asset)
+            outer, inner = Ar.SplitPackageRelativePathOuter(resolved)
+            if not os.path.isabs(outer):
+                outer = os.path.join(anchor, outer)
+            outer = os.path.normpath(outer)
+            if "<UDIM>" in outer:
+                import glob
+
+                tiles = glob.glob(outer.replace("<UDIM>", "[0-9][0-9][0-9][0-9]"))
+                reads.extend([tile] for tile in tiles)
+                continue
+            # A path such as "textures/a.png" that does not exist beside the
+            # layer is looked up in the resolver's search paths
+            # (PXR_AR_DEFAULT_SEARCH_PATH), as the import's stage does.
+            found = _usd_search_path_hit(Ar, asset, identifier, outer)
+            reads.append([outer] if found is None else [outer, found])
+            target = found if found is not None and not os.path.exists(outer) else outer
+            if not (target.lower().endswith(_USD_LAYER_EXTENSIONS) and allowed(target)):
+                continue
+            if inner and target == outer:
+                pending.append(resolved)
+            elif os.path.isfile(target):
+                pending.append(target)
+    return reads
+
+
+def _usd_search_path_hit(ar: Any, asset: str, layer_path: str, anchored: str) -> Optional[str]:
+    """Where the USD resolver finds ``asset`` for a layer, when that is not beside it.
+
+    Returns:
+        The file the resolver resolves the asset to, outside its package if
+        it is in one, or None when that is the anchored path or nothing.
+    """
+    if os.path.exists(anchored):
+        return None
+    try:
+        resolver = ar.GetResolver()
+        identifier = resolver.CreateIdentifier(asset, ar.ResolvedPath(layer_path))
+        hit = str(resolver.Resolve(identifier))
+    except Exception:
+        return None
+    if not hit:
+        return None
+    outer = os.path.normpath(ar.SplitPackageRelativePathOuter(hit)[0])
+    return None if outer == anchored else outer
+
+
+def _usda_text_reads(path: Path) -> List[List[str]]:
+    """Without pxr: the asset paths of a text .usda that names no other layer.
+
+    Raises:
+        UncheckableReferences: For a binary layer, or a text layer naming
+            other layers, which this cannot follow.
+    """
+    with path.open("rb") as handle:
+        head = handle.read(8)
+    if not head.startswith(b"#usda"):
+        raise UncheckableReferences(f"{path.name} is a binary USD file and pxr is not available")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    reads = []
+    for match in re.finditer(r"@@@(.*?)@@@|@([^@\n]+)@", text):
+        asset = match.group(1) or match.group(2) or ""
+        local = asset.split("[", 1)[0]
+        if local.lower().endswith(_USD_LAYER_EXTENSIONS):
+            raise UncheckableReferences(
+                f"{path.name} composes {asset} and pxr is not available to follow it"
+            )
+        reads.append([os.path.normpath(os.path.join(str(path.parent), local))])
+    return reads
+
+
+class UncheckableReferences(Exception):
+    """The files an import would read cannot be listed, so the sandbox cannot vouch for them."""
+
+
+# Importer options that search folders for a file a reference names, set off
+# while the sandbox is on: the FBX importer's use_image_search walks the
+# texture's folder and the FBX's, subfolders included, for any file of the
+# same name (bpy_extras.image_utils.load_image), which found and loaded an
+# image outside the sandbox. No other importer searches.
+_IMPORT_SEARCH_OPTIONS: Dict[str, Tuple[str, ...]] = {"FBX": ("use_image_search",)}
+
+_IMPORT_READS: Dict[str, Callable[[Path, Callable[[str], bool]], List[List[str]]]] = {
+    "GLTF": lambda path, _allowed: _gltf_reads(path),
+    "OBJ": lambda path, _allowed: _obj_reads(path),
+    "FBX": _fbx_reads,
+    "USD": _usd_reads,
+}
 
 
 def _did_you_mean(name: str, choices: Sequence[str]) -> str:
@@ -807,6 +1324,92 @@ def _finite_triple(value: Any, what: str) -> Tuple[float, float, float]:
     return (triple[0], triple[1], triple[2])
 
 
+def _finite_number(value: Any, what: str) -> float:
+    """A finite real number as a float (not a bool), or a ValidationError naming ``what``."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise ValidationError(f"{what} must be a number, got {value!r}", "invalid_value", field=what)
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValidationError(f"{what} must be finite, got {value!r}", "invalid_value", field=what)
+    return number
+
+
+def _unit_value(value: Any, what: str) -> float:
+    """A finite number in [0, 1], or a ValidationError naming ``what``."""
+    number = _finite_number(value, what)
+    if not 0.0 <= number <= 1.0:
+        raise ValidationError(
+            f"{what} must lie between 0 and 1, got {value!r}", "out_of_range", field=what
+        )
+    return number
+
+
+def _unit_color(value: Any, what: str) -> Tuple[float, float, float, Optional[float]]:
+    """An RGB or RGBA colour in [0, 1] as (r, g, b, alpha), alpha None for RGB.
+
+    Blender's Base Color socket takes four numbers and refused three with
+    "sequences of dimension 0 should contain 4 items, not 3".
+    """
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__len__") or len(value) not in (3, 4):
+        raise ValidationError(
+            f"{what} must be [r, g, b] or [r, g, b, a], got {value!r}", "invalid_value", field=what
+        )
+    channels = [_unit_value(channel, what) for channel in value]
+    return (channels[0], channels[1], channels[2], channels[3] if len(channels) == 4 else None)
+
+
+def _real_path(path: str) -> str:
+    """A file path in one spelling: absolute, symlinks resolved, case-folded where the OS folds."""
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _image_file(image: Any) -> Optional[str]:
+    """The file an image datablock reads, as ``_real_path`` spells it; None when it reads none."""
+    path = getattr(image, "filepath", "") or ""
+    if not path:
+        return None
+    resolve = getattr(getattr(bpy, "path", None), "abspath", None)
+    if resolve is not None:
+        # Blender-relative paths (//textures/a.png) are relative to the .blend
+        # file, or to the library the image is linked from.
+        path = resolve(path, library=getattr(image, "library", None))
+    return _real_path(path)
+
+
+def _name_list(names: Sequence[str], limit: int = 5) -> str:
+    """``'a', 'b' and 3 more`` for the first ``limit`` names."""
+    shown = ", ".join(f"'{name}'" for name in names[:limit])
+    rest = len(names) - limit
+    return shown + (f" and {rest} more" if rest > 0 else "")
+
+
+def _live_links(socket: Any) -> List[Any]:
+    """The links into a socket that Blender evaluates: neither muted nor invalid."""
+    return [
+        link
+        for link in socket.links
+        if not getattr(link, "is_muted", False) and getattr(link, "is_valid", True)
+    ]
+
+
+def _link_source(link: Any) -> Tuple[Any, Any]:
+    """The node and output socket a link really comes from, through any Reroute nodes.
+
+    Returns:
+        That node and socket, or the last Reroute's when one has nothing
+        plugged in.
+    """
+    source, output = link.from_node, link.from_socket
+    for _hop in range(1000):
+        if source.type != "REROUTE":
+            break
+        feeding = [live for socket in source.inputs for live in _live_links(socket)]
+        if not feeding:
+            break
+        source, output = feeding[0].from_node, feeding[0].from_socket
+    return source, output
+
+
 def _mesh_index(value: Any, what: str, vertex_count: int) -> int:
     """A vertex index of an edge or face, checked to be an integer within the vertex list."""
     if isinstance(value, bool) or not isinstance(value, numbers.Integral):
@@ -815,16 +1418,6 @@ def _mesh_index(value: Any, what: str, vertex_count: int) -> int:
     if index < 0 or index >= vertex_count:
         raise ValueError(f"{what} index {index} out of range [0, {vertex_count})")
     return index
-
-
-@dataclass
-class BlenderObjectEntry:
-    """Serializable Blender object summary."""
-
-    name: str
-    object_type: str
-    collection: Optional[str]
-    visible: bool
 
 
 class BlenderRuntimeSession:
@@ -993,58 +1586,129 @@ class BlenderRuntimeSession:
         collection_name: Optional[str] = None,
         include_hidden: bool = False,
         max_items: int = 200,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
-        List scene objects from the active Blender data context.
+        List scene objects from the active Blender data context, a page at a time.
+
+        A page holds at most ``max_items`` objects, and fewer when their JSON
+        would pass LISTING_JSON_BYTES_MAX, so that it fits the server's result
+        budget instead of being cut below the count it reports; ``next_offset``
+        continues the listing.
 
         Args:
             collection_name: Optional collection name to filter objects.
             include_hidden: Include hidden objects when True.
             max_items: Maximum number of objects returned.
+            offset: How many matching objects to skip, as next_offset gives it.
 
         Returns:
-            Dictionary with object summaries and truncation metadata.
+            The page (objects, count), how many objects match (total), the
+            offset of the next page (next_offset, None after the last one) and
+            whether more follow (truncated).
         """
         if max_items < 1:
             raise ValueError("max_items must be greater than zero")
+        if offset < 0:
+            raise ValueError("offset must not be negative")
 
         source_objects = self._resolve_object_source(collection_name)
-        object_entries: List[BlenderObjectEntry] = []
-
+        matching = []
         for scene_object in source_objects:
-            object_visible = self._is_object_visible(scene_object)
-            if not include_hidden and not object_visible:
-                continue
-
-            entry = BlenderObjectEntry(
-                name=scene_object.name,
-                object_type=scene_object.type,
-                collection=collection_name,
-                visible=object_visible,
-            )
-            object_entries.append(entry)
-
-            if len(object_entries) >= max_items:
-                break
-
-        serialized_objects = [
-            {
-                "name": entry.name,
-                "object_type": entry.object_type,
-                "collection": entry.collection,
-                "visible": entry.visible,
-            }
-            for entry in object_entries
-        ]
+            visible = self._is_object_visible(scene_object)
+            if include_hidden or visible:
+                matching.append((scene_object, visible))
+        page = self._page(
+            matching[offset : offset + max_items], offset, len(matching), collection_name
+        )
 
         return {
             "collection": collection_name,
             "include_hidden": include_hidden,
             "max_items": max_items,
-            "count": len(serialized_objects),
-            "objects": serialized_objects,
-            "truncated": len(serialized_objects) >= max_items,
+            **page,
         }
+
+    def _page(
+        self,
+        candidates: List[Tuple[Any, bool]],
+        offset: int,
+        total: int,
+        collection_name: Optional[str],
+    ) -> Dict[str, Any]:
+        """
+        Describe one page of matching objects.
+
+        Args:
+            candidates: The matching objects from ``offset`` on, as many as
+                the page may hold, each with whether it is visible.
+            offset: How many matching objects precede them.
+            total: How many objects match.
+            collection_name: The collection the listing filters by, which
+                each entry names; otherwise each names the object's own.
+
+        Returns:
+            offset, count, total, next_offset, objects and truncated.
+        """
+        scene_collections = self._scene_collection_pointers()
+        objects: List[Dict[str, Any]] = []
+        size = 2
+        for scene_object, visible in candidates:
+            entry = {
+                "name": scene_object.name,
+                "object_type": scene_object.type,
+                "collection": collection_name
+                or self._collection_of(scene_object, scene_collections),
+                "visible": visible,
+            }
+            # The server measures its budget as json.dumps does: non-ASCII
+            # escaped, ", " between list items.
+            entry_size = len(json.dumps(entry)) + 2
+            if objects and size + entry_size > LISTING_JSON_BYTES_MAX:
+                break
+            objects.append(entry)
+            size += entry_size
+        following = offset + len(objects)
+        more = following < total
+        return {
+            "offset": offset,
+            "count": len(objects),
+            "total": total,
+            "next_offset": following if more else None,
+            "objects": objects,
+            "truncated": more,
+        }
+
+    @staticmethod
+    def _scene_collection_pointers() -> set:
+        """The pointers of the current scene's collections, its master collection included."""
+        blender_module: Any = bpy
+        root = blender_module.context.scene.collection
+        return {root.as_pointer()} | {
+            child.as_pointer() for child in root.children_recursive
+        }
+
+    @staticmethod
+    def _collection_of(obj: Any, scene_collections: set) -> Optional[str]:
+        """
+        Name a collection that holds an object, one of the current scene's when it can.
+
+        An object can be in several collections and scenes. The scene's own
+        master collection is named "Scene Collection".
+
+        Args:
+            obj: The Blender object.
+            scene_collections: _scene_collection_pointers().
+
+        Returns:
+            The first of its collections in the current scene, else its first
+            collection anywhere (embedded mode lists every object in the
+            file), or None for an object in none.
+        """
+        holders = list(obj.users_collection)
+        in_scene = [c for c in holders if c.as_pointer() in scene_collections]
+        chosen = (in_scene or holders or [None])[0]
+        return None if chosen is None else chosen.name
 
     def get_object_info(self, object_name: str) -> Dict[str, Any]:
         """
@@ -1249,25 +1913,46 @@ class BlenderRuntimeSession:
         name_pattern: Optional[str] = None,
         object_type: Optional[str] = None,
         max_results: int = 50,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
-        Search for objects matching optional name pattern and type filter.
+        Search for objects matching optional name pattern and type filter, a page at a time.
+
+        A page is cut short to fit the server's result budget as
+        list_scene_objects' is; ``next_offset`` continues the search.
 
         Args:
             name_pattern: Python regular expression searched for in each object
                 name; a repeated group that holds a quantifier or alternatives,
                 as in (\\w+)+, is refused because it can run for hours.
-            object_type: Blender object type filter (MESH, LIGHT, etc.).
+            object_type: Blender object type filter (MESH, LIGHT, etc.), in any case.
             max_results: Maximum number of results.
+            offset: How many matching objects to skip, as next_offset gives it.
 
         Returns:
-            Dictionary with matched objects and truncation flag.
+            The page (objects, count), how many objects match (total), the
+            offset of the next page (next_offset, None after the last one) and
+            whether more follow (truncated).
 
         Raises:
             ValueError: name_pattern is not a valid regular expression, or
                 repeats a group that holds a quantifier or alternatives (see
-                ``simul.utils.regex_guard``).
+                ``simul.utils.regex_guard``); object_type is not one of the
+                running Blender's object types.
         """
+        if max_results < 1:
+            raise ValueError("max_results must be greater than zero")
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+        if object_type is not None:
+            # Blender's type identifiers are upper case: "mesh" matched nothing.
+            object_type = object_type.strip().upper()
+            known = self._object_type_names()
+            if object_type not in known:
+                raise ValueError(
+                    f"Unknown object_type {object_type!r}; Blender's object types: "
+                    + ", ".join(known)
+                )
         compiled_pattern = None
         if name_pattern:
             try:
@@ -1286,40 +1971,41 @@ class BlenderRuntimeSession:
                     "character class instead (\\w+ rather than (\\w+)+)"
                 )
         all_objects = self._resolve_object_source(None)
-        matches: List[Dict[str, Any]] = []
+        matching = [
+            obj
+            for obj in all_objects
+            if (compiled_pattern is None or compiled_pattern.search(obj.name))
+            and (object_type is None or obj.type == object_type)
+        ]
+        # Visibility is read only for the objects the page can describe.
+        page = self._page(
+            [
+                (obj, self._is_object_visible(obj))
+                for obj in matching[offset : offset + max_results]
+            ],
+            offset,
+            len(matching),
+            None,
+        )
 
-        for obj in all_objects:
-            if compiled_pattern and not compiled_pattern.search(obj.name):
-                continue
-            if object_type and obj.type != object_type:
-                continue
+        return {"pattern": name_pattern, "object_type": object_type, **page}
 
-            matches.append(
-                {
-                    "name": obj.name,
-                    "object_type": obj.type,
-                    "collection": None,
-                    "visible": self._is_object_visible(obj),
-                }
-            )
-            if len(matches) >= max_results:
-                break
-
-        return {
-            "pattern": name_pattern,
-            "object_type": object_type,
-            "count": len(matches),
-            "objects": matches,
-            "truncated": len(matches) >= max_results,
-        }
+    @staticmethod
+    def _object_type_names() -> List[str]:
+        """The running Blender's object type identifiers (MESH, LIGHT, ...)."""
+        blender_module: Any = bpy
+        return [
+            item.identifier
+            for item in blender_module.types.Object.bl_rna.properties["type"].enum_items
+        ]
 
     def summarize_scene(self) -> Dict[str, Any]:
         """
         Produce a high-level scene summary grouped by object type.
 
         Returns:
-            Dictionary with total counts, type breakdown, collections,
-            active camera, and frame range.
+            Dictionary with total counts, type breakdown, the scene's top-level
+            collections, active camera, and frame range.
         """
         blender_module: Any = bpy
         all_objects = self._resolve_object_source(None)
@@ -1329,7 +2015,9 @@ class BlenderRuntimeSession:
             type_counts[obj.type] = type_counts.get(obj.type, 0) + 1
 
         scene = blender_module.context.scene
-        collection_names = list(blender_module.data.collections.keys())
+        # The collections directly under the scene's own; bpy.data.collections
+        # also holds nested ones, other scenes' and orphans.
+        collection_names = [child.name for child in scene.collection.children]
         active_camera: Optional[str] = scene.camera.name if scene.camera else None
 
         return {
@@ -1342,46 +2030,124 @@ class BlenderRuntimeSession:
             "frame_end": scene.frame_end,
         }
 
-    def get_material_info(self, material_name: str) -> Dict[str, Any]:
+    def get_material_info(self, material_name: str, max_nodes: int = 50) -> Dict[str, Any]:
         """
-        Get material information with bounded node tree traversal.
+        Get a material's shading: its Principled BSDF values and what drives them.
 
-        Traverses at most ``_MAX_MATERIAL_NODE_DEPTH`` levels from the
-        output node to keep context small.
+        ``principled_params`` holds the values of the Principled BSDF that
+        feeds the active Material Output; an input driven by a link has None
+        there, as its own value is unused, and ``linked_inputs`` names the
+        node, socket and, for an image texture (also behind a Normal Map
+        node), the image's file, colour space and whether it is packed.
+        ``nodes`` lists at most ``max_nodes`` nodes, those feeding the output
+        first; ``node_count`` counts them all.
 
         Args:
             material_name: Name of the Blender material.
+            max_nodes: Most nodes to list.
 
         Returns:
-            Dictionary with node summary and Principled BSDF parameters.
+            Dictionary with the node list and count, Principled BSDF values,
+            linked inputs, the render method and the user count.
         """
+        if isinstance(max_nodes, bool) or not isinstance(max_nodes, int) or max_nodes < 1:
+            raise ValidationError(
+                f"max_nodes must be a whole number of at least 1, got {max_nodes!r}",
+                "out_of_range",
+                field="max_nodes",
+            )
         blender_module: Any = bpy
         mat = blender_module.data.materials.get(material_name)
         if mat is None:
-            raise ValueError(f"Material not found: {material_name}")
+            raise NotFoundError(f"Material not found: {material_name}", "material_not_found")
 
-        use_nodes = bool(getattr(mat, "use_nodes", False))
-        nodes: List[Dict[str, str]] = []
-        principled_params: Optional[Dict[str, Any]] = None
-
-        if use_nodes and mat.node_tree:
-            for node in mat.node_tree.nodes:
-                nodes.append(
-                    {
-                        "name": node.name,
-                        "node_type": node.bl_idname,
-                        "label": getattr(node, "label", ""),
-                    }
-                )
-                if node.bl_idname == "ShaderNodeBsdfPrincipled":
-                    principled_params = self._extract_principled_params(node)
+        tree = self._material_tree(mat)
+        listed: List[Any] = []
+        principled = None
+        if tree is not None:
+            listed = self._nodes_feeding_output(tree, max_nodes)
+            principled = self._principled_node(mat)
 
         return {
             "material_name": material_name,
-            "use_nodes": use_nodes,
-            "nodes": nodes,
-            "principled_params": principled_params,
+            "use_nodes": tree is not None,
+            "nodes": [
+                {"name": node.name, "node_type": node.bl_idname, "label": getattr(node, "label", "")}
+                for node in listed
+            ],
+            "node_count": 0 if tree is None else len(tree.nodes),
+            "principled_params": (
+                None if principled is None else self._extract_principled_params(principled)
+            ),
+            "linked_inputs": {} if principled is None else self._linked_inputs(principled),
+            "surface_render_method": self._render_method(mat),
+            "users": int(getattr(mat, "users", 0)),
         }
+
+    def _nodes_feeding_output(self, tree: Any, limit: int) -> List[Any]:
+        """Up to ``limit`` nodes: those the active output reads, nearest first, then the rest."""
+        output = self._material_output(tree)
+        ordered: List[Any] = []
+        # Node names are unique within a tree; bpy may wrap one node in a new
+        # Python object at each access, so identity cannot tell them apart.
+        seen: set = set()
+        pending = [] if output is None else [output]
+        while pending and len(ordered) < limit:
+            node = pending.pop(0)
+            if node.name in seen:
+                continue
+            seen.add(node.name)
+            ordered.append(node)
+            pending.extend(link.from_node for socket in node.inputs for link in socket.links)
+        for node in tree.nodes:
+            if len(ordered) >= limit:
+                break
+            if node.name not in seen:
+                seen.add(node.name)
+                ordered.append(node)
+        return ordered
+
+    @staticmethod
+    def _linked_inputs(bsdf: Any) -> Dict[str, Dict[str, Any]]:
+        """What drives each linked input of a Principled BSDF, images included.
+
+        A muted link drives nothing, so its input is not listed; a source
+        behind Reroute nodes, and an image behind a Normal Map node, are
+        followed to the node that provides them.
+        """
+        blender_module: Any = bpy
+        linked: Dict[str, Dict[str, Any]] = {}
+        for socket in bsdf.inputs:
+            live = _live_links(socket)
+            if not live:
+                continue
+            source, output = _link_source(live[0])
+            entry: Dict[str, Any] = {
+                "from_node": source.name,
+                "from_node_type": source.bl_idname,
+                "from_socket": output.name,
+            }
+            texture = source
+            if source.type == "NORMAL_MAP":
+                color = source.inputs.get("Color")
+                feeding = [] if color is None else _live_links(color)
+                texture = _link_source(feeding[0])[0] if feeding else None
+            image = (
+                getattr(texture, "image", None)
+                if texture is not None and texture.type == "TEX_IMAGE"
+                else None
+            )
+            if image is not None:
+                path = getattr(image, "filepath", "") or ""
+                resolve = getattr(getattr(blender_module, "path", None), "abspath", None)
+                entry.update(
+                    image_name=image.name,
+                    image_path=(resolve(path) if resolve and path else path) or None,
+                    image_colorspace=image.colorspace_settings.name,
+                    image_packed=getattr(image, "packed_file", None) is not None,
+                )
+            linked[socket.name] = entry
+        return linked
 
     def get_distance_between(
         self, object_name_a: str, object_name_b: str
@@ -1421,26 +2187,56 @@ class BlenderRuntimeSession:
         bounds_max: List[float],
     ) -> Dict[str, Any]:
         """
-        Check whether an object's world location falls within axis-aligned bounds.
+        Check where an object's world-space bounding box lies relative to axis-aligned bounds.
+
+        The object's bounding box (``bound_box``, as get_bounding_box reports
+        it) is turned, scaled and moved with the object, and tested as that
+        box, not as the axis-aligned box around it: ``inside`` when all of it
+        is within the bounds, ``intersecting`` when part of it is, and
+        ``outside`` when none of it is. Its origin alone said a 10 m plane fit
+        a 2 m box. A box touching the bounds intersects them; single-precision
+        rounding of the corners is allowed for.
 
         Args:
             object_name: Object name to check.
             bounds_min: Minimum corner [x, y, z].
-            bounds_max: Maximum corner [x, y, z].
+            bounds_max: Maximum corner [x, y, z], at least bounds_min on every axis.
 
         Returns:
-            Dictionary with within_bounds flag and object location.
+            within_bounds (the whole box inside), relation, intersects,
+            origin_within_bounds, the object's origin (object_location) and its
+            world-space axis-aligned extent (object_bbox_min, object_bbox_max).
+
+        Raises:
+            ValueError: A bound is not finite, or bounds_min exceeds bounds_max.
         """
+        low = _finite(bounds_min, 3, "bounds_min")
+        high = _finite(bounds_max, 3, "bounds_max")
+        inverted = [axis for axis, (a, b) in zip("xyz", zip(low, high)) if a > b]
+        if inverted:
+            raise ValueError(
+                f"bounds_min exceeds bounds_max on {', '.join(inverted)}: "
+                f"{list(low)} > {list(high)}"
+            )
         obj = self._get_object_or_raise(object_name)
         self._evaluate_transforms()
         loc = [float(v) for v in obj.matrix_world.translation]
-
-        within = all(bounds_min[i] <= loc[i] <= bounds_max[i] for i in range(3))
+        corners = self._world_bound_box(obj)
+        relation = _box_relation(
+            corners, [list(row) for row in obj.matrix_world][:3], low, high
+        )
 
         return {
             "object_name": object_name,
-            "within_bounds": within,
+            "within_bounds": relation == "inside",
+            "relation": relation,
+            "intersects": relation != "outside",
+            "origin_within_bounds": all(
+                low[i] <= loc[i] <= high[i] for i in range(3)
+            ),
             "object_location": loc,
+            "object_bbox_min": [min(c[i] for c in corners) for i in range(3)],
+            "object_bbox_max": [max(c[i] for c in corners) for i in range(3)],
         }
 
     # -- Phase 2: Visual observation methods --------------------------------
@@ -1453,6 +2249,7 @@ class BlenderRuntimeSession:
         use_render_fallback: bool = False,
         agent_id: str = "agent",
         method: str = "auto",
+        camera_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Capture the 3D View or a camera render as a base64-encoded JPEG image.
@@ -1479,18 +2276,28 @@ class BlenderRuntimeSession:
                 camera when the scene has none (aligned to the 3D View when attached,
                 framing the visible objects otherwise), removed afterwards.
                 "auto" (default): "viewport" when attached, "render" in embedded mode.
+            camera_name: Capture through this camera instead of the scene camera or
+                the 3D View's angle; the scene camera and the view are left as they
+                were. A render renders through it; a viewport capture draws the 3D
+                View's shading from it (capture_method viewport_camera), keeping the
+                render's aspect ratio inside width x height.
 
         Returns:
-            Dictionary with image_base64, width, height, engine, format and
-            capture_method: viewport, viewport_screen, render,
-            render_temp_camera_view or render_temp_camera_framing.
+            Dictionary with image_base64, width, height, engine, format,
+            camera_name (the camera captured through; None for the 3D View's
+            angle or a temporary camera) and capture_method: viewport,
+            viewport_camera, viewport_screen, render, render_temp_camera_view
+            or render_temp_camera_framing.
         """
         method = self._resolve_capture_method(method, use_render_fallback)
+        camera = None if camera_name is None else self._resolve_camera(camera_name)
         blender_module: Any = bpy
         engine = blender_module.context.scene.render.engine
         if method == "viewport":
-            return self._capture_view3d(width, height, jpeg_quality, engine)
-        return self._capture_render(width, height, jpeg_quality, engine)
+            result = self._capture_view3d(width, height, jpeg_quality, engine, camera)
+        else:
+            result = self._capture_render(width, height, jpeg_quality, engine, camera)
+        return result
 
     def set_camera_view(
         self,
@@ -1726,15 +2533,25 @@ class BlenderRuntimeSession:
 
     def get_viewport_info(self) -> Dict[str, Any]:
         """
-        Get active viewport / render settings summary.
+        Get the render settings and, in attached mode, the 3D View's view state.
 
         Returns:
-            Dictionary with render engine, resolution, film, active camera.
+            Dictionary with render engine, resolution, film and active camera,
+            plus view3d: the largest 3D View's view_perspective (PERSP, ORTHO
+            or CAMERA), is_perspective, view_matrix (world to view, rows),
+            eye_location (where the view looks from), view_location (the
+            point it orbits), view_rotation (quaternion w, x, y, z),
+            view_distance, lens, clip_start, clip_end, shading_type,
+            view_camera (the camera a CAMERA view looks through) and its
+            region size. view3d is None without an editor window (embedded
+            bpy, blender -b) or a 3D View, and view3d_unavailable_reason says
+            which.
         """
         blender_module: Any = bpy
         scene = blender_module.context.scene
         render = scene.render
         active_cam = scene.camera
+        view3d, reason = self._view3d_state()
         return {
             "render_engine": render.engine,
             "resolution_x": render.resolution_x,
@@ -1742,7 +2559,46 @@ class BlenderRuntimeSession:
             "resolution_percentage": render.resolution_percentage,
             "film_transparent": render.film_transparent,
             "active_camera": active_cam.name if active_cam else None,
+            "view3d": view3d,
+            "view3d_unavailable_reason": reason,
         }
+
+    def _view3d_state(self) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Describe the 3D View the captures use, or say why there is none."""
+        blender_module: Any = bpy
+        try:
+            _area, region, space = self._view3d_target()
+        except RuntimeError:
+            if getattr(blender_module.app, "background", False) or getattr(
+                blender_module.context, "window", None
+            ) is None:
+                return None, (
+                    "Blender runs without an editor window (embedded bpy or blender -b), "
+                    "so there is no 3D View; the render settings still apply"
+                )
+            return None, "The attached window shows no 3D View with a drawable region"
+        view = region.data
+        view.update()
+        perspective = view.view_perspective
+        camera = None
+        if perspective == "CAMERA":
+            camera = space.camera if space.use_local_camera else blender_module.context.scene.camera
+        return {
+            "view_perspective": perspective,
+            "is_perspective": bool(view.is_perspective),
+            "view_matrix": [list(row) for row in view.view_matrix],
+            "eye_location": list(view.view_matrix.inverted().translation),
+            "view_location": list(view.view_location),
+            "view_rotation": list(view.view_rotation),
+            "view_distance": view.view_distance,
+            "lens": space.lens,
+            "clip_start": space.clip_start,
+            "clip_end": space.clip_end,
+            "shading_type": space.shading.type,
+            "view_camera": camera.name if camera is not None else None,
+            "region_width": region.width,
+            "region_height": region.height,
+        }, None
 
     def capture_viewport_sequence(
         self,
@@ -1754,55 +2610,133 @@ class BlenderRuntimeSession:
         jpeg_quality: int = 85,
         agent_id: str = "agent",
         method: str = "auto",
+        camera_name: Optional[str] = None,
+        output_dir: Optional[str] = None,
+        max_frames: int = DEFAULT_SEQUENCE_FRAMES,
     ) -> Dict[str, Any]:
         """
-        Capture viewport at multiple frames as base64-encoded JPEGs.
+        Capture a frame range as JPEG files and return their paths.
+
+        Each frame is captured like capture_viewport and written to output_dir
+        as frame_<number>.jpg, so the reply carries paths and sizes rather than
+        images: inline images of more than a few frames exceeded the server's
+        result budget. Blender's main thread is busy while frames are captured,
+        so one call captures at most max_frames frames and stops starting new
+        ones after SEQUENCE_TIME_BUDGET_SECONDS; next_start_frame then says
+        where to continue. The current frame is restored afterwards.
 
         Args:
             start_frame: First frame to capture.
-            end_frame: Last frame to capture (inclusive).
+            end_frame: Last frame to capture (inclusive); not before start_frame.
             step: Frame step between captures.
             width: Maximum image width, as for capture_blender_viewport.
             height: Maximum image height, as for capture_blender_viewport.
             jpeg_quality: JPEG compression quality.
             agent_id: Visible capture feedback label in attached mode; ignored in embedded mode.
             method: "viewport", "render" or "auto" (default), as for capture_blender_viewport.
+            camera_name: Capture through this camera, as for capture_blender_viewport.
+            output_dir: Folder for the frame files, inside the sandbox; created when
+                missing, and existing frame files of the same numbers are replaced.
+                Default: a new sequence-<time>-<id> folder in the capture directory.
+            max_frames: Most frames captured by this call, 1 to 100.
 
         Returns:
-            Dictionary with frames list, frame_count, capture_method.
+            Dictionary with frames ([{frame, file_path}]), frame_count (captured
+            now), requested_frame_count (in the range), complete, next_start_frame
+            (the first frame left, None when complete), stopped_by (None,
+            "max_frames" or "time_budget"), output_dir, width, height, format,
+            camera_name and capture_method.
+
+        Raises:
+            ValueError: When end_frame is before start_frame, step is below 1,
+                or max_frames is out of range.
         """
+        if end_frame < start_frame:
+            raise ValueError(
+                f"end_frame ({end_frame}) is before start_frame ({start_frame})"
+            )
+        if step < 1:
+            raise ValueError(f"step must be at least 1, not {step}")
+        if not 1 <= max_frames <= MAX_SEQUENCE_FRAMES:
+            raise ValueError(
+                f"max_frames must be between 1 and {MAX_SEQUENCE_FRAMES}, not {max_frames}"
+            )
         method = self._resolve_capture_method(method)
+        if camera_name is not None:
+            self._resolve_camera(camera_name)
+        folder = self._sequence_folder(output_dir)
         blender_module: Any = bpy
         scene = blender_module.context.scene
+        # frame_set(7) alone would turn frame 7.25 into 7.0.
         original_frame = scene.frame_current
+        original_subframe = float(getattr(scene, "frame_subframe", 0.0))
+        requested = range(start_frame, end_frame + 1, step)
 
         frames: List[Dict[str, Any]] = []
         capture_method = method
-
+        size: Tuple[Optional[int], Optional[int]] = (None, None)
+        stopped_by: Optional[str] = None
+        started = time.monotonic()
         try:
-            for frame_num in range(start_frame, end_frame + 1, step):
+            for frame_num in requested:
+                if len(frames) >= max_frames:
+                    stopped_by = "max_frames"
+                    break
+                if frames and time.monotonic() - started > SEQUENCE_TIME_BUDGET_SECONDS:
+                    stopped_by = "time_budget"
+                    break
                 scene.frame_set(frame_num)
                 result = self.capture_viewport(
                     width=width,
                     height=height,
                     jpeg_quality=jpeg_quality,
                     method=method,
+                    camera_name=camera_name,
                 )
-                frames.append(
-                    {
-                        "frame": frame_num,
-                        "image_base64": result["image_base64"],
-                    }
-                )
+                path = folder / f"frame_{frame_num:06d}.jpg"
+                path.write_bytes(base64.b64decode(result["image_base64"]))
+                frames.append({"frame": frame_num, "file_path": str(path)})
                 capture_method = result.get("capture_method", capture_method)
+                size = (result.get("width"), result.get("height"))
         finally:
-            scene.frame_set(original_frame)
+            scene.frame_set(original_frame, subframe=original_subframe)
 
+        next_start = requested[len(frames)] if len(frames) < len(requested) else None
         return {
             "frames": frames,
             "frame_count": len(frames),
+            "requested_frame_count": len(requested),
+            "complete": next_start is None,
+            "next_start_frame": next_start,
+            "stopped_by": stopped_by,
+            "output_dir": str(folder),
+            "width": size[0],
+            "height": size[1],
+            "format": "jpeg",
+            "camera_name": camera_name,
             "capture_method": capture_method,
         }
+
+    def _sequence_folder(self, output_dir: Optional[str]) -> Path:
+        """Create the folder a sequence's frames go to, inside the sandbox.
+
+        Raises:
+            PermissionError: When the sandbox refuses output_dir, or allows no
+                writable capture directory for the default one.
+        """
+        if output_dir is not None:
+            folder = Path(self._export_target(self._deny_outside_sandbox(output_dir, write=True)))
+        else:
+            capture_dir = self._path_policy.default_capture_dir()
+            if capture_dir is None:
+                raise PermissionError(
+                    "No writable capture directory is allowed by the sandbox"
+                )
+            base = Path(self._deny_outside_sandbox(capture_dir, write=True))
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            folder = base / f"sequence-{stamp}-{secrets.token_hex(3)}"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
 
     # -- Phase 3: Scene manipulation methods ---------------------------------
 
@@ -1839,7 +2773,17 @@ class BlenderRuntimeSession:
         """
         Create a new object in the Blender scene.
 
-        Supports mesh primitives, lights, cameras, and empties.
+        Supports mesh primitives, lights, cameras, and empties. The object goes
+        in the active collection, as Blender's Add menu puts it, unless that
+        collection, or one holding it, is excluded from the view layer, hidden
+        in it or disabled in viewports: the object would be invisible there
+        (and in Blender 5.0.1 the 3D View then left context.active_object
+        unset), so it goes in the scene's own collection, and the reply's
+        warning says so. The object is told apart from the others by what the
+        add operator created, never by the active object, and removed again
+        when naming or scaling it fails. It never enters Edit Mode, whatever
+        the "Enter Edit Mode" preference says, and outside Object Mode the
+        call is refused before anything is added.
 
         Args:
             object_type: Type key (CUBE, SPHERE, POINT_LIGHT, CAMERA, etc.).
@@ -1849,55 +2793,286 @@ class BlenderRuntimeSession:
             scale: Initial scale [sx, sy, sz].
 
         Returns:
-            Dictionary with name, object_type, location.
+            Dictionary with name, object_type, location, the collection it
+            went in, the mode afterwards and a warning when it went elsewhere.
         """
         blender_module: Any = bpy
-        op_path = self._PRIMITIVE_OPS.get(object_type.upper())
+        kind = object_type.upper()
+        op_path = self._PRIMITIVE_OPS.get(kind)
         if op_path is None:
             raise ValueError(
                 f"Unsupported object type: {object_type}. "
                 f"Valid types: {', '.join(self._PRIMITIVE_OPS.keys())}"
             )
 
-        loc = tuple(location or [0.0, 0.0, 0.0])
-        rot = tuple(rotation_euler or [0.0, 0.0, 0.0])
+        loc = _finite(location or [0.0, 0.0, 0.0], 3, "location")
+        rot = _finite(rotation_euler or [0.0, 0.0, 0.0], 3, "rotation_euler")
+        size = None if scale is None else _finite(scale, 3, "scale")
 
         parts = op_path.split(".")
         op_module = getattr(blender_module.ops, parts[0])
         op_func = getattr(op_module, parts[1])
-
-        light_type = self._LIGHT_TYPE_MAP.get(object_type.upper())
+        properties: Dict[str, Any] = {"location": loc, "rotation": rot}
+        light_type = self._LIGHT_TYPE_MAP.get(kind)
         if light_type:
-            op_func(type=light_type, location=loc, rotation=rot)
-        else:
-            op_func(location=loc, rotation=rot)
+            properties["type"] = light_type
+        if "enter_editmode" in op_func.get_rna_type().properties.keys():
+            # The add operators read the preference when this is unset.
+            properties["enter_editmode"] = False
 
-        created = blender_module.context.active_object
-        if name:
-            created.name = name
-        if scale:
-            created.scale = tuple(scale)
+        view_layer = blender_module.context.view_layer
+        mode_before = blender_module.context.mode
+        if mode_before != "OBJECT":
+            # In Edit Mode an add operator adds to the edited mesh instead of
+            # creating an object. Attached mode's bridge refuses this up front;
+            # embedded mode has no such guard.
+            raise ValueError(
+                f"Blender is in {mode_before} mode; set_blender_object_mode switches back to "
+                "Object Mode, where objects can be created"
+            )
+        active_collection = view_layer.active_layer_collection
+        target, warning = self._creation_collection(view_layer)
+        existing = {obj.as_pointer() for obj in blender_module.data.objects}
+
+        def created_objects() -> List[Any]:
+            return [
+                obj
+                for obj in blender_module.data.objects
+                if obj.as_pointer() not in existing
+            ]
+
+        # bpy gives a new wrapper on every access; == compares what it wraps.
+        switch = target != active_collection
+        try:
+            if switch:
+                view_layer.active_layer_collection = target
+            try:
+                _bpy_op(f"Failed to add a {kind}", op_func, **properties)
+            finally:
+                if switch:
+                    view_layer.active_layer_collection = active_collection
+            created = created_objects()
+            if len(created) != 1:
+                raise RuntimeError(
+                    f"Adding a {kind} created {len(created)} objects, not one"
+                )
+            obj = created[0]
+            if blender_module.context.mode != "OBJECT":
+                with blender_module.context.temp_override(active_object=obj, object=obj):
+                    _bpy_op(
+                        f"Failed to return '{obj.name}' to Object Mode",
+                        blender_module.ops.object.mode_set,
+                        mode="OBJECT",
+                    )
+            if name:
+                obj.name = name
+            if size is not None:
+                obj.scale = size
+        except Exception:
+            # Never leave an unnamed, unscaled object behind a failed call.
+            for stray in created_objects():
+                self._remove_object_and_data(stray)
+            raise
 
         return {
-            "name": created.name,
-            "object_type": object_type.upper(),
-            "location": list(created.location),
+            "name": obj.name,
+            "object_type": kind,
+            "location": [float(v) for v in obj.location],
+            "collection": target.collection.name,
+            "mode": blender_module.context.mode,
+            "warning": warning,
         }
 
-    def delete_object(self, object_name: str) -> Dict[str, Any]:
+    @staticmethod
+    def _creation_collection(view_layer: Any) -> Tuple[Any, Optional[str]]:
         """
-        Delete an object from the Blender scene by name.
+        Choose the layer collection a new object goes in.
+
+        Args:
+            view_layer: The view layer the object is added to.
+
+        Returns:
+            The active layer collection and None, or the view layer's root
+            (the scene's own collection) and the reason, when the active one
+            or one holding it is excluded, hidden or disabled in viewports.
+        """
+        root = view_layer.layer_collection
+        active = view_layer.active_layer_collection
+
+        def path_to(node: Any) -> Optional[List[Any]]:
+            if node == active:
+                return [node]
+            for child in node.children:
+                found = path_to(child)
+                if found is not None:
+                    return [node, *found]
+            return None
+
+        for layer in (path_to(root) or [active])[1:]:
+            reason = (
+                "is excluded from the view layer"
+                if layer.exclude
+                else "is hidden in the view layer"
+                if layer.hide_viewport
+                else "is disabled in viewports"
+                if layer.collection.hide_viewport
+                else None
+            )
+            if reason is not None:
+                return root, (
+                    f"The active collection '{active.collection.name}' is not visible: "
+                    f"collection '{layer.collection.name}' {reason}, so the object was "
+                    f"created in the scene collection '{root.collection.name}' instead"
+                )
+        return active, None
+
+    @staticmethod
+    def _remove_object_and_data(obj: Any) -> None:
+        """Remove an object, and its data (mesh, light, camera) once nothing else uses it."""
+        blender_module: Any = bpy
+        data = obj.data
+        blender_module.data.objects.remove(obj, do_unlink=True)
+        if data is None or data.users:
+            return
+        for store in ("meshes", "lights", "cameras"):
+            collection = getattr(blender_module.data, store)
+            if collection.get(data.name) == data:
+                collection.remove(data)
+                return
+
+    def delete_object(self, object_name: str, use_global: bool = False) -> Dict[str, Any]:
+        """
+        Delete an object from the current scene, as Blender's Delete does.
+
+        This runs Blender's own Delete operator on the object alone, the
+        user's selection untouched. As in Blender, the object leaves the
+        current scene's collections and stays in the file while another scene
+        still links it; with use_global it is deleted from every scene (Delete
+        Globally). The operator also resets the rigid-body cache of a deleted
+        rigid body: removing the object directly left that cache in place, so
+        another body evaluated after a frame jump took the deleted one's cached
+        positions.
 
         Args:
             object_name: Name of the object to delete.
+            use_global: Delete it from every scene and the file, not only from
+                the current scene.
 
         Returns:
-            Dictionary with deleted_name.
+            Dictionary with deleted_name, use_global, whether the object left
+            the file (removed_from_file) and the scenes that still link it.
+
+        Raises:
+            ValueError: Without use_global, the object is not in the current
+                scene (embedded mode looks objects up in the whole file).
+            RuntimeError: Blender did not delete it, as for linked library data.
         """
         blender_module: Any = bpy
         obj = self._get_object_or_raise(object_name)
-        blender_module.data.objects.remove(obj, do_unlink=True)
-        return {"deleted_name": object_name}
+        scene = blender_module.context.scene
+        if not use_global and scene.objects.get(object_name) is None:
+            raise ValueError(
+                f"Object '{object_name}' is not in scene '{scene.name}'; pass "
+                "use_global=true to delete it from every scene"
+            )
+        operator = blender_module.ops.object.delete
+        properties: Dict[str, Any] = {"use_global": use_global}
+        if "confirm" in operator.get_rna_type().properties.keys():
+            properties["confirm"] = False
+        with blender_module.context.temp_override(
+            selected_objects=[obj],
+            selected_editable_objects=[obj],
+            active_object=obj,
+            object=obj,
+        ):
+            _bpy_op(f"Failed to delete '{object_name}'", operator, **properties)
+        if scene.objects.get(object_name) is not None:
+            raise RuntimeError(
+                f"Blender did not delete '{object_name}' (linked library data cannot be deleted)"
+            )
+        return {
+            "deleted_name": object_name,
+            "use_global": use_global,
+            "removed_from_file": blender_module.data.objects.get(object_name) is None,
+            "remaining_scenes": [
+                other.name
+                for other in blender_module.data.scenes
+                if other.objects.get(object_name) is not None
+            ],
+        }
+
+    def set_object_mode(
+        self, mode: str = "OBJECT", object_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Switch an object into a mode, as the 3D View's mode menu does.
+
+        The way back to Object Mode for a window left in Edit or Pose Mode,
+        where object creation and the other mode-sensitive tools refuse to run.
+        With object_name, that object becomes the active one first.
+
+        Args:
+            mode: OBJECT (default), EDIT, POSE, SCULPT, VERTEX_PAINT,
+                WEIGHT_PAINT, TEXTURE_PAINT or another mode Blender's
+                object.mode_set takes, in any case.
+            object_name: The object to switch; the active object by default.
+
+        Returns:
+            object_name, mode (the object's afterwards), previous_mode,
+            context_mode (Blender's, such as EDIT_MESH) and changed.
+
+        Raises:
+            ValueError: The mode is not one Blender takes, or there is no
+                object to switch to a mode other than OBJECT.
+        """
+        blender_module: Any = bpy
+        operator = blender_module.ops.object.mode_set
+        wanted = mode.strip().upper()
+        modes = [
+            item.identifier
+            for item in operator.get_rna_type().properties["mode"].enum_items
+        ]
+        if wanted not in modes:
+            raise ValueError(f"Unknown mode {mode!r}; Blender's modes: {', '.join(modes)}")
+        view_layer = blender_module.context.view_layer
+        obj = (
+            view_layer.objects.active
+            if object_name is None
+            else self._get_object_or_raise(object_name)
+        )
+        if obj is None:
+            if wanted == "OBJECT":
+                return {
+                    "object_name": None,
+                    "mode": "OBJECT",
+                    "previous_mode": "OBJECT",
+                    "context_mode": blender_module.context.mode,
+                    "changed": False,
+                }
+            raise ValueError(f"No active object to switch to {wanted} mode; pass object_name")
+        previous = obj.mode
+        if previous != wanted:
+            was_active = view_layer.objects.active
+            if was_active != obj:
+                view_layer.objects.active = obj
+            try:
+                with blender_module.context.temp_override(active_object=obj, object=obj):
+                    _bpy_op(
+                        f"Failed to switch '{obj.name}' to {wanted} mode",
+                        operator,
+                        mode=wanted,
+                    )
+            except Exception:
+                # A refused switch leaves the user's active object as it was.
+                view_layer.objects.active = was_active
+                raise
+        return {
+            "object_name": obj.name,
+            "mode": obj.mode,
+            "previous_mode": previous,
+            "context_mode": blender_module.context.mode,
+            "changed": obj.mode != previous,
+        }
 
     def set_object_transform(
         self,
@@ -2071,52 +3246,609 @@ class BlenderRuntimeSession:
         object_name: str,
         material_name: Optional[str] = None,
         base_color: Optional[List[float]] = None,
-        metallic: float = 0.0,
-        roughness: float = 0.5,
+        metallic: Optional[float] = None,
+        roughness: Optional[float] = None,
+        slot_index: Optional[int] = None,
+        face_indices: Optional[List[int]] = None,
+        link: str = "DATA",
+        single_user: bool = False,
+        reuse_existing: bool = True,
+        base_color_texture: Optional[str] = None,
+        metallic_texture: Optional[str] = None,
+        roughness_texture: Optional[str] = None,
+        normal_texture: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Create a Principled BSDF material and assign it to an object.
+        Assign a Principled BSDF material to an object, reusing it when it exists.
+
+        The material named ``material_name`` is reused when it exists (so a
+        repeated call changes nothing more), and created otherwise; pass
+        ``reuse_existing=False`` to always create a new one. Shading arguments
+        left out keep the material's own values (Blender's defaults for a new
+        one), so an existing material can be assigned as it is.
+
+        By default the material replaces the object's: it goes into slot 0
+        and every face uses slot 0. ``slot_index`` puts it into that slot
+        instead (the slot count appends one) and leaves the faces alone;
+        ``face_indices`` assigns it to those faces only, through its existing
+        slot or a new one. ``link="OBJECT"`` puts it in this object's slot
+        instead of the mesh's, but faces and the slot count belong to the
+        mesh: with link OBJECT, changing either on mesh data that other
+        objects share is refused unless ``single_user`` gives this object its
+        own copy of the mesh first.
+
+        An image already loaded in the file keeps its colour space: an input
+        that reads it differently gets its own image datablock. Everything is
+        checked before the scene changes, and a failure later removes what
+        the call created.
 
         Args:
-            object_name: Object to assign material to.
-            material_name: Material name (auto-generated if omitted).
-            base_color: Base color RGBA [r, g, b, a].
+            object_name: Object to assign the material to (mesh, curve, text,
+                or another type with material slots).
+            material_name: Material name; Material_<object> when omitted.
+            base_color: RGB or RGBA in [0, 1]; the alpha becomes the
+                Principled Alpha, and below 1 the material renders blended.
             metallic: Metallic value 0-1.
             roughness: Roughness value 0-1.
+            slot_index: Slot to put the material in; the slot count adds one.
+            face_indices: Mesh faces to assign the material to.
+            link: DATA (the mesh's slot, shared by linked duplicates) or
+                OBJECT (this object's slot).
+            single_user: Give this object its own copy of shared data first,
+                so the change leaves the objects sharing it alone.
+            reuse_existing: Reuse a material of that name when one exists.
+            base_color_texture: Image file driving Base Color (in the colour
+                space Blender loads it in: sRGB, or linear for float images).
+            metallic_texture: Image file driving Metallic (Non-Color).
+            roughness_texture: Image file driving Roughness (Non-Color).
+            normal_texture: Tangent-space normal map image (Non-Color),
+                through a Normal Map node.
 
         Returns:
-            Dictionary with object_name and material_name.
+            Dictionary with the material, whether it was created, the slot,
+            the link, the faces assigned, the object's slots, the Principled
+            values, its render method, the textures and warnings.
         """
         blender_module: Any = bpy
         obj = self._get_object_or_raise(object_name)
-        if obj.data is None:
-            raise ValueError(f"Object '{object_name}' has no data to receive materials")
+        data = obj.data
+        if data is None or not hasattr(data, "materials"):
+            raise ValidationError(
+                f"Object '{object_name}' is a {obj.type} object, which takes no materials",
+                "no_material_slots",
+                object_type=obj.type,
+            )
+        if getattr(obj, "library", None) is not None:
+            raise ValidationError(
+                f"Object '{object_name}' is linked from library '{obj.library.name}' and "
+                "cannot be changed; make it local first",
+                "linked_from_library",
+            )
+        link = link.upper() if isinstance(link, str) else link
+        if link not in ("DATA", "OBJECT"):
+            raise ValidationError(
+                f"link must be DATA or OBJECT, got {link!r}", "invalid_value", field="link"
+            )
+        color = None if base_color is None else _unit_color(base_color, "base_color")
+        for label, value in (("metallic", metallic), ("roughness", roughness)):
+            if value is not None:
+                _unit_value(value, label)
+        slot_count = len(obj.material_slots)
+        requested_slot: Any = slot_index
+        if requested_slot is not None and (
+            isinstance(requested_slot, bool)
+            or not isinstance(requested_slot, numbers.Integral)
+            or not 0 <= int(requested_slot) <= slot_count
+        ):
+            raise ValidationError(
+                f"slot_index must lie between 0 and {slot_count} (the slot count, which "
+                f"adds a slot), got {slot_index!r}",
+                "out_of_range",
+                field="slot_index",
+            )
+        faces = None
+        if face_indices is not None:
+            if obj.type != "MESH":
+                raise ValidationError(
+                    f"face_indices applies to mesh objects; '{object_name}' is a {obj.type} object",
+                    "invalid_value",
+                    field="face_indices",
+                )
+            faces = self._checked_face_indices(data, face_indices)
+        writes_faces = obj.type == "MESH" and (faces is not None or slot_index is None)
+        if writes_faces:
+            self._require_object_mode(obj, "assign materials to its faces")
+        textures = self._texture_files(
+            {
+                "base_color": base_color_texture,
+                "metallic": metallic_texture,
+                "roughness": roughness_texture,
+                "normal": normal_texture,
+            }
+        )
+        name = material_name or f"Material_{object_name}"
+        material = blender_module.data.materials.get(name) if reuse_existing else None
+        shading = bool(
+            color is not None or metallic is not None or roughness is not None or textures
+        )
+        if material is not None and shading:
+            if getattr(material, "library", None) is not None:
+                raise ValidationError(
+                    f"Material '{name}' is linked from a library and cannot be changed; assign "
+                    "it without shading arguments, or pass reuse_existing=false for a local one",
+                    "linked_from_library",
+                )
+            if self._principled_node(material) is None:
+                raise ValidationError(
+                    f"Material '{name}' has no Principled BSDF to take base_color, metallic, "
+                    "roughness or textures; assign it without them, or pass "
+                    "reuse_existing=false for a new material",
+                    "no_principled_bsdf",
+                )
 
-        mat_name = material_name or f"Material_{object_name}"
-        mat = blender_module.data.materials.new(name=mat_name)
-        mat.use_nodes = True
-        tree = mat.node_tree
-        bsdf = None
-        for node in tree.nodes:
-            if node.type == "BSDF_PRINCIPLED":
-                bsdf = node
-                break
-
-        if bsdf is not None:
-            color = base_color or [0.8, 0.8, 0.8, 1.0]
-            bsdf.inputs["Base Color"].default_value = tuple(color)
-            bsdf.inputs["Metallic"].default_value = metallic
-            bsdf.inputs["Roughness"].default_value = roughness
-
-        if hasattr(obj.data, "materials"):
-            obj.data.materials.append(mat)
+        # Where the material goes and what that does to the data, worked out
+        # before anything changes.
+        if faces is not None and slot_index is None:
+            index = next(
+                (i for i, slot in enumerate(obj.material_slots) if slot.material == material),
+                slot_count,
+            )
         else:
-            raise ValueError(f"Object '{object_name}' does not support materials")
+            index = 0 if slot_index is None else int(slot_index)
+        appends = index == slot_count
+        previous_faces: Optional[List[int]] = None
+        new_faces: Optional[List[int]] = None
+        if writes_faces:
+            previous_faces = self._face_materials(data)
+            new_faces = list(previous_faces)
+            for face in range(len(new_faces)) if faces is None else faces:
+                new_faces[face] = index
+        face_change = new_faces is not None and new_faces != previous_faces
+        changes_data = link == "DATA" or appends or face_change
+        sharers = self._other_users(obj)
+        linked_data = getattr(data, "library", None) is not None
+        # single_user also makes library data local, as Blender's Make Single User does.
+        copy_data = bool(single_user and (sharers or linked_data))
+        kind = obj.type.title() if obj.type != "MESH" else "Mesh"
+        if sharers and link == "OBJECT" and (appends or face_change) and not copy_data:
+            what = "assigning faces" if face_change else "adding a slot"
+            raise ValidationError(
+                f"{kind} data '{data.name}' is shared with {_name_list(sharers)}; with "
+                f"link='OBJECT' the slot's material is this object's, but {what} changes the "
+                f"shared data for all of them. Pass single_user=true to give '{object_name}' "
+                "its own copy first, or slot_index to an existing slot to change only the "
+                "material",
+                "shared_data",
+                shared_with=sharers,
+            )
+        if linked_data and changes_data and not copy_data:
+            raise ValidationError(
+                f"{kind} data '{data.name}' is linked from a library and cannot be changed; "
+                "pass single_user=true for a local copy, or link='OBJECT' with slot_index "
+                "to an existing slot",
+                "linked_from_library",
+            )
+        if copy_data:
+            # Blender 5.0.1 ignores obj.data = copy, without an error, while
+            # the object is in Edit Mode.
+            self._require_object_mode(obj, "give it its own copy of its data")
+        warnings = self._material_warnings(obj, link, textures, sharers, copy_data)
+        replaced = None if appends else obj.material_slots[index].material
 
+        created = material is None
+        new_images: List[Any] = []
+        appended = False
+        made_copy: Any = None
+        # Set once the copy really is the object's data.
+        original_data: Any = None
+        previous_slot: Optional[Tuple[int, str, Any]] = None
+        faces_written = False
+        try:
+            images = self._load_texture_images(textures, new_images)
+            if copy_data:
+                made_copy = data.copy()
+                obj.data = made_copy
+                if obj.data != made_copy:
+                    raise RuntimeError(
+                        f"Blender kept '{data.name}' on '{object_name}' instead of its copy; "
+                        "nothing was changed"
+                    )
+                original_data, data = data, made_copy
+            if material is None:
+                material = blender_module.data.materials.new(name=name)
+                if material.node_tree is None:
+                    # Before Blender 5.0 a new material has no node tree until
+                    # use_nodes is set; 5.0 always has one and deprecates the flag.
+                    material.use_nodes = True
+            if shading:
+                self._shade_principled(material, color, metallic, roughness, images)
+            if appends:
+                data.materials.append(material if link == "DATA" else None)
+                appended = True
+            slot = obj.material_slots[index]
+            previous_slot = (index, slot.link, slot.material)
+            slot.link = link
+            slot.material = material
+            if face_change and new_faces is not None:
+                faces_written = True
+                self._set_face_materials(data, new_faces)
+        except Exception:
+            # Each step is undone on its own, so one that fails does not keep
+            # the others from running.
+            def undo(step: Callable[[], Any]) -> None:
+                try:
+                    step()
+                except Exception:
+                    self.logger.exception("Could not undo part of a failed material assignment")
+
+            def restore_faces() -> None:
+                if faces_written and previous_faces is not None and original_data is None:
+                    self._set_face_materials(data, previous_faces)
+
+            def restore_data() -> None:
+                # Only the copy this call made is removed, its faces and slots
+                # with it, and only once no object uses it: removing data an
+                # object still uses deletes that object.
+                if made_copy is None:
+                    return
+                if original_data is not None and obj.data == made_copy:
+                    obj.data = original_data
+                if obj.data == made_copy:
+                    self.logger.error(
+                        "Left the copy '%s' on '%s': Blender did not take the original back",
+                        made_copy.name,
+                        object_name,
+                    )
+                    return
+                self._data_collection(obj).remove(made_copy)
+
+            def restore_slot() -> None:
+                # The slot's link and an OBJECT-linked material are the
+                # object's, so they are restored also after a copy is dropped.
+                if appended:
+                    if original_data is None:
+                        data.materials.pop(index=-1)
+                elif previous_slot is not None:
+                    restored = obj.material_slots[previous_slot[0]]
+                    restored.link = previous_slot[1]
+                    restored.material = previous_slot[2]
+
+            def remove_material() -> None:
+                if created and material is not None:
+                    blender_module.data.materials.remove(material)
+
+            def remove_images() -> None:
+                for image in new_images:
+                    blender_module.data.images.remove(image)
+
+            for step in (restore_faces, restore_data, restore_slot, remove_material, remove_images):
+                undo(step)
+            raise
+
+        if original_data is not None:
+            library = getattr(original_data, "library", None)
+            if library is not None:
+                # A local copy of library data keeps its name.
+                kept = f"; {_name_list(sharers)} keep the linked one" if sharers else ""
+                warnings.append(
+                    f"'{object_name}' now has a local copy of {kind.lower()} data "
+                    f"'{original_data.name}' from library '{library.name}'{kept}"
+                )
+            else:
+                kept = f", which {_name_list(sharers)} keep" if sharers else ""
+                warnings.append(
+                    f"'{object_name}' now has its own copy '{data.name}' of {kind.lower()} data "
+                    f"'{original_data.name}'{kept}"
+                )
+        if not created and shading and material.users > 1:
+            warnings.append(
+                f"Material '{material.name}' has {material.users} users; the changed shading "
+                "shows wherever it is used"
+            )
+        if replaced is not None and replaced != material and not replaced.users:
+            warnings.append(
+                f"Material '{replaced.name}' has no users now; Blender discards it when the "
+                "file is saved and reopened (set its use_fake_user to keep it)"
+            )
+        bsdf = self._principled_node(material)
         return {
             "object_name": object_name,
-            "material_name": mat.name,
+            "material_name": material.name,
+            "created": created,
+            "slot_index": index,
+            "link": link,
+            "faces_assigned": (
+                None if new_faces is None else len(new_faces) if faces is None else len(faces)
+            ),
+            "material_slots": [
+                slot.material.name if slot.material else None for slot in obj.material_slots
+            ],
+            "principled_params": None if bsdf is None else self._extract_principled_params(bsdf),
+            "surface_render_method": self._render_method(material),
+            "textures": textures,
+            "warnings": warnings,
         }
+
+    @staticmethod
+    def _other_users(obj: Any) -> List[str]:
+        """The other objects whose data is ``obj``'s, by name.
+
+        Counted from the objects rather than ``data.users``, which a fake
+        user or another datablock's reference raises too.
+        """
+        blender_module: Any = bpy
+        data = obj.data
+        return sorted(
+            other.name
+            for other in blender_module.data.objects
+            if other.name != obj.name and getattr(other, "data", None) == data
+        )
+
+    @staticmethod
+    def _data_collection(obj: Any) -> Any:
+        """The bpy.data collection that holds an object's data."""
+        blender_module: Any = bpy
+        name = {
+            "MESH": "meshes",
+            "CURVE": "curves",
+            "SURFACE": "curves",
+            "FONT": "curves",
+            "META": "metaballs",
+            "CURVES": "hair_curves",
+            "POINTCLOUD": "pointclouds",
+            "VOLUME": "volumes",
+            "GREASEPENCIL": "grease_pencils",
+        }.get(obj.type, "meshes")
+        return getattr(blender_module.data, name)
+
+    @staticmethod
+    def _checked_face_indices(mesh: Any, face_indices: Sequence[Any]) -> List[int]:
+        """Face indices in range, each once, at least one, in the order given."""
+        if not face_indices:
+            raise ValidationError(
+                "face_indices must name at least one face", "invalid_value", field="face_indices"
+            )
+        count = len(mesh.polygons)
+        checked: List[int] = []
+        seen: set = set()
+        for value in face_indices:
+            if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+                raise ValidationError(
+                    f"face_indices index {value!r} is not an integer",
+                    "invalid_value",
+                    field="face_indices",
+                )
+            index = int(value)
+            if index < 0 or index >= count:
+                raise ValidationError(
+                    f"face_indices index {index} out of range [0, {count})",
+                    "out_of_range",
+                    field="face_indices",
+                )
+            if index in seen:
+                raise ValidationError(
+                    f"face_indices lists face {index} twice", "invalid_value", field="face_indices"
+                )
+            seen.add(index)
+            checked.append(index)
+        return checked
+
+    def _texture_files(self, textures: Dict[str, Optional[str]]) -> Dict[str, str]:
+        """The texture paths given, each allowed by the sandbox and an existing file."""
+        files: Dict[str, str] = {}
+        for key, path in textures.items():
+            if path is None:
+                continue
+            resolved = self._deny_outside_sandbox(path)
+            if not os.path.isfile(resolved):
+                raise NotFoundError(
+                    f"{key}_texture '{path}' is not a file",
+                    "texture_not_found",
+                    field=f"{key}_texture",
+                    path=path,
+                )
+            files[key] = resolved
+        return files
+
+    @staticmethod
+    def _load_texture_images(textures: Dict[str, str], new_images: List[Any]) -> Dict[str, Any]:
+        """Find or load each texture image, in the colour space its socket reads it in.
+
+        A data map (metallic, roughness, normal) is read Non-Color; a base
+        colour reads the colour space Blender loads the file in: sRGB for an
+        8-bit image, linear for a float one such as an EXR. An image of the same
+        file already read that way is reused, so a repeated call adds no
+        datablock. An image already in the file is never changed, since other
+        materials may read it: when every one of the file reads the other way,
+        this input gets a datablock of its own. Images the call loads are added
+        to ``new_images``, for the caller to remove on failure.
+        bpy.data.images.load accepts a file that is no image and only fails to
+        read it later, so an image that reads as 0 x 0 pixels is refused.
+        """
+        blender_module: Any = bpy
+        images: Dict[str, Any] = {}
+        for key, path in textures.items():
+            data_map = key != "base_color"
+            same_file = [
+                image
+                for image in blender_module.data.images
+                if _image_file(image) == _real_path(path)
+            ]
+            image = next(
+                (
+                    candidate
+                    for candidate in same_file
+                    if bool(candidate.colorspace_settings.is_data) == data_map
+                ),
+                None,
+            )
+            fresh = image is None
+            if image is None:
+                image = blender_module.data.images.load(path, check_existing=False)
+                new_images.append(image)
+            if not image.size[0]:
+                raise ValidationError(
+                    f"{key}_texture '{path}' is not an image Blender can read",
+                    "not_an_image",
+                    field=f"{key}_texture",
+                    path=path,
+                )
+            if fresh and data_map:
+                image.colorspace_settings.name = "Non-Color"
+            images[key] = image
+        return images
+
+    def _material_warnings(
+        self,
+        obj: Any,
+        link: str,
+        textures: Dict[str, str],
+        sharers: List[str],
+        copy_data: bool,
+    ) -> List[str]:
+        """Warnings about where an assignment shows: shared data, missing UVs."""
+        warnings: List[str] = []
+        data = obj.data
+        if link == "DATA" and sharers and not copy_data:
+            kind = "Mesh" if obj.type == "MESH" else obj.type.title()
+            warnings.append(
+                f"{kind} data '{data.name}' is shared with {_name_list(sharers)}; its slots "
+                "and face assignments change on all of them (single_user=true changes only "
+                "this object)"
+            )
+        if textures and obj.type == "MESH" and not len(data.uv_layers):
+            warnings.append(
+                f"Mesh '{data.name}' has no UV map, which image textures need; run "
+                "uv_unwrap_blender_mesh on the object"
+            )
+        return warnings
+
+    def _shade_principled(
+        self,
+        material: Any,
+        color: Optional[Tuple[float, float, float, Optional[float]]],
+        metallic: Optional[float],
+        roughness: Optional[float],
+        images: Dict[str, Any],
+    ) -> None:
+        """Set the given values and textures on the material's Principled BSDF."""
+        bsdf = self._principled_node(material)
+        if color is not None:
+            red, green, blue, alpha = color
+            bsdf.inputs["Base Color"].default_value = (red, green, blue, 1.0)
+            material.diffuse_color = (red, green, blue, 1.0 if alpha is None else alpha)
+            if alpha is not None:
+                bsdf.inputs["Alpha"].default_value = alpha
+                self._set_render_method(material, transparent=alpha < 1.0)
+        if metallic is not None:
+            bsdf.inputs["Metallic"].default_value = metallic
+        if roughness is not None:
+            bsdf.inputs["Roughness"].default_value = roughness
+        for row, (key, image) in enumerate(images.items()):
+            self._link_texture(material.node_tree, bsdf, key, image, row)
+
+    @staticmethod
+    def _set_render_method(material: Any, transparent: bool) -> None:
+        """Blend the material when it is transparent, as alpha alone does not.
+
+        Blender 4.2+ (EEVEE Next) sets this as surface_render_method; earlier
+        versions as blend_method.
+        """
+        if hasattr(material, "surface_render_method"):
+            material.surface_render_method = "BLENDED" if transparent else "DITHERED"
+        else:
+            material.blend_method = "BLEND" if transparent else "OPAQUE"
+
+    @staticmethod
+    def _render_method(material: Any) -> Optional[str]:
+        """The material's render method (surface_render_method, else blend_method)."""
+        for name in ("surface_render_method", "blend_method"):
+            value = getattr(material, name, None)
+            if value is not None:
+                return str(value)
+        return None
+
+    def _link_texture(self, tree: Any, bsdf: Any, key: str, image: Any, row: int) -> None:
+        """Drive one Principled input with an image texture, replacing what drove it."""
+        socket = bsdf.inputs[_TEXTURE_SOCKETS[key]]
+        for old in list(socket.links):
+            source = old.from_node
+            tree.links.remove(old)
+            self._drop_unused_texture_node(tree, source)
+        x, y = bsdf.location[0], bsdf.location[1]
+        texture = tree.nodes.new("ShaderNodeTexImage")
+        texture.image = image
+        texture.label = f"{_TEXTURE_SOCKETS[key]} Texture"
+        texture.location = (x - 700, y - 300 * row)
+        if key == "normal":
+            normal_map = tree.nodes.new("ShaderNodeNormalMap")
+            normal_map.location = (x - 250, y - 300 * row)
+            tree.links.new(texture.outputs["Color"], normal_map.inputs["Color"])
+            tree.links.new(normal_map.outputs["Normal"], socket)
+        else:
+            tree.links.new(texture.outputs["Color"], socket)
+
+    def _drop_unused_texture_node(self, tree: Any, node: Any) -> None:
+        """Remove an Image Texture, Normal Map or Reroute node that no longer feeds anything.
+
+        The nodes upstream of it go too when nothing else uses them, so a
+        replaced texture behind Reroutes leaves no stray nodes.
+        """
+        if node.type not in ("TEX_IMAGE", "NORMAL_MAP", "REROUTE") or any(
+            output.is_linked for output in node.outputs
+        ):
+            return
+        upstream = [link.from_node for socket in node.inputs for link in socket.links]
+        tree.nodes.remove(node)
+        for source in upstream:
+            self._drop_unused_texture_node(tree, source)
+
+    @staticmethod
+    def _material_output(tree: Any) -> Any:
+        """The node tree's active Material Output, else its first one, else None."""
+        outputs = [node for node in tree.nodes if node.type == "OUTPUT_MATERIAL"]
+        return next((node for node in outputs if node.is_active_output), None) or next(
+            iter(outputs), None
+        )
+
+    def _material_tree(self, material: Any) -> Any:
+        """The material's node tree when it renders with nodes, else None.
+
+        Blender 5.0 materials always use nodes and deprecate Material.use_nodes
+        (removed in 6.0), so it is read only before 5.0.
+        """
+        tree = getattr(material, "node_tree", None)
+        if tree is None:
+            return None
+        if self._is_blender_5_plus:
+            return tree
+        return tree if material.use_nodes else None
+
+    def _principled_node(self, material: Any) -> Any:
+        """The Principled BSDF feeding the active output's Surface, else the first one."""
+        tree = self._material_tree(material)
+        if tree is None:
+            return None
+        output = self._material_output(tree)
+        surface = None if output is None else output.inputs.get("Surface")
+        for link in [] if surface is None else _live_links(surface):
+            source = _link_source(link)[0]
+            if source.type == "BSDF_PRINCIPLED":
+                return source
+        return next((node for node in tree.nodes if node.type == "BSDF_PRINCIPLED"), None)
+
+    @staticmethod
+    def _face_materials(mesh: Any) -> List[int]:
+        """Every face's material index, in face order."""
+        values = [0] * len(mesh.polygons)
+        mesh.polygons.foreach_get("material_index", values)
+        return values
+
+    @staticmethod
+    def _set_face_materials(mesh: Any, values: List[int]) -> None:
+        """Write every face's material index."""
+        mesh.polygons.foreach_set("material_index", values)
+        mesh.update()
 
     def add_modifier(
         self,
@@ -2293,12 +4025,27 @@ class BlenderRuntimeSession:
 
     @staticmethod
     def _require_object_mode(obj: Any, action: str) -> None:
-        """Refuse to change an object's mesh data while it is edited in another mode."""
+        """Refuse to change an object's data while it, or its data, is edited in another mode.
+
+        Edit Mode keeps its own copy of the data and writes it back on leaving,
+        over what was changed meanwhile, also when the data is edited through
+        another object that shares it.
+        """
         mode = getattr(obj, "mode", "OBJECT")
         if mode != "OBJECT":
-            raise ValueError(
+            raise ValidationError(
                 f"Object '{obj.name}' is in {mode.replace('_', ' ').title()} Mode; "
-                f"switch it to Object Mode to {action}"
+                f"switch it to Object Mode to {action}",
+                "wrong_mode",
+                mode=mode,
+            )
+        data: Any = getattr(obj, "data", None)
+        if getattr(data, "is_editmode", False):
+            raise ValidationError(
+                f"The data '{data.name}' of '{obj.name}' is in Edit Mode through another "
+                f"object that shares it; switch that object to Object Mode to {action}",
+                "wrong_mode",
+                mode="EDIT",
             )
 
     @staticmethod
@@ -2475,45 +4222,359 @@ class BlenderRuntimeSession:
         spot_size: Optional[float] = None,
         spot_blend: Optional[float] = None,
         shadow_soft_size: Optional[float] = None,
+        light_type: Optional[str] = None,
+        angle: Optional[float] = None,
+        size: Optional[float] = None,
+        size_y: Optional[float] = None,
+        shape: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Set properties on a light object.
+        Set properties on a light object, checked for its type and range.
+
+        Each setting must belong to the light's type (after ``light_type``,
+        when given): shadow_soft_size is the radius of POINT and SPOT lights,
+        spot_size and spot_blend are SPOT's, angle is a SUN's softness, and
+        shape, size and size_y are an AREA light's (size_y for RECTANGLE and
+        ELLIPSE). A value outside its range is refused rather than clamped,
+        and energy may not be negative. Nothing changes unless every value is
+        valid. The reply reports every setting of the light's type as stored.
 
         Args:
             light_name: Light object name.
-            energy: Light energy/power.
-            color: Light color RGB [r, g, b].
+            energy: Light power in watts (irradiance in W/m² for SUN), >= 0.
+            color: Light color RGB [r, g, b], each >= 0.
             use_shadow: Enable shadow casting.
-            spot_size: Spot cone angle in radians (SPOT only).
-            spot_blend: Spot edge blend factor (SPOT only).
-            shadow_soft_size: Shadow softness / radius.
+            spot_size: Spot cone angle in radians, 1 degree to pi (SPOT).
+            spot_blend: Spot edge softness 0-1 (SPOT).
+            shadow_soft_size: Light radius for soft shadows, >= 0 (POINT, SPOT).
+            light_type: Change the light to POINT, SUN, SPOT or AREA first.
+            angle: Sun's angular diameter in radians, 0 to pi (SUN).
+            size: Area light size, >= 0 (AREA; its width for RECTANGLE and ELLIPSE).
+            size_y: Area light height, >= 0 (AREA with shape RECTANGLE or ELLIPSE).
+            shape: Area light shape: SQUARE, RECTANGLE, DISK or ELLIPSE (AREA).
 
         Returns:
-            Dictionary with light_name, light_type, energy, color.
+            Dictionary with light_name, light_type, energy, color, use_shadow,
+            the settings of its type and warnings.
         """
         obj = self._get_object_or_raise(light_name)
         if obj.type != "LIGHT":
-            raise ValueError(f"Object '{light_name}' is type '{obj.type}', not LIGHT")
+            raise ValidationError(
+                f"Object '{light_name}' is type '{obj.type}', not LIGHT",
+                "not_a_light",
+                object_type=obj.type,
+            )
         light = obj.data
+        target = light.type if light_type is None else str(light_type).upper()
+        if target not in _LIGHT_TYPE_SETTINGS:
+            raise ValidationError(
+                f"light_type must be one of {', '.join(_LIGHT_TYPE_SETTINGS)}, got {light_type!r}",
+                "invalid_value",
+                field="light_type",
+            )
+        typed: Dict[str, Any] = {
+            name: value
+            for name, value in (
+                ("shadow_soft_size", shadow_soft_size),
+                ("spot_size", spot_size),
+                ("spot_blend", spot_blend),
+                ("angle", angle),
+                ("shape", shape),
+                ("size", size),
+                ("size_y", size_y),
+            )
+            if value is not None
+        }
+        for name in typed:
+            if name not in _LIGHT_TYPE_SETTINGS[target]:
+                raise ValidationError(
+                    self._light_setting_error(name, light_name, target),
+                    "setting_not_for_light_type",
+                    field=name,
+                    light_type=target,
+                )
+        numbers_given: Dict[str, Any] = {
+            name: value for name, value in typed.items() if name != "shape"
+        }
+        if energy is not None:
+            numbers_given["energy"] = energy
+        for name, value in numbers_given.items():
+            low, high = _LIGHT_LIMITS[name]
+            number = _finite_number(value, name)
+            if number < low or (high is not None and number > high):
+                bound = f"at least {low:g}" if high is None else f"between {low:g} and {high:g}"
+                raise ValidationError(f"{name} must be {bound}, got {value!r}", "out_of_range", field=name)
+        rgb: Any = color
+        if rgb is not None:
+            if isinstance(rgb, (str, bytes)) or not hasattr(rgb, "__len__") or len(rgb) != 3:
+                raise ValidationError(f"color must be [r, g, b], got {rgb!r}", "invalid_value", field="color")
+            if any(_finite_number(channel, "color") < 0 for channel in rgb):
+                raise ValidationError(
+                    f"color channels must be at least 0, got {rgb!r}", "out_of_range", field="color"
+                )
+        shadows: Any = use_shadow
+        if shadows is not None and not isinstance(shadows, bool):
+            raise ValidationError(
+                f"use_shadow must be true or false, got {shadows!r}", "invalid_value", field="use_shadow"
+            )
+        if shape is not None:
+            shape = str(shape).upper()
+            if shape not in _AREA_LIGHT_SHAPES:
+                raise ValidationError(
+                    f"shape must be one of {', '.join(_AREA_LIGHT_SHAPES)}, got {shape!r}",
+                    "invalid_value",
+                    field="shape",
+                )
+        if size_y is not None:
+            effective = shape or (light.shape if light.type == "AREA" else "SQUARE")
+            if effective not in ("RECTANGLE", "ELLIPSE"):
+                raise ValidationError(
+                    f"size_y applies to RECTANGLE and ELLIPSE area lights, and '{light_name}' "
+                    f"would be {effective}; pass shape as well",
+                    "setting_not_for_light_type",
+                    field="size_y",
+                    shape=effective,
+                )
+
+        if light.type != target:
+            light.type = target
+            # The light datablock's Python struct keeps its old type's
+            # settings until it is fetched again.
+            light = obj.data
         if energy is not None:
             light.energy = energy
         if color is not None:
-            light.color = tuple(color[:3])
+            light.color = tuple(color)
         if use_shadow is not None:
             light.use_shadow = use_shadow
-        if spot_size is not None and light.type == "SPOT":
-            light.spot_size = spot_size
-        if spot_blend is not None and light.type == "SPOT":
-            light.spot_blend = spot_blend
-        if shadow_soft_size is not None:
-            light.shadow_soft_size = shadow_soft_size
+        if shape is not None:
+            light.shape = shape
+        for name, value in typed.items():
+            if name != "shape":
+                setattr(light, name, value)
 
-        return {
+        result: Dict[str, Any] = {
             "light_name": light_name,
             "light_type": light.type,
             "energy": light.energy,
             "color": list(light.color),
+            "use_shadow": bool(light.use_shadow),
         }
+        for name in _LIGHT_TYPE_SETTINGS[light.type]:
+            result[name] = getattr(light, name)
+        users = int(getattr(light, "users", 1))
+        result["warnings"] = (
+            [f"Light data '{light.name}' is shared by {users} objects; all of them changed"]
+            if users > 1
+            else []
+        )
+        return result
+
+    @staticmethod
+    def _light_setting_error(name: str, light_name: str, light_type: str) -> str:
+        """Why a setting does not apply to a light type, and what does instead."""
+        owners = [kind for kind, settings in _LIGHT_TYPE_SETTINGS.items() if name in settings]
+        message = (
+            f"{name} applies to {' and '.join(owners)} lights, and '{light_name}' is a "
+            f"{light_type} light"
+        )
+        if name == "shadow_soft_size" and light_type == "SUN":
+            return f"{message}; a sun's softness is its angle"
+        if name == "shadow_soft_size" and light_type == "AREA":
+            return f"{message}; an area light's softness is its size"
+        return f"{message}; pass light_type to change its type"
+
+    def uv_unwrap_mesh(
+        self,
+        object_name: str,
+        method: str = "SMART_PROJECT",
+        uv_map_name: Optional[str] = None,
+        angle_limit: float = math.radians(66.0),
+        island_margin: float = 0.0,
+        cube_size: float = 1.0,
+    ) -> Dict[str, Any]:
+        """
+        Generate UV coordinates for every face of a mesh object, hidden ones included.
+
+        SMART_PROJECT splits the mesh into islands where faces meet at more
+        than ``angle_limit`` and packs them (Blender's Smart UV Project);
+        CUBE_PROJECT projects each face onto the cube side it faces, at
+        ``cube_size``. The result goes into ``uv_map_name`` (created when
+        missing), else the active UV map, else a new "UVMap". The active UV
+        map stays what it was (a mesh's first UV map becomes active and the
+        render UV map, as Blender makes it); the reply names the active and
+        render UV maps, the one image textures read. The operators need Edit
+        Mode, so the object briefly becomes the active, only selected object
+        and its hidden faces are shown; its mesh selection and hidden faces,
+        the object selection and the active object are restored afterwards.
+        The object, and Blender, must be in Object Mode.
+
+        Args:
+            object_name: Mesh object to unwrap.
+            method: SMART_PROJECT or CUBE_PROJECT.
+            uv_map_name: UV map to write; the active one (or a new UVMap) if omitted.
+            angle_limit: SMART_PROJECT: island angle in radians, above 0 to pi/2.
+            island_margin: SMART_PROJECT: space between islands, 0-1.
+            cube_size: CUBE_PROJECT: size of the projection cube, above 0.
+
+        Returns:
+            Dictionary with the UV map written, whether it was created, the
+            method, the mesh's UV map names, the active and render UV maps, the
+            face count and warnings.
+        """
+        blender_module: Any = bpy
+        obj = self._get_object_or_raise(object_name)
+        if obj.type != "MESH":
+            raise ValidationError(
+                f"Object '{object_name}' is not a MESH (type={obj.type})",
+                "not_a_mesh",
+                object_type=obj.type,
+            )
+        self._require_object_mode(obj, "unwrap it")
+        context_mode = getattr(blender_module.context, "mode", "OBJECT")
+        if context_mode != "OBJECT":
+            raise ValidationError(
+                f"Blender is in {context_mode.replace('_', ' ').title()} mode; switch to Object Mode "
+                "to unwrap a mesh",
+                "wrong_mode",
+                mode=context_mode,
+            )
+        operator = _UV_UNWRAP_METHODS.get(str(method).upper())
+        if operator is None:
+            raise ValidationError(
+                f"method must be one of {', '.join(_UV_UNWRAP_METHODS)}, got {method!r}",
+                "invalid_value",
+                field="method",
+            )
+        limits: List[Tuple[str, Any, float, Optional[float], bool]] = [
+            ("angle_limit", angle_limit, 0.0, math.pi / 2, True),
+            ("island_margin", island_margin, 0.0, 1.0, False),
+            ("cube_size", cube_size, 0.0, None, True),
+        ]
+        for label, value, low, high, open_low in limits:
+            number = _finite_number(value, label)
+            if (number <= low if open_low else number < low) or (high is not None and number > high):
+                raise ValidationError(
+                    f"{label} must be {'above' if open_low else 'at least'} {low:g}"
+                    + (f" and at most {high:g}" if high is not None else "")
+                    + f", got {value!r}",
+                    "out_of_range",
+                    field=label,
+                )
+        mesh = obj.data
+        for owner, what in ((obj, "Object"), (mesh, "Mesh")):
+            library = getattr(owner, "library", None)
+            if library is not None:
+                raise ValidationError(
+                    f"{what} '{owner.name}' is linked from library '{library.name}' and cannot "
+                    "be changed; make it local first",
+                    "linked_from_library",
+                )
+        if not obj.visible_get():
+            raise ValidationError(
+                f"Object '{object_name}' is hidden in the view layer and cannot enter Edit Mode; "
+                "unhide it first",
+                "hidden_object",
+            )
+
+        layer = mesh.uv_layers.get(uv_map_name) if uv_map_name else mesh.uv_layers.active
+        previous_uv = mesh.uv_layers.active
+        previous_uv_name = None if previous_uv is None else previous_uv.name
+        created = layer is None
+        if created:
+            layer = mesh.uv_layers.new(name=uv_map_name or "UVMap")
+            if layer is None:
+                raise ValidationError(
+                    f"Mesh '{mesh.name}' has the most UV maps Blender allows", "too_many_uv_maps"
+                )
+        mesh.uv_layers.active = layer
+        # Leaving Edit Mode rebuilds the mesh's layers, so a UV layer struct
+        # fetched before it points at freed memory afterwards (on Blender 5.0.1
+        # its name read back as ""): layers are looked up again by name.
+        uv_name = layer.name
+
+        view_layer = blender_module.context.view_layer
+        previous_active = view_layer.objects.active
+        previous_selected = [other for other in view_layer.objects if other.select_get()]
+        domains = ("vertices", "edges", "polygons")
+        flags = {
+            (domain, flag): self._element_flags(getattr(mesh, domain), flag)
+            for domain in domains
+            for flag in ("select", "hide")
+        }
+        try:
+            for other in previous_selected:
+                other.select_set(False)
+            obj.select_set(True)
+            view_layer.objects.active = obj
+            _bpy_op(
+                f"Failed to enter Edit Mode on '{object_name}'",
+                blender_module.ops.object.mode_set,
+                mode="EDIT",
+            )
+            try:
+                # The operators skip hidden faces: show them for the unwrap.
+                blender_module.ops.mesh.reveal(select=True)
+                blender_module.ops.mesh.select_all(action="SELECT")
+                options = (
+                    {"angle_limit": angle_limit, "island_margin": island_margin}
+                    if operator == "smart_project"
+                    else {"cube_size": cube_size}
+                )
+                _bpy_op(
+                    f"Failed to unwrap '{object_name}'",
+                    getattr(blender_module.ops.uv, operator),
+                    **options,
+                )
+            finally:
+                blender_module.ops.object.mode_set(mode="OBJECT")
+        except Exception:
+            stale = mesh.uv_layers.get(uv_name)
+            if created and stale is not None:
+                mesh.uv_layers.remove(stale)
+            raise
+        finally:
+            for (domain, flag), values in flags.items():
+                getattr(mesh, domain).foreach_set(flag, values)
+            restored_uv = None if previous_uv_name is None else mesh.uv_layers.get(previous_uv_name)
+            if restored_uv is not None:
+                mesh.uv_layers.active = restored_uv
+            mesh.update()
+            obj.select_set(False)
+            for other in previous_selected:
+                other.select_set(True)
+            view_layer.objects.active = previous_active
+
+        warnings: List[str] = []
+        sharers = self._other_users(obj)
+        if sharers:
+            warnings.append(
+                f"Mesh '{mesh.name}' is shared with {_name_list(sharers)}; their UVs changed too"
+            )
+        active = mesh.uv_layers.active
+        render = next((uv for uv in mesh.uv_layers if getattr(uv, "active_render", False)), None)
+        if render is not None and render.name != uv_name:
+            warnings.append(
+                f"Image textures read the render UV map '{render.name}', not '{uv_name}'"
+            )
+        return {
+            "object_name": object_name,
+            "uv_map": uv_name,
+            "created_uv_map": created,
+            "method": str(method).upper(),
+            "uv_layer_names": [uv.name for uv in mesh.uv_layers],
+            "active_uv_map": None if active is None else active.name,
+            "render_uv_map": None if render is None else render.name,
+            "face_count": len(mesh.polygons),
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def _element_flags(elements: Any, flag: str) -> List[bool]:
+        """One flag (select or hide) of every vertex, edge or face, in order."""
+        values = [False] * len(elements)
+        elements.foreach_get(flag, values)
+        return values
 
     # -- End Phase 3 methods -------------------------------------------------
 
@@ -2673,8 +4734,15 @@ class BlenderRuntimeSession:
             Dict with file_path, file_format, imported_objects, scale and
             warning (None unless something needs attention).
 
+        Files the import would read besides file_path (textures, buffers, MTL
+        libraries, USD layers) must be inside the sandbox too
+        (_refuse_reads_outside_sandbox). While the sandbox is on, the FBX
+        importer's recursive image search (use_image_search) is off: a texture
+        must be at the path the FBX stores, or beside the FBX.
+
         Raises:
-            PermissionError: If the path is outside the sandbox policy.
+            PermissionError: If the path, or a file the import would read, is
+                outside the sandbox policy.
             FileNotFoundError: If the file does not exist.
             ValueError: If the format is unsupported or scale is not positive.
         """
@@ -2684,6 +4752,7 @@ class BlenderRuntimeSession:
             raise FileNotFoundError(f"File not found: {file_path}")
         if not (math.isfinite(scale) and scale > 0.0):
             raise ValueError(f"scale must be a positive number, not {scale!r}")
+        self._refuse_reads_outside_sandbox(file_path, fmt)
 
         blender_module: Any = bpy
         existing_names = set(blender_module.data.objects.keys())
@@ -2700,6 +4769,11 @@ class BlenderRuntimeSession:
                 scale_roots = scale
             else:
                 kwargs[prop] = scale
+        if self._path_policy.enabled:
+            # Search options that find files the reference check cannot vouch for.
+            for option in _IMPORT_SEARCH_OPTIONS.get(fmt, ()):
+                if self._operator_property(op_func, (option,)):
+                    kwargs[option] = False
         _bpy_op(f"Failed to import {fmt} file '{file_path}'", op_func, **kwargs)
 
         new_names = [
@@ -3460,6 +5534,64 @@ class BlenderRuntimeSession:
         finally:
             preferences.allow_embedded_format = False
 
+    def _refuse_reads_outside_sandbox(self, file_path: str, fmt: str) -> None:
+        """Refuse an import that would read files outside the sandbox (B1-20).
+
+        The files a glTF's buffers and images, an OBJ's MTL libraries and their
+        textures, an FBX's textures, and a USD file's layers and assets name
+        are found where Blender's importer looks for them; the first of its
+        candidates that exists must be allowed. A reference to a file that does
+        not exist reads nothing and passes. STL and PLY name no other files.
+
+        Raises:
+            SandboxDenied: When a referenced file outside the sandbox exists,
+                or when the references cannot be listed (a binary USD file
+                without pxr, an FBX without Blender's FBX add-on).
+        """
+        reader = _IMPORT_READS.get(fmt)
+        if reader is None or not self._path_policy.enabled:
+            return
+        from ..utils.paths import SandboxDenied
+
+        name = os.path.basename(file_path)
+        try:
+            reads = reader(Path(file_path), self._path_policy.is_allowed)
+        except Exception as exc:
+            if fmt != "USD" and not isinstance(exc, UncheckableReferences):
+                # Blender's importer reads the same file and says why it cannot.
+                logger.warning("Could not list the files %s refers to: %s", name, exc)
+                return
+            details = self._path_policy.denial_details(file_path)
+            details.update(
+                referenced_by=file_path,
+                hint=(
+                    f"Could not check the files {name} refers to against the sandbox "
+                    f"({exc}), so it is not imported"
+                ),
+            )
+            raise SandboxDenied(file_path, details) from exc
+        outside: List[str] = []
+        for candidates in reads:
+            found = next((c for c in candidates if os.path.exists(c)), None)
+            if found is not None and not self._path_policy.is_allowed(found):
+                # Reported as the file it is, without ../ steps or symlinks.
+                real = str(self._path_policy.resolve(found))
+                if real not in outside:
+                    outside.append(real)
+        if not outside:
+            return
+        details = self._path_policy.denial_details(outside[0])
+        details.update(
+            referenced_by=file_path,
+            references_outside=outside[:20],
+            hint=(
+                f"{name} refers to files outside the sandbox, which the import would read: "
+                f"{', '.join(outside[:5])}. Copy them under an allowed root and point "
+                f"{name} at the copies, or widen security.allowed_paths"
+            ),
+        )
+        raise SandboxDenied(outside[0], details)
+
     def _scale_imported_roots(self, names: List[str], factor: float) -> Optional[str]:
         """Scale imported objects about the world origin through their root objects.
 
@@ -3494,16 +5626,20 @@ class BlenderRuntimeSession:
         Return information about the current .blend file.
 
         Returns:
-            Dict with file_path, is_saved, is_dirty, object_count, scene_name.
+            Dict with file_path, is_saved, is_dirty, object_count (objects in
+            the current scene), file_object_count (objects in the file: every
+            scene's and those no scene links) and scene_name.
         """
         blender_module: Any = bpy
         filepath = blender_module.data.filepath or ""
+        scene = blender_module.context.scene
         return {
             "file_path": filepath,
             "is_saved": bool(filepath),
             "is_dirty": blender_module.data.is_dirty,
-            "object_count": len(blender_module.data.objects),
-            "scene_name": blender_module.context.scene.name,
+            "object_count": len(scene.objects),
+            "file_object_count": len(blender_module.data.objects),
+            "scene_name": scene.name,
         }
 
     # -- End Phase 4 methods -------------------------------------------------
@@ -3754,50 +5890,115 @@ class BlenderRuntimeSession:
         collision_shape: str = "CONVEX_HULL",
         linear_damping: float = 0.04,
         angular_damping: float = 0.1,
+        kinematic: Optional[bool] = None,
+        collision_margin: Optional[float] = None,
+        collision_collections: Optional[List[int]] = None,
+        use_deactivation: Optional[bool] = None,
+        start_deactivated: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
-        Set up rigid body physics on a Blender object.
+        Set up rigid body physics on a mesh object, or replace its settings.
+
+        Every argument is checked before anything changes, and a failure
+        leaves the scene as it was: no new world, rigid body or selection
+        change. The settings before kinematic are written on every call;
+        kinematic, collision_margin, collision_collections, use_deactivation
+        and start_deactivated change only when given (a new body starts with
+        Blender's defaults).
 
         Args:
-            object_name: Name of the target object.
-            body_type: ACTIVE (dynamic) or PASSIVE (static).
-            mass: Mass in kilograms.
-            friction: Surface friction coefficient.
-            restitution: Bounciness (0-1).
-            collision_shape: Collision shape type.
-            linear_damping: Linear damping factor.
-            angular_damping: Angular damping factor.
+            object_name: Name of the target mesh object.
+            body_type: ACTIVE (simulated) or PASSIVE (static or animated collider).
+            mass: Mass in kilograms, at least 0.001.
+            friction: Surface friction coefficient, 0 or more.
+            restitution: Bounciness from 0 (none) to 1 (fully elastic).
+            collision_shape: BOX, SPHERE, CAPSULE, CYLINDER, CONE, CONVEX_HULL,
+                MESH or COMPOUND (a compound of the children's shapes).
+            linear_damping: Fraction of linear velocity lost per second, 0-1.
+            angular_damping: Fraction of angular velocity lost per second, 0-1.
+            kinematic: Animated: the body follows its own animation and pushes
+                simulated bodies instead of being simulated.
+            collision_margin: Collision margin in meters, 0-1; omitted keeps
+                Blender's automatic margin for a new body.
+            collision_collections: Collision collections (0-19) the body is
+                in; bodies collide only when they share one. A new body is in 0.
+            use_deactivation: Let the body go to sleep when it nearly stops.
+            start_deactivated: Start asleep until something hits it
+                (needs use_deactivation).
 
         Returns:
-            Dict with object_name, body_type, mass, collision_shape.
+            Dict with object_name, the settings as Blender stored them,
+            world_created and replaced (whether the object already had a
+            rigid body).
         """
         blender_module: Any = bpy
         obj = self._get_object_or_raise(object_name)
+        body_type = self._choice("body_type", body_type, self._BODY_TYPES)
+        collision_shape = self._choice(
+            "collision_shape", collision_shape, self._COLLISION_SHAPES
+        )
+        self._check_range("mass", mass, 0.001)
+        self._check_range("friction", friction, 0.0)
+        self._check_range("restitution", restitution, 0.0, 1.0)
+        self._check_range("linear_damping", linear_damping, 0.0, 1.0)
+        self._check_range("angular_damping", angular_damping, 0.0, 1.0)
+        if collision_margin is not None:
+            self._check_range("collision_margin", collision_margin, 0.0, 1.0)
+        if collision_collections is not None:
+            collision_collections = sorted(set(int(i) for i in collision_collections))
+            if any(not 0 <= i < 20 for i in collision_collections):
+                raise ValueError("collision_collections are numbered 0 to 19")
+        if obj.type != "MESH":
+            raise ValueError(
+                f"Rigid bodies need a mesh object, and '{object_name}' is a "
+                f"{obj.type} object; convert it to a mesh first"
+            )
 
         scene = blender_module.context.scene
-        self._ensure_rigid_body_world(scene)
-
-        blender_module.context.view_layer.objects.active = obj
-        obj.select_set(True)
-        _bpy_op(
-            f"Failed to add rigid body to '{object_name}'",
-            blender_module.ops.rigidbody.object_add,
-            type=body_type.upper(),
-        )
-
-        rb = obj.rigid_body
-        rb.mass = mass
-        rb.friction = friction
-        rb.restitution = restitution
-        rb.collision_shape = collision_shape.upper()
-        rb.linear_damping = linear_damping
-        rb.angular_damping = angular_damping
+        previous = self._rigid_body_snapshot(getattr(obj, "rigid_body", None))
+        _, world_created = self._ensure_rigid_body_world(scene)
+        try:
+            # Under an override the operator acts on this object alone and the
+            # user's selection and active object stay as they were.
+            with blender_module.context.temp_override(
+                object=obj,
+                active_object=obj,
+                selected_objects=[obj],
+                selected_editable_objects=[obj],
+            ):
+                _bpy_op(
+                    f"Failed to add rigid body to '{object_name}'",
+                    blender_module.ops.rigidbody.object_add,
+                    type=body_type,
+                )
+            rb = obj.rigid_body
+            rb.type = body_type
+            rb.mass = mass
+            rb.friction = friction
+            rb.restitution = restitution
+            rb.collision_shape = collision_shape
+            rb.linear_damping = linear_damping
+            rb.angular_damping = angular_damping
+            if kinematic is not None:
+                rb.kinematic = kinematic
+            if collision_margin is not None:
+                rb.use_margin = True
+                rb.collision_margin = collision_margin
+            if collision_collections is not None:
+                rb.collision_collections = [i in collision_collections for i in range(20)]
+            if use_deactivation is not None:
+                rb.use_deactivation = use_deactivation
+            if start_deactivated is not None:
+                rb.use_start_deactivated = start_deactivated
+        except Exception:
+            self._restore_rigid_body(scene, obj, previous, world_created)
+            raise
 
         return {
             "object_name": object_name,
-            "body_type": rb.type,
-            "mass": rb.mass,
-            "collision_shape": rb.collision_shape,
+            **self._rigid_body_report(obj.rigid_body),
+            "world_created": world_created,
+            "replaced": previous is not None,
         }
 
     def add_force_field(
@@ -3806,58 +6007,141 @@ class BlenderRuntimeSession:
         strength: float = 1.0,
         location: Optional[List[float]] = None,
         name: Optional[str] = None,
+        direction: Optional[List[float]] = None,
+        shape: Optional[str] = None,
+        flow: Optional[float] = None,
+        falloff_type: Optional[str] = None,
+        falloff_power: Optional[float] = None,
+        distance_max: Optional[float] = None,
+        noise: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Add a force field to the scene.
+        Add a force field to the scene, oriented in world space.
+
+        The field's local +Z (the direction WIND blows, the axis VORTEX turns
+        about, a PLANE shape's normal) points along direction, world +Z when
+        omitted, whatever the editor's Align preference. Settings left out
+        keep Blender's defaults.
 
         Args:
-            field_type: Force field type (FORCE, WIND, VORTEX, etc.).
+            field_type: FORCE, WIND, VORTEX, MAGNET, HARMONIC, CHARGE, LENNARDJ,
+                TEXTURE, GUIDE, BOID, TURBULENCE, DRAG or FLUID.
             strength: Field strength.
             location: World-space XYZ location; the world origin when omitted.
             name: Optional name for the field object.
+            direction: World-space direction of the field's local +Z axis.
+            shape: POINT, LINE, PLANE, SURFACE or POINTS.
+            flow: Air flow: how strongly the field also drags toward its speed.
+            falloff_type: SPHERE, TUBE or CONE.
+            falloff_power: How fast the field weakens with distance, 0-10.
+            distance_max: Distance past which the field has no effect; 0 or
+                omitted for no limit.
+            noise: Random noise in the field, 0-10.
 
         Returns:
-            Dict with name, field_type, strength, location.
+            Dict with name, field_type, strength, location, rotation_euler,
+            direction, shape, flow, falloff_type, falloff_power, distance_max
+            and noise.
         """
         blender_module: Any = bpy
-        loc = (0.0, 0.0, 0.0) if location is None else tuple(location)
+        field_type = self._field_type(field_type)
+        self._check_range("strength", strength)
+        loc = self._finite_vector("location", location or (0.0, 0.0, 0.0))
+        rotation = self._axis_rotation(direction, "Z", "direction")
+        if shape is not None:
+            shape = self._choice("shape", shape, self._FIELD_SHAPES)
+        if falloff_type is not None:
+            falloff_type = self._choice("falloff_type", falloff_type, self._FALLOFF_TYPES)
+        if flow is not None:
+            self._check_range("flow", flow)
+        if falloff_power is not None:
+            self._check_range("falloff_power", falloff_power, 0.0, 10.0)
+        if distance_max is not None:
+            self._check_range("distance_max", distance_max, 0.0)
+        if noise is not None:
+            self._check_range("noise", noise, 0.0, 10.0)
 
-        blender_module.ops.object.effector_add(type=field_type.upper(), location=loc)
-        field_obj = blender_module.context.active_object
-        if name:
-            field_obj.name = name
-        field_obj.field.strength = strength
+        # align='WORLD' and an explicit rotation: without them the operator
+        # follows the user's "Align: View" preference and turns the field to
+        # the 3D View. The new object is found by what the operator added:
+        # context.active_object is None in the GUI when the active collection
+        # is disabled in viewports, though the field was created.
+        view_layer = blender_module.context.view_layer
+        active_collection = view_layer.active_layer_collection
+        target, warning = self._physics_collection(view_layer, "force field")
+        existing = {obj.as_pointer() for obj in blender_module.data.objects}
+        # bpy gives a new wrapper on every access; == compares what it wraps.
+        switch = target != active_collection
+        try:
+            if switch:
+                view_layer.active_layer_collection = target
+            blender_module.ops.object.effector_add(
+                type=field_type, align="WORLD", location=loc, rotation=rotation
+            )
+        finally:
+            if switch:
+                view_layer.active_layer_collection = active_collection
+        created = [
+            obj
+            for obj in blender_module.data.objects
+            if obj.as_pointer() not in existing
+        ]
+        if len(created) != 1:
+            for obj in created:
+                blender_module.data.objects.remove(obj, do_unlink=True)
+            raise RuntimeError(
+                f"Adding a {field_type} force field created {len(created)} objects, not one"
+            )
+        field_obj = created[0]
+        try:
+            if name:
+                field_obj.name = name
+            field = field_obj.field
+            field.strength = strength
+            if shape is not None:
+                field.shape = shape
+            if flow is not None:
+                field.flow = flow
+            if falloff_type is not None:
+                field.falloff_type = falloff_type
+            if falloff_power is not None:
+                field.falloff_power = falloff_power
+            if distance_max is not None:
+                field.use_max_distance = distance_max > 0
+                field.distance_max = distance_max
+            if noise is not None:
+                field.noise = noise
+        except Exception:
+            blender_module.data.objects.remove(field_obj, do_unlink=True)
+            raise
 
         return {
             "name": field_obj.name,
-            "field_type": field_obj.field.type,
-            "strength": field_obj.field.strength,
-            "location": list(field_obj.location),
+            **self._field_report(field_obj),
+            "warning": warning,
         }
 
     def get_force_field_info(self, object_name: str) -> Dict[str, Any]:
         """
         Get force field properties from a field object.
 
+        An object whose field type is NONE has no force field and is refused:
+        Blender keeps collision settings in the same structure, so a
+        collision-only object used to be reported as a field of type NONE.
+
         Args:
             object_name: Name of the force field object.
 
         Returns:
-            Dict with object_name, field_type, strength, shape, flow, location.
+            Dict with object_name, field_type, strength, shape, flow, location,
+            rotation_euler, direction, falloff_type, falloff_power,
+            distance_max and noise.
         """
         obj = self._get_object_or_raise(object_name)
         field = getattr(obj, "field", None)
-        if field is None:
+        if field is None or field.type == "NONE":
             raise ValueError(f"Object has no force field: {object_name}")
-
-        return {
-            "object_name": object_name,
-            "field_type": field.type,
-            "strength": float(field.strength),
-            "shape": field.shape,
-            "flow": float(field.flow),
-            "location": self._world_location(obj),
-        }
+        return {"object_name": object_name, **self._field_report(obj)}
 
     def add_rigid_body_constraint(
         self,
@@ -3866,47 +6150,165 @@ class BlenderRuntimeSession:
         object2_name: str,
         location: Optional[List[float]] = None,
         disable_collisions: bool = True,
+        axis: Optional[List[float]] = None,
+        limits: Optional[Dict[str, List[float]]] = None,
+        springs: Optional[Dict[str, Dict[str, float]]] = None,
+        motor_angular_velocity: Optional[float] = None,
+        motor_angular_max_impulse: Optional[float] = None,
+        motor_linear_velocity: Optional[float] = None,
+        motor_linear_max_impulse: Optional[float] = None,
+        breaking_threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Add a rigid body constraint between two objects.
+        Add a rigid body constraint between two distinct rigid bodies.
+
+        The constraint is an empty at the pivot, whose local axes are the
+        constraint's: HINGE turns about local Z, SLIDER and PISTON move along
+        local X (PISTON also turns about it), MOTOR drives along and about
+        local X, and GENERIC limits apply per local axis. Everything is checked
+        before anything changes; a failure leaves no empty behind and the
+        selection as it was.
 
         Args:
-            constraint_type: Constraint type (FIXED, POINT, HINGE, etc.).
-            object1_name: First constrained object.
-            object2_name: Second constrained object.
-            location: Optional world-space location for the constraint empty.
-            disable_collisions: Disable collisions between constrained objects.
+            constraint_type: FIXED, POINT, HINGE, SLIDER, PISTON, GENERIC,
+                GENERIC_SPRING or MOTOR.
+            object1_name: First constrained rigid body.
+            object2_name: Second constrained rigid body.
+            location: World-space pivot; midway between the two objects'
+                origins when omitted.
+            disable_collisions: Disable collisions between the two objects.
+            axis: World-space direction of the constraint's axis: the hinge
+                axis (local Z) for HINGE, the slide or motor axis (local X) for
+                SLIDER, PISTON and MOTOR, local Z for the other types. Omitted,
+                the empty is unrotated: a HINGE turns about world Z (a door,
+                not a pendulum) and a SLIDER moves along world X.
+            limits: Limits by local axis, as [lower, upper] (meters for lin_*,
+                radians for ang_*, within +-2 pi): ang_z for HINGE, lin_x for
+                SLIDER, lin_x and ang_x for PISTON, any of lin_x, lin_y, lin_z,
+                ang_x, ang_y, ang_z for GENERIC and GENERIC_SPRING.
+            springs: GENERIC_SPRING only: springs by local axis (x, y, z,
+                ang_x, ang_y, ang_z), each {"stiffness": ..., "damping": ...}.
+            motor_angular_velocity: MOTOR only: target angular velocity about
+                local X, rad/s. Blender drives object1 relative to object2, so
+                with object1 the anchor a positive velocity turns object2 the
+                negative way about the axis (-1.91 rad in 23 frames at +2 rad/s
+                on Blender 5.0.1); swap the objects or the sign to reverse it.
+            motor_angular_max_impulse: MOTOR only: most impulse the angular
+                motor applies per step (Blender's default 1).
+            motor_linear_velocity: MOTOR only: target velocity along local X,
+                m/s, with the same convention: with object1 the anchor, object2
+                moves against the sign (-0.91 m in 23 frames at +1 m/s).
+            motor_linear_max_impulse: MOTOR only: most impulse the linear motor
+                applies per step (Blender's default 1).
+            breaking_threshold: Impulse that breaks the constraint; omitted, it
+                never breaks.
 
         Returns:
             Dict with constraint_name, constraint_type, object1_name,
-            object2_name.
+            object2_name and the constraint as get_constraint_info reports it
+            (pivot, axis, local_axes, rotation_euler, limits, springs, motor,
+            breaking_threshold), plus warnings.
         """
         blender_module: Any = bpy
+        constraint_type = self._choice(
+            "constraint_type", constraint_type, self._CONSTRAINT_TYPES
+        )
         obj1 = self._get_object_or_raise(object1_name)
         obj2 = self._get_object_or_raise(object2_name)
-
+        if obj1 == obj2:
+            raise ValueError(
+                f"A rigid body constraint joins two different objects; got "
+                f"'{object1_name}' twice"
+            )
         scene = blender_module.context.scene
-        self._ensure_rigid_body_world(scene)
+        world = getattr(scene, "rigidbody_world", None)
+        for obj in (obj1, obj2):
+            if (
+                getattr(obj, "rigid_body", None) is None
+                or world is None
+                or not self._in_rigid_body_world(world, obj)
+            ):
+                raise ValueError(
+                    f"'{obj.name}' is not a rigid body; set it up with "
+                    "setup_blender_rigid_body first (a PASSIVE body for an anchor)"
+                )
+        settings = self._constraint_settings(
+            constraint_type,
+            limits,
+            springs,
+            {
+                "motor_ang_target_velocity": motor_angular_velocity,
+                "motor_ang_max_impulse": motor_angular_max_impulse,
+                "motor_lin_target_velocity": motor_linear_velocity,
+                "motor_lin_max_impulse": motor_linear_max_impulse,
+            },
+            breaking_threshold,
+        )
+        if location is None:
+            first, second = self._world_location(obj1), self._world_location(obj2)
+            pivot = tuple((a + b) / 2.0 for a, b in zip(first, second))
+        else:
+            pivot = self._finite_vector("location", location)
+        primary = self._CONSTRAINT_AXES.get(constraint_type, "Z")
+        rotation = self._axis_rotation(axis, primary, "axis")
 
-        loc = tuple(location or [0.0, 0.0, 0.0])
-        blender_module.ops.object.empty_add(location=loc)
-        empty = blender_module.context.active_object
-        empty.name = f"RBC_{object1_name}_{object2_name}"
+        # A new empty, not empty_add: that operator follows the user's
+        # "Align: View" preference and selects the empty.
+        view_layer = blender_module.context.view_layer
+        layer, collection_warning = self._physics_collection(
+            view_layer, "constraint empty"
+        )
+        collection = layer.collection
+        empty = blender_module.data.objects.new(
+            f"RBC_{object1_name}_{object2_name}", None
+        )
+        empty.location = pivot
+        empty.rotation_mode = "XYZ"
+        empty.rotation_euler = rotation
+        previous_active = view_layer.objects.active
+        try:
+            # Inside the try: a failed link (a linked collection) must not leave
+            # the empty behind with no users.
+            collection.objects.link(empty)
+            # constraint_add acts on the view layer's active object, whatever
+            # the context override says.
+            view_layer.objects.active = empty
+            _bpy_op(
+                f"Failed to add a {constraint_type} constraint",
+                blender_module.ops.rigidbody.constraint_add,
+                type=constraint_type,
+            )
+            rbc = empty.rigid_body_constraint
+            if rbc is None:
+                raise RuntimeError(
+                    f"Blender added no rigid body constraint to '{empty.name}'"
+                )
+            rbc.object1 = obj1
+            rbc.object2 = obj2
+            rbc.disable_collisions = disable_collisions
+            for setting, value in settings.items():
+                setattr(rbc, setting, value)
+        except Exception:
+            if getattr(empty, "rigid_body_constraint", None) is not None:
+                view_layer.objects.active = empty
+                blender_module.ops.rigidbody.constraint_remove()
+            blender_module.data.objects.remove(empty, do_unlink=True)
+            raise
+        finally:
+            view_layer.objects.active = previous_active
 
-        empty.select_set(True)
-        blender_module.context.view_layer.objects.active = empty
-        blender_module.ops.rigidbody.constraint_add(type=constraint_type.upper())
-
-        rbc = empty.rigid_body_constraint
-        rbc.object1 = obj1
-        rbc.object2 = obj2
-        rbc.disable_collisions = disable_collisions
-
+        warnings: List[str] = [collection_warning] if collection_warning else []
+        if constraint_type == "MOTOR" and (
+            motor_angular_velocity is None and motor_linear_velocity is None
+        ):
+            warnings.append(
+                "A MOTOR constraint drives nothing until motor_angular_velocity or "
+                "motor_linear_velocity is set"
+            )
         return {
             "constraint_name": empty.name,
-            "constraint_type": rbc.type,
-            "object1_name": object1_name,
-            "object2_name": object2_name,
+            **self._constraint_report(empty),
+            "warnings": warnings,
         }
 
     def get_constraint_info(self, object_name: str) -> Dict[str, Any]:
@@ -3917,22 +6319,15 @@ class BlenderRuntimeSession:
             object_name: Name of the constraint empty object.
 
         Returns:
-            Dict with object_name, constraint_type, object1_name,
-            object2_name, enabled, disable_collisions.
+            Dict with object_name, constraint_type, object1_name, object2_name,
+            enabled, disable_collisions, pivot, axis, local_axes,
+            rotation_euler, limits, springs, motor and breaking_threshold.
         """
         obj = self._get_object_or_raise(object_name)
         rbc = getattr(obj, "rigid_body_constraint", None)
         if rbc is None:
             raise ValueError(f"Object has no rigid body constraint: {object_name}")
-
-        return {
-            "object_name": object_name,
-            "constraint_type": rbc.type,
-            "object1_name": rbc.object1.name if rbc.object1 else None,
-            "object2_name": rbc.object2.name if rbc.object2 else None,
-            "enabled": rbc.enabled,
-            "disable_collisions": rbc.disable_collisions,
-        }
+        return {"object_name": object_name, **self._constraint_report(obj)}
 
     @staticmethod
     def _evaluated_world_matrix(obj: Any) -> Any:
@@ -4196,6 +6591,7 @@ class BlenderRuntimeSession:
         frame_start: int,
         frame_end: int,
         scope: str = "rigid_body",
+        allow_long_bake: bool = False,
     ) -> Dict[str, Any]:
         """
         Bake the physics simulation over a frame range, replacing any earlier bake.
@@ -4214,6 +6610,9 @@ class BlenderRuntimeSession:
                 in the scene, as Blender's Bake All Dynamics does: rigid bodies,
                 cloth, soft bodies and dynamic paint over frame_start-frame_end,
                 particle systems over the range their emission settings give.
+            allow_long_bake: Bake even above 20 000 frames or 400 000
+                body-frames (frames x bodies), which can outlast the client's
+                timeout while Blender keeps baking.
 
         Returns:
             Dict with scope, frame_start, frame_end and frame_count of the
@@ -4224,6 +6623,8 @@ class BlenderRuntimeSession:
         scope = self._bake_scope(scope)
         self._check_cache_range(int(frame_start), int(frame_end))
         scene = blender_module.context.scene
+        if not allow_long_bake:
+            self._check_bake_work(scene, scope, frame_end - frame_start + 1)
         warnings: List[str] = []
         original_frame = int(scene.frame_current)
         if scope == "rigid_body":
@@ -4299,6 +6700,37 @@ class BlenderRuntimeSession:
             "rigid_body_cache": state,
             "warnings": [warning] if warning else [],
         }
+
+    #: Most a bake does without allow_long_bake: frames, and frames x bodies.
+    #: On Blender 5.0.1 a frame took about 0.3 ms plus 30-40 microseconds per
+    #: body in contact: 1000 bodies x 1000 frames took 29.4 s, against the
+    #: attached-mode client's 30 s timeout, and 401 cubes x 900 frames 14.8 s
+    #: headless (1000 frames 8.7 s in the GUI). The budget takes up to about
+    #: 16 s, inside that timeout.
+    _BAKE_FRAME_BUDGET = 20_000
+    _BAKE_WORK_BUDGET = 400_000
+
+    def _check_bake_work(self, scene: Any, scope: str, frames: int) -> None:
+        """Refuse a bake likely to outlast the client's timeout on Blender's main thread."""
+        world = getattr(scene, "rigidbody_world", None)
+        bodies = self._rigid_body_count(world) if world is not None else 0
+        if scope == "all":
+            bodies += sum(
+                1 for entry, _ in self._point_caches(scene) if entry["kind"] != "RIGID_BODY"
+            )
+        work = frames * max(bodies, 1)
+        if frames <= self._BAKE_FRAME_BUDGET and work <= self._BAKE_WORK_BUDGET:
+            return
+        raise ValueError(
+            f"Baking {frames} frames of {bodies} simulated objects is {work} body-frames, "
+            f"over this tool's limit of {self._BAKE_FRAME_BUDGET} frames and "
+            f"{self._BAKE_WORK_BUDGET} body-frames (up to about 16 s on Blender 5.0.1). A bake "
+            "runs on Blender's main thread and cannot be stopped once it starts: past "
+            "the client timeout (BLENDER__CONNECTION_TIMEOUT, 30 s by default) the call "
+            "reports a timeout while Blender keeps baking, and the next calls wait "
+            "behind it. Bake a shorter range, or raise the timeout and pass "
+            "allow_long_bake=true"
+        )
 
     def _bake_rigid_body_cache(
         self, scene: Any, world: Any, frame_start: int, frame_end: int
@@ -4410,9 +6842,9 @@ class BlenderRuntimeSession:
     _CACHE_FRAME_MAX = 1048574
 
     #: Most work get_physics_state steps an unbaked simulation through, in
-    #: body-frames (frames x rigid bodies): on Blender 5.0.1 a frame cost about
-    #: 0.3 ms plus 20-30 microseconds per body in contact with a ground, so this
-    #: stays near 10 s, a third of the attached-mode timeout.
+    #: body-frames (frames x rigid bodies), as _BAKE_WORK_BUDGET: up to 16 s of
+    #: simulation on Blender 5.0.1 when no frame is cached yet, inside the
+    #: attached-mode client's 30 s timeout. Cached frames are only read.
     _STEP_WORK_BUDGET = 400_000
 
     @staticmethod
@@ -4811,6 +7243,418 @@ class BlenderRuntimeSession:
                 "their pose outside it"
             )
         return report
+
+    # -- Rigid-body, force-field and constraint setup helpers ----------------
+
+    #: Blender 4.2-5.0's RigidBodyObject.type and collision_shape items.
+    _BODY_TYPES = ("ACTIVE", "PASSIVE")
+    _COLLISION_SHAPES = (
+        "BOX",
+        "SPHERE",
+        "CAPSULE",
+        "CYLINDER",
+        "CONE",
+        "CONVEX_HULL",
+        "MESH",
+        "COMPOUND",
+    )
+
+    #: The types object.effector_add takes (Blender 4.2-5.0).
+    _FIELD_TYPES = (
+        "FORCE",
+        "WIND",
+        "VORTEX",
+        "MAGNET",
+        "HARMONIC",
+        "CHARGE",
+        "LENNARDJ",
+        "TEXTURE",
+        "GUIDE",
+        "BOID",
+        "TURBULENCE",
+        "DRAG",
+        "FLUID",
+    )
+    #: Other spellings of an effector_add type: the one simul used to document,
+    #: and the one FieldSettings.type reports for a FLUID field.
+    _FIELD_TYPE_ALIASES = {"MAGNETIC": "MAGNET", "FLUID_FLOW": "FLUID"}
+    _FIELD_SHAPES = ("POINT", "LINE", "PLANE", "SURFACE", "POINTS")
+    _FALLOFF_TYPES = ("SPHERE", "TUBE", "CONE")
+
+    #: RigidBodyConstraint.type items.
+    _CONSTRAINT_TYPES = (
+        "FIXED",
+        "POINT",
+        "HINGE",
+        "SLIDER",
+        "PISTON",
+        "GENERIC",
+        "GENERIC_SPRING",
+        "MOTOR",
+    )
+    #: The constraint empty's local axis each type works along; Z otherwise.
+    #: Verified on Blender 5.0.1: a HINGE turns about local Z, a SLIDER moves
+    #: along local X, a MOTOR's angular motor turns about local X.
+    _CONSTRAINT_AXES = {"HINGE": "Z", "SLIDER": "X", "PISTON": "X", "MOTOR": "X"}
+    _LIMIT_AXES = ("lin_x", "lin_y", "lin_z", "ang_x", "ang_y", "ang_z")
+    #: The limits each constraint type applies (Blender's constraint panel).
+    _CONSTRAINT_LIMITS: Dict[str, Tuple[str, ...]] = {
+        "HINGE": ("ang_z",),
+        "SLIDER": ("lin_x",),
+        "PISTON": ("lin_x", "ang_x"),
+        "GENERIC": _LIMIT_AXES,
+        "GENERIC_SPRING": _LIMIT_AXES,
+    }
+    _SPRING_AXES = ("x", "y", "z", "ang_x", "ang_y", "ang_z")
+    #: Angular limits Blender accepts, in radians.
+    _ANGLE_LIMIT = 2 * math.pi
+
+    @staticmethod
+    def _choice(label: str, value: Any, choices: Sequence[str]) -> str:
+        """``value`` upper-cased when it is one of ``choices``; ValueError otherwise."""
+        text = str(value).upper()
+        if text not in choices:
+            raise ValueError(
+                f"Invalid {label} '{value}'. Must be one of: {', '.join(choices)}"
+            )
+        return text
+
+    @classmethod
+    def _field_type(cls, value: Any) -> str:
+        text = str(value).upper()
+        return cls._choice(
+            "field_type", cls._FIELD_TYPE_ALIASES.get(text, text), cls._FIELD_TYPES
+        )
+
+    @staticmethod
+    def _check_range(
+        label: str,
+        value: Any,
+        minimum: Optional[float] = None,
+        maximum: Optional[float] = None,
+    ) -> float:
+        """``value`` as a finite float within ``minimum``-``maximum``; ValueError otherwise.
+
+        Blender's RNA stores some of these settings unclamped: on 5.0.1 a mass
+        of -5 was kept, and the body fell through the ground.
+        """
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"{label} must be a finite number, got {value}")
+        if minimum is not None and number < minimum:
+            raise ValueError(f"{label} must be at least {minimum}, got {value}")
+        if maximum is not None and number > maximum:
+            raise ValueError(f"{label} must be at most {maximum}, got {value}")
+        return number
+
+    @staticmethod
+    def _finite_vector(label: str, values: Any) -> Tuple[float, float, float]:
+        vector = tuple(float(v) for v in values)
+        if len(vector) != 3 or not all(math.isfinite(v) for v in vector):
+            raise ValueError(f"{label} must be three finite numbers")
+        return vector[0], vector[1], vector[2]
+
+    @classmethod
+    def _axis_rotation(
+        cls, axis: Optional[Sequence[float]], primary: str, label: str
+    ) -> Tuple[float, float, float]:
+        """The XYZ Euler rotation that turns local ``primary`` (X or Z) onto world ``axis``.
+
+        The other local axes stay as close to the world's as they can: the
+        local X of a Z-primary frame lies along world X (world Y when the axis
+        is near X), and the local Z of an X-primary frame along world Z (world
+        X when the axis is near Z). No axis means no rotation.
+        """
+        if axis is None:
+            return 0.0, 0.0, 0.0
+        vector = cls._finite_vector(label, axis)
+        length = math.sqrt(sum(v * v for v in vector))
+        if length < 1e-9:
+            raise ValueError(f"{label} must not be the zero vector")
+        unit = tuple(v / length for v in vector)
+
+        def orthogonal(reference: Tuple[float, ...], to: Tuple[float, ...]) -> Tuple[float, ...]:
+            dot = sum(r * t for r, t in zip(reference, to))
+            rest = tuple(r - dot * t for r, t in zip(reference, to))
+            size = math.sqrt(sum(v * v for v in rest))
+            return tuple(v / size for v in rest)
+
+        def cross(a: Tuple[float, ...], b: Tuple[float, ...]) -> Tuple[float, ...]:
+            return (
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            )
+
+        if primary == "Z":
+            z = unit
+            x = orthogonal((1.0, 0.0, 0.0) if abs(z[0]) < 0.9 else (0.0, 1.0, 0.0), z)
+        else:
+            x = unit
+            z = orthogonal((0.0, 0.0, 1.0) if abs(x[2]) < 0.9 else (1.0, 0.0, 0.0), x)
+        y = cross(z, x)
+        # Blender's XYZ Euler is R = Rz Ry Rx; the matrix's columns are x, y, z.
+        sin_y = -x[2]
+        if abs(sin_y) < 1.0 - 1e-9:
+            return (
+                math.atan2(y[2], z[2]),
+                math.asin(sin_y),
+                math.atan2(x[1], x[0]),
+            )
+        if sin_y > 0:
+            return math.atan2(y[0], z[0]), math.pi / 2, 0.0
+        return math.atan2(-y[0], -z[0]), -math.pi / 2, 0.0
+
+    @staticmethod
+    def _matrix_axis(matrix: Any, column: int) -> List[float]:
+        """A world matrix's local axis ``column`` (0 X, 1 Y, 2 Z) as a unit vector."""
+        values = [float(matrix[row][column]) for row in range(3)]
+        size = math.sqrt(sum(v * v for v in values)) or 1.0
+        return [v / size for v in values]
+
+    def _physics_collection(self, view_layer: Any, what: str) -> Tuple[Any, Optional[str]]:
+        """The layer collection a new force field or constraint empty goes in.
+
+        Where create_object puts objects (_creation_collection): the active
+        collection, or the scene's own when the active one, or one holding it,
+        is excluded, hidden or disabled in viewports. Also the scene's own when
+        the active one is linked from a library, which Blender refuses to link
+        into. Either simulates: the rigid body world reads its constraints
+        collection.
+
+        Returns:
+            The layer collection, and a warning naming why it is not the
+            active one, or None.
+        """
+        layer, warning = self._creation_collection(view_layer)
+        collection = layer.collection
+        if getattr(collection, "library", None) is not None or not getattr(
+            collection, "is_editable", True
+        ):
+            root = view_layer.layer_collection
+            return root, (
+                f"The active collection '{collection.name}' is linked from a library, so "
+                f"the {what} was created in the scene collection '{root.collection.name}' "
+                "instead"
+            )
+        if warning is not None:
+            warning = warning.replace("so the object was", f"so the {what} was")
+        return layer, warning
+
+    @staticmethod
+    def _rigid_body_snapshot(rb: Any) -> Optional[Dict[str, Any]]:
+        """The settings setup_rigid_body writes, to restore them after a failure."""
+        if rb is None:
+            return None
+        names = (
+            "type",
+            "mass",
+            "friction",
+            "restitution",
+            "collision_shape",
+            "linear_damping",
+            "angular_damping",
+            "kinematic",
+            "use_margin",
+            "collision_margin",
+            "use_deactivation",
+            "use_start_deactivated",
+        )
+        snapshot = {name: getattr(rb, name) for name in names if hasattr(rb, name)}
+        if hasattr(rb, "collision_collections"):
+            snapshot["collision_collections"] = list(rb.collision_collections)
+        return snapshot
+
+    def _restore_rigid_body(
+        self,
+        scene: Any,
+        obj: Any,
+        previous: Optional[Dict[str, Any]],
+        world_created: bool,
+    ) -> None:
+        """Undo a failed setup_rigid_body: its rigid body or settings, and its world.
+
+        A failure here is logged, not raised, so the setup's own error reaches
+        the caller.
+        """
+        blender_module: Any = bpy
+        try:
+            rb = getattr(obj, "rigid_body", None)
+            if previous is None and rb is not None:
+                with blender_module.context.temp_override(
+                    object=obj,
+                    active_object=obj,
+                    selected_objects=[obj],
+                    selected_editable_objects=[obj],
+                ):
+                    blender_module.ops.rigidbody.object_remove()
+            elif previous is not None and rb is not None:
+                for name, value in previous.items():
+                    setattr(rb, name, value)
+            if world_created and scene.rigidbody_world is not None:
+                with blender_module.context.temp_override(scene=scene):
+                    blender_module.ops.rigidbody.world_remove()
+        except Exception:
+            self.logger.exception(
+                "Could not undo the failed rigid body setup of '%s'", obj.name
+            )
+
+    @staticmethod
+    def _rigid_body_report(rb: Any) -> Dict[str, Any]:
+        collections = getattr(rb, "collision_collections", None)
+        return {
+            "body_type": rb.type,
+            "mass": float(rb.mass),
+            "friction": float(rb.friction),
+            "restitution": float(rb.restitution),
+            "collision_shape": rb.collision_shape,
+            "linear_damping": float(rb.linear_damping),
+            "angular_damping": float(rb.angular_damping),
+            "kinematic": bool(rb.kinematic),
+            "collision_margin": (
+                float(rb.collision_margin) if rb.use_margin else None
+            ),
+            "collision_collections": (
+                [i for i, member in enumerate(collections) if member]
+                if collections is not None
+                else None
+            ),
+            "use_deactivation": bool(rb.use_deactivation),
+            "start_deactivated": bool(rb.use_start_deactivated),
+        }
+
+    def _field_report(self, obj: Any) -> Dict[str, Any]:
+        """A force field's settings and world pose; direction is its local +Z."""
+        matrix = self._evaluated_world_matrix(obj)
+        field = obj.field
+        return {
+            "field_type": field.type,
+            "strength": float(field.strength),
+            "location": [float(v) for v in matrix.translation],
+            "rotation_euler": [float(v) for v in matrix.to_euler("XYZ")],
+            "direction": self._matrix_axis(matrix, 2),
+            "shape": field.shape,
+            "flow": float(field.flow),
+            "falloff_type": field.falloff_type,
+            "falloff_power": float(field.falloff_power),
+            "distance_max": (
+                float(field.distance_max) if field.use_max_distance else None
+            ),
+            "noise": float(field.noise),
+        }
+
+    def _constraint_settings(
+        self,
+        constraint_type: str,
+        limits: Optional[Dict[str, List[float]]],
+        springs: Optional[Dict[str, Dict[str, float]]],
+        motor: Dict[str, Optional[float]],
+        breaking_threshold: Optional[float],
+    ) -> Dict[str, Any]:
+        """The RigidBodyConstraint settings to write, after checking each against the type."""
+        settings: Dict[str, Any] = {}
+        allowed = self._CONSTRAINT_LIMITS.get(constraint_type, ())
+        for key, bounds in (limits or {}).items():
+            if key not in allowed:
+                raise ValueError(
+                    f"A {constraint_type} constraint has no {key} limit; it limits "
+                    f"{', '.join(allowed) or 'nothing'}"
+                )
+            values = [self._check_range(f"limits.{key}", v) for v in bounds]
+            if len(values) != 2 or values[0] > values[1]:
+                raise ValueError(f"limits.{key} must be [lower, upper] with lower <= upper")
+            if key.startswith("ang_") and max(abs(v) for v in values) > self._ANGLE_LIMIT:
+                raise ValueError(f"limits.{key} must be within +-2 pi radians")
+            settings[f"use_limit_{key}"] = True
+            settings[f"limit_{key}_lower"], settings[f"limit_{key}_upper"] = values
+        if springs:
+            if constraint_type != "GENERIC_SPRING":
+                raise ValueError("springs apply to GENERIC_SPRING constraints only")
+            for key, spring in springs.items():
+                if key not in self._SPRING_AXES:
+                    raise ValueError(
+                        f"Invalid spring axis '{key}'. Must be one of: "
+                        f"{', '.join(self._SPRING_AXES)}"
+                    )
+                settings[f"use_spring_{key}"] = True
+                settings[f"spring_stiffness_{key}"] = self._check_range(
+                    f"springs.{key}.stiffness", spring.get("stiffness", 10.0), 0.0
+                )
+                settings[f"spring_damping_{key}"] = self._check_range(
+                    f"springs.{key}.damping", spring.get("damping", 0.5), 0.0
+                )
+        given = {name: value for name, value in motor.items() if value is not None}
+        if given and constraint_type != "MOTOR":
+            raise ValueError("motor settings apply to MOTOR constraints only")
+        for name, value in given.items():
+            minimum = 0.0 if name.endswith("max_impulse") else None
+            settings[name] = self._check_range(name, value, minimum)
+        if "motor_ang_target_velocity" in given:
+            settings["use_motor_ang"] = True
+        if "motor_lin_target_velocity" in given:
+            settings["use_motor_lin"] = True
+        if breaking_threshold is not None:
+            settings["use_breaking"] = True
+            settings["breaking_threshold"] = self._check_range(
+                "breaking_threshold", breaking_threshold, 0.0
+            )
+        return settings
+
+    def _constraint_report(self, empty: Any) -> Dict[str, Any]:
+        """A constraint's settings and world pose, with its local axes in world space."""
+        rbc = empty.rigid_body_constraint
+        matrix = self._evaluated_world_matrix(empty)
+        axes = {name: self._matrix_axis(matrix, column) for column, name in enumerate("xyz")}
+        kind = rbc.type
+        limits = {
+            key: [
+                float(getattr(rbc, f"limit_{key}_lower")),
+                float(getattr(rbc, f"limit_{key}_upper")),
+            ]
+            for key in self._CONSTRAINT_LIMITS.get(kind, ())
+            if getattr(rbc, f"use_limit_{key}", False)
+        }
+        springs = (
+            {
+                key: {
+                    "stiffness": float(getattr(rbc, f"spring_stiffness_{key}")),
+                    "damping": float(getattr(rbc, f"spring_damping_{key}")),
+                }
+                for key in self._SPRING_AXES
+                if getattr(rbc, f"use_spring_{key}", False)
+            }
+            if kind == "GENERIC_SPRING"
+            else {}
+        )
+        motor = None
+        if kind == "MOTOR":
+            motor = {
+                "angular_velocity": (
+                    float(rbc.motor_ang_target_velocity) if rbc.use_motor_ang else None
+                ),
+                "angular_max_impulse": float(rbc.motor_ang_max_impulse),
+                "linear_velocity": (
+                    float(rbc.motor_lin_target_velocity) if rbc.use_motor_lin else None
+                ),
+                "linear_max_impulse": float(rbc.motor_lin_max_impulse),
+            }
+        return {
+            "constraint_type": kind,
+            "object1_name": rbc.object1.name if rbc.object1 else None,
+            "object2_name": rbc.object2.name if rbc.object2 else None,
+            "enabled": bool(rbc.enabled),
+            "disable_collisions": bool(rbc.disable_collisions),
+            "pivot": [float(v) for v in matrix.translation],
+            "axis": axes[self._CONSTRAINT_AXES.get(kind, "Z").lower()],
+            "local_axes": axes,
+            "rotation_euler": [float(v) for v in matrix.to_euler("XYZ")],
+            "limits": limits,
+            "springs": springs,
+            "motor": motor,
+            "breaking_threshold": (
+                float(rbc.breaking_threshold) if rbc.use_breaking else None
+            ),
+        }
 
     # -- End Phase 6 methods -------------------------------------------------
 
@@ -6063,7 +8907,7 @@ class BlenderRuntimeSession:
 
     def _get_object_or_raise(self, object_name: str) -> Any:
         """
-        Look up a Blender object by name or raise ValueError.
+        Look up a Blender object by name or raise NotFoundError (a ValueError).
 
         Args:
             object_name: Object name to look up.
@@ -6079,14 +8923,18 @@ class BlenderRuntimeSession:
         )
         obj = objects.get(object_name)
         if obj is None:
-            raise ValueError(f"Object not found: {object_name}")
+            raise NotFoundError(
+                f"Object not found: {object_name}", "object_not_found", object_name=object_name
+            )
         return obj
 
     def _extract_principled_params(self, node: Any) -> Dict[str, Any]:
         """
         Extract common Principled BSDF input values.
 
-        Version-aware: Blender 4.0+ renamed several socket labels.
+        Version-aware: Blender 4.0+ renamed several socket labels. An input a
+        link drives reports None: its own value is unused, and reporting it
+        made a textured Base Color read as the default grey.
 
         Args:
             node: ShaderNodeBsdfPrincipled node.
@@ -6109,6 +8957,10 @@ class BlenderRuntimeSession:
         for sock_name in target_sockets:
             sock = node.inputs.get(sock_name)
             if sock is None:
+                continue
+            if getattr(sock, "is_linked", False) and _live_links(sock):
+                # A muted link drives nothing: the socket's own value applies.
+                params[sock_name] = None
                 continue
             value = sock.default_value
             # Convert Vector/Color to list for serialisation
@@ -6432,27 +9284,52 @@ class BlenderRuntimeSession:
         height: int,
         jpeg_quality: int,
         engine: str,
+        camera: Any = None,
     ) -> Dict[str, Any]:
         """
-        Capture the 3D View as the user sees it; see capture_viewport.
+        Capture the 3D View as the user sees it, or through a camera; see capture_viewport.
 
         Args:
             width: Largest image width.
             height: Largest image height.
             jpeg_quality: JPEG compression quality.
             engine: Render engine identifier.
+            camera: Camera to draw the 3D View's shading from instead of its
+                own angle, or None.
 
         Returns:
             Dictionary with image_base64, dimensions, engine, capture_method.
+
+        Raises:
+            RuntimeError: When there is no 3D View, or a camera is asked for
+                while an external engine draws the view, which only the
+                screen shows.
         """
         blender_module: Any = bpy
         context = blender_module.context
         area, region, space = self._view3d_target()
-        out_width, out_height = self._fit_inside(
-            region.width, region.height, width, height
-        )
-        with self._capture_workdir() as workdir:
+        matrices = None
+        if camera is not None:
             if self._drawn_by_external_engine(space, engine):
+                raise RuntimeError(
+                    f"The 3D View shows {engine}'s Rendered shading, which Blender draws "
+                    f"only on screen, so it cannot be drawn through camera {camera.name!r}; "
+                    "pass method='render' to render through it"
+                )
+            render = context.scene.render
+            out_width, out_height = self._fit_inside(
+                render.resolution_x * render.pixel_aspect_x,
+                render.resolution_y * render.pixel_aspect_y,
+                width,
+                height,
+            )
+            matrices = self._camera_matrices(camera, out_width, out_height)
+        else:
+            out_width, out_height = self._fit_inside(
+                region.width, region.height, width, height
+            )
+        with self._capture_workdir() as workdir:
+            if camera is None and self._drawn_by_external_engine(space, engine):
                 image = self._read_view3d_screen(context.window, area, region, workdir)
                 capture_method = "viewport_screen"
             else:
@@ -6463,8 +9340,9 @@ class BlenderRuntimeSession:
                     region,
                     out_width,
                     out_height,
+                    matrices,
                 )
-                capture_method = "viewport"
+                capture_method = "viewport" if camera is None else "viewport_camera"
             try:
                 if tuple(image.size) != (out_width, out_height):
                     image.scale(out_width, out_height)
@@ -6478,7 +9356,21 @@ class BlenderRuntimeSession:
             "engine": engine,
             "capture_method": capture_method,
             "format": "jpeg",
+            "camera_name": None if camera is None else camera.name,
         }
+
+    @staticmethod
+    def _camera_matrices(camera: Any, width: int, height: int) -> Tuple[Any, Any]:
+        """Return a camera's view and projection matrices for a width x height image.
+
+        The pose is the evaluated one, constraints included, as a render uses.
+        """
+        blender_module: Any = bpy
+        depsgraph = blender_module.context.evaluated_depsgraph_get()
+        evaluated = camera.evaluated_get(depsgraph)
+        view_matrix = evaluated.matrix_world.inverted()
+        projection = evaluated.calc_matrix_camera(depsgraph, x=width, y=height)
+        return view_matrix, projection
 
     def _draw_view3d_offscreen(
         self,
@@ -6488,6 +9380,7 @@ class BlenderRuntimeSession:
         region: Any,
         width: int,
         height: int,
+        matrices: Optional[Tuple[Any, Any]] = None,
     ) -> Any:
         """
         Redraw the 3D View offscreen with its own matrices, shading and overlays.
@@ -6501,16 +9394,20 @@ class BlenderRuntimeSession:
             region: Its WINDOW region.
             width: Image width; the region's aspect ratio.
             height: Image height.
+            matrices: View and projection matrices to draw with instead of the
+                region's, such as a camera's.
 
         Returns:
             A temporary image with the pixels; the caller removes it.
         """
         import gpu  # type: ignore[import-not-found]
 
-        view = region.data
-        # Blender refreshes view matrices on redraw; a view changed since the
-        # last one, or a window that is not redrawing, would be stale.
-        view.update()
+        if matrices is None:
+            view = region.data
+            # Blender refreshes view matrices on redraw; a view changed since the
+            # last one, or a window that is not redrawing, would be stale.
+            view.update()
+            matrices = (view.view_matrix, view.window_matrix)
         offscreen = gpu.types.GPUOffScreen(width, height)
         try:
             offscreen.draw_view3d(
@@ -6518,8 +9415,8 @@ class BlenderRuntimeSession:
                 view_layer,
                 space,
                 region,
-                view.view_matrix,
-                view.window_matrix,
+                matrices[0],
+                matrices[1],
                 do_color_management=True,
             )
             with offscreen.bind():
@@ -6604,6 +9501,7 @@ class BlenderRuntimeSession:
         height: int,
         jpeg_quality: int,
         engine: str,
+        chosen: Any = None,
     ) -> Dict[str, Any]:
         """
         Capture via bpy.ops.render.render (all engines), through a camera.
@@ -6618,9 +9516,12 @@ class BlenderRuntimeSession:
             height: Image height.
             jpeg_quality: JPEG compression quality.
             engine: Render engine identifier.
+            chosen: Camera to render through instead of the scene camera, which
+                is restored afterwards; None renders through the scene camera.
 
         Returns:
-            Dictionary with image_base64, dimensions, engine, capture_method.
+            Dictionary with image_base64, dimensions, engine, capture_method
+            and camera_name.
         """
         blender_module: Any = bpy
         scene = blender_module.context.scene
@@ -6632,9 +9533,12 @@ class BlenderRuntimeSession:
                 render.resolution_y,
                 render.resolution_percentage,
             )
+            scene_camera = scene.camera
             camera = None
             try:
-                if scene.camera is None:
+                if chosen is not None:
+                    scene.camera = chosen
+                elif scene.camera is None:
                     camera, capture_method, (width, height) = (
                         self._add_temporary_camera(scene, width, height)
                     )
@@ -6659,6 +9563,9 @@ class BlenderRuntimeSession:
                 ) = saved
                 if camera is not None:
                     self._remove_temporary_camera(scene, camera)
+                if chosen is not None:
+                    scene.camera = scene_camera
+        used = chosen if chosen is not None else scene_camera
         return {
             "image_base64": b64,
             "width": width,
@@ -6666,6 +9573,7 @@ class BlenderRuntimeSession:
             "engine": engine,
             "capture_method": capture_method,
             "format": "jpeg",
+            "camera_name": None if camera is not None or used is None else used.name,
         }
 
     def _add_temporary_camera(
@@ -8600,6 +11508,7 @@ class BlenderRuntimeAdapter:
             "execute_blender_script",
             "create_blender_mesh_from_data",
             "blender_clean_mesh",
+            "blender_uv_unwrap",
             "apply_simready_metadata",
             "get_simready_metadata",
             "validate_simready_compliance",

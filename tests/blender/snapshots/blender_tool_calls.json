@@ -117,18 +117,28 @@
         "session_calls": [
           {
             "method": "list_scene_objects",
-            "arguments": {"collection_name": "None", "include_hidden": "False", "max_items": "200"}
+            "arguments": {
+              "collection_name": "None",
+              "include_hidden": "False",
+              "max_items": "200",
+              "offset": "0"
+            }
           }
         ],
         "response": {"checked_against": "BlenderSceneObjectsResponse"},
         "usage": [{"tool": "list_blender_scene_objects", "success": false}]
       },
       "full": {
-        "arguments": {"collection_name": "Props", "include_hidden": true, "max_items": 7},
+        "arguments": {"collection_name": "Props", "include_hidden": true, "max_items": 7, "offset": 14},
         "session_calls": [
           {
             "method": "list_scene_objects",
-            "arguments": {"collection_name": "'Props'", "include_hidden": "True", "max_items": "7"}
+            "arguments": {
+              "collection_name": "'Props'",
+              "include_hidden": "True",
+              "max_items": "7",
+              "offset": "14"
+            }
           }
         ],
         "response": {"checked_against": "BlenderSceneObjectsResponse"},
@@ -141,7 +151,14 @@
           "success": false,
           "error": "1 validation error for BlenderSceneObjectsRequest\ncollection_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"collection_name": {"bogus": 1}, "include_hidden": false, "max_items": 200}}
+          "details": {
+            "input": {
+              "collection_name": {"bogus": 1},
+              "include_hidden": false,
+              "max_items": 200,
+              "offset": 0
+            }
+          }
         }
       }
     },
@@ -221,18 +238,18 @@
         "session_calls": [
           {
             "method": "search_objects",
-            "arguments": {"name_pattern": "None", "object_type": "None", "max_results": "50"}
+            "arguments": {"name_pattern": "None", "object_type": "None", "max_results": "50", "offset": "0"}
           }
         ],
         "response": {"checked_against": "BlenderSearchObjectsResponse"},
         "usage": [{"tool": "search_blender_objects", "success": false}]
       },
       "full": {
-        "arguments": {"name_pattern": "Cu*", "object_type": "MESH", "max_results": 3},
+        "arguments": {"name_pattern": "Cu*", "object_type": "mesh", "max_results": 3, "offset": 6},
         "session_calls": [
           {
             "method": "search_objects",
-            "arguments": {"name_pattern": "'Cu*'", "object_type": "'MESH'", "max_results": "3"}
+            "arguments": {"name_pattern": "'Cu*'", "object_type": "'MESH'", "max_results": "3", "offset": "6"}
           }
         ],
         "response": {"checked_against": "BlenderSearchObjectsResponse"},
@@ -245,7 +262,9 @@
           "success": false,
           "error": "1 validation error for BlenderSearchObjectsRequest\nname_pattern\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"name_pattern": {"bogus": 1}, "object_type": null, "max_results": 50}}
+          "details": {
+            "input": {"name_pattern": {"bogus": 1}, "object_type": null, "max_results": 50, "offset": 0}
+          }
         }
       }
     },
@@ -260,7 +279,23 @@
     "get_blender_material_info": {
       "minimal": {
         "arguments": {"material_name": "Metal"},
-        "session_calls": [{"method": "get_material_info", "arguments": {"material_name": "'Metal'"}}],
+        "session_calls": [
+          {
+            "method": "get_material_info",
+            "arguments": {"material_name": "'Metal'", "max_nodes": "50"}
+          }
+        ],
+        "response": {"checked_against": "BlenderMaterialInfoResponse"},
+        "usage": [{"tool": "get_blender_material_info", "success": false}]
+      },
+      "full": {
+        "arguments": {"material_name": "Metal", "max_nodes": 10},
+        "session_calls": [
+          {
+            "method": "get_material_info",
+            "arguments": {"material_name": "'Metal'", "max_nodes": "10"}
+          }
+        ],
         "response": {"checked_against": "BlenderMaterialInfoResponse"},
         "usage": [{"tool": "get_blender_material_info", "success": false}]
       },
@@ -271,7 +306,7 @@
           "success": false,
           "error": "1 validation error for BlenderMaterialInfoRequest\nmaterial_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"material_name": {"bogus": 1}}}
+          "details": {"input": {"material_name": {"bogus": 1}, "max_nodes": 50}}
         }
       }
     },
@@ -339,7 +374,8 @@
               "jpeg_quality": "85",
               "use_render_fallback": "False",
               "agent_id": "<session agent id>",
-              "method": "'auto'"
+              "method": "'auto'",
+              "camera_name": "None"
             }
           }
         ],
@@ -353,7 +389,8 @@
           "jpeg_quality": 70,
           "method": "auto",
           "use_render_fallback": true,
-          "agent_id": "snapshot-agent"
+          "agent_id": "snapshot-agent",
+          "camera_name": "Cam2"
         },
         "session_calls": [
           {
@@ -364,7 +401,8 @@
               "jpeg_quality": "70",
               "use_render_fallback": "False",
               "agent_id": "'snapshot-agent'",
-              "method": "'render'"
+              "method": "'render'",
+              "camera_name": "'Cam2'"
             }
           }
         ],
@@ -385,7 +423,8 @@
               "jpeg_quality": 85,
               "method": "auto",
               "use_render_fallback": false,
-              "agent_id": "snapshot-agent"
+              "agent_id": "snapshot-agent",
+              "camera_name": null
             }
           }
         }
@@ -510,7 +549,10 @@
               "height": "512",
               "jpeg_quality": "85",
               "agent_id": "<session agent id>",
-              "method": "'auto'"
+              "method": "'auto'",
+              "camera_name": "None",
+              "output_dir": "None",
+              "max_frames": "50"
             }
           }
         ],
@@ -526,7 +568,10 @@
           "height": 96,
           "jpeg_quality": 60,
           "agent_id": "snapshot-agent",
-          "method": "render"
+          "method": "render",
+          "camera_name": "Cam2",
+          "output_dir": "/tmp/frames",
+          "max_frames": 4
         },
         "session_calls": [
           {
@@ -539,11 +584,39 @@
               "height": "96",
               "jpeg_quality": "60",
               "agent_id": "'snapshot-agent'",
-              "method": "'render'"
+              "method": "'render'",
+              "camera_name": "'Cam2'",
+              "output_dir": "'/tmp/frames'",
+              "max_frames": "4"
             }
           }
         ],
         "response": {"checked_against": "BlenderCaptureSequenceResponse"},
+        "usage": [{"tool": "capture_blender_viewport_sequence", "success": false}]
+      },
+      "reversed": {
+        "arguments": {"start_frame": 9, "end_frame": 1, "agent_id": "snapshot-agent"},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderCaptureSequenceRequest\n  Value error, end_frame (1) is before start_frame (9) [type=value_error, input_value={'start_frame': 9, 'end_f... None, 'max_frames': 50}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/value_error",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "start_frame": 9,
+              "end_frame": 1,
+              "step": 1,
+              "width": 512,
+              "height": 512,
+              "jpeg_quality": 85,
+              "agent_id": "snapshot-agent",
+              "method": "auto",
+              "camera_name": null,
+              "output_dir": null,
+              "max_frames": 50
+            }
+          }
+        },
         "usage": [{"tool": "capture_blender_viewport_sequence", "success": false}]
       },
       "invalid": {
@@ -562,7 +635,10 @@
               "height": 512,
               "jpeg_quality": 85,
               "agent_id": "snapshot-agent",
-              "method": "auto"
+              "method": "auto",
+              "camera_name": null,
+              "output_dir": null,
+              "max_frames": 50
             }
           }
         }
@@ -631,7 +707,13 @@
     "delete_blender_object": {
       "minimal": {
         "arguments": {"object_name": "Cube"},
-        "session_calls": [{"method": "delete_object", "arguments": {"object_name": "'Cube'"}}],
+        "session_calls": [{"method": "delete_object", "arguments": {"object_name": "'Cube'", "use_global": "False"}}],
+        "response": {"checked_against": "BlenderDeleteObjectResponse"},
+        "usage": [{"tool": "delete_blender_object", "success": false}]
+      },
+      "full": {
+        "arguments": {"object_name": "Cube", "use_global": true},
+        "session_calls": [{"method": "delete_object", "arguments": {"object_name": "'Cube'", "use_global": "True"}}],
         "response": {"checked_against": "BlenderDeleteObjectResponse"},
         "usage": [{"tool": "delete_blender_object", "success": false}]
       },
@@ -642,7 +724,31 @@
           "success": false,
           "error": "1 validation error for BlenderDeleteObjectRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
           "error_type": "ValidationError",
-          "details": {"input": {"object_name": {"bogus": 1}}}
+          "details": {"input": {"object_name": {"bogus": 1}, "use_global": false}}
+        }
+      }
+    },
+    "set_blender_object_mode": {
+      "minimal": {
+        "arguments": {},
+        "session_calls": [{"method": "set_object_mode", "arguments": {"mode": "'OBJECT'", "object_name": "None"}}],
+        "response": {"checked_against": "BlenderSetObjectModeResponse"},
+        "usage": [{"tool": "set_blender_object_mode", "success": false}]
+      },
+      "full": {
+        "arguments": {"mode": "edit", "object_name": "Cube"},
+        "session_calls": [{"method": "set_object_mode", "arguments": {"mode": "'edit'", "object_name": "'Cube'"}}],
+        "response": {"checked_against": "BlenderSetObjectModeResponse"},
+        "usage": [{"tool": "set_blender_object_mode", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"mode": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderSetObjectModeRequest\nmode\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {"input": {"mode": {"bogus": 1}, "object_name": null}}
         }
       }
     },
@@ -799,9 +905,18 @@
             "arguments": {
               "object_name": "'Cube'",
               "material_name": "None",
-              "base_color": "[0.8, 0.8, 0.8, 1.0]",
-              "metallic": "0.0",
-              "roughness": "0.5"
+              "base_color": "None",
+              "metallic": "None",
+              "roughness": "None",
+              "slot_index": "None",
+              "face_indices": "None",
+              "link": "'DATA'",
+              "single_user": "False",
+              "reuse_existing": "True",
+              "base_color_texture": "None",
+              "metallic_texture": "None",
+              "roughness_texture": "None",
+              "normal_texture": "None"
             }
           }
         ],
@@ -814,7 +929,16 @@
           "material_name": "Red",
           "base_color": [1, 0, 0, 1],
           "metallic": 0.5,
-          "roughness": 0.25
+          "roughness": 0.25,
+          "slot_index": 1,
+          "face_indices": [0, 2],
+          "link": "OBJECT",
+          "single_user": true,
+          "reuse_existing": false,
+          "base_color_texture": "/tmp/albedo.png",
+          "metallic_texture": "/tmp/metallic.png",
+          "roughness_texture": "/tmp/roughness.png",
+          "normal_texture": "/tmp/normal.png"
         },
         "session_calls": [
           {
@@ -824,7 +948,16 @@
               "material_name": "'Red'",
               "base_color": "[1.0, 0.0, 0.0, 1.0]",
               "metallic": "0.5",
-              "roughness": "0.25"
+              "roughness": "0.25",
+              "slot_index": "1",
+              "face_indices": "[0, 2]",
+              "link": "'OBJECT'",
+              "single_user": "True",
+              "reuse_existing": "False",
+              "base_color_texture": "'/tmp/albedo.png'",
+              "metallic_texture": "'/tmp/metallic.png'",
+              "roughness_texture": "'/tmp/roughness.png'",
+              "normal_texture": "'/tmp/normal.png'"
             }
           }
         ],
@@ -842,9 +975,18 @@
             "input": {
               "object_name": {"bogus": 1},
               "material_name": null,
-              "base_color": [0.8, 0.8, 0.8, 1.0],
-              "metallic": 0.0,
-              "roughness": 0.5
+              "base_color": null,
+              "metallic": null,
+              "roughness": null,
+              "slot_index": null,
+              "face_indices": null,
+              "link": "DATA",
+              "single_user": false,
+              "reuse_existing": true,
+              "base_color_texture": null,
+              "metallic_texture": null,
+              "roughness_texture": null,
+              "normal_texture": null
             }
           }
         }
@@ -965,7 +1107,12 @@
               "use_shadow": "None",
               "spot_size": "None",
               "spot_blend": "None",
-              "shadow_soft_size": "None"
+              "shadow_soft_size": "None",
+              "light_type": "None",
+              "angle": "None",
+              "size": "None",
+              "size_y": "None",
+              "shape": "None"
             }
           }
         ],
@@ -980,7 +1127,12 @@
           "use_shadow": false,
           "spot_size": 0.8,
           "spot_blend": 0.2,
-          "shadow_soft_size": 0.1
+          "shadow_soft_size": 0.1,
+          "light_type": "AREA",
+          "angle": 0.1,
+          "size": 2,
+          "size_y": 1,
+          "shape": "RECTANGLE"
         },
         "session_calls": [
           {
@@ -992,7 +1144,12 @@
               "use_shadow": "False",
               "spot_size": "0.8",
               "spot_blend": "0.2",
-              "shadow_soft_size": "0.1"
+              "shadow_soft_size": "0.1",
+              "light_type": "'AREA'",
+              "angle": "0.1",
+              "size": "2.0",
+              "size_y": "1.0",
+              "shape": "'RECTANGLE'"
             }
           }
         ],
@@ -1014,7 +1171,12 @@
               "use_shadow": null,
               "spot_size": null,
               "spot_blend": null,
-              "shadow_soft_size": null
+              "shadow_soft_size": null,
+              "light_type": null,
+              "angle": null,
+              "size": null,
+              "size_y": null,
+              "shape": null
             }
           }
         }
@@ -1453,7 +1615,12 @@
               "restitution": "0.0",
               "collision_shape": "'CONVEX_HULL'",
               "linear_damping": "0.04",
-              "angular_damping": "0.1"
+              "angular_damping": "0.1",
+              "kinematic": "None",
+              "collision_margin": "None",
+              "collision_collections": "None",
+              "use_deactivation": "None",
+              "start_deactivated": "None"
             }
           }
         ],
@@ -1469,7 +1636,12 @@
           "restitution": 0.3,
           "collision_shape": "BOX",
           "linear_damping": 0.1,
-          "angular_damping": 0.2
+          "angular_damping": 0.2,
+          "kinematic": true,
+          "collision_margin": 0.01,
+          "collision_collections": [0, 3],
+          "use_deactivation": true,
+          "start_deactivated": true
         },
         "session_calls": [
           {
@@ -1482,7 +1654,12 @@
               "restitution": "0.3",
               "collision_shape": "'BOX'",
               "linear_damping": "0.1",
-              "angular_damping": "0.2"
+              "angular_damping": "0.2",
+              "kinematic": "True",
+              "collision_margin": "0.01",
+              "collision_collections": "[0, 3]",
+              "use_deactivation": "True",
+              "start_deactivated": "True"
             }
           }
         ],
@@ -1505,7 +1682,12 @@
               "restitution": 0.0,
               "collision_shape": "CONVEX_HULL",
               "linear_damping": 0.04,
-              "angular_damping": 0.1
+              "angular_damping": 0.1,
+              "kinematic": null,
+              "collision_margin": null,
+              "collision_collections": null,
+              "use_deactivation": null,
+              "start_deactivated": null
             }
           }
         }
@@ -1517,14 +1699,38 @@
         "session_calls": [
           {
             "method": "add_force_field",
-            "arguments": {"field_type": "'WIND'", "strength": "1.0", "location": "None", "name": "None"}
+            "arguments": {
+              "field_type": "'WIND'",
+              "strength": "1.0",
+              "location": "None",
+              "name": "None",
+              "direction": "None",
+              "shape": "None",
+              "flow": "None",
+              "falloff_type": "None",
+              "falloff_power": "None",
+              "distance_max": "None",
+              "noise": "None"
+            }
           }
         ],
         "response": {"checked_against": "BlenderAddForceFieldResponse"},
         "usage": [{"tool": "add_blender_force_field", "success": false}]
       },
       "full": {
-        "arguments": {"field_type": "VORTEX", "strength": 3, "location": [1, 2, 3], "name": "Swirl"},
+        "arguments": {
+          "field_type": "VORTEX",
+          "strength": 3,
+          "location": [1, 2, 3],
+          "name": "Swirl",
+          "direction": [0, 1, 0],
+          "shape": "PLANE",
+          "flow": 0.5,
+          "falloff_type": "TUBE",
+          "falloff_power": 2,
+          "distance_max": 10,
+          "noise": 0.25
+        },
         "session_calls": [
           {
             "method": "add_force_field",
@@ -1532,7 +1738,14 @@
               "field_type": "'VORTEX'",
               "strength": "3.0",
               "location": "[1.0, 2.0, 3.0]",
-              "name": "'Swirl'"
+              "name": "'Swirl'",
+              "direction": "[0.0, 1.0, 0.0]",
+              "shape": "'PLANE'",
+              "flow": "0.5",
+              "falloff_type": "'TUBE'",
+              "falloff_power": "2.0",
+              "distance_max": "10.0",
+              "noise": "0.25"
             }
           }
         ],
@@ -1544,9 +1757,23 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderAddForceFieldRequest\nfield_type\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "1 validation error for BlenderAddForceFieldRequest\nfield_type\n  Input should be 'FORCE', 'WIND', 'VORTEX', 'MAGNET', 'HARMONIC', 'CHARGE', 'LENNARDJ', 'TEXTURE', 'GUIDE', 'BOID', 'TURBULENCE', 'DRAG' or 'FLUID' [type=literal_error, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
           "error_type": "ValidationError",
-          "details": {"input": {"field_type": {"bogus": 1}, "strength": 1.0, "location": null, "name": null}}
+          "details": {
+            "input": {
+              "field_type": {"bogus": 1},
+              "strength": 1.0,
+              "location": null,
+              "name": null,
+              "direction": null,
+              "shape": null,
+              "flow": null,
+              "falloff_type": null,
+              "falloff_power": null,
+              "distance_max": null,
+              "noise": null
+            }
+          }
         }
       }
     },
@@ -1579,7 +1806,15 @@
               "object1_name": "'A'",
               "object2_name": "'B'",
               "location": "None",
-              "disable_collisions": "True"
+              "disable_collisions": "True",
+              "axis": "None",
+              "limits": "None",
+              "springs": "None",
+              "motor_angular_velocity": "None",
+              "motor_angular_max_impulse": "None",
+              "motor_linear_velocity": "None",
+              "motor_linear_max_impulse": "None",
+              "breaking_threshold": "None"
             }
           }
         ],
@@ -1592,7 +1827,10 @@
           "object1_name": "A",
           "object2_name": "B",
           "location": [0, 0, 1],
-          "disable_collisions": false
+          "disable_collisions": false,
+          "axis": [0, 1, 0],
+          "limits": {"ang_z": [-0.5, 0.5]},
+          "breaking_threshold": 20
         },
         "session_calls": [
           {
@@ -1602,7 +1840,79 @@
               "object1_name": "'A'",
               "object2_name": "'B'",
               "location": "[0.0, 0.0, 1.0]",
-              "disable_collisions": "False"
+              "disable_collisions": "False",
+              "axis": "[0.0, 1.0, 0.0]",
+              "limits": "{'ang_z': [-0.5, 0.5]}",
+              "springs": "None",
+              "motor_angular_velocity": "None",
+              "motor_angular_max_impulse": "None",
+              "motor_linear_velocity": "None",
+              "motor_linear_max_impulse": "None",
+              "breaking_threshold": "20.0"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderAddConstraintResponse"},
+        "usage": [{"tool": "add_blender_rigid_body_constraint", "success": false}]
+      },
+      "motor": {
+        "arguments": {
+          "constraint_type": "MOTOR",
+          "object1_name": "A",
+          "object2_name": "B",
+          "motor_angular_velocity": 2,
+          "motor_angular_max_impulse": 5,
+          "motor_linear_velocity": 0.5,
+          "motor_linear_max_impulse": 3
+        },
+        "session_calls": [
+          {
+            "method": "add_rigid_body_constraint",
+            "arguments": {
+              "constraint_type": "'MOTOR'",
+              "object1_name": "'A'",
+              "object2_name": "'B'",
+              "location": "None",
+              "disable_collisions": "True",
+              "axis": "None",
+              "limits": "None",
+              "springs": "None",
+              "motor_angular_velocity": "2.0",
+              "motor_angular_max_impulse": "5.0",
+              "motor_linear_velocity": "0.5",
+              "motor_linear_max_impulse": "3.0",
+              "breaking_threshold": "None"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderAddConstraintResponse"},
+        "usage": [{"tool": "add_blender_rigid_body_constraint", "success": false}]
+      },
+      "spring": {
+        "arguments": {
+          "constraint_type": "GENERIC_SPRING",
+          "object1_name": "A",
+          "object2_name": "B",
+          "limits": {"lin_z": [-1, 1]},
+          "springs": {"z": {"stiffness": 50, "damping": 0.5}}
+        },
+        "session_calls": [
+          {
+            "method": "add_rigid_body_constraint",
+            "arguments": {
+              "constraint_type": "'GENERIC_SPRING'",
+              "object1_name": "'A'",
+              "object2_name": "'B'",
+              "location": "None",
+              "disable_collisions": "True",
+              "axis": "None",
+              "limits": "{'lin_z': [-1.0, 1.0]}",
+              "springs": "{'z': {'stiffness': 50.0, 'damping': 0.5}}",
+              "motor_angular_velocity": "None",
+              "motor_angular_max_impulse": "None",
+              "motor_linear_velocity": "None",
+              "motor_linear_max_impulse": "None",
+              "breaking_threshold": "None"
             }
           }
         ],
@@ -1614,7 +1924,7 @@
         "session_calls": [],
         "response": {
           "success": false,
-          "error": "1 validation error for BlenderAddConstraintRequest\nconstraint_type\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error": "1 validation error for BlenderAddConstraintRequest\nconstraint_type\n  Input should be 'FIXED', 'POINT', 'HINGE', 'SLIDER', 'PISTON', 'GENERIC', 'GENERIC_SPRING' or 'MOTOR' [type=literal_error, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/literal_error",
           "error_type": "ValidationError",
           "details": {
             "input": {
@@ -1622,7 +1932,15 @@
               "object1_name": "A",
               "object2_name": "B",
               "location": null,
-              "disable_collisions": true
+              "disable_collisions": true,
+              "axis": null,
+              "limits": null,
+              "springs": null,
+              "motor_angular_velocity": null,
+              "motor_angular_max_impulse": null,
+              "motor_linear_velocity": null,
+              "motor_linear_max_impulse": null,
+              "breaking_threshold": null
             }
           }
         }
@@ -1720,18 +2038,23 @@
         "session_calls": [
           {
             "method": "bake_simulation",
-            "arguments": {"frame_start": "1", "frame_end": "50", "scope": "'rigid_body'"}
+            "arguments": {
+              "frame_start": "1",
+              "frame_end": "50",
+              "scope": "'rigid_body'",
+              "allow_long_bake": "False"
+            }
           }
         ],
         "response": {"checked_against": "BlenderBakeSimulationResponse"},
         "usage": [{"tool": "bake_blender_simulation", "success": false}]
       },
       "full": {
-        "arguments": {"frame_start": 1, "frame_end": 50, "scope": "all"},
+        "arguments": {"frame_start": 1, "frame_end": 50, "scope": "all", "allow_long_bake": true},
         "session_calls": [
           {
             "method": "bake_simulation",
-            "arguments": {"frame_start": "1", "frame_end": "50", "scope": "'all'"}
+            "arguments": {"frame_start": "1", "frame_end": "50", "scope": "'all'", "allow_long_bake": "True"}
           }
         ],
         "response": {"checked_against": "BlenderBakeSimulationResponse"},
@@ -1744,7 +2067,14 @@
           "success": false,
           "error": "1 validation error for BlenderBakeSimulationRequest\nframe_start\n  Input should be a valid integer [type=int_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/int_type",
           "error_type": "ValidationError",
-          "details": {"input": {"frame_start": {"bogus": 1}, "frame_end": 50, "scope": "rigid_body"}}
+          "details": {
+            "input": {
+              "frame_start": {"bogus": 1},
+              "frame_end": 50,
+              "scope": "rigid_body",
+              "allow_long_bake": false
+            }
+          }
         }
       }
     },
@@ -2005,6 +2335,70 @@
               "merge_distance": null,
               "dissolve_degenerate_distance": null,
               "recalculate_normals": false
+            }
+          }
+        }
+      }
+    },
+    "uv_unwrap_blender_mesh": {
+      "minimal": {
+        "arguments": {"object_name": "Cube"},
+        "session_calls": [
+          {
+            "method": "uv_unwrap_mesh",
+            "arguments": {
+              "object_name": "'Cube'",
+              "method": "'SMART_PROJECT'",
+              "uv_map_name": "None",
+              "angle_limit": "1.1519173063162575",
+              "island_margin": "0.0",
+              "cube_size": "1.0"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderUVUnwrapResponse"},
+        "usage": [{"tool": "uv_unwrap_blender_mesh", "success": false}]
+      },
+      "full": {
+        "arguments": {
+          "object_name": "Cube",
+          "method": "CUBE_PROJECT",
+          "uv_map_name": "Lightmap",
+          "angle_limit": 1.0,
+          "island_margin": 0.02,
+          "cube_size": 2
+        },
+        "session_calls": [
+          {
+            "method": "uv_unwrap_mesh",
+            "arguments": {
+              "object_name": "'Cube'",
+              "method": "'CUBE_PROJECT'",
+              "uv_map_name": "'Lightmap'",
+              "angle_limit": "1.0",
+              "island_margin": "0.02",
+              "cube_size": "2.0"
+            }
+          }
+        ],
+        "response": {"checked_against": "BlenderUVUnwrapResponse"},
+        "usage": [{"tool": "uv_unwrap_blender_mesh", "success": false}]
+      },
+      "invalid": {
+        "arguments": {"object_name": {"bogus": 1}},
+        "session_calls": [],
+        "response": {
+          "success": false,
+          "error": "1 validation error for BlenderUVUnwrapRequest\nobject_name\n  Input should be a valid string [type=string_type, input_value={'bogus': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/<version>/v/string_type",
+          "error_type": "ValidationError",
+          "details": {
+            "input": {
+              "object_name": {"bogus": 1},
+              "method": "SMART_PROJECT",
+              "uv_map_name": null,
+              "angle_limit": 1.1519173063162575,
+              "island_margin": 0.0,
+              "cube_size": 1.0
             }
           }
         }

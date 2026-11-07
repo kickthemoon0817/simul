@@ -68,11 +68,15 @@ UNDO_STEPS: dict[str, str] = {
     "set_frame": "set_blender_frame",
     "set_frame_range": "set_blender_frame_range",
     "set_light_params": "set_blender_light_params",
+    # Blender records mode switches as undo steps too.
+    "set_object_mode": "set_blender_object_mode",
     "set_object_parent": "set_blender_object_parent",
     "set_object_transform": "set_blender_object_transform",
     "set_rigid_body_world": "set_blender_rigid_body_world",
     "setup_rigid_body": "setup_blender_rigid_body",
     "setup_simready_hierarchy": "setup_simready_hierarchy",
+    # It writes UV coordinates; the Edit Mode round trip it makes records nothing.
+    "uv_unwrap_mesh": "uv_unwrap_blender_mesh",
 }
 #: ``control_ui`` actions that change scene data: the selection and the active
 #: object's transform, which Blender's own selection and property edits record.
@@ -453,7 +457,8 @@ class BlenderBridge:
                 and bpy.context.mode != "OBJECT"
             ):
                 raise ValueError(
-                    "Attached window is not in Object Mode; leave Edit/Pose Mode before this operation"
+                    "Attached window is not in Object Mode; leave Edit/Pose Mode before this "
+                    "operation (set_blender_object_mode switches back)"
                 )
             capturing = method in {"capture_viewport", "capture_viewport_sequence"}
             # The label only drives cosmetic feedback. The MCP request models

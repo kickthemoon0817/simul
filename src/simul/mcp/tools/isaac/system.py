@@ -8,6 +8,7 @@ from ._shared import (
     PROTECTED_CARB_SETTING_PREFIXES,
     _pyval,
 )
+from .graph import _script_execution_refusal, is_script_extension
 from .._meta import tool_meta
 
 
@@ -110,7 +111,10 @@ class SystemMixin:
     @tool_meta(
         name="enable_isaac_extension",
         description=(
-            "Enable an extension immediately in the running Isaac Sim instance."
+            "Enable an extension immediately in the running Isaac Sim instance. With "
+            "security.allow_script_execution off, the extensions that run Python attached to "
+            "the stage (omni.graph.scriptnode, omni.kit.scripting, omni.warp, and any with "
+            "a word starting with 'script' in its name) are refused."
         ),
         read_only=False,
         idempotent=True,
@@ -125,8 +129,15 @@ class SystemMixin:
                 (e.g. "omni.physx-107.3.7").
 
         Returns:
-            Dict with success status and extension info after enabling.
+            Dict with success status and extension info after enabling, or a
+            ScriptExecutionDisabled error for a script extension while
+            script execution is off.
         """
+        if not self.settings.security.allow_script_execution and is_script_extension(extension_id):
+            return _script_execution_refusal(
+                f"Refusing to enable {extension_id!r}: it runs Python attached to the stage.",
+                extension_id=extension_id,
+            )
         _ext_id = _pyval(extension_id)
         script = textwrap.dedent(f"""\
             import json
@@ -139,7 +150,7 @@ class SystemMixin:
             # Verify by matching on bare name or fully qualified ID — both are
             # accepted by the Kit extension manager, but get_extensions() always
             # returns the version-suffixed form in 'id' and the bare form in 'name'.
-            bare_query = ext_id.rsplit("-", 1)[0] if "-" in ext_id else ext_id
+            bare_query = ext_id.split("-", 1)[0]
             found = False
             for ext in ext_manager.get_extensions():
                 eid = ext.get("id", "")
