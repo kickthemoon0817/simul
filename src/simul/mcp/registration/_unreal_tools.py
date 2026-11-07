@@ -25,9 +25,9 @@ from __future__ import annotations
 import inspect
 import json
 from dataclasses import KW_ONLY, dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple, Type
+from typing import Annotated, Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple, Type
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ...config import Settings
 from ...tool_surfaces import THIN_UNREAL_TOOLS
@@ -99,6 +99,17 @@ from ._helpers import utf8_byte_length
 
 #: Default of a parameter the caller must supply.
 REQUIRED: Any = inspect.Parameter.empty
+
+#: Most assets ``search_unreal_assets`` returns per call
+#: (``unreal_runtime.MAX_ASSET_SEARCH_RESULTS``; this module does not import
+#: the adapter, and ``test_unreal_tool_wrappers`` checks the two agree).
+MAX_ASSET_SEARCH_RESULTS = 1000
+
+#: The ``allow_engine_content`` parameter of the material tools that write assets.
+_ALLOW_ENGINE_CONTENT_DESCRIPTION = (
+    "Also write to content outside the project's /Game folder: /Engine or a plugin's content, "
+    "which every project using that engine or plugin shares. Default false refuses it (SandboxError)."
+)
 
 
 @dataclass(frozen=True)
@@ -619,7 +630,12 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 description="Comma-separated package paths to search.",
                 convert=_name_list,
             ),
-            ToolParam("max_results", int, 100, description="Maximum number of results."),
+            ToolParam(
+                "max_results",
+                Annotated[int, Field(ge=1, le=MAX_ASSET_SEARCH_RESULTS)],
+                100,
+                description=f"Maximum number of results, from 1 to {MAX_ASSET_SEARCH_RESULTS}.",
+            ),
         ),
     ),
     UnrealTool(
@@ -937,7 +953,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
             "the call fails, writing nothing, when the material has no global parameter by a given "
             "name (a name only its Material Layers have included) or a texture does not load, and "
             "fails when a value reads back different, keeping what applied; not_applied gives each "
-            "reason."
+            "reason. An instance outside /Game (engine or plugin content) is refused unless "
+            "allow_engine_content is true."
         ),
         response=UnrealSetMaterialParamsResponse,
         read_only=False,
@@ -978,23 +995,40 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 target="texture_params",
                 convert=_optional_json,
             ),
+            ToolParam("allow_engine_content", bool, False, description=_ALLOW_ENGINE_CONTENT_DESCRIPTION),
         ),
     ),
     UnrealTool(
         name="create_unreal_material_instance",
-        description="Create a Material Instance Constant from a parent material.",
+        description=(
+            "Create and save a Material Instance Constant from a parent material, in the project's /Game "
+            "folder: save_path, else the parent's folder when it is in /Game, else /Game/Materials. A folder "
+            "outside /Game is refused unless allow_engine_content is true."
+        ),
         response=UnrealCreateMaterialInstanceResponse,
         read_only=False,
         method="create_material_instance",
         params=(
             ToolParam("parent_path", str),
             ToolParam("instance_name", str),
-            ToolParam("save_path", str, ""),
+            ToolParam(
+                "save_path",
+                str,
+                "",
+                description=(
+                    "Content folder for the new instance, such as /Game/Materials. Empty picks the parent's "
+                    "folder when it is under /Game, else /Game/Materials."
+                ),
+            ),
+            ToolParam("allow_engine_content", bool, False, description=_ALLOW_ENGINE_CONTENT_DESCRIPTION),
         ),
     ),
     UnrealTool(
         name="assign_unreal_material",
-        description="Assign a material to a mesh component's material slot.",
+        description=(
+            "Assign a material to a mesh component's material slot of an actor in the level being edited, "
+            "as one undoable transaction that marks the level dirty, and read it back."
+        ),
         response=UnrealAssignMaterialResponse,
         read_only=False,
         idempotent=True,
@@ -1186,9 +1220,16 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     # -- USD and SimReady ----------------------------------------------------------
     UnrealTool(
         name="import_unreal_usd",
-        description="Import USD with Unreal's optional USDImporter plugin, enabled at editor startup.",
+        description=(
+            "Import USD with Unreal's optional USDImporter plugin, enabled at editor startup: assets to "
+            "<destination_path>/<file name>, and actors into the level being edited. Without "
+            "replace_existing it is refused when that folder already holds assets, and existing actors are "
+            "kept; with it, those assets and the level's actors from an earlier import of the file are "
+            "replaced."
+        ),
         response=UnrealImportUsdResponse,
         read_only=False,
+        destructive=True,
         method="import_usd",
         params=(
             ToolParam("usd_path", str, description="Path to the USD file on disk; must be inside the sandbox."),
@@ -1202,11 +1243,24 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                     "import_lights, import_cameras."
                 ),
             ),
+            ToolParam(
+                "replace_existing",
+                bool,
+                False,
+                description=(
+                    "Replace the assets already in <destination_path>/<file name> and the level's actors from "
+                    "an earlier import of this file. Default false refuses an import into a folder that holds "
+                    "assets (InvalidState) and replaces no actor."
+                ),
+            ),
         ),
     ),
     UnrealTool(
         name="export_unreal_usd",
-        description="Export selected Unreal actors with the optional USDImporter plugin's LevelExporterUSD.",
+        description=(
+            "Export actors of the level being edited with the optional USDImporter plugin's "
+            "LevelExporterUSD; actors_exported counts the actors the written stage has a prim for."
+        ),
         response=UnrealExportUsdResponse,
         read_only=False,
         destructive=True,

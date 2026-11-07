@@ -912,6 +912,9 @@ class UnrealCreateMaterialInstanceResponse(BaseModel):
     )
     instance_path: str = Field(..., description="New MIC asset path")
     parent_path: str = Field(..., description="Parent material path")
+    class_name: str = Field(
+        "MaterialInstanceConstant", description="Class of the new asset"
+    )
 
 
 class UnrealAssignMaterialResponse(BaseModel):
@@ -922,8 +925,14 @@ class UnrealAssignMaterialResponse(BaseModel):
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor path")
-    material_path: str = Field(..., description="Assigned material path")
+    component_path: Optional[str] = Field(
+        None, description="Mesh component whose slot was set"
+    )
+    material_path: str = Field(..., description="Assigned material's object path")
     slot_index: int = Field(0, description="Slot index")
+    previous_material_path: Optional[str] = Field(
+        None, description="Material the slot rendered with before the assignment"
+    )
 
 
 class UnrealSetLightParamsResponse(BaseModel):
@@ -1115,6 +1124,10 @@ class UnrealImportUsdResponse(BaseModel):
     actor_paths: List[str] = Field(
         default_factory=list, description="Spawned actor paths in the level"
     )
+    removed_actor_paths: List[str] = Field(
+        default_factory=list,
+        description="Level actors the import replaced (only with replace_existing)",
+    )
     warnings: List[str] = Field(default_factory=list, description="Import warnings")
 
 
@@ -1126,7 +1139,17 @@ class UnrealExportUsdResponse(BaseModel):
         None, description="Error message when success is False"
     )
     output_path: str = Field(..., description="Written USD file path")
-    actors_exported: int = Field(..., description="Number of actors exported")
+    actors_exported: int = Field(
+        ..., description="Number of actors the written stage has a prim for"
+    )
+    exported_prims: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="Each exported actor's actor_path and the prim_path it was written to",
+    )
+    skipped_actors: List[str] = Field(
+        default_factory=list,
+        description="Actors given that the exporter wrote no prim for (editor helpers it leaves out)",
+    )
     file_size_bytes: int = Field(0, description="Output file size in bytes")
 
 
