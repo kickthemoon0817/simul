@@ -33,8 +33,10 @@ from simul.adapters.unreal_runtime import (
 from simul.config import Settings
 from simul.mcp import server as server_module
 from tests.fakes import AvailableAdapter
+from tests.unreal.editor_world import SUBSYSTEM_NAMES, World, editor_subsystems, is_valid
 
 ACTOR = "/Game/Map.Map:PersistentLevel.PointLight_0"
+WORLD = World("/Game/Map.Map")
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +103,9 @@ class _Actor:
     def get_path_name(self) -> str:
         return self.path
 
+    def get_world(self) -> World:
+        return WORLD
+
 
 def _fake_unreal(actor: _Actor, transactions: List[str]) -> SimpleNamespace:
     @contextmanager
@@ -113,7 +118,10 @@ def _fake_unreal(actor: _Actor, transactions: List[str]) -> SimpleNamespace:
         Vector=_Vector,
         Rotator=_Rotator,
         ScopedEditorTransaction=scoped_transaction,
-        load_object=lambda outer, path: actor if path == actor.path else None,
+        find_object=lambda outer, path: actor if path == actor.path else None,
+        SystemLibrary=SimpleNamespace(is_valid=is_valid),
+        get_editor_subsystem=editor_subsystems(WORLD).__getitem__,
+        **SUBSYSTEM_NAMES,
     )
 
 

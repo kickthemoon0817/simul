@@ -260,6 +260,16 @@ def _focus_view(request: Any) -> Optional[str]:
     return focus_view_error(request.fov, request.aspect_ratio)
 
 
+def _parent_or_detach(request: Any) -> Optional[str]:
+    """Attaching names the parent and detaching says so; one of the two, never both."""
+    if bool(request.parent_path) == bool(request.detach):
+        return (
+            "Pass parent_path to attach the actor, or detach=true to detach it from its parent"
+            + (", not both" if request.detach else "")
+        )
+    return None
+
+
 def _camera_arguments(request: Any) -> Dict[str, Any]:
     """The location and rotation triples; None for a group left unchanged."""
     arguments: Dict[str, Any] = {}
@@ -521,7 +531,11 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="get_unreal_actor_info",
-        description="Get detailed information about a specific actor including transform, components, and tags.",
+        description=(
+            "Get detailed information about a specific actor including transform, components, and tags. The path "
+            "must name a live actor of the level open in the editor; a deleted actor, or one of a map that is not "
+            "open, is not found, and no map is loaded to look for it."
+        ),
         response=UnrealGetActorInfoResponse,
         read_only=True,
         idempotent=True,
@@ -759,26 +773,76 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
     ),
     UnrealTool(
         name="set_unreal_actor_parent",
-        description="Attach an actor to a parent actor or detach it.",
+        description=(
+            "Attach an actor to a parent actor (parent_path), or detach it from its parent (detach=true with an "
+            "empty parent_path). The actor keeps its world transform, the change is one undoable editor transaction, "
+            "and the parent is read back: parent_path is the parent afterwards (null once detached), with "
+            "previous_parent_path and changed. Attaching an actor to itself or under one of its own children, or a "
+            "Static actor under a parent that is not Static, is refused with the reason, as is a path that names no "
+            "actor of the level open in the editor."
+        ),
         response=UnrealSetActorParentResponse,
         read_only=False,
         destructive=True,
         method="set_actor_parent",
         params=(
-            ToolParam("actor_path", str),
-            ToolParam("parent_path", str, "", convert=_optional_text),
+            ToolParam("actor_path", str, description="Full path of the actor to attach or detach."),
+            ToolParam(
+                "parent_path",
+                str,
+                description="Full path of the actor to attach it to; an empty string together with detach=true.",
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "detach",
+                bool,
+                False,
+                description="Detach the actor from its parent instead, keeping its world transform.",
+            ),
         ),
+        check=_parent_or_detach,
     ),
     UnrealTool(
         name="add_unreal_component",
-        description="Add a component to an Unreal actor.",
+        description=(
+            "Add an instance component to an actor in the level, as the editor's Add Component button does, in one "
+            "undoable editor transaction. A scene component attaches under parent_component or the root component. "
+            "Returns the component read back: component_path, component_name, component_class, parent_component and "
+            "is_root. Abstract classes and names already used inside the actor are refused."
+        ),
         response=UnrealAddComponentResponse,
         read_only=False,
         method="add_component",
         params=(
-            ToolParam("actor_path", str),
-            ToolParam("component_class", str),
-            ToolParam("component_name", str, "", convert=_optional_text),
+            ToolParam("actor_path", str, description="Full path of the actor."),
+            ToolParam(
+                "component_class",
+                str,
+                description=(
+                    "Component class: a native class name such as PointLightComponent, or a class path such as "
+                    "/Script/Engine.PointLightComponent or a Blueprint component's /Game/BP_Lamp.BP_Lamp_C."
+                ),
+            ),
+            ToolParam(
+                "component_name",
+                str,
+                "",
+                description=(
+                    "Name of the new component, unique inside the actor, without spaces or punctuation such as "
+                    ". : / ( ); empty lets Unreal name it after its class."
+                ),
+                convert=_optional_text,
+            ),
+            ToolParam(
+                "parent_component",
+                str,
+                "",
+                description=(
+                    "Name of the actor's scene component to attach the new one under (get_unreal_actor_info lists "
+                    "the components); empty attaches it under the root component. Scene components only."
+                ),
+                convert=_optional_text,
+            ),
         ),
     ),
     UnrealTool(

@@ -46,8 +46,10 @@ from simul.mcp import server as server_module
 from simul.mcp.registration._unreal_tools import UNREAL_TOOLS
 from simul.mcp.usage_tracker import ToolUsageTracker
 from tests.fakes import AvailableAdapter
+from tests.unreal.editor_world import SUBSYSTEM_NAMES, World, editor_subsystems, is_valid
 
 LEVEL = "/Game/Maps/Lab.Lab:PersistentLevel."
+WORLD = World("/Game/Maps/Lab.Lab")
 
 # The view the fit assumes by default: UE's default level viewport field of
 # view, 90 degrees across, on the 16:9 of the default capture. A view keeps its
@@ -209,6 +211,9 @@ class Actor:
                 component.parent = self.root_component
         self.bounds_calls: List[Tuple[bool, bool]] = []
 
+    def get_world(self) -> World:
+        return WORLD
+
     def get_path_name(self) -> str:
         return LEVEL + self.name
 
@@ -273,6 +278,7 @@ class Editor:
             "LevelEditorSubsystem": SimpleNamespace(
                 is_in_play_in_editor=lambda: editor.pie
             ),
+            **editor_subsystems(WORLD, pie=lambda: editor.pie),
         }
         return SimpleNamespace(
             Actor=Actor,
@@ -280,11 +286,12 @@ class Editor:
             ShapeComponent=ShapeComponent,
             CollisionEnabled=CollisionEnabled,
             DrawFrustumComponent=DrawFrustumComponent,
-            SystemLibrary=SimpleNamespace(get_component_bounds=get_component_bounds),
+            SystemLibrary=SimpleNamespace(get_component_bounds=get_component_bounds, is_valid=is_valid),
             EditorActorSubsystem="EditorActorSubsystem",
             LevelEditorSubsystem="LevelEditorSubsystem",
+            **SUBSYSTEM_NAMES,
             get_editor_subsystem=subsystems.__getitem__,
-            load_object=lambda outer, path: editor.actors.get(path),
+            find_object=lambda outer, path: editor.actors.get(path),
         )
 
     def run(self, code: str) -> Dict[str, Any]:

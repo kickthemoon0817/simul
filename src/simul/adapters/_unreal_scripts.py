@@ -93,13 +93,37 @@ def level_actors():
 """
 )
 
-ACTOR_HELPERS = """
-import json, unreal
+#: Message of the ``SimulNotFound`` an editor script raises for an actor path
+#: that names no live actor of the editor world; ``{path}`` is the path.
+ACTOR_NOT_FOUND = "Actor not found: {path}"
+
+# actor_at(path) is the live actor at ``path`` in the editor world, PIE-aware
+# through editor_world(). It finds the actor among loaded objects and never
+# loads one: load_object on the path of an actor in a map that is not open
+# loads that map's package from disk, so an edit landed in a map nobody sees
+# and left it dirty for the next Save All (UE 5.7.4). A destroyed actor stays
+# findable, invalid (SystemLibrary.is_valid is False), until garbage
+# collection; an actor of a map loaded but not open, or of the PIE world,
+# belongs to another world. Each raises SimulNotFound, whose message starts
+# with ACTOR_NOT_FOUND, and the session reports it as NotFoundError.
+ACTOR_HELPERS = EDITOR_WORLD + f"_ACTOR_NOT_FOUND = {ACTOR_NOT_FOUND!r}\n" + """
+class SimulNotFound(Exception):
+    pass
 
 def actor_at(path):
-    actor = unreal.load_object(None, path)
-    if actor is None or not isinstance(actor, unreal.Actor):
-        raise ValueError("Actor not found: " + path)
+    actor = unreal.find_object(None, path)
+    world = editor_world()
+    if not isinstance(actor, unreal.Actor) or not unreal.SystemLibrary.is_valid(actor):
+        where = world.get_path_name() if world is not None else "no editor world"
+        raise SimulNotFound(_ACTOR_NOT_FOUND.format(path=path)
+                            + " (no live actor at that path in the level open in the editor, " + where + ")")
+    owner = actor.get_world()
+    if world is None or owner != world:
+        raise SimulNotFound(_ACTOR_NOT_FOUND.format(path=path) + " (it belongs to "
+                            + (owner.get_path_name() if owner is not None else "no world")
+                            + ", not to the level open in the editor, "
+                            + (world.get_path_name() if world is not None else "none")
+                            + "; open that map to edit it)")
     return actor
 
 def actor_transform(actor):
@@ -333,7 +357,7 @@ print(json.dumps({"actor_path": actor.get_path_name(), **actor_transform(actor)}
 # level, a child actor or an actor inside a level instance, which Unreal
 # selects only through its parent, or any actor while the editor mode or a
 # selection lock prevents selection) reads back unselected.
-FOCUS_ACTOR = ACTOR_HELPERS + EDITOR_WORLD + """
+FOCUS_ACTOR = ACTOR_HELPERS + """
 import math
 
 def left_out_by_editor_focus(component, root):
@@ -394,7 +418,7 @@ print(json.dumps({"location": actor_transform(actor)["location"],
 # transaction. When the path loads nothing, or Unreal places no actor for it,
 # the script prints an error instead of an empty actor path; while PIE runs,
 # when Unreal places nothing whatever the path, it prints the PIE refusal.
-SPAWN_ACTOR = ACTOR_HELPERS + EDITOR_WORLD + """
+SPAWN_ACTOR = ACTOR_HELPERS + """
 def spawn(path, location, rotation, label):
     if pie_active():
         return pie_refusal("spawn actors")
@@ -433,6 +457,195 @@ def spawn(path, location, rotation, label):
             "rotation": transform["rotation"]}
 
 print(json.dumps(spawn(**args)))
+"""
+
+# Expects ``args`` = {"actor_path", "parent_path"}; parent_path None detaches.
+# K2_AttachToActor (Python attach_to_actor) returns False and changes nothing
+# for an attachment Unreal refuses: the actor itself, a parent attached under
+# the child, or a Static child under a parent that is not Static (UE 5.7.4).
+# The first two and the mobility rule are refused here first with their
+# reason; a parent path that names no live actor of the editor world raises
+# SimulNotFound like the child's. The attachment keeps the world transform
+# (location, rotation and scale) and is one undoable transaction, with the
+# child, the new parent and the previous parent recorded first (Actor.modify
+# also records the root component, whose attachment changes). The parent is
+# read back; an attachment Unreal refused cancels the transaction.
+SET_ACTOR_PARENT = ACTOR_HELPERS + """
+def path_of(actor):
+    return actor.get_path_name() if actor is not None else None
+
+def refused(error_type, message):
+    return {"success": False, "error_type": error_type, "error": message}
+
+def result(actor_path, parent, previous):
+    return {"actor_path": actor_path, "parent_path": path_of(parent),
+            "previous_parent_path": path_of(previous), "changed": parent != previous}
+
+def detach(actor_path, child, previous):
+    if previous is not None:
+        rule = unreal.DetachmentRule.KEEP_WORLD
+        with unreal.ScopedEditorTransaction("simul: detach actor"):
+            child.modify()
+            previous.modify()
+            child.detach_from_actor(rule, rule, rule)
+    after = child.get_attach_parent_actor()
+    if after is not None:
+        return refused("EngineError", "Unreal did not detach " + actor_path + " from " + path_of(after))
+    return result(actor_path, None, previous)
+
+def set_parent(actor_path, parent_path):
+    child = actor_at(actor_path)
+    previous = child.get_attach_parent_actor()
+    if parent_path is None:
+        return detach(actor_path, child, previous)
+    parent = actor_at(parent_path)
+    if parent == child:
+        return refused("ValidationError", "An actor cannot be attached to itself: " + actor_path)
+    node = parent
+    while node is not None:
+        if node == child:
+            return refused("ValidationError", "Attaching " + actor_path + " to " + parent_path
+                           + " would make a cycle: " + parent_path + " is attached under " + actor_path
+                           + "; detach " + parent_path + " first")
+        node = node.get_attach_parent_actor()
+    child_root, parent_root = child.root_component, parent.root_component
+    if child_root is None or parent_root is None:
+        return refused("InvalidState", (actor_path if child_root is None else parent_path)
+                       + " has no root component, which an attachment joins")
+    static = unreal.ComponentMobility.STATIC
+    if child_root.mobility == static and parent_root.mobility != static:
+        return refused("InvalidState", "Unreal attaches a Static actor only under a Static parent: " + actor_path
+                       + " is Static and " + parent_path + " is " + parent_root.mobility.name.title()
+                       + "; make the child's root component Movable first")
+    if previous == parent:
+        return result(actor_path, parent, previous)
+    rule = unreal.AttachmentRule.KEEP_WORLD
+    with unreal.ScopedEditorTransaction("simul: attach actor") as transaction:
+        child.modify()
+        parent.modify()
+        if previous is not None:
+            previous.modify()
+        attached = child.attach_to_actor(parent, "", rule, rule, rule, False)
+        after = child.get_attach_parent_actor()
+        if not attached and after == previous:
+            transaction.cancel()
+    if not attached or after != parent:
+        return refused("EngineError", "Unreal did not attach " + actor_path + " to " + parent_path
+                       + "; the editor log says why")
+    return result(actor_path, after, previous)
+
+print(json.dumps(set_parent(**args)))
+"""
+
+# Expects ``args`` = {"actor_path", "component_class", "component_name",
+# "parent_component"}. Adds an instance component the way the editor's Add
+# Component button does, through SubobjectDataSubsystem.add_new_subobject:
+# Remote Control refuses AddComponentByClass on UE 5.7 ("deprecated or
+# unavailable remotely"). component_class is a class path
+# (/Script/Engine.PointLightComponent, a Blueprint's /Game/BP_Lamp.BP_Lamp_C or
+# its /Game/BP_Lamp.BP_Lamp) or a native class name (PointLightComponent).
+# A path inside a map's package is refused before anything loads. An abstract
+# class is refused too: the subsystem adds one without complaint and the
+# engine fires an ensure (UE 5.7.4). unreal.new_object refuses an abstract
+# class before creating anything and makes a throwaway transient object of a
+# concrete one, which the garbage collector reclaims; nothing else reports a
+# class's abstract flag to Python. A scene component attaches under
+# parent_component (a scene component of the actor, by name) or the root
+# component, and becomes the root of an actor without one; any other component
+# takes no parent. The add and the name are one undoable transaction; a name
+# already used inside the actor is refused before it. The component is read
+# back from the actor.
+ADD_COMPONENT = ACTOR_HELPERS + """
+def refused(error_type, message):
+    return {"success": False, "error_type": error_type, "error": message}
+
+def handle_object(handle):
+    if not unreal.SubobjectDataBlueprintFunctionLibrary.is_handle_valid(handle):
+        return None
+    data = unreal.SubobjectDataBlueprintFunctionLibrary.get_data(handle)
+    return unreal.SubobjectDataBlueprintFunctionLibrary.get_associated_object(data)
+
+def resolve(name):
+    if "/" not in name:
+        wrapper = getattr(unreal, name, None)
+        if isinstance(wrapper, type) and hasattr(wrapper, "static_class"):
+            return wrapper.static_class(), None
+        return None, ("No class named " + repr(name)
+                      + ": pass a native class name such as PointLightComponent or a class path")
+    if ":" in name:
+        return None, name + " names an object inside a package, not a class"
+    if name.startswith("/Script/"):
+        found = unreal.find_object(None, name)
+    else:
+        package = name.split(".", 1)[0]
+        assets = unreal.AssetRegistryHelpers.get_asset_registry().get_assets_by_package_name(package)
+        if any(str(asset.asset_class_path.asset_name) == "World" for asset in assets):
+            return None, name + " is in a map package, not a class; simul loads no map"
+        found = unreal.load_object(None, name)
+    if isinstance(found, unreal.Blueprint):
+        found = found.generated_class()
+    if not isinstance(found, unreal.Class):
+        return None, "No class at " + repr(name)
+    return found, None
+
+def describe(actor, component):
+    parent = component.get_attach_parent() if isinstance(component, unreal.SceneComponent) else None
+    return {"component_path": component.get_path_name(), "component_name": component.get_name(),
+            "component_class": component.get_class().get_name(),
+            "parent_component": parent.get_name() if parent is not None else None,
+            "is_root": component == actor.root_component}
+
+def add(actor_path, component_class, component_name, parent_component):
+    actor = actor_at(actor_path)
+    cls, reason = resolve(component_class)
+    if cls is None:
+        return refused("NotFoundError", reason)
+    if not unreal.MathLibrary.class_is_child_of(cls, unreal.ActorComponent.static_class()):
+        return refused("ValidationError", component_class + " is the class " + cls.get_name()
+                       + ", not a component class (an ActorComponent)")
+    try:
+        unreal.new_object(cls)
+    except Exception as exc:
+        if "abstract" not in str(exc):
+            raise
+        return refused("ValidationError", cls.get_name() + " is abstract; pass a concrete component class")
+    scene = unreal.MathLibrary.class_is_child_of(cls, unreal.SceneComponent.static_class())
+    if component_name is not None and unreal.find_object(actor, component_name) is not None:
+        return refused("ValidationError", actor_path + " already has a component or subobject named "
+                       + repr(component_name))
+    target = actor.root_component if scene else None
+    if parent_component is not None:
+        if not scene:
+            return refused("ValidationError", cls.get_name() + " is not a scene component, so it attaches to "
+                           "nothing and takes no parent_component")
+        target = next((c for c in actor.get_components_by_class(unreal.SceneComponent)
+                       if c.get_name() == parent_component), None)
+        if target is None:
+            return refused("NotFoundError", "Component not found: " + parent_component
+                           + " (no scene component of that name on " + actor_path + ")")
+    subsystem = unreal.get_engine_subsystem(unreal.SubobjectDataSubsystem)
+    handles = list(subsystem.k2_gather_subobject_data_for_instance(actor))
+    parent_handle = next((h for h in handles if target is not None and handle_object(h) == target), handles[0])
+    with unreal.ScopedEditorTransaction("simul: add component") as transaction:
+        actor.modify()
+        params = unreal.AddNewSubobjectParams(parent_handle=parent_handle, new_class=cls, blueprint_context=None)
+        handle, failure = subsystem.add_new_subobject(params)
+        component = handle_object(handle)
+        if component is None:
+            transaction.cancel()
+            return refused("EngineError", "Unreal added no " + cls.get_name() + " to " + actor_path
+                           + (": " + str(failure) if str(failure) else ""))
+        if component_name is not None and not (subsystem.rename_subobject(handle, unreal.Text(component_name))
+                                               and component.get_name() == component_name):
+            subsystem.delete_subobject(handles[0], handle, None)
+            transaction.cancel()
+            return refused("EngineError", "Unreal did not name the new " + cls.get_name() + " "
+                           + repr(component_name) + ", so it was removed again")
+    if component not in actor.get_components_by_class(unreal.ActorComponent):
+        return refused("EngineError", "The new " + cls.get_name() + " is not among " + actor_path + "'s components")
+    return dict(describe(actor, component), actor_path=actor_path)
+
+print(json.dumps(add(**args)))
 """
 
 # Expects ``args`` = {"label", "match_mode", "max_results"}. Semantic labels

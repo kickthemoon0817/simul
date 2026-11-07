@@ -280,6 +280,10 @@ class Editor:
                 return SimpleNamespace(get_class=lambda: _Class("StaticMesh"))
             return next((a for a in editor.level if a.get_path_name() == path), None)
 
+        def find_object(outer: Any, path: str) -> Any:
+            editor.calls.append("find_object " + path)
+            return next((a for a in editor.level if a.get_path_name() == path), None)
+
         return SimpleNamespace(
             Actor=Actor,
             ActorComponent=object,
@@ -304,7 +308,9 @@ class Editor:
                 get_time_seconds=lambda world: 12.5,
             ),
             SystemLibrary=SimpleNamespace(
-                get_engine_version=lambda: "5.7.4", get_game_name=lambda: "Lab"
+                get_engine_version=lambda: "5.7.4",
+                get_game_name=lambda: "Lab",
+                is_valid=lambda obj: obj is not None,
             ),
             Paths=SimpleNamespace(
                 project_dir=lambda: "../../Lab/",
@@ -317,6 +323,7 @@ class Editor:
             ScopedEditorTransaction=editor.transaction,
             MathLibrary=SimpleNamespace(class_is_child_of=lambda cls, parent: True),
             load_object=load_object,
+            find_object=find_object,
             load_asset=lambda path: None,
             UsdStageImportFactory=object,
             LevelExporterUSD=object,

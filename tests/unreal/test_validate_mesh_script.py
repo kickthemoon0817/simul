@@ -17,8 +17,10 @@ from typing import Any, Dict
 import pytest
 
 from simul.adapters.unreal_runtime import UnrealRuntimeSession
+from tests.unreal.editor_world import SUBSYSTEM_NAMES, World, editor_subsystems, is_valid
 
 MESH_PATH = "/Game/Map.Map:PersistentLevel.DynamicMeshActor_0"
+WORLD = World("/Game/Map.Map")
 
 
 def _fake_unreal(counts: Dict[str, Any]) -> SimpleNamespace:
@@ -29,20 +31,25 @@ def _fake_unreal(counts: Dict[str, Any]) -> SimpleNamespace:
 
     actor = Actor(
         get_path_name=lambda: MESH_PATH,
+        get_world=lambda: WORLD,
         dynamic_mesh_component=SimpleNamespace(get_dynamic_mesh=lambda: mesh),
     )
+    subsystems = {
+        "actors": SimpleNamespace(get_all_level_actors=lambda: [actor]),
+        **editor_subsystems(WORLD),
+    }
     queries = SimpleNamespace(
         **{name: (lambda m, v=value: v) for name, value in counts.items()}
     )
     return SimpleNamespace(
         GeometryScript_MeshQueries=queries,
         Actor=Actor,
-        # actor_at() (ACTOR_HELPERS) loads the actor by path.
-        load_object=lambda outer, path: actor if path == MESH_PATH else None,
+        # actor_at() (ACTOR_HELPERS) finds the actor by path.
+        find_object=lambda outer, path: actor if path == MESH_PATH else None,
+        SystemLibrary=SimpleNamespace(is_valid=is_valid),
         EditorActorSubsystem="actors",
-        get_editor_subsystem=lambda _: SimpleNamespace(
-            get_all_level_actors=lambda: [actor]
-        ),
+        **SUBSYSTEM_NAMES,
+        get_editor_subsystem=subsystems.__getitem__,
     )
 
 

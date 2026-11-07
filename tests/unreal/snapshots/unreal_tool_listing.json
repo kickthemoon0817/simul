@@ -375,7 +375,7 @@
   {
    "name": "get_unreal_actor_info",
    "title": "Get Unreal Actor Info",
-   "description": "Get detailed information about a specific actor including transform, components, and tags.",
+   "description": "Get detailed information about a specific actor including transform, components, and tags. The path must name a live actor of the level open in the editor; a deleted actor, or one of a map that is not open, is not found, and no map is loaded to look for it.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -1002,23 +1002,28 @@
   {
    "name": "set_unreal_actor_parent",
    "title": "Set Unreal Actor Parent",
-   "description": "Attach an actor to a parent actor or detach it.",
+   "description": "Attach an actor to a parent actor (parent_path), or detach it from its parent (detach=true with an empty parent_path). The actor keeps its world transform, the change is one undoable editor transaction, and the parent is read back: parent_path is the parent afterwards (null once detached), with previous_parent_path and changed. Attaching an actor to itself or under one of its own children, or a Static actor under a parent that is not Static, is refused with the reason, as is a path that names no actor of the level open in the editor.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
-      "description": "Child actor path.",
+      "description": "Full path of the actor to attach or detach.",
       "type": "string"
      },
      "parent_path": {
-      "default": "",
-      "description": "Parent actor path (None to detach).",
+      "description": "Full path of the actor to attach it to; an empty string together with detach=true.",
       "type": "string"
+     },
+     "detach": {
+      "default": false,
+      "description": "Detach the actor from its parent instead, keeping its world transform.",
+      "type": "boolean"
      }
     },
     "required": [
-     "actor_path"
+     "actor_path",
+     "parent_path"
     ]
    },
    "execution": null,
@@ -1040,22 +1045,27 @@
   {
    "name": "add_unreal_component",
    "title": "Add Unreal Component",
-   "description": "Add a component to an Unreal actor.",
+   "description": "Add an instance component to an actor in the level, as the editor's Add Component button does, in one undoable editor transaction. A scene component attaches under parent_component or the root component. Returns the component read back: component_path, component_name, component_class, parent_component and is_root. Abstract classes and names already used inside the actor are refused.",
    "inputSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
      "actor_path": {
-      "description": "Full actor path.",
+      "description": "Full path of the actor.",
       "type": "string"
      },
      "component_class": {
-      "description": "Component class name.",
+      "description": "Component class: a native class name such as PointLightComponent, or a class path such as /Script/Engine.PointLightComponent or a Blueprint component's /Game/BP_Lamp.BP_Lamp_C.",
       "type": "string"
      },
      "component_name": {
       "default": "",
-      "description": "Optional name for the component.",
+      "description": "Name of the new component, unique inside the actor, without spaces or punctuation such as . : / ( ); empty lets Unreal name it after its class.",
+      "type": "string"
+     },
+     "parent_component": {
+      "default": "",
+      "description": "Name of the actor's scene component to attach the new one under (get_unreal_actor_info lists the components); empty attaches it under the root component. Scene components only.",
       "type": "string"
      }
     },

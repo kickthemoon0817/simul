@@ -31,6 +31,7 @@ from ..utils.regex_guard import (
 from ._unreal_procedural import new_generation, plan_scene
 from ._unreal_scripts import (
     ACTOR_HELPERS,
+    ADD_COMPONENT,
     CREATE_MATERIAL_INSTANCE,
     EDITOR_WORLD,
     ENGINE_METADATA,
@@ -43,6 +44,7 @@ from ._unreal_scripts import (
     PLACE_BASIC_SHAPES,
     ROBOTICS_SCENE_ANALYSIS,
     SCENE_SUMMARY,
+    SET_ACTOR_PARENT,
     SET_ACTOR_TRANSFORM,
     SET_LIGHT_PARAMS,
     SET_MATERIAL_PARAMS,
@@ -392,6 +394,32 @@ def _vector3(name: str, value: Any, axes: str) -> List[float]:
     ):
         return [float(v) for v in value]
     raise ValueError(f"{name} must be three finite numbers [{axes}], got {value!r}")
+
+
+#: Characters Unreal refuses in an object name (INVALID_OBJECTNAME_CHARACTERS, UE 5.7).
+_INVALID_OBJECT_NAME_CHARACTERS = "\"' ,/.:|&!~\n\r\t@#(){}[]=;^%$`"
+
+#: Longest object name Unreal keeps: an FName holds fewer than NAME_SIZE (1024) characters.
+_MAX_OBJECT_NAME_LENGTH = 1023
+
+
+def _object_name_error(name: str, value: str) -> Optional[str]:
+    """Why ``value`` cannot name an Unreal object, such as a component, or None.
+
+    Args:
+        name: Parameter name, used in the message.
+        value: The proposed object name.
+    """
+    if not value:
+        return f"{name} must not be empty"
+    if len(value) > _MAX_OBJECT_NAME_LENGTH:
+        return f"{name} is {len(value)} characters long; Unreal keeps at most {_MAX_OBJECT_NAME_LENGTH}"
+    invalid = "".join(sorted({c for c in value if c in _INVALID_OBJECT_NAME_CHARACTERS}))
+    if invalid:
+        return f"{name} {value!r} has characters Unreal refuses in an object name: {invalid!r}"
+    if value.lower() == "none":
+        return f"{name} cannot be 'None', which Unreal reserves for no name"
+    return None
 
 
 def _rotator_quaternion(rotation: Sequence[float]) -> Tuple[float, float, float, float]:
@@ -1219,10 +1247,11 @@ class UnrealRuntimeSession(LoggerMixin):
         """Run a GeometryScript body against actors resolved by path.
 
         Each keyword binds a script variable to ``actor_at(path)`` from
-        ``ACTOR_HELPERS`` -- a direct object load instead of a scan over every
-        level actor. ``body`` is the mesh op's block, indented one level; it
-        is dedented here. A missing actor raises inside the editor and comes
-        back as a ``ScriptError`` envelope. With ``pie_action`` (a body that
+        ``ACTOR_HELPERS`` -- a lookup among loaded objects instead of a scan
+        over every level actor, which never loads a map. ``body`` is the mesh
+        op's block, indented one level; it is dedented here. A path that names
+        no live actor of the editor world raises SimulNotFound inside the
+        editor and comes back as an error envelope. With ``pie_action`` (a body that
         spawns actors), the body runs only while Play In Editor is stopped
         and the call is otherwise refused as PIEActive (``_outside_pie``).
         """
@@ -1513,10 +1542,16 @@ print(json.dumps({{"actors": actors, "count": len(actors), "truncated": truncate
         return await self._execute_json_script(code)
 
     async def get_actor_info(self, actor_path: str) -> Dict[str, Any]:
-        """Read an actor's world transform, components, tags and visibility, and ``pie_active``."""
+        """Read an actor's world transform, components, tags and visibility, and ``pie_active``.
+
+        Returns:
+            The actor's info. A not-found error naming the path when it names
+            no live actor of the level open in the editor: nothing there, an
+            actor already deleted, or one of a map that is not open, which
+            is never loaded (``_unreal_scripts.ACTOR_HELPERS``' ``actor_at``).
+        """
         return await self._execute_json_script(
             ACTOR_HELPERS
-            + EDITOR_WORLD
             + f"\nprint(json.dumps(dict(actor_info(actor_at({actor_path!r})), pie_active=pie_active())))"
         )
 
@@ -2073,8 +2108,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             select (hidden in the editor or in a hidden or locked level, a
             child actor or an actor inside a level instance, or any actor
             while the editor mode or a selection lock prevents selection). A
-            ``ScriptError`` envelope when the actor cannot be found, before
-            the camera moves.
+            not-found error, before the camera moves, when the path names no
+            live actor of the level open in the editor (an actor deleted, or
+            one of a map that is not open, which is never loaded).
 
         Raises:
             ValueError: ``fov`` is under 0.001 degrees or not under 180, or
@@ -2384,89 +2420,113 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         self,
         actor_path: str,
         parent_path: Optional[str] = None,
+        detach: bool = False,
     ) -> Dict[str, Any]:
         """
-        Attach an actor to a parent actor or detach it.
+        Attach an actor to a parent actor, or detach it from its parent.
 
-        Calls the actor's ``K2_AttachToActor`` UFUNCTION, or without a parent
-        ``K2_DetachFromActor``, via Remote Control, keeping the world
-        transform either way.
+        One editor script (``_unreal_scripts.SET_ACTOR_PARENT``) attaches with
+        ``attach_to_actor`` (``K2_AttachToActor``) or detaches with
+        ``detach_from_actor``, keeping the world transform, in one undoable
+        transaction, and reads the parent back. Exactly one of
+        ``parent_path`` and ``detach`` is given. Unreal refuses to attach an
+        actor to itself, to an actor attached under it, or a Static actor
+        under a parent that is not Static, and returns False without a
+        reason; those are refused first, each with its reason.
 
         Args:
-            actor_path: Child actor path.
-            parent_path: Parent actor path (None to detach).
+            actor_path: Full path of the actor to attach or detach.
+            parent_path: Full path of the actor to attach it to.
+            detach: Detach the actor from its parent, keeping its world
+                transform. An actor with no parent is left as it is.
 
         Returns:
-            Dictionary with actor_path, parent_path.
+            Dictionary with actor_path, parent_path (the parent read back;
+            None once detached), previous_parent_path and changed (whether
+            the parent changed). A ``ValidationError`` envelope when neither or
+            both of parent_path and detach are given, for the actor itself as
+            its parent and for a cycle; ``InvalidState`` for an actor without
+            a root component or a Static child under a parent that is not
+            Static; a not-found error for an actor or parent path that names
+            no live actor of the level open in the editor; ``EngineError``
+            when Unreal still did not attach or detach it.
         """
-        if parent_path:
-            body: Dict[str, Any] = {
-                "objectPath": actor_path,
-                "functionName": "K2_AttachToActor",
-                "parameters": {
-                    "ParentActor": parent_path,
-                    "SocketName": "None",
-                    "LocationRule": "KeepWorld",
-                    "RotationRule": "KeepWorld",
-                },
+        if bool(parent_path) == bool(detach):
+            return {
+                "success": False,
+                "error_type": "ValidationError",
+                "error": (
+                    "Pass parent_path to attach the actor, or detach=True to detach it from its parent"
+                    + (", not both" if detach else "")
+                ),
             }
-        else:
-            body = {
-                "objectPath": actor_path,
-                "functionName": "K2_DetachFromActor",
-                "parameters": {
-                    "LocationRule": "KeepWorld",
-                    "RotationRule": "KeepWorld",
-                },
-            }
-        await self._http_put("/remote/object/call", body)
-
-        return {
-            "actor_path": actor_path,
-            "parent_path": parent_path,
-        }
+        args = {"actor_path": actor_path, "parent_path": None if detach else parent_path}
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + SET_ACTOR_PARENT,
+            expected_errors=("NotFoundError", "ValidationError", "InvalidState"),
+        )
 
     async def add_component(
         self,
         actor_path: str,
         component_class: str,
         component_name: Optional[str] = None,
+        parent_component: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Add a component to an actor.
+        Add an instance component to an actor in the level.
 
-        Uses ``AddComponentByClass`` UFUNCTION via Remote Control.
+        One editor script (``_unreal_scripts.ADD_COMPONENT``) adds it the way
+        the editor's Add Component button does, through
+        ``SubobjectDataSubsystem.add_new_subobject`` (Remote Control refuses
+        ``AddComponentByClass`` on UE 5.7), names it, in one undoable
+        transaction, and reads it back from the actor. A scene component is
+        attached under ``parent_component`` or the root component, and
+        becomes the root of an actor without one.
 
         Args:
-            actor_path: Full actor path.
-            component_class: Component class name.
-            component_name: Optional name for the component.
+            actor_path: Full path of the actor.
+            component_class: A native component class name
+                (``PointLightComponent``) or a class path
+                (``/Script/Engine.PointLightComponent``, a Blueprint
+                component's ``/Game/BP_Lamp.BP_Lamp_C`` or its
+                ``/Game/BP_Lamp.BP_Lamp``). Abstract classes are refused.
+            component_name: Name of the new component, unique inside the
+                actor; None lets Unreal name it after its class.
+            parent_component: Name of the actor's scene component to attach
+                the new one under; None attaches it under the root component.
+                Only for a scene component.
 
         Returns:
-            Dictionary with actor_path, component_path, component_class.
+            Dictionary with actor_path, component_path, component_name,
+            component_class (the class read back), parent_component (the
+            component it is attached under, None for a component that is not
+            a scene component or became the root) and is_root. A
+            ``ValidationError`` envelope for an invalid or taken name, a
+            class that is abstract or not a component class, or a
+            parent_component for a component that takes none; a not-found
+            error for a class, parent component or actor that is not there;
+            ``EngineError`` when Unreal adds or names nothing.
         """
-        body: Dict[str, Any] = {
-            "objectPath": actor_path,
-            "functionName": "AddComponentByClass",
-            "parameters": {
-                "Class": f"/Script/Engine.{component_class}",
-                "bManualAttachment": False,
-                "RelativeTransform": {
-                    "Rotation": {"X": 0, "Y": 0, "Z": 0, "W": 1},
-                    "Translation": {"X": 0, "Y": 0, "Z": 0},
-                    "Scale3D": {"X": 1, "Y": 1, "Z": 1},
-                },
-                "bDeferredFinish": False,
-            },
-        }
-        data = await self._http_put("/remote/object/call", body)
-        component_path = data.get("ReturnValue", "")
-
-        return {
+        problem = None
+        if not component_class.strip():
+            problem = "component_class must name a component class"
+        elif component_name is not None:
+            problem = _object_name_error("component_name", component_name)
+        if problem is None and parent_component is not None:
+            problem = _object_name_error("parent_component", parent_component)
+        if problem is not None:
+            return {"success": False, "error_type": "ValidationError", "error": problem}
+        args = {
             "actor_path": actor_path,
-            "component_path": component_path,
-            "component_class": component_class,
+            "component_class": component_class.strip(),
+            "component_name": component_name,
+            "parent_component": parent_component,
         }
+        return await self._execute_json_script(
+            f"args = {args!r}\n" + ADD_COMPONENT,
+            expected_errors=("NotFoundError", "ValidationError"),
+        )
 
     async def set_actor_visibility(
         self,
