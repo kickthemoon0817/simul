@@ -45,23 +45,34 @@ each call checks the whole request first, then writes, and if a write still
 fails it restores the specs it touched. A call that reports failure has
 changed nothing.
 
+Edit errors use the same types as the lookups above. Invalid input is a
+`ValidationError` whose `details.code` says which check failed
+(`InvalidPrimPath`, `UnknownPrimType`, `InvalidAttribute`). A missing stage or
+prim is a `NotFoundError`. A write that fails after the checks passed is an
+`EngineError` with `details.rolled_back: true`. A refusal that an explicit flag
+overrides is a `RefusedOperation` naming the flag in `details.override`, and
+an edit USD cannot express is an `UnsupportedOperation`.
+
 - **Paths** must be absolute prim paths (`/World/Box`). A relative path, a
   property path (`/World/Box.size`), a trailing `/` or an invalid prim name
-  fails with `InvalidPrimPath`, which names the bad element and suggests the
-  fix. A missing prim is `NotFoundError`, naming the nearest prim that exists.
+  fails with `details.code: InvalidPrimPath`. The message names the bad
+  element and suggests the fix (`details.suggestion`). A missing prim names
+  the nearest prim that exists.
 - **`create_prim`** takes only concrete types registered with USD (`Xform`,
   `Scope`, `Mesh`, `Cube`, `PhysicsRevoluteJoint`, ...). An unknown, abstract
-  or API schema name fails with `UnknownPrimType` and close matches. A path
-  that already holds a prim is refused unless `redefine_existing=true`, which
-  changes its type and keeps its children, properties and composition arcs.
+  or API schema name fails with `details.code: UnknownPrimType` and close
+  matches in `details.suggestions`. A path that already holds a prim is
+  refused unless `redefine_existing=true`, which changes its type and keeps
+  its children, properties and composition arcs.
 - **Attributes** are checked against the prim's existing property or its
   schema definition: the value must fit the attribute's type, and a token
   must be one of its `allowedTokens`. A new attribute is created as a custom
   attribute with a type inferred from the value. An existing relationship
   takes a target path or a list of them. The keys `active`, `instanceable`
   and `kind` set prim metadata through USD's API; other metadata keys are
-  refused rather than written as attributes. One `InvalidAttribute` error
-  lists every rejected key with its reason.
+  refused rather than written as attributes. One error
+  (`details.code: InvalidAttribute`) lists every rejected key with its reason
+  in `details.problems`.
 - **`delete_prim`** refuses `/`, and the stage's default prim unless
   `allow_root_delete=true`. It also refuses a prim the delete cannot remove
   because opinions outside the root layer keep it alive: a sublayer defines

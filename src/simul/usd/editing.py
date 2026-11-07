@@ -25,16 +25,28 @@ from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tupl
 
 from pxr import Pcp
 
+from . import lookup
 from ._pxr import Kind, Sdf, Tf, Usd
 
-# Error types, as they appear in the envelope's ``error_type``.
-INVALID_PRIM_PATH = "InvalidPrimPath"
+# Error types, from the vocabulary every backend's envelope uses.
+VALIDATION = "ValidationError"
 NOT_FOUND = "NotFoundError"
-UNKNOWN_PRIM_TYPE = "UnknownPrimType"
-INVALID_ATTRIBUTE = "InvalidAttribute"
+ENGINE = "EngineError"
 REFUSED = "RefusedOperation"
 UNSUPPORTED = "UnsupportedOperation"
+
+# Codes for the check that failed, reported in ``details.code``. Each maps to
+# the error type above that the envelope reports.
+INVALID_PRIM_PATH = "InvalidPrimPath"
+UNKNOWN_PRIM_TYPE = "UnknownPrimType"
+INVALID_ATTRIBUTE = "InvalidAttribute"
 EDIT_FAILED = "EditFailed"
+CODE_ERROR_TYPES: Dict[str, str] = {
+    INVALID_PRIM_PATH: VALIDATION,
+    UNKNOWN_PRIM_TYPE: VALIDATION,
+    INVALID_ATTRIBUTE: VALIDATION,
+    EDIT_FAILED: ENGINE,
+}
 
 # Prim metadata the tools set through the proper USD API rather than as an
 # attribute of the same name.
@@ -66,20 +78,27 @@ _ROOT = Sdf.Path.absoluteRootPath
 class USDEditError(Exception):
     """A refused or failed edit, reported as one structured error envelope.
 
+    Created with either an error type (``NotFoundError``, ``RefusedOperation``,
+    ``UnsupportedOperation``) or a code from ``CODE_ERROR_TYPES``; a code is
+    reported as its error type (``ValidationError``, ``EngineError``) with the
+    code in ``details.code``, so every USD tool reports the same mistake under
+    the same type while the code still says which check failed.
+
     Attributes:
-        error_type: Stable error type, one of the module constants.
+        error_type: The envelope's ``error_type``.
+        code: The specific check, or None for a plain error type.
         message: What went wrong, naming the prim, attribute and reason.
-        details: Structured context (paths, the rejected attributes, the
-            flag that overrides a refusal).
+        details: Structured context (``code``, paths, the rejected
+            attributes, the flag that overrides a refusal).
     """
 
-    def __init__(self, error_type: str, message: str, **details: Any) -> None:
+    def __init__(self, kind: str, message: str, **details: Any) -> None:
         super().__init__(message)
-        self.error_type = error_type
+        self.error_type = CODE_ERROR_TYPES.get(kind, kind)
+        self.code: Optional[str] = kind if kind in CODE_ERROR_TYPES else None
         self.message = message
-        self.details: Dict[str, Any] = {
-            key: value for key, value in details.items() if value is not None
-        }
+        self.details: Dict[str, Any] = {"code": self.code} if self.code else {}
+        self.details.update({key: value for key, value in details.items() if value is not None})
 
     def to_payload(self) -> Dict[str, Any]:
         """Return the error envelope fields for this error."""
@@ -148,52 +167,24 @@ def _path_string_problem(text: str) -> Optional[str]:
     return None if result else "ill-formed path"
 
 
-def parse_prim_path(raw: Any, *, field: str = "prim_path") -> Sdf.Path:
-    """Parse an absolute prim path, explaining exactly what is wrong with a bad one.
-
-    The pseudo-root ``/`` parses; callers that need a real prim refuse it.
-
-    Args:
-        raw: The path the caller supplied.
-        field: Argument name, for the message.
+def _path_hint(raw: Any) -> Tuple[str, Dict[str, Any]]:
+    """Say what is wrong with a prim path ``lookup.parse_prim_path`` refused, and how to fix it.
 
     Returns:
-        The parsed path.
-
-    Raises:
-        USDEditError: ``InvalidPrimPath`` naming the offending element.
+        A sentence for the message (empty when there is nothing to add) and
+        extra ``details`` (``suggestion``, ``element``).
     """
     if not isinstance(raw, str) or not raw.strip():
-        raise USDEditError(
-            INVALID_PRIM_PATH,
-            f"{field} is empty; pass an absolute prim path such as /World/Box.",
-            prim_path=raw,
-        )
+        return "Pass an absolute prim path such as /World/Box.", {}
     if raw != raw.strip():
-        raise USDEditError(
-            INVALID_PRIM_PATH,
-            f"{field} {raw!r} has leading or trailing whitespace.",
-            prim_path=raw,
-            suggestion=raw.strip(),
-        )
+        return "It has leading or trailing whitespace.", {"suggestion": raw.strip()}
     if not raw.startswith("/"):
         suggestion = "/" + raw
-        raise USDEditError(
-            INVALID_PRIM_PATH,
-            f"{field} {raw!r} is relative; prim paths must be absolute, for example {suggestion!r}.",
-            prim_path=raw,
-            suggestion=suggestion,
-        )
+        return f"It is relative; did you mean {suggestion!r}?", {"suggestion": suggestion}
     if raw != "/" and raw.endswith("/"):
         suggestion = raw.rstrip("/") or "/"
-        raise USDEditError(
-            INVALID_PRIM_PATH,
-            f"{field} {raw!r} ends with '/'; did you mean {suggestion!r}?",
-            prim_path=raw,
-            suggestion=suggestion,
-        )
-    problem = _path_string_problem(raw)
-    if problem is not None:
+        return f"It ends with '/'; did you mean {suggestion!r}?", {"suggestion": suggestion}
+    if _path_string_problem(raw) is not None:
         element = next(
             (
                 name
@@ -202,34 +193,55 @@ def parse_prim_path(raw: Any, *, field: str = "prim_path") -> Sdf.Path:
             ),
             None,
         )
-        if element is not None:
-            message = (
-                f"{field} {raw!r} has an invalid prim name {element!r}: prim names are "
-                "identifiers (letters, digits and underscores, no spaces or punctuation, "
-                "not starting with a digit)."
-            )
-        else:
-            message = f"{field} {raw!r} is not a valid USD path: {problem}."
-        raise USDEditError(INVALID_PRIM_PATH, message, prim_path=raw, element=element)
+        if element is None:
+            return "", {}
+        return (
+            f"The prim name {element!r} is not an identifier (letters, digits and underscores; "
+            "no spaces or punctuation; not starting with a digit).",
+            {"element": element},
+        )
     path = Sdf.Path(raw)
     if path.IsPropertyPath():
         prim_part = str(path.GetPrimPath())
-        raise USDEditError(
-            INVALID_PRIM_PATH,
-            f"{field} {raw!r} names the property {path.name!r} of {prim_part}; pass the prim "
-            f"path {prim_part} and put the property in attributes.",
-            prim_path=raw,
-            suggestion=prim_part,
+        return (
+            f"It names the property {path.name!r} of {prim_part}; pass {prim_part} and put the "
+            "property in attributes.",
+            {"suggestion": prim_part},
         )
+    return "", {}
+
+
+def parse_prim_path(raw: Any) -> Sdf.Path:
+    """Parse an absolute prim path, as the read tools do, explaining what is wrong with a bad one.
+
+    The check itself is ``lookup.parse_prim_path``, so a path the read tools
+    refuse is refused here with the same wording; the message adds which
+    element is at fault and the likely fix. The pseudo-root ``/`` parses;
+    callers that need a real prim refuse it. Variant selection paths, which
+    the lookup accepts, are refused for edits.
+
+    Args:
+        raw: The path the caller supplied.
+
+    Returns:
+        The parsed path.
+
+    Raises:
+        USDEditError: ``ValidationError`` with ``details.code``
+            ``InvalidPrimPath``.
+    """
+    try:
+        path = lookup.parse_prim_path(raw if isinstance(raw, str) else "")
+    except lookup.USDPathError as exc:
+        hint, extra = _path_hint(raw)
+        message = f"{exc}." + (f" {hint}" if hint else "")
+        raise USDEditError(INVALID_PRIM_PATH, message, prim_path=raw, **extra) from None
     if path.ContainsPrimVariantSelection():
         raise USDEditError(
             INVALID_PRIM_PATH,
-            f"{field} {raw!r} contains a variant selection; editing inside a variant is not supported.",
+            f"Invalid prim path {raw!r}: it contains a variant selection, and editing inside a "
+            "variant is not supported.",
             prim_path=raw,
-        )
-    if not path.IsAbsoluteRootOrPrimPath():
-        raise USDEditError(
-            INVALID_PRIM_PATH, f"{field} {raw!r} is not a prim path.", prim_path=raw
         )
     return path
 
@@ -240,7 +252,10 @@ def _child_names(prim: Usd.Prim, limit: int = 12) -> List[str]:
 
 
 def missing_prim_error(stage: Usd.Stage, path: Sdf.Path) -> USDEditError:
-    """Build the NotFoundError for ``path``, naming the nearest prim that does exist."""
+    """Build the NotFoundError for ``path``, naming the nearest prim that does exist.
+
+    The message starts as the read tools' does (``Prim not found: <path>``).
+    """
     ancestor = path.GetParentPath()
     while ancestor != _ROOT and not stage.GetPrimAtPath(ancestor):
         ancestor = ancestor.GetParentPath()
@@ -257,18 +272,18 @@ def missing_prim_error(stage: Usd.Stage, path: Sdf.Path) -> USDEditError:
         hint = f" The nearest existing prim is {ancestor}{listing}."
     return USDEditError(
         NOT_FOUND,
-        f"No prim at {path}.{hint}",
+        f"Prim not found: {path}.{hint}",
         prim_path=str(path),
         nearest_existing_prim=str(ancestor),
     )
 
 
 def require_prim(stage: Usd.Stage, path: Sdf.Path) -> Usd.Prim:
-    """Return the prim at ``path`` or raise NotFoundError."""
-    prim = stage.GetPrimAtPath(path)
-    if prim and prim.IsValid():
-        return prim
-    raise missing_prim_error(stage, path)
+    """Return the prim at ``path`` (through ``lookup.lookup_prim``) or raise NotFoundError."""
+    try:
+        return lookup.lookup_prim(stage, str(path))
+    except lookup.USDLookupError:
+        raise missing_prim_error(stage, path) from None
 
 
 def _instance_of(prim: Usd.Prim) -> Optional[Usd.Prim]:
@@ -320,8 +335,9 @@ def check_prim_type(type_name: str) -> Usd.PrimDefinition:
         Its prim definition.
 
     Raises:
-        USDEditError: ``UnknownPrimType`` for an unknown, abstract or API
-            schema type, with close matches when there are any.
+        USDEditError: ``ValidationError`` (code ``UnknownPrimType``) for an
+            unknown, abstract or API schema type, with close matches when
+            there are any.
     """
     definition = Usd.SchemaRegistry().FindConcretePrimDefinition(type_name)
     if definition is not None:
@@ -547,7 +563,8 @@ def plan_writes(
         The planned writes: properties in request order, then metadata.
 
     Raises:
-        USDEditError: ``InvalidAttribute`` listing every rejected entry.
+        USDEditError: ``ValidationError`` (code ``InvalidAttribute``) listing
+            every rejected entry in ``details.problems``.
     """
     properties: List[PlannedWrite] = []
     metadata: List[PlannedWrite] = []
@@ -1076,7 +1093,10 @@ def delete_prim(stage: Usd.Stage, prim_path: Any, *, allow_root_delete: bool = F
 
 
 __all__ = [
+    "CODE_ERROR_TYPES",
     "EDIT_FAILED",
+    "ENGINE",
+    "VALIDATION",
     "INVALID_ATTRIBUTE",
     "INVALID_PRIM_PATH",
     "NOT_FOUND",
