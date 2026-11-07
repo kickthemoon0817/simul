@@ -1,5 +1,6 @@
 """Tests for Blender runtime adapter functionality."""
 
+import base64
 import json
 import math
 from pathlib import Path
@@ -34,6 +35,7 @@ from tests.fakes import (
     FakeViewLayer,
     axis_angle_matrix,
     euler_matrix,
+    fake_bpy_types,
     matrix_euler,
     matrix_quaternion,
 )
@@ -590,12 +592,17 @@ class FakeObject:
         self.constraints = constraints or []
         self.material_slots = material_slots or []
         self.matrix_world = matrix_world or FakeMatrix.Translation(location)
-        self.bound_box = bound_box or []
+        # Blender gives an object without geometry eight corners at its origin.
+        self.bound_box = bound_box or [FakePropArray((0.0, 0.0, 0.0))] * 8
         self.data = data
+        self.users_collection: List[Any] = []
 
     def visible_get(self) -> bool:
         """Mirror Blender visible_get behavior."""
         return self._visible
+
+    def as_pointer(self) -> int:
+        return id(self)
 
 
 class TestBlenderRuntimeSession:
@@ -651,6 +658,9 @@ class TestBlenderRuntimeSession:
                 background=True,
             ),
             data=fake_data,
+            context=SimpleNamespace(
+                scene=SimpleNamespace(collection=FakeCollection("Scene Collection"))
+            ),
         )
 
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -850,7 +860,12 @@ class TestObservationTools:
             def keys(self) -> list:
                 return col_names
 
+        # The collections given are the scene's top-level ones.
+        scene_collection = FakeCollection(
+            "Scene Collection", children=[FakeCollection(name) for name in col_names]
+        )
         scene = SimpleNamespace(
+            collection=scene_collection,
             camera=scene_camera,
             frame_current=frame_current,
             frame_start=frame_start,
@@ -872,6 +887,7 @@ class TestObservationTools:
             ),
             # Real bpy always has it; world-space reads evaluate transforms first.
             context=SimpleNamespace(scene=scene, evaluated_depsgraph_get=lambda: "depsgraph"),
+            types=fake_bpy_types(),
         )
 
     # -- get_object_info --------------------------------------------------
@@ -1336,7 +1352,7 @@ class TestObservationTools:
     # -- is_object_within_bounds ------------------------------------------
 
     def test_is_object_within_bounds_inside(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
         """Object inside bounds returns within_bounds=True."""
         obj = FakeObject(
@@ -1357,7 +1373,7 @@ class TestObservationTools:
         assert result["object_location"] == [5.0, 5.0, 5.0]
 
     def test_is_object_within_bounds_outside(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, mathutils: Any
     ) -> None:
         """Object outside bounds returns within_bounds=False."""
         obj = FakeObject(
@@ -1528,7 +1544,7 @@ class TestVisualObservationTools:
                 for frame, camera in enumerate(marker_cameras, start=frame_current)
             ],
         )
-        scene.frame_set = lambda f: setattr(scene, "frame_current", f)
+        scene.frame_set = lambda f, subframe=0.0: setattr(scene, "frame_current", f)
 
         class MaterialStore:
             def get(self, name: str) -> Optional[Any]:
@@ -6219,16 +6235,23 @@ class TestVisualObservationTools:
 
     # -- capture_viewport_sequence -----------------------------------------
 
+    @staticmethod
+    def _sequence_session(tmp_path: Path) -> "blender_runtime.BlenderRuntimeSession":
+        """A session whose sandbox, and so whose capture directory, is the pytest tmp dir."""
+        return blender_runtime.BlenderRuntimeSession(
+            settings=Settings(security=SecurityConfig(allowed_paths=[str(tmp_path)]))
+        )
+
     def test_capture_viewport_sequence_basic(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """capture_viewport_sequence captures frames and restores frame."""
+        """Frames are written to files, their paths returned, and the frame restored."""
         cam = self._make_camera_object()
         fake_bpy = self._make_fake_bpy_with_camera(objects=[cam], frame_current=10)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
 
-        session = blender_runtime.BlenderRuntimeSession()
+        session = self._sequence_session(tmp_path)
 
         call_count = 0
 
@@ -6236,8 +6259,10 @@ class TestVisualObservationTools:
             nonlocal call_count
             call_count += 1
             return {
-                "image_base64": f"FRAME_{call_count}",
-                "capture_method": "gpu_offscreen",
+                "image_base64": base64.b64encode(f"FRAME_{call_count}".encode()).decode(),
+                "capture_method": "viewport",
+                "width": 64,
+                "height": 32,
             }
 
         monkeypatch.setattr(session, "capture_viewport", _mock_capture)
@@ -6245,18 +6270,22 @@ class TestVisualObservationTools:
         result = session.capture_viewport_sequence(start_frame=1, end_frame=3, step=1)
 
         assert result["frame_count"] == 3
-        assert len(result["frames"]) == 3
-        assert result["frames"][0]["frame"] == 1
-        assert result["frames"][1]["frame"] == 2
-        assert result["frames"][2]["frame"] == 3
-        assert result["frames"][0]["image_base64"] == "FRAME_1"
-        assert result["capture_method"] == "gpu_offscreen"
+        assert [f["frame"] for f in result["frames"]] == [1, 2, 3]
+        first = Path(result["frames"][0]["file_path"])
+        assert first.read_bytes() == b"FRAME_1"
+        assert first.name == "frame_000001.jpg"
+        assert first.parent == Path(result["output_dir"])
+        assert first.parent.parent == (tmp_path / "captures").resolve()
+        assert "image_base64" not in result["frames"][0]
+        assert (result["width"], result["height"]) == (64, 32)
+        assert result["capture_method"] == "viewport"
+        assert result["complete"] is True and result["next_start_frame"] is None
         # Original frame restored
         scene = fake_bpy.context.scene
         assert scene.frame_current == 10
 
     def test_capture_viewport_sequence_step(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """capture_viewport_sequence respects step parameter."""
         cam = self._make_camera_object()
@@ -6264,19 +6293,19 @@ class TestVisualObservationTools:
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
 
-        session = blender_runtime.BlenderRuntimeSession()
+        session = self._sequence_session(tmp_path)
 
         monkeypatch.setattr(
             session,
             "capture_viewport",
-            lambda **kw: {"image_base64": "X", "capture_method": "render_fallback"},
+            lambda **kw: {"image_base64": "WA==", "capture_method": "render"},
         )
 
         result = session.capture_viewport_sequence(start_frame=1, end_frame=10, step=3)
 
         captured_frames = [f["frame"] for f in result["frames"]]
         assert captured_frames == [1, 4, 7, 10]
-        assert result["frame_count"] == 4
+        assert result["frame_count"] == result["requested_frame_count"] == 4
 
 
 # ---------------------------------------------------------------------------
@@ -6452,39 +6481,8 @@ class TestSceneManipulationTools:
         return fake_bpy
 
     # -- create_object -------------------------------------------------------
-
-    def test_create_object_cube(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Create a mesh cube via the create_object adapter."""
-        created_obj = FakeObject("Cube", "MESH", True, location=(1.0, 2.0, 3.0))
-        fake_bpy = self._make_fake_bpy_with_manipulation(
-            active_object=created_obj,
-        )
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.create_object(object_type="CUBE", location=[1.0, 2.0, 3.0])
-
-        assert result["name"] == "Cube"
-        assert result["object_type"] == "CUBE"
-        assert fake_bpy._ops_calls[0]["op"] == "mesh.primitive_cube_add"
-
-    def test_create_object_point_light(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Create a point light passes the type kwarg."""
-        created_obj = FakeObject("Point", "LIGHT", True)
-        fake_bpy = self._make_fake_bpy_with_manipulation(
-            active_object=created_obj,
-        )
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.create_object(object_type="POINT_LIGHT")
-
-        assert result["object_type"] == "POINT_LIGHT"
-        call = fake_bpy._ops_calls[0]
-        assert call["op"] == "object.light_add"
-        assert call["type"] == "POINT"
+    # Creation itself, and deletion, are covered in test_object_ops.py against a
+    # fake that models collections, modes and Blender's Delete operator.
 
     def test_create_object_invalid_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Unsupported type raises ValueError."""
@@ -6496,40 +6494,7 @@ class TestSceneManipulationTools:
         with pytest.raises(ValueError, match="Unsupported object type"):
             session.create_object(object_type="INVALID_TYPE")
 
-    def test_create_object_with_name_and_scale(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Custom name and scale are applied after creation."""
-        created_obj = FakeObject("Cube", "MESH", True)
-        fake_bpy = self._make_fake_bpy_with_manipulation(
-            active_object=created_obj,
-        )
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.create_object(
-            object_type="CUBE", name="MyCube", scale=[2.0, 2.0, 2.0]
-        )
-
-        assert created_obj.name == "MyCube"
-        assert result["name"] == "MyCube"
-
     # -- delete_object -------------------------------------------------------
-
-    def test_delete_object(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Delete removes the object from data.objects."""
-        obj = FakeObject("ToDelete", "MESH", True)
-        objs = {"ToDelete": obj}
-        fake_bpy = self._make_fake_bpy_with_manipulation(objects=objs)
-        monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
-        monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
-
-        session = blender_runtime.BlenderRuntimeSession()
-        result = session.delete_object("ToDelete")
-
-        assert result["deleted_name"] == "ToDelete"
-        assert "ToDelete" not in objs
 
     def test_delete_object_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Delete on a missing object raises ValueError."""
@@ -6909,7 +6874,7 @@ class TestFileIOTools:
             export_mesh=FakeExportMesh,
         )
 
-        fake_scene = SimpleNamespace(name=scene_name)
+        fake_scene = SimpleNamespace(name=scene_name, objects=objects)
         fake_context = SimpleNamespace(scene=fake_scene)
         fake_data = SimpleNamespace(
             objects=objects,
@@ -7181,7 +7146,9 @@ class TestFileIOTools:
         assert "LegacyMesh" in result["imported_objects"]
         assert fake_bpy._ops_calls[0]["op"] == "import_scene.obj"
 
-    def test_import_fbx(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_import_fbx(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fbx_parser: Any
+    ) -> None:
         """FBX import uses import_scene.fbx (same for v3.6 and v4)."""
         fbx_file = tmp_path / "model.fbx"
         fbx_file.write_bytes(b"\x00")
@@ -7193,6 +7160,9 @@ class TestFileIOTools:
             fake_bpy._ops_calls.append({"op": "import_scene.fbx", **kwargs})
             objs["FBXObj"] = FakeObject("FBXObj", "MESH", True)
 
+        fake_fbx_import.get_rna_type = lambda: SimpleNamespace(  # type: ignore[attr-defined]
+            properties={"filepath": None, "use_image_search": None}
+        )
         fake_bpy.ops.import_scene.fbx = fake_fbx_import
         monkeypatch.setattr(blender_runtime, "bpy", fake_bpy)
         monkeypatch.setattr(blender_runtime, "BLENDER_AVAILABLE", True)
@@ -7202,6 +7172,8 @@ class TestFileIOTools:
 
         assert result["file_format"] == "FBX"
         assert "FBXObj" in result["imported_objects"]
+        # The sandbox keeps the importer from searching folders for textures.
+        assert fake_bpy._ops_calls[0]["use_image_search"] is False
 
     def test_import_unsupported_format(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Importing an unsupported format raises ValueError."""

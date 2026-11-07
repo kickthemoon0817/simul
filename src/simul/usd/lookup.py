@@ -5,12 +5,18 @@ trailing slash or a property path used to fall through to
 ``Stage.GetPrimAtPath`` and come back as a generic failure; these helpers tell
 a malformed path (``ValidationError``) apart from a prim that does not exist
 (``NotFoundError``). The exceptions carry the ``error_type`` the tool envelope
-reports.
+reports and the ``details`` it attaches: a malformed path is ``details.code``
+``InvalidPrimPath``, the code the edit tools report for the same check.
 """
 
 from __future__ import annotations
 
+from typing import Any, Dict
+
 from ._pxr import Sdf, Usd
+
+
+INVALID_PRIM_PATH = "InvalidPrimPath"
 
 
 class USDLookupError(LookupError):
@@ -18,11 +24,19 @@ class USDLookupError(LookupError):
 
     error_type = "NotFoundError"
 
+    def __init__(self, message: str, **details: Any) -> None:
+        super().__init__(message)
+        self.details: Dict[str, Any] = details
+
 
 class USDPathError(ValueError):
     """A prim path that is not an absolute USD prim path."""
 
     error_type = "ValidationError"
+
+    def __init__(self, message: str, prim_path: Any = None) -> None:
+        super().__init__(message)
+        self.details: Dict[str, Any] = {"code": INVALID_PRIM_PATH, "prim_path": prim_path}
 
 
 def parse_prim_path(prim_path: str) -> Sdf.Path:
@@ -42,11 +56,12 @@ def parse_prim_path(prim_path: str) -> Sdf.Path:
     # pxr returns True for a valid string and (False, reason) for an invalid one.
     valid, reason = (checked, "") if isinstance(checked, bool) else (checked[0], checked[1])
     if not valid:
-        raise USDPathError(f"Invalid prim path {prim_path!r}: {reason}")
+        raise USDPathError(f"Invalid prim path {prim_path!r}: {reason}", prim_path)
     path = Sdf.Path(prim_path)
     if not path.IsAbsolutePath() or not (path.IsPrimPath() or path.IsAbsoluteRootPath()):
         raise USDPathError(
-            f"Invalid prim path {prim_path!r}: expected an absolute prim path such as /World/Robot"
+            f"Invalid prim path {prim_path!r}: expected an absolute prim path such as /World/Robot",
+            prim_path,
         )
     return path
 
@@ -69,8 +84,8 @@ def lookup_prim(stage: Usd.Stage, prim_path: str) -> Usd.Prim:
     """
     prim = stage.GetPrimAtPath(parse_prim_path(prim_path))
     if not prim or not prim.IsValid():
-        raise USDLookupError(f"Prim not found: {prim_path}")
+        raise USDLookupError(f"Prim not found: {prim_path}", prim_path=prim_path)
     return prim
 
 
-__all__ = ["USDLookupError", "USDPathError", "lookup_prim", "parse_prim_path"]
+__all__ = ["INVALID_PRIM_PATH", "USDLookupError", "USDPathError", "lookup_prim", "parse_prim_path"]

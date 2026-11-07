@@ -91,12 +91,56 @@ def test_allowed_path_still_runs() -> None:
     assert client.execute.await_count == 1
 
 
-def test_save_without_a_path_still_runs() -> None:
-    """save-as is optional; a plain save has no path to police."""
+def _probe(stage_url: str, dirty_layers: List[str] | None = None) -> ScriptResult:
+    return ScriptResult(
+        success=True,
+        output=json.dumps(
+            {"stage_url": stage_url, "dirty_layers": dirty_layers or [], "timeline_stopped": True}
+        ),
+    )
+
+
+def test_save_in_place_inside_the_sandbox_runs() -> None:
+    """An in-place save asks what it would write first, then writes it."""
     tools, client = _tools()
+    saved = ScriptResult(success=True, output=json.dumps({"file_path": INSIDE_SANDBOX, "saved": True}))
+    client.execute.side_effect = [_probe(INSIDE_SANDBOX), saved]
     result = asyncio.run(tools.save_isaac_stage())
 
     assert not _denied(result)
+    assert result["saved"] is True
+    assert client.execute.await_count == 2
+
+
+def test_save_in_place_of_a_stage_outside_the_sandbox_is_refused() -> None:
+    """With no file_path the stage's own file is the write target, and it is checked."""
+    tools, client = _tools()
+    client.execute.side_effect = [_probe(OUTSIDE_SANDBOX)]
+    result = asyncio.run(tools.save_isaac_stage())
+
+    assert _denied(result)
+    assert result["details"]["layer"] == OUTSIDE_SANDBOX
+    assert client.execute.await_count == 1, "only the probe may run"
+
+
+def test_save_in_place_with_a_dirty_layer_outside_the_sandbox_is_refused() -> None:
+    """A save writes every dirty layer, so each one must be inside the sandbox."""
+    tools, client = _tools()
+    client.execute.side_effect = [_probe(INSIDE_SANDBOX, ["/etc/sublayer.usda"])]
+    result = asyncio.run(tools.save_isaac_stage())
+
+    assert _denied(result)
+    assert result["details"]["layer"] == "/etc/sublayer.usda"
+    assert client.execute.await_count == 1
+
+
+def test_save_in_place_of_a_nucleus_stage_needs_a_write_scheme() -> None:
+    tools, client = _tools()
+    client.execute.side_effect = [_probe("omniverse://nucleus/Projects/scene.usd")]
+    result = asyncio.run(tools.save_isaac_stage())
+
+    assert _denied(result)
+    assert result["details"]["access"] == "write"
     assert client.execute.await_count == 1
 
 

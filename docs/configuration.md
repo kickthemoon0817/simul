@@ -151,7 +151,35 @@ dispatchers, and `simul isaac exec` / `simul unreal exec` return a
 `ScriptExecutionDisabled` error. The fixed granular tools, including
 `control_unreal_ui`, keep working.
 
-This is the only switch that removes the agent-authored code surface. The
+Isaac Sim also runs Python that an OmniGraph node carries as data:
+`omni.graph.scriptnode.ScriptNode` runs its `inputs:script`,
+`omni.warp.WarpKernel` imports its `inputs:codeStr`, and Replicator's
+augmentation and condition nodes run their `*Script` inputs. Both
+`omni.graph.scriptnode` and `omni.warp` are enabled in Isaac Sim's own
+`.kit`. With the switch off, these tools refuse with `ScriptExecutionDisabled`:
+
+- `create_isaac_graph_node` refuses those node types and any type with
+  `script` or `warp` in its name.
+- `set_isaac_graph_node_values` refuses code attributes (any name containing
+  `script` or `code`, without regard to case) and any write to a
+  script-capable node.
+- `connect_isaac_graph_nodes` refuses a connection into a code attribute or
+  into a script-capable node.
+- `import_isaac_asset` and `add_isaac_reference` refuse an asset whose
+  composed content holds such a node.
+- `enable_isaac_extension` refuses `omni.graph.scriptnode`,
+  `omni.kit.scripting`, `omni.warp` and any extension with `script` or
+  `warp` in its name.
+
+Routes this does not close: the prim-editing tools (`set_isaac_prim_attribute`
+on a node's code attribute or `node:type`, `create_isaac_prim` and
+`duplicate_isaac_prim` of a code node) until they adopt the same check; a
+stage opened with `open_isaac_stage` that already contains such a node; and
+nodes already on the stage, which run when the graph evaluates. Treat the
+switch as removing the agent's direct code tools, not as a sandbox for an
+untrusted stage.
+
+The switch is the one that removes the agent-authored code tools. The
 Isaac bridge extension's `allow_unsafe_execution` setting (and
 `simul isaac bridge-set-unsafe`) only gates raw scripts sent over the
 bridge on port 8229. The bridge refuses such a script without running it,
@@ -285,7 +313,12 @@ your data. Each refusal is a structured `RefusedOperation` error:
   `isaacsim.code_editor.vscode`).
 - `set_isaac_carb_settings` refuses keys under `/exts/khemoo.simul/` and
   `/exts/isaacsim.code_editor.python_server/`.
-- `save_isaac_stage` needs `overwrite=true` to replace an existing file.
+- `save_isaac_stage` needs `overwrite=true` to replace an existing file, and
+  for any URL target (a remote file's existence cannot be checked first). It
+  refuses while the timeline is playing or paused unless
+  `allow_while_playing=true`, since the stage then holds simulated poses. An
+  in-place save checks the stage's file and every dirty layer it writes
+  against the write sandbox.
 - `new_isaac_stage` and `open_isaac_stage` need `discard_unsaved=true` when
   the current stage has unsaved edits.
 - `delete_prim` (headless USD) refuses `/`, and refuses the stage's default
