@@ -27,7 +27,7 @@ from bpy.app.handlers import persistent
 
 from ..adapters.blender_runtime import BlenderRuntimeSession
 from ..utils.errors import exception_message
-from ..utils.paths import PathPolicy
+from ..utils.paths import PathPolicy, state_dir
 from .agent_control import reset_ui
 from .agent_cursor import cursors, hide_annotations, observations
 from .protocol import (
@@ -202,11 +202,12 @@ class BlenderBridge:
     """Identify a process, file-load generation, window, and scene before acting."""
 
     def __init__(self, discovery_dir: Path | None = None) -> None:
-        self.discovery_dir = (
-            discovery_dir
-            or Path(
-                os.environ.get("SIMUL_BLENDER_DISCOVERY_DIR", "~/.simul/blender")
-            ).expanduser()
+        # The server looks in blender.discovery_dir, which defaults to
+        # $SIMUL_HOME/blender: Blender has to see the same SIMUL_HOME.
+        self.discovery_dir = discovery_dir or (
+            Path(os.environ["SIMUL_BLENDER_DISCOVERY_DIR"]).expanduser()
+            if os.environ.get("SIMUL_BLENDER_DISCOVERY_DIR")
+            else state_dir() / "blender"
         )
         self.instance_id = uuid.uuid4().hex
         self.document_id = uuid.uuid4().hex

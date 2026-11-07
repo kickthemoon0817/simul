@@ -280,6 +280,97 @@ def test_attach_existing_gui_and_refuse_changed_targets(
             assert box["bbox_min"] == pytest.approx([0.0, 1.0, 2.0])
             assert box["bbox_max"] == pytest.approx([2.0, 3.0, 4.0])
 
+            def pose(name: str) -> dict[str, Any]:
+                """The object's rotation mode and world matrix, as Blender holds them."""
+                seen = client.execute_script(
+                    "bpy.context.view_layer.update()\n"
+                    f"obj = bpy.data.objects[{name!r}]\n"
+                    "__result__ = {'mode': obj.rotation_mode, "
+                    "'parent': obj.parent.name if obj.parent else None, "
+                    "'world': [v for row in obj.matrix_world for v in row]}"
+                )
+                assert seen.get("error") is None, seen
+                return ast.literal_eval(seen["return_value"])
+
+            # glTF nodes store quaternions: a rotation_euler write was ignored
+            # with success, and object info gave the parent-relative location
+            # as world space.
+            made = client.execute_script(
+                "scene = bpy.context.scene\n"
+                "for name, parent, location in (('ProbeRoot', None, (1, 2, 0)),"
+                " ('ProbeArm', 'ProbeRoot', (0.3, 0, 1))):\n"
+                "    obj = bpy.data.objects.new(name, None)\n"
+                "    scene.collection.objects.link(obj)\n"
+                "    obj.rotation_mode = 'QUATERNION'\n"
+                "    obj.parent = bpy.data.objects.get(parent or '')\n"
+                "    obj.location = location\n"
+                "bpy.data.objects['ProbeRoot'].rotation_quaternion = (0.9659258, 0, 0, 0.2588190)\n"
+                "bpy.data.objects['ProbeArm'].rotation_quaternion = (0.9238795, 0, 0, 0.3826834)\n"
+            )
+            assert made.get("error") is None, made
+            turned = tool(
+                "set_blender_object_transform",
+                object_name="ProbeRoot",
+                rotation_euler=[0.0, 0.0, 1.0],
+            )
+            assert turned["success"] is True, turned
+            assert turned["rotation_mode"] == "QUATERNION"
+            assert turned["rotation_euler"] == pytest.approx([0.0, 0.0, 1.0], abs=1e-6)
+            root = pose("ProbeRoot")
+            assert root["mode"] == "QUATERNION"
+            assert root["world"][:2] == pytest.approx(
+                [0.5403023, -0.8414710], abs=1e-6
+            )
+            arm_info = tool("get_blender_object_info", object_name="ProbeArm")
+            arm = pose("ProbeArm")
+            assert arm_info["location"] == pytest.approx([0.3, 0.0, 1.0])
+            assert arm_info["world_location"] == pytest.approx(
+                [arm["world"][3], arm["world"][7], arm["world"][11]], abs=1e-6
+            )
+            assert arm_info["world_location"] != pytest.approx(arm_info["location"])
+            assert arm_info["rotation_euler"] == pytest.approx([0, 0, 0.7853982], abs=1e-6)
+            assert arm_info["world_rotation_euler"] == pytest.approx(
+                [0, 0, 1.7853982], abs=1e-6
+            )
+            assert [v for row in arm_info["matrix_world"] for v in row] == pytest.approx(
+                arm["world"], abs=1e-6
+            )
+            # Parenting moved the child by the parent's transform, and accepted
+            # a loop that Blender then ignored.
+            child_before = pose("AttachmentProbe")["world"]
+            parented = tool(
+                "set_blender_object_parent",
+                child_name="AttachmentProbe",
+                parent_name="ProbeArm",
+            )
+            assert parented["success"] is True, parented
+            assert pose("AttachmentProbe")["world"] == pytest.approx(
+                child_before, abs=1e-5
+            )
+            looped = tool(
+                "set_blender_object_parent",
+                child_name="ProbeRoot",
+                parent_name="AttachmentProbe",
+            )
+            assert looped["success"] is False and "loop" in looped["error"], looped
+            cleared = tool("clear_blender_object_parent", object_name="AttachmentProbe")
+            assert cleared["success"] is True, cleared
+            assert pose("AttachmentProbe") == {
+                "mode": "XYZ",
+                "parent": None,
+                "world": pytest.approx(child_before, abs=1e-5),
+            }
+            client.delete_object("ProbeArm")
+            client.delete_object("ProbeRoot")
+            # Snap the probe back to its exact transform for the checks below.
+            tool(
+                "set_blender_object_transform",
+                object_name="AttachmentProbe",
+                location=[1, 2, 3],
+                rotation_euler=[0, 0, 0],
+                scale=[1, 1, 1],
+            )
+
             def framing(camera: str, target: str) -> dict[str, Any]:
                 """Where the target's world bounding box lands in the camera's view."""
                 seen = client.execute_script(

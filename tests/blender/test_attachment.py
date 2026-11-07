@@ -284,7 +284,7 @@ def test_cli_missing_bridge_is_actionable(
 
 def test_server_mode_flag_rejects_unknown_values() -> None:
     result = CliRunner().invoke(app, ["server", "--blender-mode", "guess"])
-    assert result.exit_code == 1
+    assert result.exit_code == 2  # a bad invocation, as docs/cli.md says
 
 
 def test_mcp_transform_forwards_validated_values_over_attachment(

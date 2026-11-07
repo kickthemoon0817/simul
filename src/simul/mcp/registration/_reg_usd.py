@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from fastmcp.tools import ToolResult
 
-from ..schemas.common import BoundingBox, ErrorResponse, Transform
+from ..schemas.common import ErrorResponse
 from ..schemas.usd import (
     BBoxRequest,
     BBoxResponse,
@@ -25,21 +25,28 @@ from ..schemas.usd import (
     PrimDeleteRequest,
     PrimInfo,
     PrimInfoRequest,
+    MatchMode,
     PrimSearchRequest,
     PrimSearchResponse,
+    PrimSubtreeRequest,
+    PrimSubtreeResponse,
     PrimUpdateRequest,
     Purpose,
     SceneSummaryRequest,
     SceneSummaryResponse,
+    SearchType,
+    SummaryFormat,
     StageInfo,
     USDFileInfo,
     USDFileRequest,
     USDValidateRequest,
 )
+from ...usd.validation import WARNING, composition_issues
+from ...usd.validation import validate_usd_file as run_validation
 from ._helpers import with_param_descriptions
 
 if TYPE_CHECKING:
-    from ..adapters.headless_usd import HeadlessUSDSession
+    from ...adapters.headless_usd import HeadlessUSDSession
     from ..server import SimulMCPServer
 
 
@@ -62,13 +69,16 @@ def _loaded_stage(session: "HeadlessUSDSession", stage_id: str) -> Any:
 
 def register_usd_tools(server: "SimulMCPServer") -> None:
     """Register USD-related tools."""
-    from ...adapters.headless_usd import HeadlessUSDSession
 
     @server.mcp.tool(
         name="load_usd_file",
         description=(
-            "Load a USD file and return stage information. "
-            "Paths: sandbox (security.allowed_paths)."
+            "Load a USD file and return stage information. A file pxr cannot open "
+            "fails with LoadError, whose details.reason names the cause (ParseError "
+            "with line and column, CorruptFile, EmptyFile, FileTooLarge, "
+            "PermissionDenied, UnsupportedExtension, FileNotFound, NotAFile). Missing "
+            "sublayers, references or payloads do not fail the load; they are listed "
+            "in warnings. Paths: sandbox (security.allowed_paths)."
         ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
@@ -93,13 +103,16 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             if isinstance(input_data, dict):
                 return input_data
 
-            stage_id = session.load_stage(
+            # A USDLoadError carries pxr's reason; the envelope reports it as
+            # LoadError with details.reason.
+            stage_id = session.load_stage_or_raise(
                 server._path_policy.authorize(input_data.file_path)
             )
-            stage_info = session.get_stage_info(stage_id) if stage_id else None
-            if not stage_id or stage_info is None:
+            stage = session.get_stage(stage_id)
+            stage_info = session.get_stage_info(stage_id)
+            if stage is None or stage_info is None:
                 return ErrorResponse(
-                    error=f"Failed to load USD file: {input_data.file_path}",
+                    error=f"Loaded {input_data.file_path} but could not read its stage information",
                     error_type="LoadError",
                 ).model_dump()
             return StageInfo(
@@ -116,6 +129,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 has_animation=stage_info.start_time_code != stage_info.end_time_code,
                 layer_count=len(stage_info.layers),
                 default_prim=stage_info.default_prim_path,
+                warnings=[issue.to_dict() for issue in composition_issues(stage, WARNING)],
             ).model_dump()
 
         return await server._exec_backend(
@@ -130,7 +144,15 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     @server.mcp.tool(
         name="validate_usd_file",
         description=(
-            "Validate a USD file without loading it. "
+            "Open a USD file with pxr and report what is wrong with it; no stage is "
+            "kept. Checks: access (exists, permissions, usd.allowed_extensions, "
+            "usd.max_file_size_mb, empty), parse and crate errors with pxr's reason, "
+            "missing sublayers, references, payloads and other asset paths, "
+            "defaultPrim, upAxis and metersPerUnit, physics (joint body targets, "
+            "nested rigid bodies or articulation roots, mass, inverted joint limits) "
+            "and pxr's UsdValidation validators, with the usdz package rules for a "
+            ".usdz. Returns is_valid (no error-severity issue), can_read (pxr opened "
+            "it, so load_usd_file can) and issues with severity, code and location. "
             "Paths: sandbox (security.allowed_paths)."
         ),
         annotations=server._tool_annotations(
@@ -141,7 +163,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     @with_param_descriptions()
     async def validate_usd_file(file_path: str) -> ToolResult:
         """
-        Check that a path names a readable USD file within the size limit.
+        Open a USD file with pxr and report every problem found.
 
         Args:
             file_path: Path to USD file
@@ -156,19 +178,8 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 return input_data
 
             path = Path(server._path_policy.authorize(input_data.file_path))
-            file_exists = path.exists()
-            is_file = path.is_file() if file_exists else False
-            file_size = path.stat().st_size if is_file else 0
-            valid_extension = path.suffix.lower() in (".usd", ".usda", ".usdc", ".usdz")
-            max_size_mb = server.settings.usd.max_file_size_mb
-            size_ok = file_size <= (max_size_mb * 1024 * 1024)
-            return USDFileInfo(
-                file_path=str(path.resolve()),
-                file_size=file_size,
-                format=path.suffix.lower().lstrip("."),
-                is_valid=file_exists and is_file and valid_extension and size_ok,
-                can_read=file_exists and is_file and valid_extension,
-            ).model_dump()
+            report = run_validation(str(path.resolve()), server.settings.usd)
+            return USDFileInfo(**report.to_dict()).model_dump()
 
         return await server._exec_backend(
             "validate_usd_file",
@@ -181,20 +192,48 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="get_prim_info",
-        description="Get information about a USD prim.",
+        description=(
+            "Get one USD prim: state, applied API schemas, world bounding box, local "
+            "transform, children, material bindings, attributes, relationships "
+            "(joint bodies, material bindings, collision filters) and metadata "
+            "(specifier, instanceable, references/payloads/inherits/specializes "
+            "with whether each resolved, variant sets and selections, other "
+            "authored metadata). Each attribute is {type, value, authored}; "
+            "authored false means the value is the schema fallback. Values are "
+            "JSON: vectors are lists, quaternions [w, x, y, z], matrices lists of "
+            "rows, and a non-finite float the string \"Infinity\", "
+            "\"-Infinity\" or \"NaN\". An array attribute carries its length "
+            "and its first array_preview elements, so a large mesh stays small; "
+            "use get_mesh_info for geometry statistics."
+        ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
         output_schema=None,
     )
     @with_param_descriptions()
-    async def get_prim_info(stage_id: str, prim_path: str) -> ToolResult:
+    async def get_prim_info(
+        stage_id: str,
+        prim_path: str,
+        time_code: Optional[float] = None,
+        include_purposes: Optional[List[Purpose]] = None,
+        array_preview: int = 16,
+        attribute_filter: Optional[List[str]] = None,
+    ) -> ToolResult:
         """
         Get information about a USD prim.
 
         Args:
             stage_id: Stage identifier
-            prim_path: Path to the prim
+            prim_path: Absolute path to the prim, e.g. /World/Robot
+            time_code: Time code to read animated values, the transform and the
+                bounding box at; None for the default (unanimated) value
+            include_purposes: Purposes the bounding box counts, any of
+                default, render, proxy, guide; None for default and render
+            array_preview: Leading elements of each array attribute to include,
+                0 to 10000; longer arrays report length and truncated
+            attribute_filter: Glob patterns such as physics:* or xformOp:*;
+                only matching attributes are listed. None lists them all
 
         Returns:
             Prim information or error
@@ -202,44 +241,30 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
         def _prim_info(session: "HeadlessUSDSession") -> Dict[str, Any]:
             input_data = server._validate_input(
-                PrimInfoRequest, stage_id=stage_id, prim_path=prim_path
+                PrimInfoRequest,
+                stage_id=stage_id,
+                prim_path=prim_path,
+                time_code=time_code,
+                include_purposes=include_purposes,
+                array_preview=array_preview,
+                attribute_filter=attribute_filter,
             )
             if isinstance(input_data, dict):
                 return input_data
 
-            prim_info = session.get_prim_info(input_data.stage_id, input_data.prim_path)
-            if not prim_info:
-                return ErrorResponse(
-                    error=f"Prim not found: {input_data.prim_path}",
-                    error_type="NotFoundError",
-                ).model_dump()
+            from ...usd.lookup import lookup_prim
+            from ...usd.reader import describe_prim
 
-            bbox_dict = session.get_prim_bbox(input_data.stage_id, input_data.prim_path)
-            transform_dict = session.get_prim_transform(
-                input_data.stage_id, input_data.prim_path
-            )
+            stage = _loaded_stage(session, input_data.stage_id)
+            prim = lookup_prim(stage, input_data.prim_path)
             return PrimInfo(
-                path=prim_info.path,
-                name=prim_info.name,
-                type=prim_info.type_name,
-                is_active=prim_info.is_active,
-                is_loaded=prim_info.is_loaded,
-                is_defined=prim_info.is_defined,
-                is_instance=prim_info.is_instance,
-                purpose=prim_info.purpose,
-                visibility=prim_info.visibility,
-                kind=prim_info.kind,
-                bbox=BoundingBox(**bbox_dict) if bbox_dict else None,
-                transform=Transform(**transform_dict) if transform_dict else None,
-                children_count=len(prim_info.children),
-                children_types=session.get_children_type_counts(
-                    input_data.stage_id, input_data.prim_path
-                ),
-                material_bindings=session.get_material_bindings(
-                    input_data.stage_id, input_data.prim_path
-                ),
-                attributes=prim_info.attributes,
-                metadata=prim_info.metadata,
+                **describe_prim(
+                    prim,
+                    time_code=input_data.time_code,
+                    purposes=input_data.include_purposes,
+                    array_preview=input_data.array_preview,
+                    attribute_filter=input_data.attribute_filter,
+                )
             ).model_dump()
 
         return await server._exec_backend(
@@ -248,7 +273,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "USD",
             PrimInfo,
             _prim_info,
-            params={"stage_id": stage_id, "prim_path": prim_path},
+            params={"stage_id": stage_id, "prim_path": prim_path, "time_code": time_code},
         )
 
     @server.mcp.tool(
@@ -477,7 +502,20 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
 
     @server.mcp.tool(
         name="search_prims",
-        description="Search for prims in a USD stage.",
+        description=(
+            "Search a USD stage for prims, one page at a time. search_type picks "
+            "what the query is matched against: by_name (prim name), by_path "
+            "(full path), by_type (prim type: with match auto a registered schema "
+            "matches its whole family, so PhysicsJoint finds every joint and "
+            "Gprim every geometric primitive) or by_api_schema (applied API "
+            "schemas: PhysicsRigidBodyAPI; PhysicsDriveAPI also finds "
+            "PhysicsDriveAPI:angular). match is auto, exact, substring, glob or "
+            "regex; names compare case-insensitively unless case_sensitive. "
+            "Instances are searched (include_instance_proxies), root_path limits "
+            "the search to a subtree, and offset/limit page the matches: "
+            "total_matches counts them all and next_offset starts the next page. "
+            "An empty by_name query lists every prim."
+        ),
         annotations=server._tool_annotations(
             read_only=True, idempotent=True, open_world=False
         ),
@@ -485,16 +523,37 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     )
     @with_param_descriptions()
     async def search_prims(
-        stage_id: str, search_type: str, query: str, exact_match: bool = False
+        stage_id: str,
+        search_type: SearchType,
+        query: str,
+        exact_match: bool = False,
+        match: MatchMode = "auto",
+        case_sensitive: bool = False,
+        root_path: Optional[str] = None,
+        include_instance_proxies: bool = True,
+        offset: int = 0,
+        limit: int = 200,
     ) -> ToolResult:
         """
         Search for prims in a USD stage.
 
         Args:
             stage_id: Stage identifier
-            search_type: Search type (by_type, by_name)
-            query: Search query
-            exact_match: Use exact matching for name search
+            search_type: by_name, by_path, by_type or by_api_schema
+            query: Name, path, type or API schema to find; may be empty for
+                by_name and by_path (matches every prim)
+            exact_match: Same as match="exact"; kept for older callers
+            match: auto (substring for names and paths, the schema family for
+                types, the schema and its instances for API schemas), exact,
+                substring, glob (* and ?) or regex
+            case_sensitive: Compare case-sensitively (default: ignore case)
+            root_path: Absolute prim path to search under (the prim itself
+                included); None searches the whole stage
+            include_instance_proxies: Search the prims inside instanceable
+                prims (default true)
+            offset: Matches to skip, in traversal order; pass the previous
+                page's next_offset to continue
+            limit: Matches per page, 1 to 5000
 
         Returns:
             Search results or error
@@ -507,26 +566,43 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
                 search_type=search_type,
                 query=query,
                 exact_match=exact_match,
+                match=match,
+                case_sensitive=case_sensitive,
+                root_path=root_path,
+                include_instance_proxies=include_instance_proxies,
+                offset=offset,
+                limit=limit,
             )
             if isinstance(input_data, dict):
                 return input_data
 
-            results: List[str] = []
-            if input_data.search_type == "by_type":
-                results = session.find_prims_by_type(input_data.stage_id, input_data.query)
-            elif input_data.search_type == "by_name":
-                results = session.find_prims_by_name(
-                    input_data.stage_id, input_data.query, input_data.exact_match
-                )
-            # The envelope's result budget trims ``results`` when a broad
-            # query matches every mesh in the file; ``count`` stays the true total.
+            from ...usd.lookup import lookup_prim
+            from ...usd.search import search_prims as run_search
+
+            stage = _loaded_stage(session, input_data.stage_id)
+            root = lookup_prim(stage, input_data.root_path) if input_data.root_path else None
+            mode = "exact" if input_data.exact_match and input_data.match == "auto" else input_data.match
+            page = run_search(
+                stage,
+                input_data.search_type,
+                input_data.query,
+                match=mode,
+                case_sensitive=input_data.case_sensitive,
+                root=root,
+                include_instance_proxies=input_data.include_instance_proxies,
+                offset=input_data.offset,
+                limit=input_data.limit,
+            )
             return PrimSearchResponse(
                 success=True,
                 stage_id=input_data.stage_id,
                 search_type=input_data.search_type,
                 query=input_data.query,
-                results=results,
-                count=len(results),
+                match=mode,
+                case_sensitive=input_data.case_sensitive,
+                root_path=input_data.root_path,
+                include_instance_proxies=input_data.include_instance_proxies,
+                **page,
             ).model_dump()
 
         return await server._exec_backend(
@@ -535,7 +611,112 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
             "USD",
             PrimSearchResponse,
             _search,
-            params={"stage_id": stage_id, "search_type": search_type, "query": query},
+            params={
+                "stage_id": stage_id,
+                "search_type": search_type,
+                "query": query,
+                "match": match,
+                "root_path": root_path,
+                "offset": offset,
+            },
+        )
+
+    @server.mcp.tool(
+        name="get_prim_subtree",
+        description=(
+            "List a prim and its descendants (a robot, an imported asset) in one "
+            "call: a flat, depth-first page with path, type, depth, child count "
+            "and applied API schemas per prim, instances included. With "
+            "include_properties each prim also carries its authored attributes "
+            "({type, value, authored}) and relationship targets (joint bodies, "
+            "material bindings), so a whole articulation is read without one "
+            "get_prim_info call per link. Paged with max_results/offset; total "
+            "counts the subtree and next_offset starts the next page."
+        ),
+        annotations=server._tool_annotations(
+            read_only=True, idempotent=True, open_world=False
+        ),
+        output_schema=None,
+    )
+    @with_param_descriptions()
+    async def get_prim_subtree(
+        stage_id: str,
+        root_path: str = "/",
+        max_depth: int = 5,
+        max_results: int = 150,
+        offset: int = 0,
+        include_instance_proxies: bool = True,
+        include_properties: bool = False,
+        attribute_filter: Optional[List[str]] = None,
+        array_preview: int = 4,
+    ) -> ToolResult:
+        """
+        List the prims under one prim.
+
+        Args:
+            stage_id: Stage identifier
+            root_path: Absolute path of the subtree root (listed at depth 0);
+                "/" lists the whole stage
+            max_depth: Deepest level below root_path to list, 0 to 64
+            max_results: Prims per page, 1 to 1000
+            offset: Prims to skip, in traversal order; pass the previous
+                page's next_offset to continue
+            include_instance_proxies: Descend into instanceable prims
+                (default true)
+            include_properties: Add each prim's authored attributes and
+                authored relationship targets
+            attribute_filter: Glob patterns (physics:*) limiting the
+                properties include_properties adds
+            array_preview: Leading elements of array attributes to include,
+                0 to 10000
+
+        Returns:
+            One page of the subtree or error
+        """
+
+        def _subtree(session: "HeadlessUSDSession") -> Dict[str, Any]:
+            input_data = server._validate_input(
+                PrimSubtreeRequest,
+                stage_id=stage_id,
+                root_path=root_path,
+                max_depth=max_depth,
+                max_results=max_results,
+                offset=offset,
+                include_instance_proxies=include_instance_proxies,
+                include_properties=include_properties,
+                attribute_filter=attribute_filter,
+                array_preview=array_preview,
+            )
+            if isinstance(input_data, dict):
+                return input_data
+
+            from ...usd.lookup import lookup_prim
+            from ...usd.search import list_subtree
+
+            stage = _loaded_stage(session, input_data.stage_id)
+            root = lookup_prim(stage, input_data.root_path)
+            page = list_subtree(
+                stage,
+                root,
+                max_depth=input_data.max_depth,
+                include_instance_proxies=input_data.include_instance_proxies,
+                include_properties=input_data.include_properties,
+                attribute_filter=input_data.attribute_filter,
+                array_preview=input_data.array_preview,
+                offset=input_data.offset,
+                limit=input_data.max_results,
+            )
+            return PrimSubtreeResponse(
+                success=True, stage_id=input_data.stage_id, **page
+            ).model_dump()
+
+        return await server._exec_backend(
+            "get_prim_subtree",
+            server.headless_adapter,
+            "USD",
+            PrimSubtreeResponse,
+            _subtree,
+            params={"stage_id": stage_id, "root_path": root_path, "offset": offset},
         )
 
     @server.mcp.tool(
@@ -655,7 +836,7 @@ def register_usd_tools(server: "SimulMCPServer") -> None:
     )
     @with_param_descriptions()
     async def summarize_scene(
-        stage_id: str, include_meshes: bool = True, format: str = "json"
+        stage_id: str, include_meshes: bool = True, format: SummaryFormat = "json"
     ) -> ToolResult:
         """
         Generate a summary of a USD scene.

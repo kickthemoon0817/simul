@@ -16,7 +16,7 @@ unsaved work, or fall back to an embedded scene when the editor is unavailable.
 simul blender install-bridge
 ```
 
-This builds `~/.simul/blender/simul_blender_bridge.zip`. In the **existing
+This builds `$SIMUL_HOME/blender/simul_blender_bridge.zip` (`SIMUL_HOME` defaults to `~/.simul`; see [configuration.md](configuration.md#state-directory-simul_home)). In the **existing
 Blender window**, open Preferences → Add-ons → Install from Disk, select the
 ZIP, and enable **Simul Blender Bridge**. No restart or scene reload is
 needed. The bridge must be enabled inside the process to control its memory;
@@ -144,7 +144,7 @@ annotation appears in the largest viewport, or the explicitly selected viewport.
 | `isolate_workspace` | Explicitly duplicate the attached window's shared workspace; call `inspect` again for new editor IDs |
 | `select_object` | Visible, selectable object name in the current view layer; replaces selection in Object Mode |
 | `show_properties` | Blender tab identifier such as `OBJECT`, `RENDER`, `MODIFIER`; unavailable tabs return an error |
-| `set_property` | Active editable object's `location`, `rotation_euler` or `scale`; three finite values, radians for rotation, Object Mode only |
+| `set_property` | Active editable object's `location`, `rotation_euler` or `scale`; three finite values, Object Mode only. `rotation_euler` is XYZ radians, written in the object's rotation mode (a quaternion for glTF imports), which is kept |
 | `move_cursor` | Draw the agent's virtual pointer; center by default, optional normalized `position: [x, y]` measured from bottom-left |
 | `clear_cursor` | Remove only `agent_id`'s marker in the attached window |
 
@@ -374,10 +374,10 @@ error that names the limit; send the data in several calls instead.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BLENDER__MODE` | `embedded` | Choose local bpy or an attached editor |
-| `BLENDER__DISCOVERY_DIR` | `~/.simul/blender` | Directory searched by the CLI |
-| `BLENDER__ATTACHMENT_PATH` | `~/.simul/blender/attachment.json` | Selection used by this client/server |
+| `BLENDER__DISCOVERY_DIR` | `$SIMUL_HOME/blender` (`~/.simul/blender`) | Directory searched by the CLI |
+| `BLENDER__ATTACHMENT_PATH` | `$SIMUL_HOME/blender/attachment.json` | Selection used by this client/server |
 | `BLENDER__CONNECTION_TIMEOUT` | `30` | Maximum seconds to wait per operation |
-| `SIMUL_BLENDER_DISCOVERY_DIR` | `~/.simul/blender` | Override discovery location in Blender's environment |
+| `SIMUL_BLENDER_DISCOVERY_DIR` | `$SIMUL_HOME/blender` (`~/.simul/blender`) | Override discovery location in Blender's environment; Blender must otherwise see the server's `SIMUL_HOME` |
 
 Use distinct attachment paths for independent MCP servers controlling different
 windows. Set the same path on each server and the CLI used to select its target.
@@ -391,7 +391,9 @@ execution, a script's `sys.exit()` leaving Blender running, named UI actions
 with scripting disabled, object editing, agent edits as undo steps that the
 user's undo and redo take back one at a time and that make quitting ask to
 save, a world-space
-bounding box, camera focus that keeps the whole object in the frame and clip range
+bounding box, rotating a quaternion object (as glTF imports store them), local and
+world transforms in object info, parenting that keeps the child in place and refuses
+a parent loop, camera focus that keeps the whole object in the frame and clip range
 (a 60 m cube included, and a camera parented to a moved rig with a quaternion
 rotation), world-space camera placement, a camera whose Track To constraint
 overrides focus and placement (reported with the evaluated pose and the

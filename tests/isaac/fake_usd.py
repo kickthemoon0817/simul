@@ -170,6 +170,10 @@ class Sentinel:
     whose attributes are all unset.
     """
 
+    # A sentinel doubles as its own ``Tf.Type``: the registry fakes below hand
+    # it back, and ``FakePrim.IsA`` / ``HasAPI`` compare against it.
+    isUnknown = False
+
     def __init__(self, name: str) -> None:
         self.name = name
 
@@ -178,6 +182,14 @@ class Sentinel:
 
     def __call__(self, prim: Any) -> _NullSchema:
         return _NullSchema()
+
+    @property
+    def pythonClass(self) -> "Sentinel":
+        return self
+
+    @property
+    def typeName(self) -> str:
+        return self.name.replace(".", "")
 
 
 def _module(name: str, **attrs: Any) -> types.ModuleType:
@@ -195,6 +207,43 @@ LIGHT_API = Sentinel("UsdLux.LightAPI")
 RIGID_BODY_API = Sentinel("UsdPhysics.RigidBodyAPI")
 COLLISION_API = Sentinel("UsdPhysics.CollisionAPI")
 JOINT_KIND = Sentinel("UsdPhysics.Joint")
+
+TYPED_KINDS = (MESH_KIND, XFORM_KIND, JOINT_KIND)
+API_KINDS = (LIGHT_API, RIGID_BODY_API, COLLISION_API)
+# Registered schema type names, as Usd.SchemaRegistry knows them.
+SCHEMA_NAMES = {
+    "Mesh": MESH_KIND,
+    "Xform": XFORM_KIND,
+    "PhysicsJoint": JOINT_KIND,
+    "LightAPI": LIGHT_API,
+    "PhysicsRigidBodyAPI": RIGID_BODY_API,
+    "PhysicsCollisionAPI": COLLISION_API,
+}
+
+
+class _UnknownType:
+    """``Tf.Type.Unknown``."""
+
+    isUnknown = True
+    pythonClass = None
+    typeName = ""
+
+
+UNKNOWN_TYPE = _UnknownType()
+
+SCHEMA_REGISTRY = types.SimpleNamespace(
+    GetTypeFromSchemaTypeName=lambda name: SCHEMA_NAMES.get(name, UNKNOWN_TYPE),
+    IsTyped=lambda tf_type: tf_type in TYPED_KINDS,
+    IsAppliedAPISchema=lambda tf_type: tf_type in API_KINDS,
+)
+
+TF = types.SimpleNamespace(
+    Type=types.SimpleNamespace(
+        Find=lambda cls: cls if isinstance(cls, Sentinel) else UNKNOWN_TYPE,
+        FindByName=lambda name: UNKNOWN_TYPE,
+        Unknown=UNKNOWN_TYPE,
+    )
+)
 
 
 class Camera:
@@ -266,31 +315,36 @@ def usd_modules(stage: FakeStage) -> Dict[str, types.ModuleType]:
         ),
     )
     omni.usd = omni_usd  # type: ignore[attr-defined]
-    pxr = _module(
-        "pxr",
-        Usd=types.SimpleNamespace(
+    submodules = {
+        "Usd": types.SimpleNamespace(
             PrimRange=FakePrimRange,
             TimeCode=types.SimpleNamespace(Default=lambda: 0.0),
+            SchemaRegistry=SCHEMA_REGISTRY,
         ),
-        UsdGeom=types.SimpleNamespace(
+        "UsdGeom": types.SimpleNamespace(
             Camera=Camera,
             Mesh=MESH_KIND,
             Xform=XFORM_KIND,
             GetStageUpAxis=lambda _stage: "Z",
             GetStageMetersPerUnit=lambda _stage: 1.0,
         ),
-        UsdShade=types.SimpleNamespace(Material=Material),
-        UsdLux=types.SimpleNamespace(LightAPI=LIGHT_API),
-        UsdPhysics=types.SimpleNamespace(
+        "UsdShade": types.SimpleNamespace(Material=Material),
+        "UsdLux": types.SimpleNamespace(LightAPI=LIGHT_API),
+        "UsdPhysics": types.SimpleNamespace(
             RigidBodyAPI=RIGID_BODY_API,
             CollisionAPI=COLLISION_API,
             Joint=JOINT_KIND,
             Scene=Scene,
         ),
-        Gf=types.SimpleNamespace(Vec3f=lambda *xyz: tuple(float(v) for v in xyz)),
-        Sdf=types.SimpleNamespace(),
-    )
-    return {"omni": omni, "omni.usd": omni_usd, "pxr": pxr}
+        "Gf": types.SimpleNamespace(Vec3f=lambda *xyz: tuple(float(v) for v in xyz)),
+        "Sdf": types.SimpleNamespace(AssetPath=type("AssetPath", (), {})),
+        "Tf": TF,
+    }
+    pxr = _module("pxr", **submodules)
+    modules: Dict[str, Any] = {"omni": omni, "omni.usd": omni_usd, "pxr": pxr}
+    # importlib.import_module("pxr.UsdPhysics") reads sys.modules first.
+    modules.update({f"pxr.{name}": module for name, module in submodules.items()})
+    return modules
 
 
 def capture_script(method: str, **kwargs: Any) -> str:
