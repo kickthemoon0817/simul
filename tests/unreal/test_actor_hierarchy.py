@@ -250,8 +250,9 @@ def test_an_attachment_unreal_refuses_is_an_error_and_its_transaction_is_cancell
 
     result = _run(editor, monkeypatch, "set_actor_parent", child.path, parent.path)
 
-    assert result["success"] is False and result["error_type"] == "EngineError"
+    assert result["success"] is False and result["error_type"] == "AttachmentNotApplied"
     assert result["error"] == f"Unreal did not attach {child.path} to {parent.path}; the editor log says why"
+    assert result["details"] == {"expected": {"parent_path": parent.path}, "actual": {"parent_path": None}}
     assert ("cancel", "simul: attach actor") in editor.events and child.parent is None
 
 
@@ -449,8 +450,9 @@ def test_a_component_unreal_does_not_name_is_removed_and_its_transaction_cancell
 
     result = _run(editor, monkeypatch, "add_component", crate.path, "PointLightComponent", "Lamp")
 
-    assert result["success"] is False and result["error_type"] == "EngineError"
+    assert result["success"] is False and result["error_type"] == "RenameNotApplied"
     assert "did not name the new PointLightComponent 'Lamp'" in result["error"]
+    assert result["details"] == {"expected": {"component_name": "Lamp"}, "actual": {"component_name": "PointLight"}}
     assert ("delete", "PointLight") in editor.events and ("cancel", "simul: add component") in editor.events
     assert [c.get_name() for c in crate.components] == ["StaticMeshComponent0"]
 
@@ -461,8 +463,12 @@ def test_a_component_unreal_does_not_add_is_an_error(editor: Editor, monkeypatch
 
     result = _run(editor, monkeypatch, "add_component", crate.path, "PointLightComponent")
 
-    assert result["success"] is False and result["error_type"] == "EngineError"
+    assert result["success"] is False and result["error_type"] == "ComponentNotApplied"
     assert result["error"].endswith(": Cannot add a subobject of class 'Point Light Component'")
+    assert result["details"] == {
+        "expected": {"component_class": "PointLightComponent"},
+        "actual": {"component_path": None},
+    }
     assert ("cancel", "simul: add component") in editor.events
 
 

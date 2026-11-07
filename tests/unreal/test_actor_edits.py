@@ -215,9 +215,13 @@ def test_a_flag_that_does_not_read_back_is_an_error_naming_the_actor(
 
     result = _run(editor, monkeypatch, "set_actor_visibility", parent.path, visible=False)
 
-    assert result["success"] is False and result["error_type"] == "EngineError"
+    assert result["success"] is False and result["error_type"] == "VisibilityNotApplied"
     assert result["error"] == "Unreal did not apply the visibility to: " + child.path
     assert result["actors"][1] == _flags(child)
+    assert result["details"] == {
+        "expected": {"hidden_in_editor": True, "hidden_in_game": True},
+        "actual": [_flags(child)],
+    }
 
 
 @pytest.mark.parametrize(
@@ -392,7 +396,12 @@ def test_a_delete_unreal_refuses_is_an_error_and_its_transaction_cancelled(
 
     result = _run(editor, monkeypatch, "delete_actor", crate.path)
 
-    assert result == {"success": False, "error_type": "EngineError", "error": "Unreal did not delete " + crate.path}
+    assert result == {
+        "success": False,
+        "error_type": "DeleteNotApplied",
+        "error": "Unreal did not delete " + crate.path,
+        "details": {"expected": {"deleted": True}, "actual": {"deleted": False}},
+    }
     assert ("cancel", "simul: delete actor") in editor.events and crate.valid
 
 
@@ -516,6 +525,10 @@ def test_a_camera_that_reads_back_otherwise_is_an_error_with_what_it_reads(monke
 
     result = asyncio.run(session.set_camera_view(location=(1.0, 2.0, 3.0), rotation=(-10.0, 20.0, 30.0)))
 
-    assert result["success"] is False and result["error_type"] == "EngineError"
+    assert result["success"] is False and result["error_type"] == "CameraNotApplied"
     assert result["error"] == "The viewport camera reads back other than what was set: rotation"
     assert result["rotation"] == (-10.0, 20.0, 0.0) and result["location"] == (1.0, 2.0, 3.0)
+    assert result["details"] == {
+        "expected": {"location": [1.0, 2.0, 3.0], "rotation": [-10.0, 20.0, 30.0]},
+        "actual": {"location": [1.0, 2.0, 3.0], "rotation": [-10.0, 20.0, 0.0]},
+    }

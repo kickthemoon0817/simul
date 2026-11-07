@@ -29,6 +29,7 @@ from ..utils.regex_guard import (
     exponential_regex_construct as _exponential_regex_construct,
 )
 from ._unreal_errors import (
+    CAMERA_NOT_APPLIED,
     CONNECTION_ERROR,
     NOT_FOUND_ERROR,
     TIMEOUT_ERROR,
@@ -2351,8 +2352,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             viewport camera (also when both were left unchanged). A
             ``ValidationError`` envelope for a value out of range, before the
             camera moves; ``ViewportUnavailable`` when the camera cannot be
-            read; ``EngineError``, with the read-back values, when the camera
-            reads back other than what was set.
+            read; ``CameraNotApplied``, with the read-back values and
+            ``details.expected`` / ``details.actual``, when the camera reads
+            back other than what was set.
         """
         problem = camera_view_error(location, rotation)
         if problem is not None:
@@ -2394,18 +2396,24 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             "location": tuple(info["camera_location"]),
             "rotation": tuple(info["camera_rotation"]),
         }
+        requested = {
+            name: wanted for name, wanted in (("location", location), ("rotation", rotation)) if wanted is not None
+        }
         missed = [
             name
-            for name, wanted in (("location", location), ("rotation", rotation))
-            if wanted is not None
-            and not _transform_component_applied(name, [float(v) for v in wanted], result[name])
+            for name, wanted in requested.items()
+            if not _transform_component_applied(name, [float(v) for v in wanted], result[name])
         ]
         if missed:
             return {
                 **result,
                 "success": False,
                 "error": "The viewport camera reads back other than what was set: " + ", ".join(missed),
-                "error_type": "EngineError",
+                "error_type": CAMERA_NOT_APPLIED,
+                "details": {
+                    "expected": {name: [float(v) for v in value] for name, value in requested.items()},
+                    "actual": {name: list(result[name]) for name in requested},
+                },
             }
         return result
 
@@ -2598,8 +2606,10 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             level, a map, an asset no actor factory accepts (``SpawnError``);
             ``ValidationError`` for a label Unreal would not take (it trims
             whitespace and drops the others without a word), before anything
-            spawns; and ``PIEActive`` while Play In Editor runs, when Unreal's
-            editor spawns nothing. Those are logged as refusals, not failures.
+            spawns, and ``RenameNotApplied`` (the actor removed again) for one
+            it still does not take; and ``PIEActive`` while Play In Editor
+            runs, when Unreal's editor spawns nothing. The refusals are logged
+            as refusals, not failures.
 
         Raises:
             ValueError: location or rotation is not three finite numbers.
@@ -2646,8 +2656,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             map); ``ValidationError`` for an actor the editor does not let you
             delete (the level's WorldSettings or builder brush, an actor kept
             out of the Outliner); ``PIEActive`` while Play In Editor runs,
-            when Unreal deletes nothing; ``EngineError`` when Unreal did not
-            delete it.
+            when Unreal deletes nothing; ``DeleteNotApplied`` when Unreal did
+            not delete it.
         """
         args = {"actor_path": actor_path}
         return await self._execute_json_script(
@@ -2864,8 +2874,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             its parent and for a cycle; ``InvalidState`` for an actor without
             a root component or a Static child under a parent that is not
             Static; a not-found error for an actor or parent path that names
-            no live actor of the level open in the editor; ``EngineError``
-            when Unreal still did not attach or detach it.
+            no live actor of the level open in the editor;
+            ``AttachmentNotApplied`` when Unreal still did not attach or
+            detach it.
         """
         if bool(parent_path) == bool(detach):
             return {
@@ -2922,7 +2933,8 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             class that is abstract or not a component class, or a
             parent_component for a component that takes none; a not-found
             error for a class, parent component or actor that is not there;
-            ``EngineError`` when Unreal adds or names nothing.
+            ``ComponentNotApplied`` when Unreal adds nothing and
+            ``RenameNotApplied`` when it does not take the name.
         """
         problem = None
         if not component_class.strip():
@@ -2983,9 +2995,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             Dictionary with actor_path, visible, scope, propagate, persistent
             and actors: each affected actor's hidden_in_editor,
             hidden_in_editor_at_startup and hidden_in_game read back, the actor
-            first. ``EngineError``, with those, naming every actor whose flags
-            read back other than asked; ``ValidationError`` for an unknown
-            scope or persistent with the game scope; ``PIEActive`` for
+            first. ``VisibilityNotApplied``, with those, naming every actor
+            whose flags read back other than asked; ``ValidationError`` for an
+            unknown scope or persistent with the game scope; ``PIEActive`` for
             persistent during PIE; a not-found error for a path that names no
             live actor of the level open in the editor.
         """

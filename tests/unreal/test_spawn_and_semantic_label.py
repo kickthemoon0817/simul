@@ -676,8 +676,9 @@ async def test_a_label_unreal_does_not_take_removes_the_actor_again(editor: Edit
             rc.settings, "spawn_unreal_actor", {"asset_path": POINT_LIGHT.path, "label": "Dropped"}
         )
 
-    assert payload["success"] is False and payload["error_type"] == "ValidationError"
+    assert payload["success"] is False and payload["error_type"] == "RenameNotApplied"
     assert payload["error"] == "Unreal did not take the label 'Dropped', so the actor was removed again"
+    assert payload["details"] == {"expected": {"label": "Dropped"}, "actual": {"label": "PointLight_0"}}
     assert editor.actors == []
     assert [event[0] for event in editor.events] == ["begin", "spawn", "label", "destroy", "cancel", "end"]
 

@@ -7,6 +7,14 @@ depend on Remote Control's property-description wire format.
 
 from typing import Any, Dict
 
+from ._unreal_errors import (
+    ATTACHMENT_NOT_APPLIED,
+    COMPONENT_NOT_APPLIED,
+    DELETE_NOT_APPLIED,
+    RENAME_NOT_APPLIED,
+    VISIBILITY_NOT_APPLIED,
+)
+
 #: ``error_type`` of an editor-world change refused because Play In Editor (or
 #: Simulate In Editor) is running.
 PIE_ACTIVE = "PIEActive"
@@ -110,7 +118,14 @@ ACTOR_NOT_FOUND = "Actor not found: {path}"
 # actor_at(path, play_world=True) also takes an actor of the running Play In
 # Editor world (UnrealEditorSubsystem.get_game_world), for the physics and
 # collision edits that change the running copy on purpose.
-ACTOR_HELPERS = EDITOR_WORLD + f"_ACTOR_NOT_FOUND = {ACTOR_NOT_FOUND!r}\n" + """
+ACTOR_HELPERS = EDITOR_WORLD + f"""_ACTOR_NOT_FOUND = {ACTOR_NOT_FOUND!r}
+_ATTACHMENT_NOT_APPLIED, _COMPONENT_NOT_APPLIED = {ATTACHMENT_NOT_APPLIED!r}, {COMPONENT_NOT_APPLIED!r}
+_RENAME_NOT_APPLIED, _DELETE_NOT_APPLIED = {RENAME_NOT_APPLIED!r}, {DELETE_NOT_APPLIED!r}
+_VISIBILITY_NOT_APPLIED = {VISIBILITY_NOT_APPLIED!r}
+""" + """
+def not_applied(error_type, message, expected, actual):
+    return {"success": False, "error_type": error_type, "error": message,
+            "details": {"expected": expected, "actual": actual}}
 # The package name prefix of a Play In Editor world, UEDPIE_<n>_<map>.
 _PIE_PACKAGE = "UEDPIE_[0-9]+_"
 
@@ -529,11 +544,12 @@ def spawn(path, location, rotation, label):
             actor = subsystem.spawn_actor_from_object(source, location, rotation)
         if actor is not None and label is not None:
             actor.set_actor_label(label)
-            if actor.get_actor_label() != label:
+            got = actor.get_actor_label()
+            if got != label:
                 subsystem.destroy_actor(actor)
                 transaction.cancel()
-                return refused("ValidationError", "Unreal did not take the label " + repr(label[:80])
-                               + ", so the actor was removed again")
+                return not_applied(_RENAME_NOT_APPLIED, "Unreal did not take the label " + repr(label[:80])
+                                   + ", so the actor was removed again", {"label": label}, {"label": got})
     if actor is None:
         return refused("SpawnError", "Unreal placed no actor for " + path + " (a "
                        + source.get_class().get_name() + "); pass a concrete Actor class (Unreal "
@@ -578,7 +594,8 @@ def detach(actor_path, child, previous):
             child.detach_from_actor(rule, rule, rule)
     after = child.get_attach_parent_actor()
     if after is not None:
-        return refused("EngineError", "Unreal did not detach " + actor_path + " from " + path_of(after))
+        return not_applied(_ATTACHMENT_NOT_APPLIED, "Unreal did not detach " + actor_path + " from " + path_of(after),
+                           {"parent_path": None}, {"parent_path": path_of(after)})
     return result(actor_path, None, previous)
 
 def set_parent(actor_path, parent_path):
@@ -618,8 +635,9 @@ def set_parent(actor_path, parent_path):
         if not attached and after == previous:
             transaction.cancel()
     if not attached or after != parent:
-        return refused("EngineError", "Unreal did not attach " + actor_path + " to " + parent_path
-                       + "; the editor log says why")
+        return not_applied(_ATTACHMENT_NOT_APPLIED, "Unreal did not attach " + actor_path + " to " + parent_path
+                           + "; the editor log says why", {"parent_path": parent.get_path_name()},
+                           {"parent_path": path_of(after)})
     return result(actor_path, after, previous)
 
 print(json.dumps(set_parent(**args)))
@@ -721,16 +739,20 @@ def add(actor_path, component_class, component_name, parent_component):
         component = handle_object(handle)
         if component is None:
             transaction.cancel()
-            return refused("EngineError", "Unreal added no " + cls.get_name() + " to " + actor_path
-                           + (": " + str(failure) if str(failure) else ""))
+            return not_applied(_COMPONENT_NOT_APPLIED, "Unreal added no " + cls.get_name() + " to " + actor_path
+                               + (": " + str(failure) if str(failure) else ""),
+                               {"component_class": cls.get_name()}, {"component_path": None})
         if component_name is not None and not (subsystem.rename_subobject(handle, unreal.Text(component_name))
                                                and component.get_name() == component_name):
+            got = component.get_name()
             subsystem.delete_subobject(handles[0], handle, None)
             transaction.cancel()
-            return refused("EngineError", "Unreal did not name the new " + cls.get_name() + " "
-                           + repr(component_name) + ", so it was removed again")
+            return not_applied(_RENAME_NOT_APPLIED, "Unreal did not name the new " + cls.get_name() + " "
+                               + repr(component_name) + ", so it was removed again",
+                               {"component_name": component_name}, {"component_name": got})
     if component not in actor.get_components_by_class(unreal.ActorComponent):
-        return refused("EngineError", "The new " + cls.get_name() + " is not among " + actor_path + "'s components")
+        return not_applied(_COMPONENT_NOT_APPLIED, "The new " + cls.get_name() + " is not among " + actor_path
+                           + "'s components", {"component_path": component.get_path_name()}, {"component_path": None})
     return dict(describe(actor, component), actor_path=actor_path)
 
 print(json.dumps(add(**args)))
@@ -776,7 +798,8 @@ def delete(actor_path):
         if not destroyed:
             transaction.cancel()
     if not destroyed or unreal.SystemLibrary.is_valid(actor):
-        return {"success": False, "error_type": "EngineError", "error": "Unreal did not delete " + actor_path}
+        return not_applied(_DELETE_NOT_APPLIED, "Unreal did not delete " + actor_path, {"deleted": True},
+                           {"deleted": False})
     return {"actor_path": actor_path, "deleted": True}
 
 print(json.dumps(delete(**args)))
@@ -851,8 +874,16 @@ def set_visibility(actor_path, visible, scope, propagate, persistent):
     result = {"actor_path": actor_path, "visible": visible, "scope": scope, "propagate": propagate,
               "persistent": persistent, "actors": states}
     if missed:
-        result.update(success=False, error_type="EngineError",
-                      error="Unreal did not apply the visibility to: " + ", ".join(missed))
+        expected = {}
+        if editor:
+            expected["hidden_in_editor"] = hidden
+            if persistent:
+                expected["hidden_in_editor_at_startup"] = hidden
+        if game:
+            expected["hidden_in_game"] = hidden
+        result.update(not_applied(_VISIBILITY_NOT_APPLIED, "Unreal did not apply the visibility to: "
+                                  + ", ".join(missed), expected,
+                                  [state for state in states if state["actor_path"] in missed]))
     return result
 
 print(json.dumps(set_visibility(**args)))

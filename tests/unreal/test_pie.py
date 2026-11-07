@@ -499,7 +499,7 @@ def test_a_delete_unreal_refuses_outside_pie_is_an_error(
 
     result = asyncio.run(session.delete_actor(LEVEL + "Crate"))
 
-    assert result["success"] is False and result["error_type"] == "EngineError"
+    assert result["success"] is False and result["error_type"] == "DeleteNotApplied"
     assert result["error"] == "Unreal did not delete " + LEVEL + "Crate"
 
 

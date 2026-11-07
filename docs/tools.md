@@ -176,10 +176,7 @@ Behaviour worth knowing:
   - `TimeoutError`: no answer within `UNREAL__TIMEOUT`. A script or a change
     may still be running in the editor, and Remote Control cannot cancel it,
     so check the editor's state before retrying.
-  - `EngineError`: Remote Control answered with HTTP 5xx, or an actor
-    tool read back that Unreal did not carry out a change it took (an
-    attachment, a component, a deletion, a visibility flag, the viewport
-    camera).
+  - `EngineError`: Remote Control answered with HTTP 5xx.
   - `ValidationError`: Remote Control refused the request as made (HTTP 400),
     for example a read-only, `EditConst` or protected property, or a value of
     the wrong type.
@@ -192,6 +189,16 @@ Behaviour worth knowing:
   `error` carries Remote Control's own message, and `details` carries the
   `status`, the `route` and `remote_control_message`. The domain types
   (`PIEActive`, `TransformNotApplied` and the like) are unchanged.
+- A change Unreal took without an error, but which the read-back shows it did
+  not make, fails with an `error_type` ending in `NotApplied`, so a client can
+  match the family by that suffix: `TransformNotApplied`,
+  `RenderSettingNotApplied`, `MaterialParamsNotApplied`, `PhysicsNotApplied`,
+  `PhysicsParamsNotApplied`, and for the actor tools `AttachmentNotApplied`
+  (parenting), `ComponentNotApplied` (a component not added),
+  `RenameNotApplied` (a component name or an actor label not taken),
+  `DeleteNotApplied`, `VisibilityNotApplied` and `CameraNotApplied` (the
+  viewport camera). The actor tools' ones carry `details.expected`, what was
+  asked, and `details.actual`, what Unreal reads back.
 - `batch_unreal_operations` (registered with script execution allowed) sends
   each operation as `RequestId`, `URL`, `Verb`, `Body`, in that order, with a
   unique `RequestId`. Operations without one are numbered. Remote Control
@@ -232,7 +239,7 @@ Behaviour worth knowing:
   Static; those come back as `ValidationError` (itself, a cycle) or
   `InvalidState` (mobility, an actor without a root component) with the reason,
   before anything changes. An attachment Unreal still refuses is an
-  `EngineError`, and its transaction is cancelled.
+  `AttachmentNotApplied`, and its transaction is cancelled.
 - `add_unreal_component` adds an instance component the way the editor's Add
   Component button does (`SubobjectDataSubsystem`): Remote Control refuses
   `AddComponentByClass` on UE 5.7. `component_class` is a native class name
@@ -275,7 +282,7 @@ Behaviour worth knowing:
   The reply's `actors` lists each actor's `hidden_in_editor`,
   `hidden_in_editor_at_startup` and `hidden_in_game` read back, the actor
   first; one that reads back other than asked fails the call with
-  `EngineError`.
+  `VisibilityNotApplied`.
 - `spawn_unreal_actor` refuses a class Unreal does not let you place, and a
   Blueprint of one: the level's per-level singletons (WorldSettings,
   LevelScriptActor, WorldDataLayers, the World Partition minimap, the default
@@ -289,17 +296,19 @@ Behaviour worth knowing:
   label with leading or trailing whitespace, over 1023 characters or `None` is
   refused before anything spawns, since Unreal trims or drops it without a
   word, and the label is read back: one Unreal still does not take removes the
-  actor again.
+  actor again (`RenameNotApplied`).
 - `delete_unreal_actor` takes the actor's full path; a label, a missing path or
   an actor already deleted is `NotFoundError`. The level's WorldSettings, its
   builder brush and the other actors the editor keeps out of the Outliner are
   refused with `ValidationError`, as the editor does not let you delete them.
-  The deletion is read back.
+  The deletion is read back (`DeleteNotApplied` when the actor is still
+  there).
 - `set_unreal_camera_view` takes each axis of `location` within
   4398046511104 cm (2^42) of the origin and `pitch` from -90 to 90 degrees;
   Unreal clamps anything beyond without a word, so a value outside is a
   `ValidationError` and the camera does not move. The reply is the camera
-  read back, location and rotation, also for a group left unchanged.
+  read back, location and rotation, also for a group left unchanged; a camera
+  that reads back other than what was set is a `CameraNotApplied`.
 - Actor inspection, physics, materials and PIE start/stop/pause/resume use
   editor Python APIs. Single-frame stepping is not supported by the editor and
   returns `UnsupportedOperation`; simulation `frame_count` is `null` when the
