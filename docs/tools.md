@@ -77,6 +77,12 @@ Notes:
 - `execute_isaac_script` scripts should follow the scripting reference served
   as the `simul://isaac-sim/skills` resource. Isaac Sim 6.0 deprecates
   `isaacsim.core.{api,prims,utils}` and removes the `omni.isaac.*` shims.
+- `claim_isaac_instance` and `set_active_isaac_instance` (with a `purpose`)
+  return `ClaimStoreError` when the claim could not be saved. Calling
+  `claim_isaac_instance` again with the same `agent_id` after a reconnect or
+  a server restart takes the orphaned claim over; `release_isaac_instance`
+  with that `agent_id` releases it. See
+  [configuration.md](configuration.md#multi-agent-claims).
 
 ## Unreal Engine
 
