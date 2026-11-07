@@ -244,7 +244,7 @@ class TestCli:
 
     def test_server_refuses_unknown_transport(self, captured: List[Dict[str, Any]]) -> None:
         result = runner.invoke(app, ["server", "--transport", "grpc"])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert "stdio, http, sse" in result.output
         assert captured == []
 
@@ -254,7 +254,7 @@ class TestCli:
         assert captured[-1]["backends"] == {"usd", "isaac"}
 
         result = runner.invoke(app, ["server", "--backends", "usd,houdini"])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert "houdini" in result.output
         assert len(captured) == 1
 

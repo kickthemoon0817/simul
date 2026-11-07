@@ -17,7 +17,14 @@ commands and their parameters, run `simul commands` (always JSON).
   1 to 65535, and every timeout option (`-t/--timeout`, `--wait-timeout`) a
   finite number of seconds greater than 0. Any other value exits 2 with
   `error_type: InvalidArgument`: the JSON envelope under `--json`, a message
-  on stderr otherwise.
+  on stderr otherwise. So does an unknown `--transport`, `--backends`,
+  `--log-level`, `--unreal-tools`, `--blender-tools`, `--unreal-mode` or
+  `--blender-mode` value.
+- Settings that cannot be used (a config file that is missing or not valid
+  YAML, an invalid value such as `UNREAL__PORT=70000`, an unknown security
+  key) exit 2 with `error_type: ConfigError` from every command, naming the
+  setting, its source and the reason in `details.errors`. See
+  [configuration.md](configuration.md#when-the-configuration-is-wrong).
 
 ```bash
 simul --json info
@@ -31,7 +38,7 @@ simul isaac scene | jq .
 | `simul server` | Start the MCP server |
 | `simul info [--config FILE]` | Backends reachable from this machine and the tools registered for them |
 | `simul commands` | Every CLI command with its parameters, as JSON |
-| `simul validate-config FILE` | Validate a YAML configuration file |
+| `simul validate-config FILE` | Validate a YAML configuration file strictly: YAML errors, unknown keys (with suggestions) and invalid values are errors (exit 1); retired keys and unknown non-security `SECTION__` variables are warnings |
 | `simul version` | Version information |
 | `simul stats [--tool NAME] [--recent N] [--reset]` | Tool usage statistics from the persistent log; `--reset` clears it |
 | `simul logs paths` | Resolved log file paths for the current settings |
@@ -53,14 +60,14 @@ simul server --config /abs/path/config.yaml --log-level DEBUG
 
 | Option | Meaning |
 |---|---|
-| `-c, --config FILE` | YAML configuration file (default: the packaged `default.yaml`) |
+| `-c, --config FILE` | YAML configuration file (default: `$CONFIG_FILE`, else the packaged `default.yaml`); missing or invalid exits 2 with `ConfigError` |
 | `-t, --transport` | `stdio` (default; the client spawns the server), `http` (streamable HTTP) or `sse` (legacy) |
 | `-b, --backends` | Comma-separated subset of `isaac,unreal,usd,blender`. Default: every available backend, Isaac Sim only on Linux and Windows; naming `isaac` registers it on any OS ([isaac-sim.md](isaac-sim.md#platforms)) |
 | `--unreal-tools` | `thin` (default, six tools) or `full` (every granular Unreal tool). Overrides `unreal.tool_surface` |
 | `--blender-tools` | `full` (default) or `thin` (the essentials in `THIN_BLENDER_TOOLS`). Overrides `blender.tool_surface` |
 | `--unreal-mode` | `endpoint` (default) or `attached` (the editor chosen with `simul unreal attach`) |
 | `--blender-mode` | `embedded` (default, local `bpy`) or `attached` (the window chosen with `simul blender attach`) |
-| `-l, --log-level` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
+| `-l, --log-level` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (any case); anything else exits 2 |
 | `-v, --verbose` | Verbose logging |
 | `--allow-public` | Let `http`/`sse` bind a non-loopback `server.host` (`SERVER__ALLOW_PUBLIC=true`) |
 
