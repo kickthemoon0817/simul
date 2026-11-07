@@ -1982,7 +1982,8 @@ class BlenderInsertKeyframeRequest(BaseModel):
         None,
         description=(
             "Value to key instead of the property's current one: one number for one "
-            "channel, else one per element"
+            "channel, else one per element. The keyed channels then show what their "
+            "F-curves give at the current frame; other channels keep their values"
         ),
     )
     interpolation: Optional[BlenderKeyframeInterpolation] = Field(
@@ -2025,7 +2026,12 @@ class BlenderInsertKeyframeResponse(BaseModel):
         default_factory=list, description="The key on each keyed channel"
     )
     warning: Optional[str] = Field(
-        None, description="Set when the inserted key could not be read back"
+        None,
+        description=(
+            "Set when the inserted key could not be read back, or when the keyed "
+            "channels keep their values until a frame change (an object with NLA "
+            "tracks)"
+        ),
     )
 
 

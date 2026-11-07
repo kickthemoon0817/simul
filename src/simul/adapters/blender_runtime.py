@@ -990,6 +990,35 @@ def _like(current: Any, value: float) -> Any:
     return float(value)
 
 
+def _as_animated(current: Any, value: float) -> Any:
+    """An F-curve's value as Blender's animation writes it to a property holding ``current``.
+
+    Blender evaluates the F-curve of a boolean or integer property to whole
+    numbers (on 5.0.1 one keyed 1 and 8 gave 3.0 between them), so the
+    conversion is exact.
+    """
+    if isinstance(current, bool):
+        return bool(round(value))
+    if isinstance(current, int):
+        return int(round(value))
+    return float(value)
+
+
+# Blender replaces a key this close to a new one instead of adding another
+# (BEZT_BINARYSEARCH_THRESH), comparing the 32-bit frames: on Blender 5.0.1 a
+# key inserted at 11.005 replaced the one at 11 and stayed at frame 11.
+KEY_MERGE_DISTANCE = 0.01
+
+
+def _float32(value: float) -> float:
+    return float(struct.unpack("<f", struct.pack("<f", value))[0])
+
+
+def _same_key_frame(first: float, second: float) -> bool:
+    """Whether Blender keeps one key, not two, for keys on these frames of one channel."""
+    return abs(_float32(first) - _float32(second)) <= _float32(KEY_MERGE_DISTANCE)
+
+
 # -- Files an import reads besides the one named (B1-20) ---------------------
 #
 # The sandbox checked only the path handed to import_file, so a glTF inside the
@@ -4874,12 +4903,13 @@ class BlenderRuntimeSession:
 
         Without ``value`` Blender keys the property's current value, as the I
         key does: set it first (set_blender_object_transform, for instance).
-        With ``value`` that value is keyed, and Blender then evaluates the
-        object's animation, so the property shows what its animation gives at
-        the current frame: the keyed value on that frame or where the key is
-        the property's only one. A GUI Blender evaluated a first key at once
-        and a later one only at the next frame change, and background Blender
-        neither, so the call has Blender evaluate it either way.
+        With ``value`` that value is keyed, and each channel keyed then shows
+        what its F-curve gives at the current frame: the keyed value on that
+        frame or where the key is the channel's only one. A GUI Blender showed
+        a first key at once and a later one only at the next frame change, and
+        background Blender neither. Only the keyed channels are written: every
+        other channel, an unkeyed edit on it included, keeps its value, as
+        Blender's own keying leaves it.
 
         Args:
             object_name: Name of the object.
@@ -4890,6 +4920,8 @@ class BlenderRuntimeSession:
             value: Value to key instead of the current one: one number for a
                 single channel (index >= 0, or a property that is not an array),
                 otherwise one number per element, such as [x, y, z] for location.
+                The keyed channels then show what their F-curves give at the
+                current frame; every other channel keeps its value.
             interpolation: Interpolation from this key to the next (CONSTANT,
                 LINEAR, BEZIER, SINE, QUAD, CUBIC, QUART, QUINT, EXPO, CIRC, BACK,
                 BOUNCE or ELASTIC); None leaves Blender's choice: the previous
@@ -4901,7 +4933,10 @@ class BlenderRuntimeSession:
         Returns:
             Dict with object_name, data_path, frame, value_source ('given' or
             'current') and keyframes: per keyed channel its array_index, value,
-            interpolation and keyframe_type as Blender stored them.
+            interpolation and keyframe_type as Blender stored them; and a
+            warning when the keys are not on that frame of the action (NLA
+            tweak mode) or the keyed channels keep their values until a frame
+            change (an object whose NLA tracks Blender blends).
 
         Raises:
             RuntimeError: When Blender inserted no keyframe: on an F-curve that
@@ -4943,8 +4978,6 @@ class BlenderRuntimeSession:
             # Blender refused the key.
             if restore is not None:
                 restore()
-        if inserted and restore is not None:
-            self._evaluate_animation(obj)
         if not inserted:
             raise RuntimeError(
                 f"Blender inserted no keyframe on '{object_name}' "
@@ -4973,10 +5006,11 @@ class BlenderRuntimeSession:
                     "keyframe_type": key.type,
                 }
             )
+        warnings = []
         if not keys:
             # In NLA tweak mode Blender maps the frame into the tweaked strip's
             # own time, so the key is not on this frame of the action.
-            result["warning"] = (
+            warnings.append(
                 f"Blender reported the key inserted, but the object's action has no "
                 f"key on {_channel_name(data_path, index)} at frame {frame} (in NLA "
                 "tweak mode keys land at the strip's own frame); "
@@ -4986,6 +5020,13 @@ class BlenderRuntimeSession:
                     else "get_blender_keyframes lists the keyed channels"
                 )
             )
+        if value is not None:
+            # After the interpolation is set: it shapes the curve after the key.
+            shown = self._show_keyed_channels(obj, [fcurve for fcurve, _key in keys])
+            if shown is not None:
+                warnings.append(shown)
+        if warnings:
+            result["warning"] = "; ".join(warnings)
         return result
 
     def _write_property(
@@ -5048,29 +5089,87 @@ class BlenderRuntimeSession:
         return lambda: write(old_values)
 
     @staticmethod
-    def _evaluate_animation(obj: Any) -> None:
-        """Have Blender evaluate the object's animation at the current frame, now.
+    def _show_keyed_channels(obj: Any, fcurves: List[Any]) -> Optional[str]:
+        """Write what each keyed F-curve gives at the current frame to its channel alone.
 
-        Tagging the object's time-dependent data and evaluating the depsgraph
-        writes what its animation (NLA included) gives back to its properties,
-        as a frame change does, without running frame-change handlers.
+        Keying a given value writes it, keys it and writes the old value back,
+        which the channel shows until Blender next evaluates the animation.
+        Evaluating the object's whole animation would also put every other
+        animated channel back to its F-curve, discarding unkeyed edits that
+        Blender's own keying keeps, so each keyed channel gets its own
+        F-curve's value at the scene's current time, as Blender's animation
+        writes it. A muted F-curve and a driven channel are left as they are,
+        as Blender's animation leaves them.
+
+        Args:
+            obj: The keyed object.
+            fcurves: The F-curves of the keyed channels.
+
+        Returns:
+            A warning when the object's NLA tracks blend its action, which
+            Blender works out only on a frame change, so the keyed channels
+            keep their values until then; else None.
         """
+        anim_data = obj.animation_data
+        if anim_data is None or not fcurves:
+            return None
+        if anim_data.use_nla and len(anim_data.nla_tracks):
+            return (
+                f"'{obj.name}' has NLA tracks, which Blender blends with its action "
+                "on a frame change, so the keyed channels keep the values they had "
+                "until then"
+            )
         blender_module: Any = bpy
-        obj.update_tag(refresh={"TIME"})
-        blender_module.context.evaluated_depsgraph_get()
+        scene = blender_module.context.scene
+        # The time Blender evaluates the animation at (BKE_scene_ctime_get): the
+        # frame and subframe, scaled by the render's time remapping. On 5.0.1,
+        # frame 5 under frame_map_old 100 and frame_map_new 200 evaluated 2.5.
+        render = scene.render
+        time = (
+            (scene.frame_current + scene.frame_subframe)
+            * render.frame_map_old
+            / render.frame_map_new
+        )
+        driven = {(driver.data_path, driver.array_index) for driver in anim_data.drivers}
+        for fcurve in fcurves:
+            group = fcurve.group
+            if fcurve.mute or (group is not None and group.mute):
+                continue
+            if (fcurve.data_path, fcurve.array_index) in driven:
+                continue
+            value = fcurve.evaluate(time)
+            owner, name, custom = _property_owner(obj, fcurve.data_path)
+            current = owner[name] if custom else getattr(owner, name)
+            try:
+                len(current)
+            except TypeError:
+                new = _as_animated(current, value)
+                if custom:
+                    owner[name] = new
+                else:
+                    setattr(owner, name, new)
+            else:
+                element = fcurve.array_index
+                current[element] = _as_animated(current[element], value)
+        return None
 
     def _keys_on_frame(
         self, obj: Any, data_path: str, index: int, frame: float
     ) -> List[Tuple[Any, Any]]:
-        """The (F-curve, keyframe) pairs of the property's channels keyed on ``frame``."""
+        """The (F-curve, keyframe) pairs of the property's channels keyed on ``frame``.
+
+        A key Blender inserted next to an existing one replaced it and kept its
+        frame, so the key nearest ``frame`` within Blender's merge distance.
+        """
         pairs = []
         for fcurve in action_fcurves(obj.animation_data, self._blender_version) or []:
             if fcurve.data_path != data_path or index not in (-1, fcurve.array_index):
                 continue
-            for key in fcurve.keyframe_points:
-                if abs(key.co[0] - frame) < 1e-3:
-                    pairs.append((fcurve, key))
-                    break
+            near = [
+                key for key in fcurve.keyframe_points if _same_key_frame(key.co[0], frame)
+            ]
+            if near:
+                pairs.append((fcurve, min(near, key=lambda key: abs(key.co[0] - frame))))
         return sorted(pairs, key=lambda pair: pair[0].array_index)
 
     def delete_keyframe(

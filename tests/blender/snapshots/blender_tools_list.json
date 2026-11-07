@@ -1183,7 +1183,7 @@
           "value": {
             "anyOf": [{"type": "number"}, {"items": {"type": "number"}, "type": "array"}, {"type": "null"}],
             "default": null,
-            "description": "Value to key instead of the current one: one number for a single channel (index >= 0, or a property that is not an array), otherwise one number per element, such as [x, y, z] for location."
+            "description": "Value to key instead of the current one: one number for a single channel (index >= 0, or a property that is not an array), otherwise one number per element, such as [x, y, z] for location. The keyed channels then show what their F-curves give at the current frame; every other channel keeps its value."
           },
           "interpolation": {
             "anyOf": [

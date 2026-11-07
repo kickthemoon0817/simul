@@ -1187,12 +1187,16 @@ Behaviour worth knowing:
 - `insert_blender_keyframe` keys the property's current value, as Blender's I
   key does, unless `value` gives one: one number for one channel (`index` 0 or
   more, or a property that is not an array), else one per element. A given
-  value is keyed through the property, so NLA remapping applies, and Blender
-  then evaluates the object's animation, so the property shows what its
-  animation gives at the current frame (the keyed value on that frame, or
-  where the key is the property's only one). Left to itself, a GUI Blender
-  5.0.1 showed a first key at once and a later one only at the next frame
-  change, and background Blender neither. `interpolation`
+  value is keyed through the property, so NLA remapping applies, and each
+  keyed channel then shows what its F-curve gives at the current frame (the
+  keyed value on that frame, or where the key is the channel's only one).
+  Left to itself, a GUI Blender 5.0.1 showed a first key at once and a later
+  one only at the next frame change, and background Blender neither. Only the
+  keyed channels are written: every other channel keeps its value, an
+  unkeyed edit included, as Blender's own keying leaves it. On an object with
+  NLA tracks, which Blender blends with the action only on a frame change,
+  the keyed channels keep their values until then and `warning` says so; a
+  muted or driven channel keeps its value too. `interpolation`
   sets the key's interpolation (otherwise Blender's choice: the previous key's
   on a curve with two keys or more, else its preference, Bezier by default)
   and `keyframe_type` its key type. The reply's `keyframes` give each keyed
