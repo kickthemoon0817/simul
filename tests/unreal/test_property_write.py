@@ -9,6 +9,15 @@ wrong on UE 5.7.4:
   property with a setter (MaterialBillboardComponent's Elements) gets the new
   elements appended to the old ones (RemoteControlModule.cpp,
   FindSetterFunctionInternal_TMP).
+* A write through a setter (Elements, StaticMesh, Mobility, RelativeLocation,
+  a light's Intensity) is a function call with no transaction of its own, so
+  Remote Control never calls Modify: the object is not recorded for undo and
+  the level is not marked changed (CreateRCCall, InvokeCall with
+  ERCTransactionMode::NONE). Any other write runs PreEditChange, which calls
+  Modify and marks the level changed.
+* An error body is printed with its message unescaped, and a batch answer
+  embeds it verbatim: a message with a line break makes the answer invalid
+  JSON (CreateUTF8ErrorMessage, HandleBatchRequest).
 * The write's PostEditChangeProperty runs only when Remote Control's next
   function call arrives (TestOrFinalizeOngoingChange, with
   RemoteControl.EnableOngoingChangeOptimization on), so a read straight after
@@ -36,7 +45,6 @@ import pytest
 from aiohttp import web
 
 from simul.adapters import unreal_runtime
-from simul.adapters._unreal_errors import UnrealError
 from simul.adapters.unreal_runtime import PROPERTY_TRANSACTIONS, UnrealRuntimeSession
 from simul.config import Settings
 
@@ -44,6 +52,8 @@ LEVEL = "/Game/Maps/Lab.Lab:PersistentLevel."
 ACTOR = LEVEL + "Props_1"
 MESH = ACTOR + ".StaticMeshComponent0"
 BILLBOARD = ACTOR + ".MaterialBillboard"
+LAMP = LEVEL + "PointLight_1"
+LIGHT = LAMP + ".LightComponent0"
 SPHERE, CUBE = "/Engine/BasicShapes/Sphere.Sphere", "/Engine/BasicShapes/Cube.Cube"
 MATERIAL_A, MATERIAL_B = "/Engine/M_A.M_A", "/Engine/M_B.M_B"
 ELEMENT = {"Material": "", "BaseSizeX": 32, "BaseSizeY": 32, "bSizeIsInScreenSpace": False}
@@ -67,6 +77,10 @@ class FakeSet(set):
 
 
 NEVER = "NEVER"
+
+
+class Printed(str):
+    """An error body as Remote Control prints it: raw text, maybe not JSON."""
 
 
 class Obj:
@@ -106,12 +120,26 @@ class Obj:
             raise Exception(f"Failed to find property '{name}'")
         return self.props[name]  # the property itself, as UE returns a container
 
+    def modify(self, always_mark_dirty: bool = True) -> bool:
+        """UObject::Modify: recorded in an open transaction; the level marked changed only when asked."""
+        self.editor.modify(self)
+        if always_mark_dirty:
+            self.editor.dirty = True
+        return self.editor.record is not None
+
     def set_editor_property(self, name: str, value: Any, notify_mode: Any = None) -> None:
         if self.meta.get(name, {}).get("python_readonly"):
             raise Exception(f"Property '{name}' is read-only and cannot be set")
+        if value == self.props.get(name):
+            return  # identical: Unreal neither notifies nor records (an empty container emptied)
         if notify_mode != NEVER:
-            self.editor.modify(self)
-        self.props[name] = FakeArray(copy.deepcopy(list(value))) if isinstance(value, list) else copy.deepcopy(value)
+            self.modify()  # PreEditChange
+        if isinstance(value, list):
+            self.props[name] = FakeArray(copy.deepcopy(list(value)))
+        elif isinstance(value, dict) and isinstance(self.props.get(name), FakeMap):
+            self.props[name] = FakeMap(copy.deepcopy(dict(value)))
+        else:
+            self.props[name] = copy.deepcopy(value)
         if notify_mode != NEVER:
             self.editor.post_edit(self, name)
 
@@ -145,6 +173,8 @@ class Editor:
         self.writes: List[str] = []
         self.console: Dict[str, Any] = {"__name__": "__main__"}
         self.drop_batch_answer = False
+        self.dirty = False  # the level's package
+        self.lost_closes = 0  # requests running PROPERTY_END that never arrive
 
     # -- undo -----------------------------------------------------------------------
     def modify(self, obj: Obj) -> None:
@@ -255,8 +285,14 @@ class Editor:
                 "errorMessage": "Property is not writeable because it is protected without the AllowPrivateAccess "
                 "specifier set to true or a setter assigned."
             }
+        if meta.get("rc_refuses_printed"):
+            return 400, Printed(
+                '{ "errorMessage": "Property is not writeable because it is protected\nwithout the '
+                'AllowPrivateAccess specifier set to true or a setter assigned." }'
+            )
         self.writes.append(name)
-        self.modify(obj)  # Remote Control's PreEditChange
+        if not meta.get("setter"):
+            obj.modify()  # Remote Control's PreEditChange; the setter path calls no Modify
         value = body["propertyValue"][name]
         current = obj.props[name]
         if isinstance(current, list):
@@ -292,19 +328,29 @@ class Editor:
         if route == "/remote/object/property":
             return self.property(body)
         if route == "/remote/batch":
-            responses = []
+            # Each part's body goes in verbatim, as HandleBatchRequest writes it.
+            parts = []
             for request in body["Requests"]:
                 code, answer = self.dispatch(request["URL"], request["Body"])
-                responses.append({"RequestId": request["RequestId"], "ResponseCode": code, "ResponseBody": answer})
-            return 200, {"Responses": responses}
+                text = answer if isinstance(answer, Printed) else json.dumps(answer)
+                parts.append(f'{{"RequestId":{request["RequestId"]},"ResponseCode":{code},"ResponseBody":{text}}}')
+            return 200, Printed('{"Responses":[' + ",".join(parts) + "]}")
         return 404, {"errorMessage": "Route not found"}
 
     async def __call__(self, request: web.Request) -> web.StreamResponse:
-        code, answer = self.dispatch(request.path, await request.json())
+        body = await request.json()
+        command = str((body.get("parameters") or {}).get("PythonCommand", ""))
+        if request.path == "/remote/object/call" and self.lost_closes and "def end(" in command:
+            self.lost_closes -= 1
+            request.transport.close()  # it never arrives
+            raise ConnectionResetError
+        code, answer = self.dispatch(request.path, body)
         if request.path == "/remote/batch" and self.drop_batch_answer:
             self.drop_batch_answer = False
             request.transport.close()  # the batch ran; its answer is lost
             raise ConnectionResetError
+        if isinstance(answer, Printed):
+            return web.Response(text=str(answer), status=code, content_type="application/json")
         return web.json_response(answer, status=code)
 
     def open_transactions(self) -> Any:
@@ -313,7 +359,16 @@ class Editor:
 
 
 def _scene(editor: Editor) -> None:
-    actor = editor.add(Actor(editor, ACTOR, "StaticMeshActor", {"Tags": ["seed"], "bHidden": False}, {}, editor.world))
+    actor = editor.add(
+        Actor(
+            editor,
+            ACTOR,
+            "StaticMeshActor",
+            {"Tags": ["seed"], "bHidden": False, "Settings": FakeMap({"k": 1}), "PrintedRefusal": ["a", "b"]},
+            {"PrintedRefusal": {"rc_refuses_printed": True}},
+            editor.world,
+        )
+    )
 
     def trim(obj: Obj, name: str) -> None:  # CleanUpOverrideMaterials: one slot on a sphere
         if len(obj.props[name]) > 1:
@@ -332,12 +387,19 @@ def _scene(editor: Editor) -> None:
                 "ProtectedList": ["kept"],
             },
             {
-                "StaticMesh": {"object": True},
+                "StaticMesh": {"object": True, "setter": True},
                 "OverrideMaterials": {"objects": True, "post_edit": trim},
-                "Mobility": {"enum": ["Static", "Stationary", "Movable"]},
+                "Mobility": {"enum": ["Static", "Stationary", "Movable"], "setter": True},
+                "RelativeLocation": {"setter": True},
                 "ProtectedList": {"rc_refuses": True},
             },
             owner=actor,
+        )
+    )
+    lamp = editor.add(Actor(editor, LAMP, "PointLight", {"bHidden": False}, {}, editor.world))
+    editor.add(
+        ActorComponent(
+            editor, LIGHT, "PointLightComponent", {"Intensity": 5000.0}, {"Intensity": {"setter": True}}, owner=lamp
         )
     )
     editor.add(
@@ -487,12 +549,106 @@ async def test_a_value_unreal_does_not_take_is_put_back(name: str, value: str, e
 async def test_a_container_remote_control_refuses_to_write_gets_its_copy_back() -> None:
     """Python could empty it, Remote Control refused the write (a protected property)."""
     async with editor_session() as (session, editor):
-        with pytest.raises(UnrealError) as raised:
-            await session.set_actor_property(MESH, "ProtectedList", '["new"]')
+        result = await session.set_actor_property(MESH, "ProtectedList", '["new"]')
 
-    assert raised.value.error_type == "ValidationError"
+    assert (result["success"], result["error_type"], result["restored"]) == (False, "ValidationError", True)
+    assert result["value"] == ["kept"] and "put back" in result["error"]
     assert editor.objects[MESH].props["ProtectedList"] == ["kept"]
     assert editor.history == [] and editor.depth == 0 and editor.open_transactions() == {}
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_whose_message_breaks_the_batch_json_is_put_back() -> None:
+    """A protected property's refusal spans two lines, printed raw into the batch answer.
+
+    The answer was invalid JSON: the call raised JSONDecodeError and kept the
+    emptied container as an undo step ([1111, 2778] became []).
+    """
+    async with editor_session() as (session, editor):
+        result = await session.set_actor_property(ACTOR, "PrintedRefusal", '["x"]')
+
+    assert (result["success"], result["error_type"], result["restored"]) == (False, "ValidationError", True)
+    assert "not writeable because it is protected" in result["error"]
+    assert editor.objects[ACTOR].props["PrintedRefusal"] == ["a", "b"]
+    assert editor.history == [] and editor.depth == 0 and editor.open_transactions() == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path,name,value",
+    [
+        (LIGHT, "Intensity", "999"),
+        (MESH, "Mobility", '"Movable"'),
+        (MESH, "RelativeLocation", '{"X": 333, "Y": 0, "Z": 100}'),
+        (MESH, "StaticMesh", json.dumps(CUBE)),
+        (BILLBOARD, "Elements", '[{"BaseSizeX": 5}, {"BaseSizeX": 6}]'),
+    ],
+)
+async def test_a_write_through_a_setter_is_one_undo_step_and_marks_the_level_changed(
+    path: str, name: str, value: str
+) -> None:
+    """Remote Control's setter path calls no Modify: the write left no undo step and a clean level.
+
+    The next undo then reverted the edit before it, and a save of the changed
+    packages skipped the write.
+    """
+    async with editor_session() as (session, editor):
+        # An earlier, unrelated undo step, and a saved level.
+        editor.begin()
+        editor.objects[ACTOR].modify()
+        editor.objects[ACTOR].props["Tags"] = ["earlier"]
+        editor.end()
+        editor.dirty = False
+        before = copy.deepcopy(editor.objects[path].props[name])
+
+        result = await session.set_actor_property(path, name, value)
+
+        assert result["applied"] is True, result
+        assert editor.dirty is True
+        assert len(editor.history) == 2 and editor.depth == 0
+        editor.undo()
+        assert editor.objects[path].props[name] == before
+        assert editor.objects[ACTOR].props["Tags"] == ["earlier"]  # the earlier edit stays
+
+
+@pytest.mark.asyncio
+async def test_a_setter_write_put_back_leaves_the_level_unchanged() -> None:
+    async with editor_session() as (session, editor):
+        result = await session.set_actor_property(MESH, "StaticMesh", '"/Engine/BasicShapes/NoSuchMesh"')
+
+        assert (result["error_type"], result["restored"]) == ("PropertyNotApplied", True)
+        assert editor.dirty is False and editor.history == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name,value,code",
+    [
+        ("Tags", "5", "value_not_a_list"),
+        ("Tags", '{"a": 1}', "value_not_a_list"),
+        ("Tags", '"prop"', "value_not_a_list"),
+        ("Settings", '["k"]', "value_not_an_object"),
+    ],
+)
+async def test_a_value_of_another_shape_is_refused_before_the_container_is_emptied(
+    name: str, value: str, code: str
+) -> None:
+    """5 into Tags held ['None'] and {"a": 1} held [], both reported as success."""
+    async with editor_session() as (session, editor):
+        before = copy.deepcopy(editor.objects[ACTOR].props[name])
+        result = await session.set_actor_property(ACTOR, name, value)
+
+    assert (result["success"], result["error_type"], result["details"]) == (False, "ValidationError", {"code": code})
+    assert editor.objects[ACTOR].props[name] == before
+    assert editor.writes == [] and editor.history == [] and editor.open_transactions() == {}
+
+
+@pytest.mark.asyncio
+async def test_a_map_is_replaced_whole() -> None:
+    async with editor_session() as (session, editor):
+        result = await session.set_actor_property(ACTOR, "Settings", '{"j": 2}')
+
+    assert result["applied"] is True and editor.objects[ACTOR].props["Settings"] == {"j": 2}
 
 
 @pytest.mark.asyncio
@@ -505,15 +661,38 @@ async def test_a_struct_written_in_part_keeps_its_other_fields() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_lost_batch_answer_still_closes_the_transaction() -> None:
+async def test_a_lost_batch_answer_puts_the_previous_value_back() -> None:
+    """The batch ran and its answer was lost: the call fails, so the level is left as it was."""
     async with editor_session() as (session, editor):
         editor.drop_batch_answer = True
-        with pytest.raises(Exception):
-            await session.set_actor_property(ACTOR, "Tags", '["x"]')
+        result = await session.set_actor_property(ACTOR, "Tags", '["x"]')
 
-        assert editor.depth == 0 and editor.open_transactions() == {}
-        assert editor.objects[ACTOR].props["Tags"] == ["x"]  # the batch ran; its answer was lost
-        assert len(editor.history) == 1
+        assert (result["success"], result["error_type"], result["restored"]) == (False, "ConnectionError", True)
+        assert "whether the request ran is unknown" in result["error"]
+        assert editor.objects[ACTOR].props["Tags"] == ["seed"]
+        assert editor.depth == 0 and editor.open_transactions() == {} and editor.history == []
+
+
+@pytest.mark.asyncio
+async def test_a_transaction_whose_closes_were_lost_is_closed_by_the_next_write() -> None:
+    """Both closing requests lost: nesting stayed at 1, and the editor's undo waited on it."""
+    async with editor_session() as (session, editor):
+        editor.lost_closes = 2
+        first = await session.set_actor_property(ACTOR, "Tags", '["first"]')
+
+        assert first["applied"] is True and "stays open" in first["warning"]
+        assert editor.depth == 1 and len(editor.open_transactions()) == 1
+
+        second = await session.set_actor_property(ACTOR, "bHidden", "true")
+
+        assert second["applied"] is True and "warning" not in second
+        assert editor.depth == 0 and len(editor.history) == 2
+        # The first call's entry stays, transaction closed, for its own late close.
+        assert [entry["index"] for entry in editor.open_transactions().values()] == [None]
+        editor.undo()
+        assert editor.objects[ACTOR].props["bHidden"] is False
+        editor.undo()
+        assert editor.objects[ACTOR].props["Tags"] == ["seed"]
 
 
 # -- the target: the level's actors and components, as actor_at resolves them ----------
@@ -544,6 +723,21 @@ async def test_a_lost_batch_answer_still_closes_the_transaction() -> None:
             "/Game/BP.BP_C:Light_GEN_VARIABLE",
             "ValidationError",
             "component_template",
+        ),
+        (
+            lambda e: e.add(
+                ActorComponent(
+                    e,
+                    "/Script/Engine.Default__PointLight:LightComponent0",
+                    "PointLightComponent",
+                    {"Intensity": 1},
+                    {},
+                    owner=Actor(e, "/Script/Engine.Default__PointLight", "PointLight", {}, {}),
+                )
+            ),
+            "/Script/Engine.Default__PointLight:LightComponent0",
+            "ValidationError",
+            "class_default_object",
         ),
         (lambda e: None, LEVEL + "Gone_1", "NotFoundError", None),
         (lambda e: None, "/Game/Maps/NotOpen.NotOpen:PersistentLevel.Lamp_1", "NotFoundError", None),

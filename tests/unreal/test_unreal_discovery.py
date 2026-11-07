@@ -709,6 +709,43 @@ def test_ping_says_when_its_request_never_left_this_machine(
     assert (result.get("error_type") == PROBE_NOT_SENT) is not_sent
 
 
+@pytest.mark.asyncio
+async def test_ping_names_a_dropped_connection_and_a_refused_one() -> None:
+    """A dropped connection used to come back with an error and no error_type."""
+
+    async def drop(request: web.Request) -> web.Response:
+        request.transport.close()
+        raise ConnectionResetError
+
+    application = web.Application()
+    application.router.add_get("/remote/info", drop)
+    runner = web.AppRunner(application)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    base = Settings()
+    session = UnrealRuntimeSession(
+        base.model_copy(update={"unreal": base.unreal.model_copy(update={"host": "127.0.0.1", "port": port})})
+    )
+    try:
+        dropped = await session.ping()
+    finally:
+        await session.close()
+        await runner.cleanup()
+    refused = UnrealRuntimeSession(
+        base.model_copy(update={"unreal": base.unreal.model_copy(update={"host": "127.0.0.1", "port": port})})
+    )
+    try:
+        closed = await refused.ping()
+    finally:
+        await refused.close()
+
+    assert (dropped["reachable"], dropped["error_type"]) == (False, "ConnectionError"), dropped
+    assert "closed the connection" in dropped["error"]
+    assert (closed["reachable"], closed["error_type"]) == (False, "ConnectionError"), closed
+
+
 def test_ping_and_health_both_name_a_timeout() -> None:
     """A timeout's text is empty: neither probe reports a blank error."""
     session = UnrealRuntimeSession(Settings())
@@ -721,6 +758,7 @@ def test_ping_and_health_both_name_a_timeout() -> None:
     health = asyncio.run(session.health_check())
 
     assert ping["error"] == f"No answer within {session.ping_timeout}s"
+    assert ping["error_type"] == "TimeoutError"
     # Both probe /remote/info with ping_timeout, so a busy editor is reported
     # in seconds, not after the 30 s request timeout.
     assert health == {

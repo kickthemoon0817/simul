@@ -517,6 +517,8 @@ Behaviour worth knowing:
   backends share:
   - `ConnectionError`: nothing answered at the Remote Control endpoint, or
     the editor closed the connection without answering (it may have crashed).
+    For a change, whether it ran is then unknown: check the editor's state
+    before retrying. `ping_unreal` reports one with this type too.
   - `TimeoutError`: no answer within `UNREAL__TIMEOUT`. A script or a change
     may still be running in the editor, and Remote Control cannot cancel it,
     so check the editor's state before retrying.
@@ -659,18 +661,28 @@ Behaviour worth knowing:
     among loaded objects only, and nothing is written for a refusal:
     - an actor that is gone, of another map, loaded or not, or of the running
       Play In Editor world is `NotFoundError`, as above;
-    - an asset, class default object or component template is
-      `ValidationError`, with `details.code` `not_an_actor_or_component`,
-      `class_default_object` or `component_template`.
+    - an asset, a class default object or a component of one, and a component
+      template are `ValidationError`, with `details.code`
+      `not_an_actor_or_component`, `class_default_object` or
+      `component_template`.
   - **Containers.** An array, set or map is replaced whole, so `[]` empties
     it. That includes struct arrays and properties Remote Control writes
     through a setter, such as a MaterialBillboard's `Elements`. Remote
     Control's own write only adds to a container: by index, or appended for a
     setter. So the editor's Python API empties the container first, and a
     container Python cannot replace is refused (`container_not_replaceable`).
+    The new contents must be a JSON array for an array or set and a JSON
+    object for a map, or the call is refused before anything is emptied
+    (`value_not_a_list`, `value_not_an_object`): Remote Control wrote what it
+    could of another shape, `5` into `Tags` as `['None']`.
   - **The write.** Remote Control does the write, converting structs, enums by
     name and objects by path. It is one undo step, with the transaction kept
-    open until the read-back is compared. The write and the read-back go in
+    open until the read-back is compared. The object is recorded in that
+    transaction before anything changes, and the level is marked changed when
+    the write stays. Remote Control's own write of a property with a setter
+    (a light's `Intensity`, `Mobility`, `StaticMesh`, `RelativeLocation`)
+    records nothing: it used to leave no undo step, so the next undo reverted
+    the edit before it, and a save of the changed packages skipped it. The write and the read-back go in
     one Remote Control batch, so no editor tick runs between them, and a
     function call sits between the two. That call is what makes Remote
     Control finish the write: Unreal's `PostEditChangeProperty` runs only on
@@ -683,7 +695,16 @@ Behaviour worth knowing:
     value is then put back in the same transaction, which is cancelled, so the
     level is as it was and the call leaves no undo step; `restored` says
     whether it held. A write Remote Control refuses (an `EditConst` or
-    protected property) also gets its container's previous contents back.
+    protected property) is put back the same way and fails with Remote
+    Control's error type, `ValidationError`, and `restored`. So is a write
+    whose answer was lost (`ConnectionError`) or came back unreadable. A
+    refused write of a property without a setter still leaves the level
+    marked changed: Remote Control marks it before it writes, and Unreal
+    offers no way to clear a map package's flag.
+  - **Lost closing requests.** When neither request closing the transaction
+    is answered, the reply carries a `warning`, and the next
+    `set_unreal_actor_property` call ends that transaction first. Until then
+    the editor's undo waits on it.
   - **The reply.** It has `value`, `previous_value` and `applied`. `applied`
     is `null`, with a `warning`, when Unreal will not read the property back,
     or when the two values cannot be compared (an enum written as a number). A

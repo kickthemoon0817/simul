@@ -370,10 +370,16 @@ async def test_an_editor_that_drops_the_connection_may_have_crashed() -> None:
         raise ConnectionResetError
 
     async with editor(handler, max_retries=0) as session:
-        with pytest.raises(UnrealConnectionError) as raised:
+        with pytest.raises(UnrealConnectionError) as read:
+            await session._http_get("/remote/info")
+        with pytest.raises(UnrealConnectionError) as write:
             await session._http_put("/remote/object/property", WRITE_TAGS)
 
-    assert "may have crashed" in str(raised.value)
+    assert str(read.value).endswith("it may have crashed or be shutting down")
+    # A change may have run before the connection dropped: the editor did
+    # not necessarily crash, and the change is not necessarily lost.
+    assert "whether the request ran is unknown: check the editor's state before retrying" in str(write.value)
+    assert "may also have crashed" in str(write.value)
 
 
 @pytest.mark.asyncio

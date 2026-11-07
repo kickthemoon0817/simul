@@ -1052,7 +1052,7 @@ class TestUnrealRuntimeSessionPhase3:
         assert steps == [
             "preflight", "READ_ACCESS",
             ["batch", "call", "WRITE_ACCESS", "call", "READ_ACCESS"],
-            "close", "close",
+            "close",
         ]
 
     # -- call_actor_function --

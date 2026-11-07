@@ -41,6 +41,7 @@ from ._unreal_errors import (
     UnrealError,
     UnrealTimeoutError,
     UnrealValidationError,
+    parse_remote_control_json,
     remote_control_error,
     remote_control_error_type,
     remote_control_message,
@@ -547,6 +548,8 @@ def property_target(path, name):
         owner = owning_actor(obj)
         if owner is None:
             return refuse("component_template", path + " is a component template, not part of a level." + scope)
+        if owner.get_name().startswith("Default__"):
+            return refuse("class_default_object", path + " belongs to a class default object." + scope)
         actor_at(owner.get_path_name())
         if not unreal.SystemLibrary.is_valid(obj):
             raise SimulNotFound(_ACTOR_NOT_FOUND.format(path=path) + " (the component was removed)")
@@ -579,15 +582,30 @@ PROPERTY_TRANSACTIONS = "_simul_property_transactions"
 
 #: Opens set_actor_property's transaction and empties a container that is to
 #: be replaced whole; expects ``args`` = {"token", "path", "name",
-#: "transaction", "empty"} (the container kind, or None). The container is
-#: emptied with a fresh value: the one get_editor_property returns is the
-#: property itself, and clearing it in place would change it before
-#: set_editor_property's PreEditChange snapshots it for undo. A copy is filed
-#: under the token, so a write Unreal refuses can be undone through the Python
-#: API, which emptied it, even where Remote Control may not write (a protected
-#: property).
+#: "transaction", "empty"} (the container kind, or None).
+#:
+#: The object is recorded in the transaction first (``modify(False)``, which
+#: does not mark the level changed): for a property with a setter (a light's
+#: Intensity, Mobility, StaticMesh, RelativeLocation, Elements) Remote Control
+#: calls the setter with no transaction of its own and so never calls Modify
+#: (RemoteControlModule.cpp, CreateRCCall and InvokeCall with
+#: ERCTransactionMode::NONE): the write left no undo step, and the next undo
+#: reverted the edit before it. PROPERTY_END marks the level changed when the
+#: write stays.
+#:
+#: The container is emptied with a fresh value: the one get_editor_property
+#: returns is the property itself, and clearing it in place would change it
+#: before set_editor_property's PreEditChange snapshots it for undo. A copy is
+#: filed under the token, so a write Unreal refuses can be undone through the
+#: Python API, which emptied it, even where Remote Control may not write (a
+#: protected property).
+#:
+#: An entry another call left (both of its closing requests were lost) has
+#: its transaction ended first, as the write it made stays, or the editor's
+#: undo would wait on it and this call's transaction would nest inside it.
+#: Its copy stays for its own PROPERTY_END for ten minutes.
 PROPERTY_BEGIN = f"""
-import json, sys, types, unreal
+import json, sys, time, types, unreal
 
 def begin(args):
     registry = sys.modules.get({PROPERTY_TRANSACTIONS!r})
@@ -595,31 +613,42 @@ def begin(args):
         registry = types.ModuleType({PROPERTY_TRANSACTIONS!r})
         registry.open = {{}}
         sys.modules[{PROPERTY_TRANSACTIONS!r}] = registry
+    now, stale = time.time(), 0
+    for token, other in list(registry.open.items()):
+        if other["index"] is not None:
+            unreal.SystemLibrary.end_transaction()
+            other["index"] = None
+            stale += 1
+        other.setdefault("orphaned", now)
+        if now - other["orphaned"] > 600:
+            del registry.open[token]
     obj = unreal.find_object(None, args["path"])
     entry = {{"index": None, "path": args["path"], "name": args["name"], "previous": None}}
     if args["transaction"]:
         index = unreal.SystemLibrary.begin_transaction("simul", "Set " + args["name"], obj)
         entry["index"] = index if index >= 0 else None
+    obj.modify(False)
     if args["empty"]:
         entry["previous"] = obj.get_editor_property(args["name"]).copy()
-    if entry["index"] is not None or entry["previous"] is not None:
-        registry.open[args["token"]] = entry
+    registry.open[args["token"]] = entry
     if args["empty"]:
         obj.set_editor_property(args["name"], {{}} if args["empty"] == "map" else [])
-    return {{"transaction": entry["index"], "emptied": bool(args["empty"])}}
+    return {{"transaction": entry["index"], "emptied": bool(args["empty"]), "stale_closed": stale}}
 
 print(json.dumps(begin(args)))
 """
 
 #: Ends set_actor_property's call; expects ``args`` = {"token", "keep",
 #: "restore"}. With ``restore`` the container PROPERTY_BEGIN emptied gets its
-#: copy back. ``keep`` False cancels the transaction, dropping the undo record
-#: of a write that was rolled back by hand: Unreal's Cancel reverts nothing
-#: (UTransBuffer::Cancel) and cancels every nested transaction, so only one
-#: this call opened outermost is cancelled; otherwise it is ended. Does
-#: nothing for a token it no longer has. Being a function call, it also makes
-#: Remote Control finish the property write before it
-#: (TestOrFinalizeOngoingChange).
+#: copy back. With ``keep`` the write stays, and the level is marked changed
+#: (``modify()``): Remote Control's setter path does not mark it, so a save of
+#: the changed packages skipped the write. ``keep`` False cancels the
+#: transaction, dropping the undo record of a write that was rolled back by
+#: hand: Unreal's Cancel reverts nothing (UTransBuffer::Cancel) and cancels
+#: every nested transaction, so only one this call opened outermost is
+#: cancelled; otherwise it is ended. Does nothing for a token it no longer
+#: has. Being a function call, it also makes Remote Control finish the
+#: property write before it (TestOrFinalizeOngoingChange).
 PROPERTY_END = f"""
 import json, sys, unreal
 
@@ -628,10 +657,13 @@ def end(args):
     entry = registry.open.pop(args["token"], None) if registry is not None else None
     if entry is None:
         return {{"closed": None, "restored": False}}
+    obj = unreal.find_object(None, entry["path"])
     restored = False
-    if args["restore"] and entry["previous"] is not None:
-        unreal.find_object(None, entry["path"]).set_editor_property(entry["name"], entry["previous"])
+    if args["restore"] and entry["previous"] is not None and obj is not None:
+        obj.set_editor_property(entry["name"], entry["previous"])
         restored = True
+    if args["keep"] and obj is not None:
+        obj.modify()
     closed = None
     if entry["index"] is not None:
         if not args["keep"] and entry["index"] == 0:
@@ -650,6 +682,15 @@ print(json.dumps(end(args)))
 #: (RemoteControl.EnableOngoingChangeOptimization, on by default), so this
 #: call goes between a write and the read that checks it.
 PROPERTY_FINISH = 'import json\nprint(json.dumps({"finished": True}))\n'
+
+
+#: What a container property's new value must be: the JSON type, how to say
+#: it, and the refusal's ``details.code``.
+_CONTAINER_VALUES: Dict[str, Tuple[type, str, str]] = {
+    "array": (list, "a JSON array ([] empties it)", "value_not_a_list"),
+    "set": (list, "a JSON array ([] empties it)", "value_not_a_list"),
+    "map": (dict, "a JSON object ({} empties it)", "value_not_an_object"),
+}
 
 
 def _batch_failure(answer: Dict[str, Any], route: str) -> Optional[UnrealError]:
@@ -1389,7 +1430,19 @@ class UnrealRuntimeSession(LoggerMixin):
                             "image_bytes": await resp.read(),
                             "content_type": resp.headers.get("Content-Type", ""),
                         }
-                    data: Dict[str, Any] = await resp.json()
+                    try:
+                        data: Dict[str, Any] = await resp.json()
+                    except ValueError:
+                        # A batch answer embeds Remote Control's error bodies
+                        # raw, unescaped messages and all.
+                        try:
+                            data = parse_remote_control_json(await _response_text(resp))
+                        except ValueError as exc:
+                            raise UnrealError(
+                                f"Remote Control answered {method} {path} with JSON simul cannot read: {exc}",
+                                ENGINE_ERROR,
+                                details={"route": path},
+                            ) from exc
                     return data
 
             except Exception as exc:
@@ -1512,10 +1565,17 @@ class UnrealRuntimeSession(LoggerMixin):
         if connection_failed:
             address = f"{self.host}:{self.port}"
             if aiohttp is not None and isinstance(exc, aiohttp.ServerDisconnectedError):
-                message = (
-                    f"The editor at {address} closed the connection without answering {method} {path}: "
-                    "it may have crashed or be shutting down"
-                )
+                if retry_safe:
+                    message = (
+                        f"The editor at {address} closed the connection without answering {method} {path}: "
+                        "it may have crashed or be shutting down"
+                    )
+                else:
+                    message = (
+                        f"The editor at {address} closed the connection without answering {method} {path}, "
+                        "so whether the request ran is unknown: check the editor's state before retrying "
+                        "(the editor may also have crashed or be shutting down)"
+                    )
             else:
                 message = f"Cannot reach Remote Control at {address} ({exc})"
             error = UnrealConnectionError(message, CONNECTION_ERROR, details=details)
@@ -1830,6 +1890,10 @@ class UnrealRuntimeSession(LoggerMixin):
             status = _http_status(exc)
             if status is not None:
                 failure["status"] = status
+            if isinstance(exc, UnrealError):
+                failure["error_type"] = exc.error_type
+            else:
+                failure["error_type"] = TIMEOUT_ERROR if isinstance(exc, asyncio.TimeoutError) else CONNECTION_ERROR
             not_sent = _not_sent(exc)
             if not_sent is not None:
                 failure["error"] = not_sent
@@ -3430,66 +3494,162 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 "error_type": VALIDATION_ERROR,
                 "details": {"code": "container_not_replaceable"},
             }
+        shape = _CONTAINER_VALUES.get(container or "")
+        if shape is not None and not isinstance(parsed_value, shape[0]):
+            # Remote Control writes what it can of a value of another shape (5
+            # into Tags held ['None']), and the container emptied for the write
+            # would be lost.
+            return {
+                **result,
+                "success": False,
+                "error": (
+                    f"{property_name} is {'a map' if container == 'map' else f'an {container}'}: give its new "
+                    f"contents as {shape[1]}. Nothing was written"
+                ),
+                "error_type": VALIDATION_ERROR,
+                "details": {"code": shape[2]},
+            }
         if "value" in previous:
             result["previous_value"] = previous["value"]
 
         token = uuid.uuid4().hex
         try:
-            written, read_back = await self._property_write(
-                token, actor_path, property_name, parsed_value, container, generate_transaction
+            payload = await self._property_set(
+                token, actor_path, property_name, parsed_value, container, generate_transaction, previous, result
             )
-            if isinstance(written, UnrealError):
-                # The container was emptied, or the write landed after a failed
-                # preparation: put the previous value back before reporting.
-                await self._property_restore(
-                    token, actor_path, property_name, previous.get("value", _MISSING), container
+        except BaseException:
+            # Closes the transaction only if this call still has it open; its
+            # own failure must not hide what went wrong first.
+            await self._property_close_quietly(token)
+            raise
+        unclosed = await self._property_close_quietly(token)
+        if unclosed is not None:
+            payload["warning"] = f"{payload['warning']} {unclosed}" if payload.get("warning") else unclosed
+        return payload
+
+    async def _property_set(
+        self,
+        token: str,
+        path: str,
+        name: str,
+        value: Any,
+        container: Optional[str],
+        transaction: bool,
+        previous: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Write, read back and compare one property, rolling back what Unreal did not take.
+
+        Leaves this call's transaction open when the write stays;
+        ``set_actor_property`` closes it.
+        """
+        try:
+            written, read_back = await self._property_write(token, path, name, value, container, transaction)
+        except UnrealError as exc:
+            if _not_sent(exc) is not None:
+                raise  # it never left this machine: nothing ran
+            # The batch may have run: its answer was lost, or could not be read.
+            return await self._property_rolled_back(token, path, name, previous, container, result, exc)
+        if isinstance(written, UnrealError):
+            # Remote Control refused the write, or the write landed after a
+            # failed preparation; a container was emptied either way.
+            return await self._property_rolled_back(token, path, name, previous, container, result, written)
+        if "value" not in read_back:
+            return {**result, "applied": None, "value": None, "warning": read_back["warning"]}
+        now = read_back["value"]
+        applied = _json_value_matches(value, now)
+        if applied is not False:
+            done = {**result, "value": now, "applied": applied}
+            if applied is None:
+                done["warning"] = (
+                    f"Wrote {name}, but its value read back ({json.dumps(now)}) cannot be compared "
+                    f"with the one written ({json.dumps(value)}); check it"
                 )
-                raise written
-            if "value" not in read_back:
-                await self._property_close(token, keep=True)
-                return {**result, "applied": None, "value": None, "warning": read_back["warning"]}
-            value = read_back["value"]
-            applied = _json_value_matches(parsed_value, value)
-            if applied is not False:
-                await self._property_close(token, keep=True)
-                result.update(value=value, applied=applied)
-                if applied is None:
-                    result["warning"] = (
-                        f"Wrote {property_name}, but its value read back ({json.dumps(value)}) cannot be compared "
-                        f"with the one written ({json.dumps(parsed_value)}); check it"
-                    )
-                return result
+            return done
+        after, natively = await self._property_restore(token, path, name, previous.get("value", _MISSING), container)
+        held = after.get("value", now)
+        if "value" in previous and "value" in after:
+            restored = _json_value_matches(previous["value"], held) is not False
+        else:
+            restored = natively
+        return {
+            **result,
+            "value": held,
+            "applied": False,
+            "restored": restored,
+            "success": False,
+            "error": (
+                f"Unreal holds {json.dumps(now)} for {name}, not {json.dumps(value)}: it did "
+                "not take the value as written"
+                + (", so the previous value was put back" if restored else ", and the previous value could not "
+                   "be put back: check it")
+            ),
+            "error_type": "PropertyNotApplied",
+            "details": {"expected": value, "actual": now},
+        }
+
+    async def _property_rolled_back(
+        self,
+        token: str,
+        path: str,
+        name: str,
+        previous: Dict[str, Any],
+        container: Optional[str],
+        result: Dict[str, Any],
+        error: UnrealError,
+    ) -> Dict[str, Any]:
+        """Put the previous value back after a failed write, and report the failure.
+
+        Raises:
+            UnrealError: ``error`` itself, when the previous value could not be
+                put back either (the editor is gone).
+        """
+        try:
             after, natively = await self._property_restore(
-                token, actor_path, property_name, previous.get("value", _MISSING), container
+                token, path, name, previous.get("value", _MISSING), container
             )
-            now = after.get("value", value)
-            if "value" in previous and "value" in after:
-                restored = _json_value_matches(previous["value"], now) is not False
-            else:
-                restored = natively
-            return {
-                **result,
-                "value": now,
-                "applied": False,
-                "restored": restored,
-                "success": False,
-                "error": (
-                    f"Unreal holds {json.dumps(value)} for {property_name}, not {json.dumps(parsed_value)}: it did "
-                    "not take the value as written"
-                    + (", so the previous value was put back" if restored else ", and the previous value could not "
-                       "be put back: check it")
-                ),
-                "error_type": "PropertyNotApplied",
-                "details": {"expected": parsed_value, "actual": value},
-            }
-        finally:
-            # Idempotent: closes the transaction only if this call still has it
-            # open (every exit, a lost answer included). Its own failure must not
-            # hide what went wrong first.
+        except UnrealError as restore_failure:
+            self.logger.warning("Could not put %s back after a failed write: %s", name, restore_failure)
+            raise error
+        if "value" in previous and "value" in after:
+            restored = _json_value_matches(previous["value"], after["value"]) is not False
+        else:
+            restored = natively
+        failed: Dict[str, Any] = {
+            **result,
+            "success": False,
+            "error": str(error)
+            + (". The previous value was put back" if restored else ". The previous value could not be put back: "
+               "check it"),
+            "error_type": error.error_type,
+            "restored": restored,
+        }
+        if "value" in after:
+            failed["value"] = after["value"]
+        if error.details:
+            failed["details"] = error.details
+        return failed
+
+    async def _property_close_quietly(self, token: str) -> Optional[str]:
+        """End this call's transaction if it is still open, trying twice.
+
+        Returns:
+            None, or a warning when neither try was answered: the transaction
+            stays open, and the next ``set_actor_property`` closes it
+            (PROPERTY_BEGIN).
+        """
+        failure: Optional[Exception] = None
+        for _attempt in range(2):
             try:
                 await self._property_close(token, keep=True)
+                return None
             except Exception as exc:
+                failure = exc
                 self.logger.warning("Could not close the property write's undo transaction: %s", exc)
+        return (
+            f"The request closing this write's undo transaction got no answer ({failure}): it stays open, and "
+            "the editor's undo waits, until the next set_unreal_actor_property call closes it"
+        )
 
     async def _property_write(
         self,
