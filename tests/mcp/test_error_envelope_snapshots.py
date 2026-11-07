@@ -406,15 +406,26 @@ def _raising(exc: BaseException) -> Any:
     return operator
 
 
+class _Objects(dict):
+    """bpy.data.objects: looked up by name, iterated over its objects."""
+
+    def __iter__(self) -> Any:
+        return iter(list(self.values()))
+
+
 def _stand_in_bpy() -> SimpleNamespace:
     """Just enough of bpy for the physics tools, with operators that fail like Blender 5.0's."""
     cube = SimpleNamespace(
-        name="Cube", type="MESH", rigid_body=None, select_set=lambda value: None
+        name="Cube",
+        type="MESH",
+        rigid_body=None,
+        select_set=lambda value: None,
+        as_pointer=lambda: 1,
     )
     scene = SimpleNamespace(rigidbody_world=SimpleNamespace(), objects={"Cube": cube})
     return SimpleNamespace(
         app=SimpleNamespace(version=(5, 0, 1), version_string="5.0.1", background=True),
-        data=SimpleNamespace(objects={"Cube": cube}),
+        data=SimpleNamespace(objects=_Objects(Cube=cube)),
         context=SimpleNamespace(
             scene=scene,
             view_layer=SimpleNamespace(objects=SimpleNamespace(active=None)),

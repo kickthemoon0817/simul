@@ -54,6 +54,7 @@ def fake_bpy(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """A bpy whose effector_add records its arguments and makes the field active."""
     calls: List[Dict[str, Any]] = []
     context = SimpleNamespace(active_object=None, evaluated_depsgraph_get=lambda: None)
+    objects: List[Any] = []
 
     def effector_add(**kwargs: Any) -> set:
         calls.append(kwargs)
@@ -74,11 +75,14 @@ def fake_bpy(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             ),
             evaluated_get=lambda depsgraph: SimpleNamespace(matrix_world=_Matrix(location)),
         )
+        context.active_object.as_pointer = lambda: id(context.active_object)
+        objects.append(context.active_object)
         return {"FINISHED"}
 
     fake = SimpleNamespace(
         app=SimpleNamespace(version=(5, 0, 1)),
         context=context,
+        data=SimpleNamespace(objects=objects),
         ops=SimpleNamespace(object=SimpleNamespace(effector_add=effector_add)),
         effector_calls=calls,
     )

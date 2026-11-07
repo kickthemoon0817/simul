@@ -27,6 +27,13 @@ POLL_FAILED = (
 REPORTED = "Error: Cannot open file /x.blend@ for writing: Permission denied\n"
 
 
+class _Objects(dict):
+    """bpy.data.objects: looked up by name, iterated over its objects."""
+
+    def __iter__(self) -> Any:
+        return iter(list(self.values()))
+
+
 def _raising(exc: BaseException) -> Any:
     def operator(*args: Any, **kwargs: Any) -> Any:
         raise exc
@@ -37,7 +44,9 @@ def _raising(exc: BaseException) -> Any:
 def _session(
     monkeypatch: pytest.MonkeyPatch, ops: Dict[str, Any], tmp_path: Path
 ) -> Any:
-    cube = SimpleNamespace(name="Cube", type="MESH", select_set=lambda value: None)
+    cube = SimpleNamespace(
+        name="Cube", type="MESH", select_set=lambda value: None, as_pointer=lambda: 1
+    )
     world = SimpleNamespace(
         enabled=True,
         time_scale=1.0,
@@ -58,7 +67,7 @@ def _session(
     fake = SimpleNamespace(
         app=SimpleNamespace(version=(5, 0, 1), version_string="5.0.1", background=True),
         data=SimpleNamespace(
-            objects={"Cube": cube}, filepath=str(tmp_path / "scene.blend")
+            objects=_Objects(Cube=cube), filepath=str(tmp_path / "scene.blend")
         ),
         context=SimpleNamespace(
             scene=scene,
