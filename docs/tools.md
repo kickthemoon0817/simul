@@ -974,6 +974,65 @@ Behaviour worth knowing:
   imported root objects, and `warning` names roots whose transform is animated.
   `save_blender_file` accepts only `.blend` paths, since the saved file becomes
   the open document.
+- `export_simready_usd` writes an asset a simulator reads, not just Blender's
+  geometry. After Blender's USD exporter runs, the export authors from each
+  object's `simready_` metadata (`apply_simready_metadata`):
+  - `is_rigid_body`: `UsdPhysics.RigidBodyAPI` on the object's prim;
+    `mass_kg` and `density`: `MassAPI` (density converted from kg/m³ to the
+    stage's units);
+  - `collider_type`: `CollisionAPI` plus a `MeshCollisionAPI` approximation
+    on the object's meshes (`convexHull`, `convexDecomposition`,
+    `meshSimplification`, `none` for the triangle mesh, `boundingCube`,
+    `boundingSphere`; the older `mesh`, `box`, `sphere` and `capsule` are
+    written as `none`, `boundingCube`, `boundingSphere` and `convexHull`, as
+    UsdPhysics has no capsule approximation of a mesh);
+  - `static_friction`, `dynamic_friction`, `restitution`: a physics material
+    (`UsdPhysics.MaterialAPI` on a `UsdShade.Material` under
+    `<asset root>/PhysicsMaterials`) bound to those colliders with the
+    `physics` purpose;
+  - the semantic fields: `UsdSemantics.LabelsAPI` labels in the taxonomies
+    `class`, `hierarchy`, `qcode` and each additional label's key. A Blender
+    whose bundled USD has no UsdSemantics module gets Isaac Sim's
+    older `SemanticsAPI:Semantics_<taxonomy>` attributes instead;
+    `semantics.labels_schema` in the result says which.
+
+  `collider_type` and the friction values also apply to the meshes of
+  descendants that set none of their own, so metadata on an asset root makes
+  all its meshes collide; rigid body and mass stay on the object that sets
+  them. The result's `warnings` name a rigid body without a collider, nested
+  rigid bodies, a triangle-mesh collider on a dynamic body, and stored values
+  that are not valid numbers, which are left out. The asset root is the default
+  prim (kind `component`): the one top-level object, or an Xform named after
+  the file when several objects share the top level. Blender's `/root`
+  container goes, and the render materials move to `<asset root>/Looks`.
+  `metersPerUnit` is the scene's Unit Scale, with the coordinates left in
+  Blender units, `upAxis` is Z and `kilogramsPerUnit` 1. The result lists each
+  written object's prim path in `prims`; `object_count` counts the objects
+  written.
+
+  Listed objects are exported with their descendants (`include_children`),
+  also when they are hidden: the export shows them for Blender's exporter and
+  hides them again. A descendant, or with `object_names` null a scene object,
+  that is hidden in renders is left out and named in `skipped_objects`, as are
+  lights and cameras; `include_lights_and_cameras: true` keeps those and the
+  World's dome light. An empty `object_names` is refused. When validation finds
+  an error, nothing is written and the call fails with `SimReadyValidationFailed`
+  and the issues, unless `force: true`. Like `export_blender_file`, it writes
+  `file_path` exactly (a missing folder is created) and lists `files_written`,
+  applies modifiers, leaves Edit, Pose and paint modes for the export (so
+  unsaved mesh edits are written) and enters them again, and restores the
+  selection; a SimReady asset is static, so animation is left out. Blender
+  writes next to the destination and the authored layer replaces the file only
+  at the end; a `.usdz` is packaged from a `.usdc` with its textures. With `embed_metadata` (the default) the
+  `simready_` properties stay as `userProperties` attributes too, and Blender's
+  USD import reads them back as custom properties. The importer names an object
+  merged with its single mesh after the mesh, and imports the `Looks` and
+  `PhysicsMaterials` scopes as empties.
+- `validate_simready_compliance` judges sizes in real-world metres: a mesh's
+  world-space size times the scene's Unit Scale (`meters_per_unit` in the
+  result). Above 100 m or below 1 mm is an error, as the scene's units are then
+  not the ones the part was modelled in (a 0.5 m part modelled in millimetres
+  measures 500 m in a metre scene); above 20 m is a warning.
 - Rigid bodies simulate only inside the rigid-body world's cache range
   (`rigid_body_cache` in the replies of `get_blender_rigid_body_world`,
   `get_blender_physics_state`, `bake_blender_simulation`, `free_blender_bake`
