@@ -36,18 +36,43 @@ class _Adapter(AvailableAdapter):
         yield self._session
 
 
+class _Matrix:
+    """An unrotated world matrix at ``location``, indexed [row][column] like mathutils'."""
+
+    def __init__(self, location: List[float]) -> None:
+        self.translation = location
+
+    def __getitem__(self, row: int) -> List[float]:
+        return [1.0 if row == column else 0.0 for column in range(3)]
+
+    def to_euler(self, order: str) -> List[float]:
+        return [0.0, 0.0, 0.0]
+
+
 @pytest.fixture
 def fake_bpy(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """A bpy whose effector_add records its arguments and makes the field active."""
     calls: List[Dict[str, Any]] = []
-    context = SimpleNamespace(active_object=None)
+    context = SimpleNamespace(active_object=None, evaluated_depsgraph_get=lambda: None)
 
     def effector_add(**kwargs: Any) -> set:
         calls.append(kwargs)
+        location = list(kwargs["location"])
         context.active_object = SimpleNamespace(
             name="Field",
-            location=list(kwargs["location"]),
-            field=SimpleNamespace(type=kwargs["type"], strength=1.0),
+            location=location,
+            field=SimpleNamespace(
+                type=kwargs["type"],
+                strength=1.0,
+                shape="POINT",
+                flow=0.0,
+                falloff_type="SPHERE",
+                falloff_power=0.0,
+                use_max_distance=False,
+                distance_max=0.0,
+                noise=0.0,
+            ),
+            evaluated_get=lambda depsgraph: SimpleNamespace(matrix_world=_Matrix(location)),
         )
         return {"FINISHED"}
 
@@ -115,7 +140,15 @@ def test_a_field_without_location_is_added_at_the_origin(
 
     assert result["success"] is True, result
     assert result["location"] == [0.0, 0.0, 0.0]
-    assert fake_bpy.effector_calls == [{"type": "WIND", "location": (0.0, 0.0, 0.0)}]
+    # Placed in world space whatever the user's Align preference.
+    assert fake_bpy.effector_calls == [
+        {
+            "type": "WIND",
+            "align": "WORLD",
+            "location": (0.0, 0.0, 0.0),
+            "rotation": (0.0, 0.0, 0.0),
+        }
+    ]
     assert fake_bpy.context.active_object.field.strength == 2.5
 
 
@@ -131,4 +164,11 @@ def test_an_explicit_location_is_used_and_still_validated(
     assert placed["location"] == [1.0, 2.0, 3.0]
     assert refused["success"] is False
     assert refused["error_type"] == "ValidationError"
-    assert fake_bpy.effector_calls == [{"type": "FORCE", "location": (1.0, 2.0, 3.0)}]
+    assert fake_bpy.effector_calls == [
+        {
+            "type": "FORCE",
+            "align": "WORLD",
+            "location": (1.0, 2.0, 3.0),
+            "rotation": (0.0, 0.0, 0.0),
+        }
+    ]

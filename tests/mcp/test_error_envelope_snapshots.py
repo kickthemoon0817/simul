@@ -14,6 +14,7 @@ derived from the same source rather than written out.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
@@ -415,6 +416,7 @@ def _stand_in_bpy() -> SimpleNamespace:
         context=SimpleNamespace(
             scene=scene,
             view_layer=SimpleNamespace(objects=SimpleNamespace(active=None)),
+            temp_override=lambda **members: contextlib.nullcontext(),
         ),
         ops=SimpleNamespace(
             rigidbody=SimpleNamespace(object_add=_raising(RuntimeError(POLL_FAILED))),
@@ -456,19 +458,24 @@ def test_blender_bpy_failure_with_object_context(
 def test_blender_bpy_failure_without_added_context(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A bad enum is a TypeError from bpy, whose message already lists the valid values.
+    """An operator's TypeError keeps its class and bpy's message, which says enough.
 
     The wrapper that restated the field type, and re-raised the TypeError as a
-    RuntimeError, is gone.
+    RuntimeError, is gone. A type Blender does not know never reaches bpy now:
+    the request model lists the valid ones.
     """
     instance = _embedded_blender(monkeypatch, tmp_path)
 
+    refused = _call(instance, "add_blender_force_field", field_type="BOGUS")
     payload = _call(
         instance,
         "add_blender_force_field",
-        field_type="BOGUS",
+        field_type="WIND",
         location=[0.0, 0.0, 0.0],
     )
+
+    assert refused["error_type"] == "ValidationError"
+    assert "'FORCE', 'WIND'" in refused["error"]
 
     message = ENUM_MISSING
     assert payload == {
@@ -478,7 +485,8 @@ def test_blender_bpy_failure_without_added_context(
         "details": None,
     }
     assert _records(instance, "add_blender_force_field") == [
-        {"success": False, "error": message}
+        {"success": False, "error": refused["error"]},
+        {"success": False, "error": message},
     ]
 
 

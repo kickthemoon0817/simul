@@ -164,7 +164,7 @@ def test_file_failures_name_the_resolved_path(
         ("wm", "save_mainfile", lambda s: s.save_blend_file()),
         ("screen", "animation_cancel", lambda s: s.play_animation("stop")),
         ("screen", "animation_play", lambda s: s.play_animation("play")),
-        ("object", "effector_add", lambda s: s.add_force_field("BOGUS")),
+        ("object", "effector_add", lambda s: s.add_force_field("WIND")),
         ("ptcache", "bake_from_cache", lambda s: s.bake_simulation(1, 10)),
         ("ptcache", "free_bake", lambda s: s.free_bake()),
     ],

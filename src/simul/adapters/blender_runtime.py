@@ -2058,50 +2058,115 @@ class BlenderRuntimeSession:
         collision_shape: str = "CONVEX_HULL",
         linear_damping: float = 0.04,
         angular_damping: float = 0.1,
+        kinematic: Optional[bool] = None,
+        collision_margin: Optional[float] = None,
+        collision_collections: Optional[List[int]] = None,
+        use_deactivation: Optional[bool] = None,
+        start_deactivated: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
-        Set up rigid body physics on a Blender object.
+        Set up rigid body physics on a mesh object, or replace its settings.
+
+        Every argument is checked before anything changes, and a failure
+        leaves the scene as it was: no new world, rigid body or selection
+        change. The settings before kinematic are written on every call;
+        kinematic, collision_margin, collision_collections, use_deactivation
+        and start_deactivated change only when given (a new body starts with
+        Blender's defaults).
 
         Args:
-            object_name: Name of the target object.
-            body_type: ACTIVE (dynamic) or PASSIVE (static).
-            mass: Mass in kilograms.
-            friction: Surface friction coefficient.
-            restitution: Bounciness (0-1).
-            collision_shape: Collision shape type.
-            linear_damping: Linear damping factor.
-            angular_damping: Angular damping factor.
+            object_name: Name of the target mesh object.
+            body_type: ACTIVE (simulated) or PASSIVE (static or animated collider).
+            mass: Mass in kilograms, at least 0.001.
+            friction: Surface friction coefficient, 0 or more.
+            restitution: Bounciness from 0 (none) to 1 (fully elastic).
+            collision_shape: BOX, SPHERE, CAPSULE, CYLINDER, CONE, CONVEX_HULL,
+                MESH or COMPOUND (a compound of the children's shapes).
+            linear_damping: Fraction of linear velocity lost per second, 0-1.
+            angular_damping: Fraction of angular velocity lost per second, 0-1.
+            kinematic: Animated: the body follows its own animation and pushes
+                simulated bodies instead of being simulated.
+            collision_margin: Collision margin in meters, 0-1; omitted keeps
+                Blender's automatic margin for a new body.
+            collision_collections: Collision collections (0-19) the body is
+                in; bodies collide only when they share one. A new body is in 0.
+            use_deactivation: Let the body go to sleep when it nearly stops.
+            start_deactivated: Start asleep until something hits it
+                (needs use_deactivation).
 
         Returns:
-            Dict with object_name, body_type, mass, collision_shape.
+            Dict with object_name, the settings as Blender stored them,
+            world_created and replaced (whether the object already had a
+            rigid body).
         """
         blender_module: Any = bpy
         obj = self._get_object_or_raise(object_name)
+        body_type = self._choice("body_type", body_type, self._BODY_TYPES)
+        collision_shape = self._choice(
+            "collision_shape", collision_shape, self._COLLISION_SHAPES
+        )
+        self._check_range("mass", mass, 0.001)
+        self._check_range("friction", friction, 0.0)
+        self._check_range("restitution", restitution, 0.0, 1.0)
+        self._check_range("linear_damping", linear_damping, 0.0, 1.0)
+        self._check_range("angular_damping", angular_damping, 0.0, 1.0)
+        if collision_margin is not None:
+            self._check_range("collision_margin", collision_margin, 0.0, 1.0)
+        if collision_collections is not None:
+            collision_collections = sorted(set(int(i) for i in collision_collections))
+            if any(not 0 <= i < 20 for i in collision_collections):
+                raise ValueError("collision_collections are numbered 0 to 19")
+        if obj.type != "MESH":
+            raise ValueError(
+                f"Rigid bodies need a mesh object, and '{object_name}' is a "
+                f"{obj.type} object; convert it to a mesh first"
+            )
 
         scene = blender_module.context.scene
-        self._ensure_rigid_body_world(scene)
-
-        blender_module.context.view_layer.objects.active = obj
-        obj.select_set(True)
-        _bpy_op(
-            f"Failed to add rigid body to '{object_name}'",
-            blender_module.ops.rigidbody.object_add,
-            type=body_type.upper(),
-        )
-
-        rb = obj.rigid_body
-        rb.mass = mass
-        rb.friction = friction
-        rb.restitution = restitution
-        rb.collision_shape = collision_shape.upper()
-        rb.linear_damping = linear_damping
-        rb.angular_damping = angular_damping
+        previous = self._rigid_body_snapshot(getattr(obj, "rigid_body", None))
+        _, world_created = self._ensure_rigid_body_world(scene)
+        try:
+            # Under an override the operator acts on this object alone and the
+            # user's selection and active object stay as they were.
+            with blender_module.context.temp_override(
+                object=obj,
+                active_object=obj,
+                selected_objects=[obj],
+                selected_editable_objects=[obj],
+            ):
+                _bpy_op(
+                    f"Failed to add rigid body to '{object_name}'",
+                    blender_module.ops.rigidbody.object_add,
+                    type=body_type,
+                )
+            rb = obj.rigid_body
+            rb.type = body_type
+            rb.mass = mass
+            rb.friction = friction
+            rb.restitution = restitution
+            rb.collision_shape = collision_shape
+            rb.linear_damping = linear_damping
+            rb.angular_damping = angular_damping
+            if kinematic is not None:
+                rb.kinematic = kinematic
+            if collision_margin is not None:
+                rb.use_margin = True
+                rb.collision_margin = collision_margin
+            if collision_collections is not None:
+                rb.collision_collections = [i in collision_collections for i in range(20)]
+            if use_deactivation is not None:
+                rb.use_deactivation = use_deactivation
+            if start_deactivated is not None:
+                rb.use_start_deactivated = start_deactivated
+        except Exception:
+            self._restore_rigid_body(scene, obj, previous, world_created)
+            raise
 
         return {
             "object_name": object_name,
-            "body_type": rb.type,
-            "mass": rb.mass,
-            "collision_shape": rb.collision_shape,
+            **self._rigid_body_report(obj.rigid_body),
+            "world_created": world_created,
+            "replaced": previous is not None,
         }
 
     def add_force_field(
@@ -2110,58 +2175,112 @@ class BlenderRuntimeSession:
         strength: float = 1.0,
         location: Optional[List[float]] = None,
         name: Optional[str] = None,
+        direction: Optional[List[float]] = None,
+        shape: Optional[str] = None,
+        flow: Optional[float] = None,
+        falloff_type: Optional[str] = None,
+        falloff_power: Optional[float] = None,
+        distance_max: Optional[float] = None,
+        noise: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Add a force field to the scene.
+        Add a force field to the scene, oriented in world space.
+
+        The field's local +Z (the direction WIND blows, the axis VORTEX turns
+        about, a PLANE shape's normal) points along direction, world +Z when
+        omitted, whatever the editor's Align preference. Settings left out
+        keep Blender's defaults.
 
         Args:
-            field_type: Force field type (FORCE, WIND, VORTEX, etc.).
+            field_type: FORCE, WIND, VORTEX, MAGNET, HARMONIC, CHARGE, LENNARDJ,
+                TEXTURE, GUIDE, BOID, TURBULENCE, DRAG or FLUID.
             strength: Field strength.
             location: World-space XYZ location; the world origin when omitted.
             name: Optional name for the field object.
+            direction: World-space direction of the field's local +Z axis.
+            shape: POINT, LINE, PLANE, SURFACE or POINTS.
+            flow: Air flow: how strongly the field also drags toward its speed.
+            falloff_type: SPHERE, TUBE or CONE.
+            falloff_power: How fast the field weakens with distance, 0-10.
+            distance_max: Distance past which the field has no effect; 0 or
+                omitted for no limit.
+            noise: Random noise in the field, 0-10.
 
         Returns:
-            Dict with name, field_type, strength, location.
+            Dict with name, field_type, strength, location, rotation_euler,
+            direction, shape, flow, falloff_type, falloff_power, distance_max
+            and noise.
         """
         blender_module: Any = bpy
-        loc = (0.0, 0.0, 0.0) if location is None else tuple(location)
+        field_type = self._field_type(field_type)
+        self._check_range("strength", strength)
+        loc = self._finite_vector("location", location or (0.0, 0.0, 0.0))
+        rotation = self._axis_rotation(direction, "Z", "direction")
+        if shape is not None:
+            shape = self._choice("shape", shape, self._FIELD_SHAPES)
+        if falloff_type is not None:
+            falloff_type = self._choice("falloff_type", falloff_type, self._FALLOFF_TYPES)
+        if flow is not None:
+            self._check_range("flow", flow)
+        if falloff_power is not None:
+            self._check_range("falloff_power", falloff_power, 0.0, 10.0)
+        if distance_max is not None:
+            self._check_range("distance_max", distance_max, 0.0)
+        if noise is not None:
+            self._check_range("noise", noise, 0.0, 10.0)
 
-        blender_module.ops.object.effector_add(type=field_type.upper(), location=loc)
+        # align='WORLD' and an explicit rotation: without them the operator
+        # follows the user's "Align: View" preference and turns the field to
+        # the 3D View.
+        blender_module.ops.object.effector_add(
+            type=field_type, align="WORLD", location=loc, rotation=rotation
+        )
         field_obj = blender_module.context.active_object
-        if name:
-            field_obj.name = name
-        field_obj.field.strength = strength
+        try:
+            if name:
+                field_obj.name = name
+            field = field_obj.field
+            field.strength = strength
+            if shape is not None:
+                field.shape = shape
+            if flow is not None:
+                field.flow = flow
+            if falloff_type is not None:
+                field.falloff_type = falloff_type
+            if falloff_power is not None:
+                field.falloff_power = falloff_power
+            if distance_max is not None:
+                field.use_max_distance = distance_max > 0
+                field.distance_max = distance_max
+            if noise is not None:
+                field.noise = noise
+        except Exception:
+            blender_module.data.objects.remove(field_obj, do_unlink=True)
+            raise
 
-        return {
-            "name": field_obj.name,
-            "field_type": field_obj.field.type,
-            "strength": field_obj.field.strength,
-            "location": list(field_obj.location),
-        }
+        return {"name": field_obj.name, **self._field_report(field_obj)}
 
     def get_force_field_info(self, object_name: str) -> Dict[str, Any]:
         """
         Get force field properties from a field object.
 
+        An object whose field type is NONE has no force field: a Collision
+        modifier keeps its settings in the same place, so a collider alone
+        reports one.
+
         Args:
             object_name: Name of the force field object.
 
         Returns:
-            Dict with object_name, field_type, strength, shape, flow, location.
+            Dict with object_name, field_type, strength, shape, flow, location,
+            rotation_euler, direction, falloff_type, falloff_power,
+            distance_max and noise.
         """
         obj = self._get_object_or_raise(object_name)
         field = getattr(obj, "field", None)
-        if field is None:
+        if field is None or field.type == "NONE":
             raise ValueError(f"Object has no force field: {object_name}")
-
-        return {
-            "object_name": object_name,
-            "field_type": field.type,
-            "strength": float(field.strength),
-            "shape": field.shape,
-            "flow": float(field.flow),
-            "location": self._world_location(obj),
-        }
+        return {"object_name": object_name, **self._field_report(obj)}
 
     def add_rigid_body_constraint(
         self,
@@ -2170,47 +2289,154 @@ class BlenderRuntimeSession:
         object2_name: str,
         location: Optional[List[float]] = None,
         disable_collisions: bool = True,
+        axis: Optional[List[float]] = None,
+        limits: Optional[Dict[str, List[float]]] = None,
+        springs: Optional[Dict[str, Dict[str, float]]] = None,
+        motor_angular_velocity: Optional[float] = None,
+        motor_angular_max_impulse: Optional[float] = None,
+        motor_linear_velocity: Optional[float] = None,
+        motor_linear_max_impulse: Optional[float] = None,
+        breaking_threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Add a rigid body constraint between two objects.
+        Add a rigid body constraint between two distinct rigid bodies.
+
+        The constraint is an empty at the pivot, whose local axes are the
+        constraint's: HINGE turns about local Z, SLIDER and PISTON move along
+        local X (PISTON also turns about it), MOTOR drives along and about
+        local X, and GENERIC limits apply per local axis. Everything is checked
+        before anything changes; a failure leaves no empty behind and the
+        selection as it was.
 
         Args:
-            constraint_type: Constraint type (FIXED, POINT, HINGE, etc.).
-            object1_name: First constrained object.
-            object2_name: Second constrained object.
-            location: Optional world-space location for the constraint empty.
-            disable_collisions: Disable collisions between constrained objects.
+            constraint_type: FIXED, POINT, HINGE, SLIDER, PISTON, GENERIC,
+                GENERIC_SPRING or MOTOR.
+            object1_name: First constrained rigid body.
+            object2_name: Second constrained rigid body.
+            location: World-space pivot; midway between the two objects'
+                origins when omitted.
+            disable_collisions: Disable collisions between the two objects.
+            axis: World-space direction of the constraint's axis: the hinge
+                axis (local Z) for HINGE, the slide or motor axis (local X) for
+                SLIDER, PISTON and MOTOR, local Z for the other types. Omitted,
+                the empty is unrotated: a HINGE turns about world Z (a door,
+                not a pendulum) and a SLIDER moves along world X.
+            limits: Limits by local axis, as [lower, upper] (meters for lin_*,
+                radians for ang_*, within +-2 pi): ang_z for HINGE, lin_x for
+                SLIDER, lin_x and ang_x for PISTON, any of lin_x, lin_y, lin_z,
+                ang_x, ang_y, ang_z for GENERIC and GENERIC_SPRING.
+            springs: GENERIC_SPRING only: springs by local axis (x, y, z,
+                ang_x, ang_y, ang_z), each {"stiffness": ..., "damping": ...}.
+            motor_angular_velocity: MOTOR only: target angular velocity about
+                local X, rad/s.
+            motor_angular_max_impulse: MOTOR only: most impulse the angular
+                motor applies per step (Blender's default 1).
+            motor_linear_velocity: MOTOR only: target velocity along local X, m/s.
+            motor_linear_max_impulse: MOTOR only: most impulse the linear motor
+                applies per step (Blender's default 1).
+            breaking_threshold: Impulse that breaks the constraint; omitted, it
+                never breaks.
 
         Returns:
             Dict with constraint_name, constraint_type, object1_name,
-            object2_name.
+            object2_name and the constraint as get_constraint_info reports it
+            (pivot, axis, local_axes, rotation_euler, limits, springs, motor,
+            breaking_threshold), plus warnings.
         """
         blender_module: Any = bpy
+        constraint_type = self._choice(
+            "constraint_type", constraint_type, self._CONSTRAINT_TYPES
+        )
         obj1 = self._get_object_or_raise(object1_name)
         obj2 = self._get_object_or_raise(object2_name)
-
+        if obj1 == obj2:
+            raise ValueError(
+                f"A rigid body constraint joins two different objects; got "
+                f"'{object1_name}' twice"
+            )
         scene = blender_module.context.scene
-        self._ensure_rigid_body_world(scene)
+        world = getattr(scene, "rigidbody_world", None)
+        for obj in (obj1, obj2):
+            if (
+                getattr(obj, "rigid_body", None) is None
+                or world is None
+                or not self._in_rigid_body_world(world, obj)
+            ):
+                raise ValueError(
+                    f"'{obj.name}' is not a rigid body; set it up with "
+                    "setup_blender_rigid_body first (a PASSIVE body for an anchor)"
+                )
+        settings = self._constraint_settings(
+            constraint_type,
+            limits,
+            springs,
+            {
+                "motor_ang_target_velocity": motor_angular_velocity,
+                "motor_ang_max_impulse": motor_angular_max_impulse,
+                "motor_lin_target_velocity": motor_linear_velocity,
+                "motor_lin_max_impulse": motor_linear_max_impulse,
+            },
+            breaking_threshold,
+        )
+        if location is None:
+            first, second = self._world_location(obj1), self._world_location(obj2)
+            pivot = tuple((a + b) / 2.0 for a, b in zip(first, second))
+        else:
+            pivot = self._finite_vector("location", location)
+        primary = self._CONSTRAINT_AXES.get(constraint_type, "Z")
+        rotation = self._axis_rotation(axis, primary, "axis")
 
-        loc = tuple(location or [0.0, 0.0, 0.0])
-        blender_module.ops.object.empty_add(location=loc)
-        empty = blender_module.context.active_object
-        empty.name = f"RBC_{object1_name}_{object2_name}"
+        # A new empty, not empty_add: that operator follows the user's
+        # "Align: View" preference and selects the empty.
+        view_layer = blender_module.context.view_layer
+        empty = blender_module.data.objects.new(
+            f"RBC_{object1_name}_{object2_name}", None
+        )
+        view_layer.active_layer_collection.collection.objects.link(empty)
+        empty.location = pivot
+        empty.rotation_mode = "XYZ"
+        empty.rotation_euler = rotation
+        previous_active = view_layer.objects.active
+        try:
+            # constraint_add acts on the view layer's active object, whatever
+            # the context override says.
+            view_layer.objects.active = empty
+            _bpy_op(
+                f"Failed to add a {constraint_type} constraint",
+                blender_module.ops.rigidbody.constraint_add,
+                type=constraint_type,
+            )
+            rbc = empty.rigid_body_constraint
+            if rbc is None:
+                raise RuntimeError(
+                    f"Blender added no rigid body constraint to '{empty.name}'"
+                )
+            rbc.object1 = obj1
+            rbc.object2 = obj2
+            rbc.disable_collisions = disable_collisions
+            for setting, value in settings.items():
+                setattr(rbc, setting, value)
+        except Exception:
+            if getattr(empty, "rigid_body_constraint", None) is not None:
+                view_layer.objects.active = empty
+                blender_module.ops.rigidbody.constraint_remove()
+            blender_module.data.objects.remove(empty, do_unlink=True)
+            raise
+        finally:
+            view_layer.objects.active = previous_active
 
-        empty.select_set(True)
-        blender_module.context.view_layer.objects.active = empty
-        blender_module.ops.rigidbody.constraint_add(type=constraint_type.upper())
-
-        rbc = empty.rigid_body_constraint
-        rbc.object1 = obj1
-        rbc.object2 = obj2
-        rbc.disable_collisions = disable_collisions
-
+        warnings: List[str] = []
+        if constraint_type == "MOTOR" and (
+            motor_angular_velocity is None and motor_linear_velocity is None
+        ):
+            warnings.append(
+                "A MOTOR constraint drives nothing until motor_angular_velocity or "
+                "motor_linear_velocity is set"
+            )
         return {
             "constraint_name": empty.name,
-            "constraint_type": rbc.type,
-            "object1_name": object1_name,
-            "object2_name": object2_name,
+            **self._constraint_report(empty),
+            "warnings": warnings,
         }
 
     def get_constraint_info(self, object_name: str) -> Dict[str, Any]:
@@ -2221,22 +2447,15 @@ class BlenderRuntimeSession:
             object_name: Name of the constraint empty object.
 
         Returns:
-            Dict with object_name, constraint_type, object1_name,
-            object2_name, enabled, disable_collisions.
+            Dict with object_name, constraint_type, object1_name, object2_name,
+            enabled, disable_collisions, pivot, axis, local_axes,
+            rotation_euler, limits, springs, motor and breaking_threshold.
         """
         obj = self._get_object_or_raise(object_name)
         rbc = getattr(obj, "rigid_body_constraint", None)
         if rbc is None:
             raise ValueError(f"Object has no rigid body constraint: {object_name}")
-
-        return {
-            "object_name": object_name,
-            "constraint_type": rbc.type,
-            "object1_name": rbc.object1.name if rbc.object1 else None,
-            "object2_name": rbc.object2.name if rbc.object2 else None,
-            "enabled": rbc.enabled,
-            "disable_collisions": rbc.disable_collisions,
-        }
+        return {"object_name": object_name, **self._constraint_report(obj)}
 
     @staticmethod
     def _evaluated_world_matrix(obj: Any) -> Any:
@@ -2500,6 +2719,7 @@ class BlenderRuntimeSession:
         frame_start: int,
         frame_end: int,
         scope: str = "rigid_body",
+        allow_long_bake: bool = False,
     ) -> Dict[str, Any]:
         """
         Bake the physics simulation over a frame range, replacing any earlier bake.
@@ -2518,6 +2738,9 @@ class BlenderRuntimeSession:
                 in the scene, as Blender's Bake All Dynamics does: rigid bodies,
                 cloth, soft bodies and dynamic paint over frame_start-frame_end,
                 particle systems over the range their emission settings give.
+            allow_long_bake: Bake even above 20 000 frames or 400 000
+                body-frames (frames x bodies), which can outlast the client's
+                timeout while Blender keeps baking.
 
         Returns:
             Dict with scope, frame_start, frame_end and frame_count of the
@@ -2528,6 +2751,8 @@ class BlenderRuntimeSession:
         scope = self._bake_scope(scope)
         self._check_cache_range(int(frame_start), int(frame_end))
         scene = blender_module.context.scene
+        if not allow_long_bake:
+            self._check_bake_work(scene, scope, frame_end - frame_start + 1)
         warnings: List[str] = []
         original_frame = int(scene.frame_current)
         if scope == "rigid_body":
@@ -2603,6 +2828,37 @@ class BlenderRuntimeSession:
             "rigid_body_cache": state,
             "warnings": [warning] if warning else [],
         }
+
+    #: Most a bake does without allow_long_bake: frames, and frames x bodies.
+    #: On Blender 5.0.1 a frame took about 0.3 ms plus 30-40 microseconds per
+    #: body in contact: 1000 bodies x 1000 frames took 29.4 s, against the
+    #: attached-mode client's 30 s timeout, and 401 cubes x 900 frames 14.8 s
+    #: headless (1000 frames 8.7 s in the GUI). The budget takes up to about
+    #: 16 s, inside that timeout.
+    _BAKE_FRAME_BUDGET = 20_000
+    _BAKE_WORK_BUDGET = 400_000
+
+    def _check_bake_work(self, scene: Any, scope: str, frames: int) -> None:
+        """Refuse a bake likely to outlast the client's timeout on Blender's main thread."""
+        world = getattr(scene, "rigidbody_world", None)
+        bodies = self._rigid_body_count(world) if world is not None else 0
+        if scope == "all":
+            bodies += sum(
+                1 for entry, _ in self._point_caches(scene) if entry["kind"] != "RIGID_BODY"
+            )
+        work = frames * max(bodies, 1)
+        if frames <= self._BAKE_FRAME_BUDGET and work <= self._BAKE_WORK_BUDGET:
+            return
+        raise ValueError(
+            f"Baking {frames} frames of {bodies} simulated objects is {work} body-frames, "
+            f"over this tool's limit of {self._BAKE_FRAME_BUDGET} frames and "
+            f"{self._BAKE_WORK_BUDGET} body-frames (up to about 16 s on Blender 5.0.1). A bake "
+            "runs on Blender's main thread and cannot be stopped once it starts: past "
+            "the client timeout (BLENDER__CONNECTION_TIMEOUT, 30 s by default) the call "
+            "reports a timeout while Blender keeps baking, and the next calls wait "
+            "behind it. Bake a shorter range, or raise the timeout and pass "
+            "allow_long_bake=true"
+        )
 
     def _bake_rigid_body_cache(
         self, scene: Any, world: Any, frame_start: int, frame_end: int
@@ -2714,9 +2970,9 @@ class BlenderRuntimeSession:
     _CACHE_FRAME_MAX = 1048574
 
     #: Most work get_physics_state steps an unbaked simulation through, in
-    #: body-frames (frames x rigid bodies): on Blender 5.0.1 a frame cost about
-    #: 0.3 ms plus 20-30 microseconds per body in contact with a ground, so this
-    #: stays near 10 s, a third of the attached-mode timeout.
+    #: body-frames (frames x rigid bodies), as _BAKE_WORK_BUDGET: up to 16 s of
+    #: simulation on Blender 5.0.1 when no frame is cached yet, inside the
+    #: attached-mode client's 30 s timeout. Cached frames are only read.
     _STEP_WORK_BUDGET = 400_000
 
     @staticmethod
@@ -3115,6 +3371,389 @@ class BlenderRuntimeSession:
                 "their pose outside it"
             )
         return report
+
+    # -- Rigid-body, force-field and constraint setup helpers ----------------
+
+    #: Blender 4.2-5.0's RigidBodyObject.type and collision_shape items.
+    _BODY_TYPES = ("ACTIVE", "PASSIVE")
+    _COLLISION_SHAPES = (
+        "BOX",
+        "SPHERE",
+        "CAPSULE",
+        "CYLINDER",
+        "CONE",
+        "CONVEX_HULL",
+        "MESH",
+        "COMPOUND",
+    )
+
+    #: The types object.effector_add takes (Blender 4.2-5.0).
+    _FIELD_TYPES = (
+        "FORCE",
+        "WIND",
+        "VORTEX",
+        "MAGNET",
+        "HARMONIC",
+        "CHARGE",
+        "LENNARDJ",
+        "TEXTURE",
+        "GUIDE",
+        "BOID",
+        "TURBULENCE",
+        "DRAG",
+        "FLUID",
+    )
+    #: Other spellings of an effector_add type: the one simul used to document,
+    #: and the one FieldSettings.type reports for a FLUID field.
+    _FIELD_TYPE_ALIASES = {"MAGNETIC": "MAGNET", "FLUID_FLOW": "FLUID"}
+    _FIELD_SHAPES = ("POINT", "LINE", "PLANE", "SURFACE", "POINTS")
+    _FALLOFF_TYPES = ("SPHERE", "TUBE", "CONE")
+
+    #: RigidBodyConstraint.type items.
+    _CONSTRAINT_TYPES = (
+        "FIXED",
+        "POINT",
+        "HINGE",
+        "SLIDER",
+        "PISTON",
+        "GENERIC",
+        "GENERIC_SPRING",
+        "MOTOR",
+    )
+    #: The constraint empty's local axis each type works along; Z otherwise.
+    #: Verified on Blender 5.0.1: a HINGE turns about local Z, a SLIDER moves
+    #: along local X, a MOTOR's angular motor turns about local X.
+    _CONSTRAINT_AXES = {"HINGE": "Z", "SLIDER": "X", "PISTON": "X", "MOTOR": "X"}
+    _LIMIT_AXES = ("lin_x", "lin_y", "lin_z", "ang_x", "ang_y", "ang_z")
+    #: The limits each constraint type applies (Blender's constraint panel).
+    _CONSTRAINT_LIMITS: Dict[str, Tuple[str, ...]] = {
+        "HINGE": ("ang_z",),
+        "SLIDER": ("lin_x",),
+        "PISTON": ("lin_x", "ang_x"),
+        "GENERIC": _LIMIT_AXES,
+        "GENERIC_SPRING": _LIMIT_AXES,
+    }
+    _SPRING_AXES = ("x", "y", "z", "ang_x", "ang_y", "ang_z")
+    #: Angular limits Blender accepts, in radians.
+    _ANGLE_LIMIT = 2 * math.pi
+
+    @staticmethod
+    def _choice(label: str, value: Any, choices: Sequence[str]) -> str:
+        """``value`` upper-cased when it is one of ``choices``; ValueError otherwise."""
+        text = str(value).upper()
+        if text not in choices:
+            raise ValueError(
+                f"Invalid {label} '{value}'. Must be one of: {', '.join(choices)}"
+            )
+        return text
+
+    @classmethod
+    def _field_type(cls, value: Any) -> str:
+        text = str(value).upper()
+        return cls._choice(
+            "field_type", cls._FIELD_TYPE_ALIASES.get(text, text), cls._FIELD_TYPES
+        )
+
+    @staticmethod
+    def _check_range(
+        label: str,
+        value: Any,
+        minimum: Optional[float] = None,
+        maximum: Optional[float] = None,
+    ) -> float:
+        """``value`` as a finite float within ``minimum``-``maximum``; ValueError otherwise.
+
+        Blender's RNA stores some of these settings unclamped: on 5.0.1 a mass
+        of -5 was kept, and the body fell through the ground.
+        """
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"{label} must be a finite number, got {value}")
+        if minimum is not None and number < minimum:
+            raise ValueError(f"{label} must be at least {minimum}, got {value}")
+        if maximum is not None and number > maximum:
+            raise ValueError(f"{label} must be at most {maximum}, got {value}")
+        return number
+
+    @staticmethod
+    def _finite_vector(label: str, values: Any) -> Tuple[float, float, float]:
+        vector = tuple(float(v) for v in values)
+        if len(vector) != 3 or not all(math.isfinite(v) for v in vector):
+            raise ValueError(f"{label} must be three finite numbers")
+        return vector[0], vector[1], vector[2]
+
+    @classmethod
+    def _axis_rotation(
+        cls, axis: Optional[Sequence[float]], primary: str, label: str
+    ) -> Tuple[float, float, float]:
+        """The XYZ Euler rotation that turns local ``primary`` (X or Z) onto world ``axis``.
+
+        The other local axes stay as close to the world's as they can: the
+        local X of a Z-primary frame lies along world X (world Y when the axis
+        is near X), and the local Z of an X-primary frame along world Z (world
+        X when the axis is near Z). No axis means no rotation.
+        """
+        if axis is None:
+            return 0.0, 0.0, 0.0
+        vector = cls._finite_vector(label, axis)
+        length = math.sqrt(sum(v * v for v in vector))
+        if length < 1e-9:
+            raise ValueError(f"{label} must not be the zero vector")
+        unit = tuple(v / length for v in vector)
+
+        def orthogonal(reference: Tuple[float, ...], to: Tuple[float, ...]) -> Tuple[float, ...]:
+            dot = sum(r * t for r, t in zip(reference, to))
+            rest = tuple(r - dot * t for r, t in zip(reference, to))
+            size = math.sqrt(sum(v * v for v in rest))
+            return tuple(v / size for v in rest)
+
+        def cross(a: Tuple[float, ...], b: Tuple[float, ...]) -> Tuple[float, ...]:
+            return (
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            )
+
+        if primary == "Z":
+            z = unit
+            x = orthogonal((1.0, 0.0, 0.0) if abs(z[0]) < 0.9 else (0.0, 1.0, 0.0), z)
+        else:
+            x = unit
+            z = orthogonal((0.0, 0.0, 1.0) if abs(x[2]) < 0.9 else (1.0, 0.0, 0.0), x)
+        y = cross(z, x)
+        # Blender's XYZ Euler is R = Rz Ry Rx; the matrix's columns are x, y, z.
+        sin_y = -x[2]
+        if abs(sin_y) < 1.0 - 1e-9:
+            return (
+                math.atan2(y[2], z[2]),
+                math.asin(sin_y),
+                math.atan2(x[1], x[0]),
+            )
+        if sin_y > 0:
+            return math.atan2(y[0], z[0]), math.pi / 2, 0.0
+        return math.atan2(-y[0], -z[0]), -math.pi / 2, 0.0
+
+    @staticmethod
+    def _matrix_axis(matrix: Any, column: int) -> List[float]:
+        """A world matrix's local axis ``column`` (0 X, 1 Y, 2 Z) as a unit vector."""
+        values = [float(matrix[row][column]) for row in range(3)]
+        size = math.sqrt(sum(v * v for v in values)) or 1.0
+        return [v / size for v in values]
+
+    @staticmethod
+    def _rigid_body_snapshot(rb: Any) -> Optional[Dict[str, Any]]:
+        """The settings setup_rigid_body writes, to restore them after a failure."""
+        if rb is None:
+            return None
+        names = (
+            "type",
+            "mass",
+            "friction",
+            "restitution",
+            "collision_shape",
+            "linear_damping",
+            "angular_damping",
+            "kinematic",
+            "use_margin",
+            "collision_margin",
+            "use_deactivation",
+            "use_start_deactivated",
+        )
+        snapshot = {name: getattr(rb, name) for name in names if hasattr(rb, name)}
+        if hasattr(rb, "collision_collections"):
+            snapshot["collision_collections"] = list(rb.collision_collections)
+        return snapshot
+
+    def _restore_rigid_body(
+        self,
+        scene: Any,
+        obj: Any,
+        previous: Optional[Dict[str, Any]],
+        world_created: bool,
+    ) -> None:
+        """Undo a failed setup_rigid_body: its rigid body or settings, and its world.
+
+        A failure here is logged, not raised, so the setup's own error reaches
+        the caller.
+        """
+        blender_module: Any = bpy
+        try:
+            rb = getattr(obj, "rigid_body", None)
+            if previous is None and rb is not None:
+                with blender_module.context.temp_override(
+                    object=obj,
+                    active_object=obj,
+                    selected_objects=[obj],
+                    selected_editable_objects=[obj],
+                ):
+                    blender_module.ops.rigidbody.object_remove()
+            elif previous is not None and rb is not None:
+                for name, value in previous.items():
+                    setattr(rb, name, value)
+            if world_created and scene.rigidbody_world is not None:
+                with blender_module.context.temp_override(scene=scene):
+                    blender_module.ops.rigidbody.world_remove()
+        except Exception:
+            self.logger.exception(
+                "Could not undo the failed rigid body setup of '%s'", obj.name
+            )
+
+    @staticmethod
+    def _rigid_body_report(rb: Any) -> Dict[str, Any]:
+        collections = getattr(rb, "collision_collections", None)
+        return {
+            "body_type": rb.type,
+            "mass": float(rb.mass),
+            "friction": float(rb.friction),
+            "restitution": float(rb.restitution),
+            "collision_shape": rb.collision_shape,
+            "linear_damping": float(rb.linear_damping),
+            "angular_damping": float(rb.angular_damping),
+            "kinematic": bool(rb.kinematic),
+            "collision_margin": (
+                float(rb.collision_margin) if rb.use_margin else None
+            ),
+            "collision_collections": (
+                [i for i, member in enumerate(collections) if member]
+                if collections is not None
+                else None
+            ),
+            "use_deactivation": bool(rb.use_deactivation),
+            "start_deactivated": bool(rb.use_start_deactivated),
+        }
+
+    def _field_report(self, obj: Any) -> Dict[str, Any]:
+        """A force field's settings and world pose; direction is its local +Z."""
+        matrix = self._evaluated_world_matrix(obj)
+        field = obj.field
+        return {
+            "field_type": field.type,
+            "strength": float(field.strength),
+            "location": [float(v) for v in matrix.translation],
+            "rotation_euler": [float(v) for v in matrix.to_euler("XYZ")],
+            "direction": self._matrix_axis(matrix, 2),
+            "shape": field.shape,
+            "flow": float(field.flow),
+            "falloff_type": field.falloff_type,
+            "falloff_power": float(field.falloff_power),
+            "distance_max": (
+                float(field.distance_max) if field.use_max_distance else None
+            ),
+            "noise": float(field.noise),
+        }
+
+    def _constraint_settings(
+        self,
+        constraint_type: str,
+        limits: Optional[Dict[str, List[float]]],
+        springs: Optional[Dict[str, Dict[str, float]]],
+        motor: Dict[str, Optional[float]],
+        breaking_threshold: Optional[float],
+    ) -> Dict[str, Any]:
+        """The RigidBodyConstraint settings to write, after checking each against the type."""
+        settings: Dict[str, Any] = {}
+        allowed = self._CONSTRAINT_LIMITS.get(constraint_type, ())
+        for key, bounds in (limits or {}).items():
+            if key not in allowed:
+                raise ValueError(
+                    f"A {constraint_type} constraint has no {key} limit; it limits "
+                    f"{', '.join(allowed) or 'nothing'}"
+                )
+            values = [self._check_range(f"limits.{key}", v) for v in bounds]
+            if len(values) != 2 or values[0] > values[1]:
+                raise ValueError(f"limits.{key} must be [lower, upper] with lower <= upper")
+            if key.startswith("ang_") and max(abs(v) for v in values) > self._ANGLE_LIMIT:
+                raise ValueError(f"limits.{key} must be within +-2 pi radians")
+            settings[f"use_limit_{key}"] = True
+            settings[f"limit_{key}_lower"], settings[f"limit_{key}_upper"] = values
+        if springs:
+            if constraint_type != "GENERIC_SPRING":
+                raise ValueError("springs apply to GENERIC_SPRING constraints only")
+            for key, spring in springs.items():
+                if key not in self._SPRING_AXES:
+                    raise ValueError(
+                        f"Invalid spring axis '{key}'. Must be one of: "
+                        f"{', '.join(self._SPRING_AXES)}"
+                    )
+                settings[f"use_spring_{key}"] = True
+                settings[f"spring_stiffness_{key}"] = self._check_range(
+                    f"springs.{key}.stiffness", spring.get("stiffness", 10.0), 0.0
+                )
+                settings[f"spring_damping_{key}"] = self._check_range(
+                    f"springs.{key}.damping", spring.get("damping", 0.5), 0.0
+                )
+        given = {name: value for name, value in motor.items() if value is not None}
+        if given and constraint_type != "MOTOR":
+            raise ValueError("motor settings apply to MOTOR constraints only")
+        for name, value in given.items():
+            minimum = 0.0 if name.endswith("max_impulse") else None
+            settings[name] = self._check_range(name, value, minimum)
+        if "motor_ang_target_velocity" in given:
+            settings["use_motor_ang"] = True
+        if "motor_lin_target_velocity" in given:
+            settings["use_motor_lin"] = True
+        if breaking_threshold is not None:
+            settings["use_breaking"] = True
+            settings["breaking_threshold"] = self._check_range(
+                "breaking_threshold", breaking_threshold, 0.0
+            )
+        return settings
+
+    def _constraint_report(self, empty: Any) -> Dict[str, Any]:
+        """A constraint's settings and world pose, with its local axes in world space."""
+        rbc = empty.rigid_body_constraint
+        matrix = self._evaluated_world_matrix(empty)
+        axes = {name: self._matrix_axis(matrix, column) for column, name in enumerate("xyz")}
+        kind = rbc.type
+        limits = {
+            key: [
+                float(getattr(rbc, f"limit_{key}_lower")),
+                float(getattr(rbc, f"limit_{key}_upper")),
+            ]
+            for key in self._CONSTRAINT_LIMITS.get(kind, ())
+            if getattr(rbc, f"use_limit_{key}", False)
+        }
+        springs = (
+            {
+                key: {
+                    "stiffness": float(getattr(rbc, f"spring_stiffness_{key}")),
+                    "damping": float(getattr(rbc, f"spring_damping_{key}")),
+                }
+                for key in self._SPRING_AXES
+                if getattr(rbc, f"use_spring_{key}", False)
+            }
+            if kind == "GENERIC_SPRING"
+            else {}
+        )
+        motor = None
+        if kind == "MOTOR":
+            motor = {
+                "angular_velocity": (
+                    float(rbc.motor_ang_target_velocity) if rbc.use_motor_ang else None
+                ),
+                "angular_max_impulse": float(rbc.motor_ang_max_impulse),
+                "linear_velocity": (
+                    float(rbc.motor_lin_target_velocity) if rbc.use_motor_lin else None
+                ),
+                "linear_max_impulse": float(rbc.motor_lin_max_impulse),
+            }
+        return {
+            "constraint_type": kind,
+            "object1_name": rbc.object1.name if rbc.object1 else None,
+            "object2_name": rbc.object2.name if rbc.object2 else None,
+            "enabled": bool(rbc.enabled),
+            "disable_collisions": bool(rbc.disable_collisions),
+            "pivot": [float(v) for v in matrix.translation],
+            "axis": axes[self._CONSTRAINT_AXES.get(kind, "Z").lower()],
+            "local_axes": axes,
+            "rotation_euler": [float(v) for v in matrix.to_euler("XYZ")],
+            "limits": limits,
+            "springs": springs,
+            "motor": motor,
+            "breaking_threshold": (
+                float(rbc.breaking_threshold) if rbc.use_breaking else None
+            ),
+        }
 
     # -- End Phase 6 methods -------------------------------------------------
 

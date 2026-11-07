@@ -274,6 +274,8 @@ script can make the GUI temporarily unresponsive. The client timeout limits
 waiting, not execution: an operation already started cannot safely be stopped.
 Its outcome is unknown after a timeout, and Simul never automatically retries it.
 Requests whose deadlines expired before execution are refused.
+`bake_blender_simulation` refuses a bake likely to outlast the timeout unless
+`allow_long_bake` is set; see [tools.md](tools.md).
 
 The transport uses a per-instance token in owner-only discovery/attachment
 files. It accepts loopback connections only. Normal filesystem sandbox settings

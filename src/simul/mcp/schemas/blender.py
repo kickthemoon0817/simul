@@ -1,9 +1,9 @@
 """Blender MCP schemas."""
 
 import math
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 
-from pydantic import AfterValidator, BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, BeforeValidator, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 # Printed-output cap of execute_blender_script. Mirrors DEFAULT_SCRIPT_OUTPUT_CHARS
@@ -1361,26 +1361,161 @@ class BlenderGetKeyframesResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _upper_name(value: Any) -> Any:
+    """Accept Blender enum names in any case, as the session always has."""
+    return value.upper() if isinstance(value, str) else value
+
+
+def _field_type_name(value: Any) -> Any:
+    # MAGNETIC is what simul used to document; FLUID_FLOW is what a FLUID
+    # field's FieldSettings.type reports. effector_add takes neither.
+    if not isinstance(value, str):
+        return value
+    value = value.upper()
+    return {"MAGNETIC": "MAGNET", "FLUID_FLOW": "FLUID"}.get(value, value)
+
+
+# Blender 4.2-5.0's enum items; BlenderRuntimeSession repeats them for the
+# add-on, which cannot import these schemas.
+BlenderBodyType = Annotated[Literal["ACTIVE", "PASSIVE"], BeforeValidator(_upper_name)]
+BlenderCollisionShape = Annotated[
+    Literal["BOX", "SPHERE", "CAPSULE", "CYLINDER", "CONE", "CONVEX_HULL", "MESH", "COMPOUND"],
+    BeforeValidator(_upper_name),
+]
+BlenderForceFieldType = Annotated[
+    Literal[
+        "FORCE",
+        "WIND",
+        "VORTEX",
+        "MAGNET",
+        "HARMONIC",
+        "CHARGE",
+        "LENNARDJ",
+        "TEXTURE",
+        "GUIDE",
+        "BOID",
+        "TURBULENCE",
+        "DRAG",
+        "FLUID",
+    ],
+    BeforeValidator(_field_type_name),
+]
+BlenderFieldShape = Annotated[
+    Literal["POINT", "LINE", "PLANE", "SURFACE", "POINTS"], BeforeValidator(_upper_name)
+]
+BlenderFalloffType = Annotated[
+    Literal["SPHERE", "TUBE", "CONE"], BeforeValidator(_upper_name)
+]
+BlenderConstraintType = Annotated[
+    Literal[
+        "FIXED", "POINT", "HINGE", "SLIDER", "PISTON", "GENERIC", "GENERIC_SPRING", "MOTOR"
+    ],
+    BeforeValidator(_upper_name),
+]
+#: A constraint limit's local axis: lin_* in meters, ang_* in radians.
+BlenderConstraintLimitAxis = Literal["lin_x", "lin_y", "lin_z", "ang_x", "ang_y", "ang_z"]
+#: A GENERIC_SPRING spring's local axis.
+BlenderSpringAxis = Literal["x", "y", "z", "ang_x", "ang_y", "ang_z"]
+#: A spring's settings: stiffness and damping, each 0 or more.
+BlenderSpringSettings = Dict[Literal["stiffness", "damping"], float]
+
+# The limits each constraint type applies; BlenderRuntimeSession repeats them.
+_CONSTRAINT_LIMITS: Dict[str, Tuple[str, ...]] = {
+    "HINGE": ("ang_z",),
+    "SLIDER": ("lin_x",),
+    "PISTON": ("lin_x", "ang_x"),
+    "GENERIC": ("lin_x", "lin_y", "lin_z", "ang_x", "ang_y", "ang_z"),
+    "GENERIC_SPRING": ("lin_x", "lin_y", "lin_z", "ang_x", "ang_y", "ang_z"),
+}
+
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+# Blender's RNA ranges for rigid-body and field settings, which the tools also
+# advertise; Blender itself stored a mass of -5 unclamped.
+RigidBodyMass = Annotated[float, Field(ge=0.001, allow_inf_nan=False)]
+NonNegativeFloat = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
+UnitFloat = Annotated[float, Field(ge=0.0, le=1.0, allow_inf_nan=False)]
+FieldTenth = Annotated[float, Field(ge=0.0, le=10.0, allow_inf_nan=False)]
+# RigidBodyWorld's RNA ranges.
+WorldSubsteps = Annotated[int, Field(ge=1, le=32767)]
+WorldSolverIterations = Annotated[int, Field(ge=1, le=1000)]
+WorldTimeScale = Annotated[float, Field(ge=0.0, le=100.0, allow_inf_nan=False)]
+
+
+def _finite_vector(value: Optional[List[float]], label: str) -> None:
+    if value is not None and not all(math.isfinite(v) for v in value):
+        raise ValueError(f"{label} must be three finite numbers")
+
+
+def _nonzero_vector(value: Optional[List[float]], label: str) -> None:
+    _finite_vector(value, label)
+    if value is not None and not any(value):
+        raise ValueError(f"{label} must not be the zero vector")
+
+
 class BlenderSetupRigidBodyRequest(BaseModel):
     """Request to set up rigid body physics on an object."""
 
-    object_name: str = Field(..., description="Name of the target object")
-    body_type: str = Field(
+    object_name: str = Field(..., description="Name of the target mesh object")
+    body_type: BlenderBodyType = Field(
         "ACTIVE",
-        description="Rigid body type: ACTIVE (dynamic) or PASSIVE (static)",
+        description="ACTIVE (simulated) or PASSIVE (static or animated collider)",
     )
-    mass: float = Field(1.0, description="Mass in kilograms")
-    friction: float = Field(0.5, description="Surface friction coefficient")
-    restitution: float = Field(0.0, description="Bounciness (0-1)")
-    collision_shape: str = Field(
+    mass: float = Field(
+        1.0, description="Mass in kilograms", ge=0.001, allow_inf_nan=False
+    )
+    friction: float = Field(
+        0.5, description="Surface friction coefficient", ge=0.0, allow_inf_nan=False
+    )
+    restitution: float = Field(
+        0.0, description="Bounciness (0-1)", ge=0.0, le=1.0, allow_inf_nan=False
+    )
+    collision_shape: BlenderCollisionShape = Field(
         "CONVEX_HULL",
         description=(
-            "Collision shape: BOX, SPHERE, CAPSULE, CYLINDER, "
-            "CONE, CONVEX_HULL, MESH"
+            "Collision shape: BOX, SPHERE, CAPSULE, CYLINDER, CONE, CONVEX_HULL, MESH "
+            "or COMPOUND (the children's shapes combined)"
         ),
     )
-    linear_damping: float = Field(0.04, description="Linear damping factor")
-    angular_damping: float = Field(0.1, description="Angular damping factor")
+    linear_damping: float = Field(
+        0.04,
+        description="Fraction of linear velocity lost per second (0-1)",
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+    angular_damping: float = Field(
+        0.1,
+        description="Fraction of angular velocity lost per second (0-1)",
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+    kinematic: Optional[bool] = Field(
+        None,
+        description=(
+            "Animated: the body follows its own animation and pushes simulated bodies"
+        ),
+    )
+    collision_margin: Optional[float] = Field(
+        None,
+        description="Collision margin in meters (0-1); omitted keeps Blender's automatic margin",
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
+    collision_collections: Optional[List[Annotated[int, Field(ge=0, le=19)]]] = Field(
+        None,
+        description=(
+            "Collision collections 0-19 the body is in; bodies collide only when they share one"
+        ),
+        max_length=20,
+    )
+    use_deactivation: Optional[bool] = Field(
+        None, description="Let the body sleep when it nearly stops"
+    )
+    start_deactivated: Optional[bool] = Field(
+        None, description="Start asleep until something hits it"
+    )
 
 
 class BlenderSetupRigidBodyResponse(BaseModel):
@@ -1394,19 +1529,39 @@ class BlenderSetupRigidBodyResponse(BaseModel):
     body_type: str = Field(..., description="Rigid body type set")
     mass: float = Field(..., description="Mass set")
     collision_shape: str = Field(..., description="Collision shape set")
+    # Null from an add-on built before these were reported.
+    friction: Optional[float] = Field(None, description="Friction set")
+    restitution: Optional[float] = Field(None, description="Restitution set")
+    linear_damping: Optional[float] = Field(None, description="Linear damping set")
+    angular_damping: Optional[float] = Field(None, description="Angular damping set")
+    kinematic: Optional[bool] = Field(None, description="Whether the body is animated")
+    collision_margin: Optional[float] = Field(
+        None, description="Collision margin, or null for Blender's automatic margin"
+    )
+    collision_collections: Optional[List[int]] = Field(
+        None, description="Collision collections the body is in"
+    )
+    use_deactivation: Optional[bool] = Field(None, description="Whether the body can sleep")
+    start_deactivated: Optional[bool] = Field(None, description="Whether it starts asleep")
+    world_created: Optional[bool] = Field(
+        None, description="Whether the call added the scene's rigid body world"
+    )
+    replaced: Optional[bool] = Field(
+        None, description="Whether the object already had a rigid body"
+    )
 
 
 class BlenderAddForceFieldRequest(BaseModel):
     """Request to add a force field to the scene."""
 
-    field_type: str = Field(
+    field_type: BlenderForceFieldType = Field(
         ...,
         description=(
-            "Force field type: FORCE, WIND, VORTEX, MAGNETIC, "
-            "HARMONIC, CHARGE, LENNARDJ, TURBULENCE, DRAG"
+            "Force field type: FORCE, WIND, VORTEX, MAGNET, HARMONIC, CHARGE, LENNARDJ, "
+            "TEXTURE, GUIDE, BOID, TURBULENCE, DRAG or FLUID"
         ),
     )
-    strength: float = Field(1.0, description="Field strength")
+    strength: float = Field(1.0, description="Field strength", allow_inf_nan=False)
     # Optional, not a default list: the tool passes None when the caller omits
     # the location, and a List[float] field rejects None.
     location: Optional[List[float]] = Field(
@@ -1416,6 +1571,38 @@ class BlenderAddForceFieldRequest(BaseModel):
         max_length=3,
     )
     name: Optional[str] = Field(None, description="Optional name for the field")
+    direction: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World-space direction of the field's local +Z (where WIND blows, the "
+            "axis VORTEX turns about); world +Z when omitted"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    shape: Optional[BlenderFieldShape] = Field(
+        None, description="POINT, LINE, PLANE, SURFACE or POINTS"
+    )
+    flow: Optional[float] = Field(None, description="Air flow", allow_inf_nan=False)
+    falloff_type: Optional[BlenderFalloffType] = Field(
+        None, description="SPHERE, TUBE or CONE"
+    )
+    falloff_power: Optional[float] = Field(
+        None, description="How fast the field weakens with distance", ge=0.0, le=10.0
+    )
+    distance_max: Optional[float] = Field(
+        None,
+        description="Distance past which the field has no effect; 0 for no limit",
+        ge=0.0,
+        allow_inf_nan=False,
+    )
+    noise: Optional[float] = Field(None, description="Random noise", ge=0.0, le=10.0)
+
+    @model_validator(mode="after")
+    def _finite_vectors(self) -> "BlenderAddForceFieldRequest":
+        _finite_vector(self.location, "location")
+        _nonzero_vector(self.direction, "direction")
+        return self
 
 
 class BlenderAddForceFieldResponse(BaseModel):
@@ -1426,7 +1613,9 @@ class BlenderAddForceFieldResponse(BaseModel):
         None, description="Error message when success is False"
     )
     name: str = Field(..., description="Name of the created force field object")
-    field_type: str = Field(..., description="Type of force field")
+    field_type: str = Field(
+        ..., description="Type of force field (a FLUID field reports FLUID_FLOW)"
+    )
     strength: float = Field(..., description="Strength of the field")
     location: List[float] = Field(
         ...,
@@ -1434,6 +1623,21 @@ class BlenderAddForceFieldResponse(BaseModel):
         min_length=3,
         max_length=3,
     )
+    # Null from an add-on built before these were reported.
+    rotation_euler: Optional[List[float]] = Field(
+        None, description="World XYZ Euler rotation, radians"
+    )
+    direction: Optional[List[float]] = Field(
+        None, description="World direction of the field's local +Z"
+    )
+    shape: Optional[str] = Field(None, description="Field shape")
+    flow: Optional[float] = Field(None, description="Air flow")
+    falloff_type: Optional[str] = Field(None, description="Falloff type")
+    falloff_power: Optional[float] = Field(None, description="Falloff power")
+    distance_max: Optional[float] = Field(
+        None, description="Maximum distance, or null for no limit"
+    )
+    noise: Optional[float] = Field(None, description="Noise")
 
 
 class BlenderGetForceFieldInfoRequest(BaseModel):
@@ -1460,29 +1664,125 @@ class BlenderGetForceFieldInfoResponse(BaseModel):
         min_length=3,
         max_length=3,
     )
+    # Null from an add-on built before these were reported.
+    rotation_euler: Optional[List[float]] = Field(
+        None, description="World XYZ Euler rotation, radians"
+    )
+    direction: Optional[List[float]] = Field(
+        None, description="World direction of the field's local +Z"
+    )
+    falloff_type: Optional[str] = Field(None, description="Falloff type")
+    falloff_power: Optional[float] = Field(None, description="Falloff power")
+    distance_max: Optional[float] = Field(
+        None, description="Maximum distance, or null for no limit"
+    )
+    noise: Optional[float] = Field(None, description="Noise")
 
 
 class BlenderAddConstraintRequest(BaseModel):
     """Request to add a rigid body constraint."""
 
-    constraint_type: str = Field(
+    constraint_type: BlenderConstraintType = Field(
         ...,
         description=(
             "Constraint type: FIXED, POINT, HINGE, SLIDER, "
             "PISTON, GENERIC, GENERIC_SPRING, MOTOR"
         ),
     )
-    object1_name: str = Field(..., description="First constrained object")
-    object2_name: str = Field(..., description="Second constrained object")
+    object1_name: str = Field(..., description="First constrained rigid body")
+    object2_name: str = Field(..., description="Second constrained rigid body")
     location: Optional[List[float]] = Field(
         None,
-        description="Optional location for the constraint empty",
+        description="World-space pivot; midway between the two objects when omitted",
         min_length=3,
         max_length=3,
     )
     disable_collisions: bool = Field(
         True, description="Disable collisions between constrained objects"
     )
+    axis: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World direction of the constraint axis: the hinge axis (local Z) for "
+            "HINGE, the slide or motor axis (local X) for SLIDER, PISTON and MOTOR, "
+            "local Z otherwise; unrotated (world axes) when omitted"
+        ),
+        min_length=3,
+        max_length=3,
+    )
+    limits: Optional[Dict[BlenderConstraintLimitAxis, List[FiniteFloat]]] = Field(
+        None,
+        description="Limits by local axis as [lower, upper]; meters for lin_*, radians for ang_*",
+    )
+    springs: Optional[Dict[BlenderSpringAxis, BlenderSpringSettings]] = Field(
+        None, description="GENERIC_SPRING only: stiffness and damping by local axis"
+    )
+    motor_angular_velocity: Optional[float] = Field(
+        None, description="MOTOR only: target rad/s about local X", allow_inf_nan=False
+    )
+    motor_angular_max_impulse: Optional[float] = Field(
+        None, description="MOTOR only: angular motor impulse cap", ge=0.0, allow_inf_nan=False
+    )
+    motor_linear_velocity: Optional[float] = Field(
+        None, description="MOTOR only: target m/s along local X", allow_inf_nan=False
+    )
+    motor_linear_max_impulse: Optional[float] = Field(
+        None, description="MOTOR only: linear motor impulse cap", ge=0.0, allow_inf_nan=False
+    )
+    breaking_threshold: Optional[float] = Field(
+        None,
+        description="Impulse that breaks the constraint; omitted, it never breaks",
+        ge=0.0,
+        allow_inf_nan=False,
+    )
+
+    @model_validator(mode="after")
+    def _fits_the_type(self) -> "BlenderAddConstraintRequest":
+        if self.object1_name == self.object2_name:
+            raise ValueError("object1_name and object2_name must name two different objects")
+        _finite_vector(self.location, "location")
+        _nonzero_vector(self.axis, "axis")
+        allowed = _CONSTRAINT_LIMITS.get(self.constraint_type, ())
+        for key, bounds in (self.limits or {}).items():
+            if key not in allowed:
+                raise ValueError(
+                    f"A {self.constraint_type} constraint has no {key} limit; it limits "
+                    f"{', '.join(allowed) or 'nothing'}"
+                )
+            if len(bounds) != 2 or bounds[0] > bounds[1]:
+                raise ValueError(f"limits.{key} must be [lower, upper] with lower <= upper")
+            if key.startswith("ang_") and max(abs(v) for v in bounds) > 2 * math.pi:
+                raise ValueError(f"limits.{key} must be within +-2 pi radians")
+        if self.springs:
+            if self.constraint_type != "GENERIC_SPRING":
+                raise ValueError("springs apply to GENERIC_SPRING constraints only")
+            for spring_axis, spring in self.springs.items():
+                if any(not math.isfinite(v) or v < 0 for v in spring.values()):
+                    raise ValueError(
+                        f"springs.{spring_axis} needs finite stiffness and damping >= 0"
+                    )
+        motor = (
+            self.motor_angular_velocity,
+            self.motor_angular_max_impulse,
+            self.motor_linear_velocity,
+            self.motor_linear_max_impulse,
+        )
+        if self.constraint_type != "MOTOR" and any(v is not None for v in motor):
+            raise ValueError("motor settings apply to MOTOR constraints only")
+        return self
+
+
+class BlenderConstraintMotor(BaseModel):
+    """A MOTOR constraint's drive along and about its local X."""
+
+    angular_velocity: Optional[float] = Field(
+        None, description="Target rad/s about local X; null when the angular motor is off"
+    )
+    angular_max_impulse: float = Field(..., description="Angular motor impulse cap")
+    linear_velocity: Optional[float] = Field(
+        None, description="Target m/s along local X; null when the linear motor is off"
+    )
+    linear_max_impulse: float = Field(..., description="Linear motor impulse cap")
 
 
 class BlenderAddConstraintResponse(BaseModel):
@@ -1496,6 +1796,39 @@ class BlenderAddConstraintResponse(BaseModel):
     constraint_type: str = Field(..., description="Type of constraint")
     object1_name: str = Field(..., description="First constrained object")
     object2_name: str = Field(..., description="Second constrained object")
+    # Null from an add-on built before these were reported.
+    pivot: Optional[List[float]] = Field(
+        None, description="World-space pivot (the constraint empty's location)"
+    )
+    axis: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World direction of the constraint axis: local Z for HINGE, local X for "
+            "SLIDER, PISTON and MOTOR, local Z otherwise"
+        ),
+    )
+    local_axes: Optional[Dict[str, List[float]]] = Field(
+        None,
+        description="World directions of the empty's local x, y and z, which limits refer to",
+    )
+    rotation_euler: Optional[List[float]] = Field(
+        None, description="The empty's world XYZ Euler rotation, radians"
+    )
+    limits: Optional[Dict[str, List[float]]] = Field(
+        None, description="Enabled limits by local axis, [lower, upper]"
+    )
+    springs: Optional[Dict[str, Dict[str, float]]] = Field(
+        None, description="Enabled springs by local axis"
+    )
+    motor: Optional[BlenderConstraintMotor] = Field(
+        None, description="The motor of a MOTOR constraint"
+    )
+    breaking_threshold: Optional[float] = Field(
+        None, description="Impulse that breaks it, or null when unbreakable"
+    )
+    warnings: List[str] = Field(
+        default_factory=list, description="Settings the constraint still needs"
+    )
 
 
 class BlenderGetConstraintInfoRequest(BaseModel):
@@ -1521,6 +1854,36 @@ class BlenderGetConstraintInfoResponse(BaseModel):
     )
     enabled: bool = Field(..., description="Whether constraint is enabled")
     disable_collisions: bool = Field(..., description="Whether collisions are disabled")
+    # Null from an add-on built before these were reported.
+    pivot: Optional[List[float]] = Field(
+        None, description="World-space pivot (the constraint empty's location)"
+    )
+    axis: Optional[List[float]] = Field(
+        None,
+        description=(
+            "World direction of the constraint axis: local Z for HINGE, local X for "
+            "SLIDER, PISTON and MOTOR, local Z otherwise"
+        ),
+    )
+    local_axes: Optional[Dict[str, List[float]]] = Field(
+        None,
+        description="World directions of the empty's local x, y and z, which limits refer to",
+    )
+    rotation_euler: Optional[List[float]] = Field(
+        None, description="The empty's world XYZ Euler rotation, radians"
+    )
+    limits: Optional[Dict[str, List[float]]] = Field(
+        None, description="Enabled limits by local axis, [lower, upper]"
+    )
+    springs: Optional[Dict[str, Dict[str, float]]] = Field(
+        None, description="Enabled springs by local axis"
+    )
+    motor: Optional[BlenderConstraintMotor] = Field(
+        None, description="The motor of a MOTOR constraint"
+    )
+    breaking_threshold: Optional[float] = Field(
+        None, description="Impulse that breaks it, or null when unbreakable"
+    )
 
 
 # Bounds of a Blender point cache's frame range (PointCache RNA, Blender
@@ -1734,6 +2097,13 @@ class BlenderBakeSimulationRequest(BaseModel):
             "rigid_body bakes only the rigid-body world's cache; all bakes every point "
             "cache in the scene (rigid bodies, cloth, soft bodies, dynamic paint and "
             "particles)"
+        ),
+    )
+    allow_long_bake: bool = Field(
+        False,
+        description=(
+            "Bake above 20 000 frames or 400 000 body-frames, which can outlast the "
+            "client timeout while Blender keeps baking"
         ),
     )
 
