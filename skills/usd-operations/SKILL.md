@@ -12,7 +12,7 @@ This skill teaches you how to load, inspect, analyze, and modify USD files using
 
 | Tool set | When to use | Identifier |
 |---|---|---|
-| `load_usd_file`, `get_prim_info`, `search_prims`, `get_mesh_info`, `get_bounding_box`, `summarize_scene`, `create_prim`, `update_prim_attributes`, `delete_prim` | Offline/headless USD file analysis and editing | `stage_id` |
+| `load_usd_file`, `get_prim_info`, `get_prim_subtree`, `search_prims`, `get_mesh_info`, `get_bounding_box`, `summarize_scene`, `create_prim`, `update_prim_attributes`, `delete_prim` | Offline/headless USD file analysis and editing | `stage_id` |
 | `get_isaac_prim_detail` (aspects: info, mesh, ...), `search_isaac_prims`, etc. | Live Isaac Sim scene (running instance) | prim path only |
 
 **Never mix these two sets.** If Isaac Sim is not running, use the headless tools with `stage_id`. If Isaac Sim is running with a stage open, use the Isaac tools (names containing `isaac`, such as `get_isaac_prim_detail`).
@@ -97,10 +97,27 @@ mcp__simul__search_prims
 
 **`search_type` options:**
 
-| Value | Behavior |
+| Value | Behavior (`match: "auto"`) |
 |---|---|
-| `by_type` | Match USD schema type: `Mesh`, `Xform`, `Scope`, `Material`, `Camera`, `DistantLight`, `SphereLight`, `RectLight` |
-| `by_name` | Substring match on prim name (case-insensitive) |
+| `by_type` | A registered type matches its whole schema family: `PhysicsJoint` finds every joint, `Gprim` every geometric primitive, `Boundable` everything with extent. `match: "exact"` for the exact type only |
+| `by_api_schema` | Applied API schemas: `PhysicsRigidBodyAPI`, `PhysicsCollisionAPI`; `PhysicsDriveAPI` also finds `PhysicsDriveAPI:angular` |
+| `by_name` | Substring of the prim name, case-insensitive; an empty query lists every prim |
+| `by_path` | Substring of the full path; use `match: "glob"` for `/World/*/joints/*` |
+
+`match` can also be `exact`, `substring`, `glob` or `regex`; pass `case_sensitive: true` to respect case. Instances are searched; `root_path` limits the search to a subtree. Results are paged: `limit` (default 200), `total_matches`, and `next_offset` to pass as the next `offset`.
+
+### 4b. List a Subtree
+
+Read a robot or asset in one call instead of one `get_prim_info` per prim:
+
+```
+mcp__simul__get_prim_subtree
+  stage_id: "abc123"
+  root_path: "/World/Robot"
+  include_properties: true
+```
+
+Each prim has `path`, `type`, `depth`, `child_count` and `api_schemas`. With `include_properties`, each prim also carries its authored attributes and relationship targets, such as joint `physics:body0`/`body1`. Paged with `max_results`/`offset`.
 
 ### 5. Analyze Mesh Geometry
 
@@ -226,4 +243,4 @@ error names the prim, each rejected attribute and the reason.
 - **Forgetting `stage_id`**: Every headless call requires the `stage_id` from `load_usd_file`. Calling `get_prim_info` without it will fail.
 - **Stage ID is session-scoped**: The `stage_id` is not persistent across tool sessions. If the session resets, call `load_usd_file` again.
 - **Large scenes**: `summarize_scene` with `include_meshes: true` on a scene with thousands of meshes can be slow. Use `include_meshes: false` for a quick overview first.
-- **`by_name` is substring match**: `search_prims` with `by_name: "link"` will match `base_link`, `arm_link_1`, etc. Use more specific queries to narrow results.
+- **`by_name` is a case-insensitive substring match** by default: `"link"` matches `base_link`, `ARM_LINK_1`, etc. Use `match: "exact"`, `"glob"` or `"regex"` (and `case_sensitive`) to narrow it.
