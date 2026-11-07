@@ -255,8 +255,12 @@ none of the transports authenticate by default:
   re-run setup. Binding to another interface requires
   `--bind <host> --allow-public`, optionally with
   `--passphrase`; read [docs/unreal-setup.md](docs/unreal-setup.md) first.
-- The Isaac Sim bridge and Python socket bind to the local machine. Run
-  `simul` on the same host; cross-host Isaac is not supported.
+- The Isaac Sim bridge and Python socket bind to the local machine, where by
+  default any local process can reach them. On a shared host start Isaac Sim
+  6.0 with `simul isaac launch --generate-auth-token`, which makes both
+  require one token; see
+  [docs/isaac-sim.md](docs/isaac-sim.md#security-model). Run `simul` on the
+  same host; cross-host Isaac is not supported.
 - `SECURITY__ALLOW_SCRIPT_EXECUTION=false` removes the arbitrary-code tools
   from the MCP server. See [docs/configuration.md](docs/configuration.md#security).
 

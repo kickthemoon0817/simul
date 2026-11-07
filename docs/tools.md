@@ -77,6 +77,14 @@ Notes:
 - `execute_isaac_script` scripts should follow the scripting reference served
   as the `simul://isaac-sim/skills` resource. Isaac Sim 6.0 deprecates
   `isaacsim.core.{api,prims,utils}` and removes the `omni.isaac.*` shims.
+  On Isaac Sim 5.1 with the bridge down, scripts over 32 KiB are refused
+  (`ScriptTooLargeForSocket`): that socket runs each read as its own script.
+- `open_isaac_stage`, `new_isaac_stage`, `read_isaac_aovs`,
+  `capture_isaac_viewport` and `enable_isaac_extension` run with a budget of
+  at least 110 s instead of the default 29 s. Any timeout reply says that the
+  Kit work may still complete; check the state before retrying.
+- A tool whose script shared Kit's stdout with another callback returns its
+  result with the other text under `foreign_output` and a note in `warnings`.
 
 ## Unreal Engine
 

@@ -239,7 +239,11 @@ class RenderMixin:
                 output["error"] = "No AOV produced data (" + "; ".join(reasons) + ")"
             print(json.dumps(output))
         """)
-        return await self._execute_json_script(script)
+        # A render product's first frames compile shaders and can take far
+        # longer than the default budget.
+        return await self._execute_json_script(
+            script, timeout_seconds=self._heavy_script_timeout()
+        )
 
     @tool_meta(
         name="list_isaac_aovs",
@@ -518,4 +522,3 @@ class RenderMixin:
             print(json.dumps(result))
         """)
         return await self._execute_json_script(script)
-

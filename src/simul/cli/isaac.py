@@ -330,7 +330,8 @@ def launch(
         None,
         "--auth-token",
         help=(
-            "Require this exact token on the python_server socket (Isaac Sim 6.0+ only). "
+            "Require this exact token on the python_server socket and the bridge "
+            "(Isaac Sim 6.0+ only). "
             "Set the same value as ISAAC_SIM__SOCKET_AUTH_TOKEN for the MCP server. "
             "Kit takes settings on argv, so the token is visible to other local "
             "users via the process list for the editor's lifetime; prefer "
@@ -341,8 +342,8 @@ def launch(
         False,
         "--generate-auth-token",
         help=(
-            "Require auth on the python_server socket and let Kit generate the token "
-            "(Isaac Sim 6.0+ only). The token is read back from the launch log and stored "
+            "Require auth on the python_server socket and the bridge, and let Kit generate "
+            "the token (Isaac Sim 6.0+ only). The token is read back from the launch log and stored "
             "0600 at <discovery_dir>/auth-token-<pid>, where the MCP server picks it up "
             "when ISAAC_SIM__SOCKET_AUTH_TOKEN is unset. Nothing secret reaches argv."
         ),
@@ -470,8 +471,14 @@ def launch(
         # An empty auth_token with require_auth makes python_server generate
         # one and print it, so the secret never appears on the command line.
         command.append(f"--/exts/{transport_ext}/require_auth=true")
+    bridge_auth_required = bridge_present and bool(auth_token or generate_auth_token)
     if bridge_present:
         command += ["--enable", BRIDGE_EXTENSION, f"--/exts/{BRIDGE_EXTENSION}/port={resolved_bridge_port}"]
+        if bridge_auth_required:
+            # The bridge runs the same Python as the socket; a token on 8226
+            # alone would leave 8229 open. It accepts python_server's token
+            # (generated or given above), so nothing secret is added here.
+            command.append(f"--/exts/{BRIDGE_EXTENSION}/require_auth=true")
     if headless:
         command.append("--no-window")
     command += list(kit_args)
@@ -493,6 +500,7 @@ def launch(
         "bridge_address": f"{settings.isaac_sim.bridge_host}:{resolved_bridge_port}",
         "command": redacted_command,
         "auth_required": bool(auth_token or generate_auth_token),
+        "bridge_auth_required": bridge_auth_required,
         "auth_token_source": (
             "argv" if auth_token else "generated" if generate_auth_token else None
         ),

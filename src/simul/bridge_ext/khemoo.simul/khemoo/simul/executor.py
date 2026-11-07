@@ -16,6 +16,12 @@ shapes everything here:
   ``isaacsim.code_editor.python_server`` extension drives user coroutines
   the same way for that reason. Stepping by hand also makes the coroutine
   interruptible while it waits on a future that never resolves.
+- ``sys.stdout`` is process-wide. Redirecting it for the whole life of a
+  coroutine script would also capture whatever else prints while the script
+  waits on frames (a physics callback, an OmniGraph script node, another
+  extension), and simul parses a tool script's stdout as one JSON object. So
+  stdout is redirected only while the script's own code runs: the
+  synchronous part and each coroutine step, never across an await.
 """
 
 from __future__ import annotations
@@ -77,13 +83,21 @@ class _CoroutineDriver:
         coro: Any,
         loop: asyncio.AbstractEventLoop,
         on_done: Callable[[Any, BaseException | None], None],
+        output: io.StringIO | None = None,
     ) -> None:
         self._coro = coro
         self._loop = loop
         self._on_done = on_done
+        self._output = output
         self._done = False
         self._generation = 0
         self._awaiting: asyncio.Future | None = None
+
+    def _capture(self) -> Any:
+        """Redirect stdout into the script's buffer for one step only."""
+        if self._output is None:
+            return contextlib.nullcontext()
+        return contextlib.redirect_stdout(self._output)
 
     @property
     def done(self) -> bool:
@@ -118,10 +132,14 @@ class _CoroutineDriver:
             return
         self._awaiting = None
         try:
-            if exc is not None:
-                yielded = self._coro.throw(exc)
-            else:
-                yielded = self._coro.send(value)
+            # Only the script's own code runs inside send()/throw(); what
+            # runs between steps (Kit's frame, its callbacks) prints to the
+            # real stdout.
+            with self._capture():
+                if exc is not None:
+                    yielded = self._coro.throw(exc)
+                else:
+                    yielded = self._coro.send(value)
         except StopIteration as stop:
             self._complete(stop.value, None)
             return
@@ -220,28 +238,28 @@ class ScriptExecutor:
         trace = ""
         watchdog: threading.Timer | None = None
         try:
-            with contextlib.redirect_stdout(output):
-                self._begin(self._PHASE_SYNC)
-                if timeout_seconds:
-                    watchdog = threading.Timer(
-                        timeout_seconds,
-                        self.interrupt,
-                        args=(f"timed out after {timeout_seconds:g}s",),
-                    )
-                    watchdog.daemon = True
-                    watchdog.start()
-                try:
+            self._begin(self._PHASE_SYNC)
+            if timeout_seconds:
+                watchdog = threading.Timer(
+                    timeout_seconds,
+                    self.interrupt,
+                    args=(f"timed out after {timeout_seconds:g}s",),
+                )
+                watchdog.daemon = True
+                watchdog.start()
+            try:
+                with contextlib.redirect_stdout(output):
                     code, result = self._run_sync(source)
-                finally:
-                    self._end_sync()
-                if self._coroutine_flag != -1 and bool(code.co_flags & self._coroutine_flag):
-                    reason = self._pending_interrupt_reason()
-                    if reason is not None:
-                        # The interrupt landed as the synchronous part was
-                        # finishing; the coroutine it produced must not start.
-                        result.close()
-                        raise ScriptInterrupted(reason)
-                    await self._drive_coroutine(result)
+            finally:
+                self._end_sync()
+            if self._coroutine_flag != -1 and bool(code.co_flags & self._coroutine_flag):
+                reason = self._pending_interrupt_reason()
+                if reason is not None:
+                    # The interrupt landed as the synchronous part was
+                    # finishing; the coroutine it produced must not start.
+                    result.close()
+                    raise ScriptInterrupted(reason)
+                await self._drive_coroutine(result, output)
         except ScriptInterrupted as exc:
             exception = self._describe_interrupt(exc)
             trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
@@ -315,8 +333,13 @@ class ScriptExecutor:
             )
         return code, eval(code, self._globals, self._locals)
 
-    async def _drive_coroutine(self, coro: Any) -> Any:
-        """Run a script coroutine through the manual driver and await its outcome."""
+    async def _drive_coroutine(self, coro: Any, output: io.StringIO | None = None) -> Any:
+        """Run a script coroutine through the manual driver and await its outcome.
+
+        Args:
+            coro: The coroutine the script's top-level await produced.
+            output: Buffer that captures stdout during each step of it.
+        """
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
 
@@ -328,7 +351,7 @@ class ScriptExecutor:
             else:
                 future.set_exception(error)
 
-        driver = _CoroutineDriver(coro, loop, _on_done)
+        driver = _CoroutineDriver(coro, loop, _on_done, output)
         with self._state_lock:
             self._phase = self._PHASE_ASYNC
             self._driver = driver
