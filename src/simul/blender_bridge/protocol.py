@@ -21,8 +21,13 @@ from ..utils.private_files import BridgeFiles  # noqa: F401
 # agent edits now count as. An older add-on would reject the argument, or, if it were left out,
 # open over the unsaved work without the check.
 # Version 6: export_file takes object, modifier, animation and format options; import_file takes scale.
-# Version 7: capture tools take camera_name; capture_viewport_sequence writes files (output_dir, max_frames).
-PROTOCOL_VERSION = 7
+# Version 7: bake_simulation and free_bake take scope, and a bake replaces an earlier one;
+# get_physics_state takes step_simulation; get/set_rigid_body_world are new. An older add-on
+# would reject the arguments, or, left without them, report a re-bake it did not do.
+# Version 8: export_simready_usd takes include_children, include_lights_and_cameras and force, and
+# authors UsdPhysics and UsdSemantics schemas through the add-on's bundled simready_usd module.
+# Version 9: capture tools take camera_name; capture_viewport_sequence writes files (output_dir, max_frames).
+PROTOCOL_VERSION = 9
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 

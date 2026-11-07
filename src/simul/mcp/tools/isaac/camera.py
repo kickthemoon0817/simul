@@ -8,7 +8,9 @@ from ._shared import (
     MAX_CAPTURE_DIMENSION,
     MAX_INLINE_CAPTURE_BYTES,
     MAX_RETAINED_CAPTURES,
+    XFORM_READ_CORE,
     FloatList,
+    _compose_script,
     _pyval,
 )
 from .._meta import tool_meta
@@ -22,8 +24,10 @@ class CameraMixin:
     @tool_meta(
         name="get_isaac_camera_info",
         description=(
-            "Get camera properties (focal length, clipping range, resolution) for the "
-            "active or specified camera."
+            "Get camera properties (pose, focal length, apertures, clipping range, "
+            "projection) for the active or specified camera. resolution is the active "
+            "viewport's when that viewport looks through this camera, else null: a USD "
+            "camera has no resolution of its own."
         ),
         read_only=True,
         idempotent=True,
@@ -38,14 +42,19 @@ class CameraMixin:
             camera_path: USD path to a camera prim. None uses active viewport camera.
 
         Returns:
-            Dict with camera position, target, focal length, clipping range, etc.
+            Dict with camera position, rotation, focal length, apertures,
+            clipping range, projection, and ``resolution`` (the active
+            viewport's when it looks through this camera, else None).
         """
         _cam_path = _pyval(camera_path or "")
-        script = textwrap.dedent(f"""\
+        script = _compose_script(
+            """\
             import json
             import omni.usd
             from pxr import Usd, UsdGeom, Gf
-
+            """,
+            XFORM_READ_CORE,
+            f"""\
             stage = omni.usd.get_context().get_stage()
             if stage is None:
                 print(json.dumps({{"error": "No stage is currently open"}}))
@@ -77,21 +86,39 @@ class CameraMixin:
                     xformable = UsdGeom.Xformable(cam_prim)
                     world_xform = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
                     pos = world_xform.ExtractTranslation()
-                    rot = world_xform.ExtractRotation().GetQuat()
+                    # Scale factored out first: ExtractRotation() on a camera
+                    # under a scaled parent reads the wrong orientation.
+                    world_pose = _decompose_matrix(world_xform)
+                    # A USD camera has no resolution of its own: it renders at
+                    # the resolution of whatever viewport or render product
+                    # uses it. The active viewport's is the one known here.
+                    resolution = None
+                    try:
+                        import omni.kit.viewport.utility as vp_util
+                        active = vp_util.get_active_viewport()
+                        if active and str(active.camera_path) == str(cam_path):
+                            resolution = [int(v) for v in active.resolution]
+                    except Exception:
+                        pass
                     print(json.dumps({{
                         "camera_path": str(cam_path),
                         "position": list(pos),
-                        "rotation_quat": [float(rot.GetReal())] + [float(x) for x in rot.GetImaginary()],
+                        "rotation_quat": world_pose["rotation_quat"],
                         "focal_length": float(cam.GetFocalLengthAttr().Get()),
                         "horizontal_aperture": float(cam.GetHorizontalApertureAttr().Get()),
                         "vertical_aperture": float(cam.GetVerticalApertureAttr().Get()),
                         "clipping_range": [float(x) for x in cam.GetClippingRangeAttr().Get()],
                         "projection": str(cam.GetProjectionAttr().Get()),
+                        "resolution": resolution,
+                        "resolution_source": "active_viewport" if resolution else None,
                     }}))
                 elif not cam_path:
                     print(json.dumps({{"error": "No camera found in scene"}}))
-        """)
-        return await self._execute_json_script(script)
+            """,
+        )
+        # A camera mounted on a simulated robot moves with it; USD stops
+        # following under GPU physics.
+        return await self._execute_json_script(script, annotations=("usd_readback",))
 
     @tool_meta(
         name="list_isaac_cameras",
@@ -434,7 +461,11 @@ class CameraMixin:
             except Exception as e:
                 print(json.dumps({{"error": f"Viewport capture error: {{e}}"}}))
         """)
-        return await self._execute_json_script(script)
+        # Rendering at a new resolution can recompile shaders, which stalls
+        # the frames this script waits on well past the default budget.
+        return await self._execute_json_script(
+            script, timeout_seconds=self._heavy_script_timeout()
+        )
 
     def _capture_dir_or_denial(self) -> Union[str, Dict[str, Any]]:
         """Pick the directory captures are written to, or explain why none is.
