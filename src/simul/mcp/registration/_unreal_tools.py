@@ -254,7 +254,7 @@ def _whole_camera_groups(request: Any) -> Optional[str]:
 
 
 def _focus_view(request: Any) -> Optional[str]:
-    """Auto-fit needs a field of view in (0, 180) degrees and a positive aspect ratio."""
+    """Auto-fit needs a field of view Unreal renders, under 180 degrees, and the aspect ratio of a capture."""
     from ...adapters.unreal_runtime import focus_view_error
 
     return focus_view_error(request.fov, request.aspect_ratio)
@@ -645,8 +645,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 float,
                 90.0,
                 description=(
-                    "Auto-fit only: field of view across the view, in degrees, more than 0 and less than 180. "
-                    "The level viewport's; UE's default is 90."
+                    "Auto-fit only: field of view across the view, in degrees, at least 0.001 (the narrowest "
+                    "Unreal renders) and less than 180. The level viewport's; UE's default is 90."
                 ),
             ),
             ToolParam(
@@ -654,8 +654,8 @@ UNREAL_TOOLS: Tuple[UnrealTool, ...] = (
                 float,
                 16.0 / 9.0,
                 description=(
-                    "Auto-fit only: the view's width over its height, such as a capture's resolution_x / "
-                    "resolution_y; 16:9 by default, as the default 1920x1080 capture."
+                    "Auto-fit only: the view's width over its height, from 1/16384 to 16384, such as a "
+                    "capture's resolution_x / resolution_y; 16:9 by default, as the default 1920x1080 capture."
                 ),
             ),
         ),

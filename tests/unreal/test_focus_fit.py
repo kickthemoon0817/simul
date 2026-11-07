@@ -848,10 +848,14 @@ def test_distance_0_fits_the_actor_during_pie_too(
 
 def test_the_default_view_is_the_default_field_of_view_on_the_default_capture() -> None:
     """Without a view, the fit is unchanged: 90 degrees across on 16:9, which put a
-    20 m cube 3475.9 cm away (UE 5.7.4). The tool advertises the session's defaults."""
+    20 m cube 3475.9 cm away and a 10 cm one 20.07 cm away (UE 5.7.4). The tool
+    advertises the session's defaults."""
     extent = (1000.0, 1000.0, 1000.0)
     assert unreal_runtime._focus_fit_distance(extent) == pytest.approx(
         3475.93, abs=0.01
+    )
+    assert unreal_runtime._focus_fit_distance((5.0, 5.0, 5.0)) == pytest.approx(
+        20.07, abs=0.01
     )
     assert unreal_runtime._focus_fit_distance(
         extent
@@ -905,6 +909,51 @@ def test_distance_0_fits_the_actor_in_the_view_it_is_given(
     assert result["camera_location"] == pytest.approx(camera)
     assert result["camera_rotation"] == pytest.approx(rotation)
     assert "fit_warning" not in result
+
+
+@pytest.mark.parametrize(
+    "size, fov, aspect",
+    [
+        (10.0, 90.0, 1.0),
+        (10.0, 90.0, 9.0 / 16.0),
+        (10.0, 120.0, ASPECT),
+        (2.0, 170.0, ASPECT),
+        (30.0, 170.0, ASPECT),
+    ],
+    ids=[
+        "10 cm cube, square",
+        "10 cm cube, 9:16",
+        "10 cm cube, 120 degrees",
+        "2 cm pebble, 170 degrees",
+        "30 cm box, 170 degrees",
+    ],
+)
+def test_a_small_actor_in_a_wide_or_square_view_stays_clear_of_the_near_clip_plane(
+    editor: Editor,
+    monkeypatch: pytest.MonkeyPatch,
+    size: float,
+    fov: float,
+    aspect: float,
+) -> None:
+    """In the default view the 10 cm minimum radius keeps the camera far enough back,
+    but a view as tall as it is wide, or a wider field of view, fitted a small actor
+    from so close that the near clip plane cut it: a 10 cm cube's nearest corner was
+    8.8 cm from the camera in a square view. The camera stays back until the bounding
+    sphere, with the fit's margin, is beyond the plane."""
+    origin, extent = (0.0, 0.0, size / 2), (size / 2,) * 3
+    path = editor.add(Actor("Pebble", (0.0, 0.0, 0.0), origin, extent))
+
+    result = _focus(editor, monkeypatch, path, fov=fov, aspect_ratio=aspect)
+
+    nearest, reach = _box_in_view(result, origin, extent, fov, aspect)
+    assert nearest > NEAR_CLIP and reach <= 1.0
+    radius = max(math.hypot(*extent), unreal_runtime.FOCUS_MIN_RADIUS)
+    assert result["distance"] * math.hypot(1.0, 0.5) == pytest.approx(
+        radius * unreal_runtime.FOCUS_FIT_MARGIN + NEAR_CLIP
+    )
+    camera, rotation = _placement(origin, result["distance"])
+    assert result["camera_location"] == pytest.approx(camera)
+    assert result["camera_rotation"] == pytest.approx(rotation)
 
 
 def test_the_view_leaves_an_explicit_distance_alone(
@@ -1022,8 +1071,16 @@ def test_an_agent_can_give_the_view_to_fit(
         ({"fov": 0.0}, "fov"),
         ({"fov": 180.0}, "fov"),
         ({"fov": -45.0}, "fov"),
+        # Narrower than Unreal renders: 5e-324 divided by zero in the fit, after
+        # the actor was selected.
+        ({"fov": 0.0005}, "fov"),
+        ({"fov": 5e-324}, "fov"),
         ({"aspect_ratio": 0.0}, "aspect_ratio"),
         ({"aspect_ratio": -1.5}, "aspect_ratio"),
+        # Wider or narrower than a capture can be: 1e308 put the camera at infinity.
+        ({"aspect_ratio": 20000.0}, "aspect_ratio"),
+        ({"aspect_ratio": 1.0 / 20000.0}, "aspect_ratio"),
+        ({"aspect_ratio": 1e308}, "aspect_ratio"),
     ],
 )
 def test_a_view_the_fit_cannot_use_is_refused_before_anything_moves(
@@ -1033,9 +1090,10 @@ def test_a_view_the_fit_cannot_use_is_refused_before_anything_moves(
     view: Dict[str, float],
     named: str,
 ) -> None:
-    """A field of view outside (0, 180) degrees or an aspect ratio that is not
-    positive has no fit: the tool refuses it as invalid input, and the session
-    raises, before the actor is selected or the camera moves."""
+    """A field of view narrower than Unreal renders (0.001 degrees) or not under 180,
+    or an aspect ratio no capture has (outside 1/16384 to 16384), has no fit: the tool
+    refuses it as invalid input, and the session raises, before the actor is selected
+    or the camera moves."""
     path = editor.add(
         Actor("Crate", (0.0, 0.0, 0.0), (0.0, 0.0, 50.0), (50.0, 50.0, 50.0))
     )
@@ -1047,3 +1105,20 @@ def test_a_view_the_fit_cannot_use_is_refused_before_anything_moves(
     with pytest.raises(ValueError, match=named):
         asyncio.run(_session(editor, monkeypatch).focus_on_actor(path, **view))
     assert editor.selection == [] and editor.camera_writes == []
+
+
+@pytest.mark.parametrize(
+    "fov, aspect",
+    [
+        (unreal_runtime.FOCUS_MIN_FOV_DEGREES, unreal_runtime.FOCUS_MAX_ASPECT_RATIO),
+        (179.999, 1.0 / unreal_runtime.FOCUS_MAX_ASPECT_RATIO),
+    ],
+    ids=["narrowest view", "widest view"],
+)
+def test_the_views_at_the_edges_of_the_range_still_fit_at_a_finite_distance(
+    fov: float, aspect: float
+) -> None:
+    """The views the tool takes all have a fit, even for bounds larger than any world."""
+    assert unreal_runtime.focus_view_error(fov, aspect) is None
+    for extent in ((0.0, 0.0, 0.0), (1e12, 1e12, 1e12)):
+        assert math.isfinite(unreal_runtime._focus_fit_distance(extent, fov, aspect))

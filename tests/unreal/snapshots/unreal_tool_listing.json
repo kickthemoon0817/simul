@@ -694,12 +694,12 @@
      },
      "fov": {
       "default": 90.0,
-      "description": "Auto-fit only: field of view across the view, in degrees, more than 0 and less than 180. The level viewport's; UE's default is 90.",
+      "description": "Auto-fit only: field of view across the view, in degrees, at least 0.001 (the narrowest Unreal renders) and less than 180. The level viewport's; UE's default is 90.",
       "type": "number"
      },
      "aspect_ratio": {
       "default": 1.7777777777777777,
-      "description": "Auto-fit only: the view's width over its height, such as a capture's resolution_x / resolution_y; 16:9 by default, as the default 1920x1080 capture.",
+      "description": "Auto-fit only: the view's width over its height, from 1/16384 to 16384, such as a capture's resolution_x / resolution_y; 16:9 by default, as the default 1920x1080 capture.",
       "type": "number"
      }
     },

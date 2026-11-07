@@ -181,14 +181,31 @@ FOCUS_NOT_SELECTED_WARNING = (
 FOCUS_FOV_DEGREES = 90.0
 FOCUS_ASPECT_RATIO = 16.0 / 9.0
 
+#: Narrowest field of view the auto-fit takes, in degrees: Unreal renders a
+#: narrower one this wide (FEditorViewportClient::CalcSceneView clamps the
+#: view's field of view to at least 0.001 degrees, UE 5.7).
+FOCUS_MIN_FOV_DEGREES = 0.001
+
+#: Widest aspect ratio the auto-fit takes, whose inverse is the narrowest: a
+#: capture 16384 pixels by 1, the largest capture_viewport takes. Within these
+#: and FOCUS_MIN_FOV_DEGREES the fitted distance is finite for any bounds.
+FOCUS_MAX_ASPECT_RATIO = 16384.0
+
 #: The auto-fit camera stands this many times as far from the actor's bounding
 #: sphere as it would to have the sphere touch the top and bottom of the view.
 FOCUS_FIT_MARGIN = 1.1
 
 #: Smallest bounding-sphere radius the auto-fit frames, in cm: the minimum the
-#: editor's own Focus uses (FEditorViewportClient::MinimumFocusRadius), which
-#: keeps the camera clear of the 10 cm near clip plane.
+#: editor's own Focus uses (FEditorViewportClient::MinimumFocusRadius).
 FOCUS_MIN_RADIUS = 10.0
+
+#: Unreal's near clip plane, in cm (the engine's default NearClipPlane): the
+#: viewport draws nothing nearer the camera. The auto-fit camera keeps the
+#: actor's bounding sphere, FOCUS_FIT_MARGIN times as large, beyond it. In UE's
+#: default view FOCUS_MIN_RADIUS alone keeps it that far back, but a wider
+#: field of view, or a view as tall as it is wide, fits a small actor from so
+#: close that the plane would cut it.
+FOCUS_NEAR_CLIP = 10.0
 
 #: ``focus_on_actor``'s distance, in cm, for an actor without bounds to fit.
 FOCUS_DEFAULT_DISTANCE = 500.0
@@ -209,13 +226,17 @@ def focus_view_error(fov: float, aspect_ratio: float) -> Optional[str]:
         aspect_ratio: The view's width over its height.
 
     Returns:
-        The message for a field of view outside (0, 180) degrees or an aspect
-        ratio that is not a positive number, or None when both are usable.
+        The message for a field of view under FOCUS_MIN_FOV_DEGREES or not
+        under 180 degrees, or an aspect ratio outside 1 / FOCUS_MAX_ASPECT_RATIO
+        to FOCUS_MAX_ASPECT_RATIO, or None when both are usable.
     """
-    if not 0.0 < fov < 180.0:
-        return f"fov must be more than 0 and less than 180 degrees, not {fov}"
-    if not (math.isfinite(aspect_ratio) and aspect_ratio > 0.0):
-        return f"aspect_ratio must be a positive width / height, not {aspect_ratio}"
+    if not FOCUS_MIN_FOV_DEGREES <= fov < 180.0:
+        return f"fov must be at least {FOCUS_MIN_FOV_DEGREES:g} and less than 180 degrees, not {fov}"
+    if not 1.0 / FOCUS_MAX_ASPECT_RATIO <= aspect_ratio <= FOCUS_MAX_ASPECT_RATIO:
+        return (
+            f"aspect_ratio must be a width / height from 1/{FOCUS_MAX_ASPECT_RATIO:g} to "
+            f"{FOCUS_MAX_ASPECT_RATIO:g}, not {aspect_ratio}"
+        )
     return None
 
 
@@ -233,7 +254,9 @@ def _focus_fit_distance(
     side of the view. The view keeps ``fov`` across its width, as Unreal's
     viewports do, so a view wider than tall is narrower up and down. A sphere
     smaller than FOCUS_MIN_RADIUS counts as that size, as in the editor's own
-    Focus.
+    Focus. The camera also stands back far enough for the sphere, made
+    FOCUS_FIT_MARGIN times as large, to stay beyond the FOCUS_NEAR_CLIP
+    plane, which only a small actor in a wide or square view needs.
 
     Args:
         extent: The box's half-size along X, Y and Z, in cm.
@@ -248,7 +271,10 @@ def _focus_fit_distance(
     radius = max(math.hypot(*extent), FOCUS_MIN_RADIUS)
     half_width = math.radians(fov) / 2
     half_angle = min(half_width, math.atan(math.tan(half_width) / aspect_ratio))
-    from_center = radius * FOCUS_FIT_MARGIN / math.sin(half_angle)
+    from_center = max(
+        radius * FOCUS_FIT_MARGIN / math.sin(half_angle),
+        radius * FOCUS_FIT_MARGIN + FOCUS_NEAR_CLIP,
+    )
     return from_center / math.hypot(1.0, 0.5)
 
 
@@ -2006,17 +2032,18 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
         Distance 0 or less fits the actor in the view, as the editor's own Focus does:
         the camera looks at the center of the bounds and stands back until
         their bounding sphere fills the narrower side of the view with 10% to
-        spare. The view is ``fov`` degrees across and ``aspect_ratio`` wide
-        per unit of height, keeping ``fov`` across its width as Unreal's
-        viewports and captures do. Editor Python cannot read the level
-        viewport's field of view, so the defaults are UE's default, 90
-        degrees across, on the 16:9 of the default capture (1920 x 1080); a
-        narrower field of view, or a view wider than about 2:1, can crop the
-        actor unless they are passed. An actor whose bounds have no size (zero
-        extent, such as a StaticMeshActor without a mesh) gets the default
-        500 cm from its location instead, and ``fit_warning`` says so. In the
-        editor an actor without a mesh, such as an empty actor or a light,
-        usually has bounds: those of its editor icon.
+        spare, and at least until the sphere, with that margin, is beyond
+        Unreal's 10 cm near clip plane. The view is ``fov`` degrees across and
+        ``aspect_ratio`` wide per unit of height, keeping ``fov`` across its
+        width as Unreal's viewports and captures do. Editor Python cannot
+        read the level viewport's field of view, so the defaults are UE's
+        default, 90 degrees across, on the 16:9 of the default capture (1920
+        x 1080); a narrower field of view, or a view wider than about 2:1,
+        can crop the actor unless they are passed. An actor whose bounds have
+        no size (zero extent, such as a StaticMeshActor without a mesh) gets
+        the default 500 cm from its location instead, and ``fit_warning``
+        says so. In the editor an actor without a mesh, such as an empty
+        actor or a light, usually has bounds: those of its editor icon.
 
         While Play In Editor (or Simulate) runs the actor is not selected:
         Unreal's editor reports no selection then and clears it when PIE
@@ -2029,11 +2056,12 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
                 fits the actor's bounds in the view.
             fov: Field of view across the view's width, in degrees, that
                 auto-fit frames the actor in: the level viewport's, which
-                editor Python cannot read (UE's default is 90). Used only
-                when distance is 0 or less.
+                editor Python cannot read (UE's default is 90). At least
+                0.001, the narrowest Unreal renders, and less than 180. Used
+                only when distance is 0 or less.
             aspect_ratio: Width over height of that view: a capture's
-                resolution_x / resolution_y (the default capture is 16:9).
-                Used only when distance is 0 or less.
+                resolution_x / resolution_y (the default capture is 16:9),
+                from 1/16384 to 16384. Used only when distance is 0 or less.
 
         Returns:
             Dictionary with actor_path, camera_location and camera_rotation
@@ -2049,8 +2077,9 @@ print(json.dumps({{'data': base64.b64encode(data).decode('ascii')}}))
             the camera moves.
 
         Raises:
-            ValueError: ``fov`` is not between 0 and 180 degrees, or
-                ``aspect_ratio`` is not a positive number.
+            ValueError: ``fov`` is under 0.001 degrees or not under 180, or
+                ``aspect_ratio`` is outside 1/16384 to 16384, before the
+                actor is selected or the camera moves.
         """
         problem = focus_view_error(fov, aspect_ratio)
         if problem is not None:

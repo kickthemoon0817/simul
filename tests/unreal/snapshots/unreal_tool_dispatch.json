@@ -4289,7 +4289,7 @@
     "is_error": false,
     "payload": {
      "success": false,
-     "error": "fov must be more than 0 and less than 180 degrees, not 180.0",
+     "error": "fov must be at least 0.001 and less than 180 degrees, not 180.0",
      "error_type": "ValidationError",
      "details": {
       "input": {
@@ -4304,7 +4304,7 @@
    "usage": [
     {
      "success": false,
-     "error": "fov must be more than 0 and less than 180 degrees, not 180.0"
+     "error": "fov must be at least 0.001 and less than 180 degrees, not 180.0"
     }
    ]
   },
