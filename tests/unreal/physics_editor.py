@@ -751,7 +751,8 @@ class Editor:
                 get_editor_world=lambda: None if editor.pie else editor.editor_world,
                 get_game_world=lambda: editor.pie_world if editor.pie else None,
             ),
-            # GWorld: the editor world wherever Remote Control runs a script.
+            # GWorld, the editor world wherever Remote Control runs a script,
+            # which editor_world() falls back on during PIE.
             "LayersSubsystem": SimpleNamespace(get_world=lambda: editor.editor_world),
             "EditorActorSubsystem": SimpleNamespace(
                 get_all_level_actors=lambda: (
@@ -820,6 +821,7 @@ class Editor:
             GameplayStatics=gameplay,
             GuidLibrary=guids,
             Vector=Vector,
+            SystemLibrary=SimpleNamespace(is_valid=lambda obj: obj is not None),
             get_editor_subsystem=subsystems.__getitem__,
             load_object=load_object,
             find_object=load_object,
