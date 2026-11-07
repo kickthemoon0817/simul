@@ -501,11 +501,11 @@ class UnrealSetCameraViewResponse(BaseModel):
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
-    location: Optional[Tuple[float, float, float]] = Field(
-        None, description="Applied camera position; None when left unchanged"
+    location: Tuple[float, float, float] = Field(
+        ..., description="Camera position (X, Y, Z) in cm, read back after the call"
     )
-    rotation: Optional[Tuple[float, float, float]] = Field(
-        None, description="Applied camera rotation; None when left unchanged"
+    rotation: Tuple[float, float, float] = Field(
+        ..., description="Camera rotation (Pitch, Yaw, Roll) in degrees, read back after the call"
     )
 
 
@@ -594,7 +594,9 @@ class UnrealDeleteActorResponse(BaseModel):
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Path of the deleted actor")
-    deleted: bool = Field(..., description="Whether actor was actually deleted")
+    deleted: bool = Field(
+        ..., description="Whether the actor is gone, read back after the delete"
+    )
 
 
 class UnrealSetActorTransformResponse(BaseModel):
@@ -691,15 +693,47 @@ class UnrealAddComponentResponse(BaseModel):
     )
 
 
+class UnrealActorVisibility(BaseModel):
+    """One actor's hidden flags, read back after a visibility change."""
+
+    actor_path: str = Field(..., description="Full actor path")
+    hidden_in_editor: bool = Field(
+        ...,
+        description=(
+            "Hidden by the editor (the Outliner's eye): the level viewport and captures do not draw it; "
+            "kept for the editor session"
+        ),
+    )
+    hidden_in_editor_at_startup: bool = Field(
+        ...,
+        description="Hidden at editor startup: saved with the level and applied when it loads",
+    )
+    hidden_in_game: bool = Field(
+        ...,
+        description="Hidden in game: saved with the level; Play In Editor and the packaged game do not draw it",
+    )
+
+
 class UnrealSetActorVisibilityResponse(BaseModel):
-    """Response after setting actor visibility."""
+    """Response after setting actor visibility, read back from every actor it changed."""
 
     success: bool = Field(..., description="Whether request was successful")
     error: Optional[str] = Field(
         None, description="Error message when success is False"
     )
     actor_path: str = Field(..., description="Actor whose visibility was set")
-    visible: bool = Field(..., description="Applied visibility state")
+    visible: bool = Field(..., description="The visibility asked for")
+    scope: str = Field(..., description="Which visibility was set: editor, game or all")
+    propagate: bool = Field(
+        ..., description="Whether every actor attached under it was set the same"
+    )
+    persistent: bool = Field(
+        ..., description="Whether the hidden-at-editor-startup flag was set too"
+    )
+    actors: List[UnrealActorVisibility] = Field(
+        ...,
+        description="The flags read back from each actor set: the actor first, then those attached under it",
+    )
 
 
 # ---------------------------------------------------------------

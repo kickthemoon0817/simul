@@ -144,7 +144,13 @@ SAMPLES: Dict[str, Dict[str, Any]] = {
         "component_name": "Lamp",
         "parent_component": "Base",
     },
-    "set_unreal_actor_visibility": {"actor_path": ACTOR, "visible": False, "propagate": False},
+    "set_unreal_actor_visibility": {
+        "actor_path": ACTOR,
+        "visible": False,
+        "propagate": False,
+        "scope": "editor",
+        "persistent": True,
+    },
     "get_unreal_material_info": {"material_path": MATERIAL},
     "set_unreal_material_params": {
         "material_path": MATERIAL,
@@ -300,6 +306,8 @@ ERROR_CASES: Tuple[Tuple[str, Dict[str, Any]], ...] = (
     ("focus_unreal_on_actor", {"actor_path": ACTOR, "fov": 180.0}),
     ("set_unreal_actor_parent", {"actor_path": ACTOR, "parent_path": ""}),
     ("set_unreal_actor_parent", {"actor_path": ACTOR, "parent_path": PARENT, "detach": True}),
+    ("set_unreal_actor_visibility", {"actor_path": ACTOR, "scope": "viewport"}),
+    ("set_unreal_actor_visibility", {"actor_path": ACTOR, "scope": "game", "persistent": True}),
     ("control_unreal_ui", {"agent_control": "bogus"}),
     ("control_unreal_ui", {"agent_control": "set_property", "property_name": "color", "value": [1.0, 2.0, 3.0]}),
     ("set_unreal_material_params", {"material_path": MATERIAL, "scalar_params_json": "{bad"}),
