@@ -77,6 +77,39 @@ No running application needed. File arguments must be inside the sandbox
   is a `NotFoundError`; a relative, malformed or property path is a
   `ValidationError`.
 
+`validate_usd_file` opens the file with pxr, as `load_usd_file` does, and
+keeps no stage. `can_read` says whether pxr opened it (so whether
+`load_usd_file` can); `is_valid` additionally needs no issue of severity
+`error`. Each issue carries `severity`, a stable `code`, pxr's `message`, its
+`source` (`simul` or the pxr validator) and a `location` (`layer`,
+`prim_path`, `property_path`, `asset_path`, or `line` and `column` for a
+parse error). The checks, in order:
+
+- Access, shared with the loader: the file exists, is a regular file, has an
+  extension from `usd.allowed_extensions`, is readable by the server process,
+  is not empty and fits `usd.max_file_size_mb` (`FileNotFound`, `NotAFile`,
+  `UnsupportedExtension`, `PermissionDenied`, `EmptyFile`, `FileTooLarge`).
+- Parsing: pxr's own reason (`ParseError` with line and column,
+  `CorruptFile` for crate or usdz damage, `UnknownFormat`), with a hint when
+  the bytes do not match the extension (text in a `.usdc`).
+- Composition: `MissingSublayer`, `MissingReference`, `MissingPayload`,
+  `UnresolvedPrimPath`, and pxr's `UnresolvableDependency` for other asset
+  paths such as textures.
+- Stage metadata: a dangling defaultPrim is an error; an unset defaultPrim,
+  upAxis or metersPerUnit is a warning, since consumers fall back to Y up and
+  centimeters.
+- Physics: `NestedRigidBody` (without `resetXformStack`) and
+  `InvertedJointLimits`, plus pxr's UsdPhysics validators (dangling joint
+  bodies, nested articulation roots, invalid mass and inertia).
+- pxr's UsdValidation validators, listed in `validators`; the usdz package
+  rules (alignment, compression, file types) run only for a `.usdz`.
+
+`load_usd_file` fails with `error_type: LoadError` and `details.reason` set
+to the same access or parsing code, with pxr's message in `error`. A stage
+that opens with missing sublayers, references or payloads loads, and lists
+them in `warnings`. `simul usd validate` runs the same checks and exits 1
+when the file is invalid.
+
 ## Isaac Sim
 
 Requires a running Isaac Sim 5.1.0, 6.0.0 or 6.0.1 reachable over the bridge
